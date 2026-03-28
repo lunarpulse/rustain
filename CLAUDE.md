@@ -17,26 +17,44 @@ cargo clippy          # Lint
 cargo fmt             # Format
 ```
 
-## Architecture
+## Architecture (Hexagonal)
 
 ```
 rustain/src/
-├── main.rs              # Entry point (tokio, tracing to file, panic hook)
-├── app.rs               # Event loop (tokio::select! on AppEvent channel)
-├── core/                # Service layer (rustain's own, NOT rustycode's)
-│   ├── provider.rs      # StreamingProvider trait + AnthropicStreamingProvider (SSE)
-│   ├── service.rs       # Streaming service (tool execution loop, permission bridge)
-│   └── registry.rs      # CapabilityRegistry — central coordinator for all protocols
-├── tui/                 # ratatui rendering
-│   ├── ui.rs            # Root layout (tab bar | chat+sidebar | status | input + overlays)
-│   └── widgets/         # Widget modules (tool_call, thinking, diff, etc.)
-└── types/               # All type definitions
-    ├── app_state.rs     # AppState, AppMode, TabState, Focus, PermissionMode
-    ├── capability.rs    # CapabilityProvider trait, Capability, CapabilityEvent, PermissionScope
-    ├── conversation.rs  # Conversation, ChatMessage, ContentBlock, ForkSource, UsageInfo
-    ├── event.rs         # AppEvent (Key, Resize, Stream, Permission, Tick)
-    └── stream.rs        # TuiStreamEvent (16 variants for streaming render)
+├── main.rs                          # Composition root (only file naming concrete adapters)
+├── lib.rs                           # Lib re-export for integration tests
+├── domain/                          # Pure domain — NO I/O crate imports
+│   ├── models/                      # Types/enums/structs (FocusState, AppConfig, NoticeLevel)
+│   ├── ports/                       # Port trait definitions (Story 1.1b+)
+│   ├── services/                    # Pure functions on domain types
+│   ├── events.rs                    # AppEvent, DomainInputEvent, ChunkAction
+│   └── errors.rs                    # DomainError, ConfigError, EventError
+├── adapters/                        # External system interfaces
+│   ├── tui/                         # ratatui + crossterm (terminal rendering)
+│   │   ├── terminal.rs              # setup/teardown/restore_terminal_raw
+│   │   ├── layout.rs                # compute_layout (60x16 min, 80x24 standard)
+│   │   ├── state.rs                 # TuiState (rendering state)
+│   │   ├── app.rs                   # handle_input, convert_crossterm_event
+│   │   └── widgets/                 # empty_state, chat_pane, status_bar, input_box
+│   ├── cli/                         # CLI argument parsing (clap)
+│   └── noop.rs                      # NoOp adapter stubs for all ports
+├── infrastructure/                  # OS/runtime concerns
+│   ├── runtime/                     # Orchestration
+│   │   ├── event_loop.rs            # 4-branch tokio::select! loop
+│   │   ├── app_state.rs             # Runtime state coordination
+│   │   └── agent_core.rs            # Central runtime orchestrator
+│   ├── startup.rs                   # Ordered startup sequence (<20ms to first frame)
+│   ├── config.rs                    # Configuration loader
+│   ├── logging.rs                   # tracing + rolling-file (10MB rotation)
+│   ├── signals.rs                   # Panic hook + SIGTERM/SIGINT handlers
+│   └── paths.rs                     # ~/.rustain/ data dir, crash logs
 ```
+
+**Dependency rule:**
+- `domain/` → imports NOTHING from adapters/ or infrastructure/
+- `adapters/` → imports from domain/ ONLY
+- `infrastructure/` → imports from domain/ ONLY
+- `main.rs` → ONLY file naming concrete adapter types
 
 ## Capability Provider Architecture (CPA)
 
