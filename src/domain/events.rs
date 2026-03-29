@@ -1,4 +1,4 @@
-use crate::domain::models::NoticeLevel;
+use crate::domain::models::{NoticeLevel, StreamChunk, ToolResult};
 
 /// Domain-level application events flowing through the event loop.
 /// crossterm types MUST NOT appear here — the adapter converts them to DomainInputEvent.
@@ -7,14 +7,28 @@ use crate::domain::models::NoticeLevel;
 pub enum AppEvent {
     /// Converted terminal input (crossterm → domain)
     InputEvent(DomainInputEvent),
-    /// Internal domain events
-    DomainEvent(DomainEventPayload),
+    /// Streaming chunk from provider
+    ProviderChunk(StreamChunk),
+    /// Tool execution result
+    ToolResult(ToolResultEvent),
+    /// Terminal resize
+    Resize(u16, u16),
     /// Render tick
     Tick,
     /// Graceful shutdown request
     Shutdown,
     /// System notice (status bar messages)
     SystemNotice(NoticeLevel, String),
+    /// Internal domain events (legacy — kept for backward compat with 1.1a event loop)
+    DomainEvent(DomainEventPayload),
+}
+
+/// Event wrapping a tool execution result.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ToolResultEvent {
+    pub tab_id: String,
+    pub result: ToolResult,
 }
 
 /// Terminal input events, abstracted from crossterm.
@@ -49,11 +63,19 @@ pub enum DomainEventPayload {
     Noop,
 }
 
-/// Chunk action stub — used in streaming pipeline (Story 1.2+).
+/// Action returned by apply_chunk() to tell the event loop what to do.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkAction {
-    Append(String),
-    Replace(String),
-    Complete,
+    /// No action needed.
+    None,
+    /// Trigger a redraw on next tick.
+    NeedsRedraw,
+    /// Turn is complete — persist and optionally generate title.
+    TurnComplete {
+        persist: bool,
+        trigger_title_generation: bool,
+    },
+    /// Turn continues (tool use loop).
+    TurnContinuing,
 }

@@ -44,7 +44,8 @@ rolling-file = "0.2"
 
 # ── Utilities ────────────────────────────────────────────────────
 async-trait = "0.1"
-# nanoid = "0.4"  # Re-add when conversation IDs are needed
+arc-swap = "1.7"
+nanoid = "0.4"
 dirs = "6.0"
 # chrono = { version = "0.4", features = ["serde"] }  # Re-add when time formatting is needed
 

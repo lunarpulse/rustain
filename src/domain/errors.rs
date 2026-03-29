@@ -4,11 +4,41 @@ use thiserror::Error;
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum DomainError {
-    #[error("Configuration error: {0}")]
+    #[error(transparent)]
     Config(#[from] ConfigError),
 
-    #[error("Event error: {0}")]
+    #[error(transparent)]
     Event(#[from] EventError),
+
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+
+    #[error(transparent)]
+    Permission(#[from] PermissionError),
+
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+
+    #[error(transparent)]
+    Capability(#[from] CapabilityError),
+
+    #[error(transparent)]
+    Ownership(#[from] OwnershipError),
+
+    #[error(transparent)]
+    Profile(#[from] ProfileError),
+
+    #[error(transparent)]
+    Channel(#[from] ChannelError),
+
+    #[error(transparent)]
+    Scheduler(#[from] SchedulerError),
+
+    #[error(transparent)]
+    Session(#[from] SessionError),
 
     #[error("Startup error: {0}")]
     Startup(String),
@@ -38,4 +68,118 @@ pub enum EventError {
 
     #[error("Event processing failed: {0}")]
     ProcessingFailed(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ProviderError {
+    #[error("Connection failed: {0}")]
+    ConnectionFailed(String),
+
+    #[error("Authentication failed")]
+    AuthenticationFailed,
+
+    #[error("Rate limited{}", .retry_after_ms.map(|ms| format!(", retry after {}ms", ms)).unwrap_or_default())]
+    RateLimited { retry_after_ms: Option<u64> },
+
+    #[error("Stream error: {0}")]
+    StreamError(String),
+
+    #[error("Request cancelled")]
+    Cancelled,
+
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+
+    #[error("I/O error: {0}")]
+    IoError(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum PermissionError {
+    #[error("Permission denied: {0}")]
+    Denied(String),
+
+    #[error("Command blocked: {0}")]
+    Blocked(String),
+
+    #[error("Workspace violation: {0}")]
+    WorkspaceViolation(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ToolError {
+    #[error("Tool not found: {0}")]
+    NotFound(String),
+
+    #[error("Tool execution failed: {0}")]
+    ExecutionFailed(String),
+
+    #[error("Tool execution timed out")]
+    Timeout,
+
+    #[error("{0}")]
+    Other(String),
+}
+
+// Stub error types — single Other(String) variant each until implementation sprint.
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum CapabilityError {
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum OwnershipError {
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ProfileError {
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ChannelError {
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum SchedulerError {
+    #[error("{0}")]
+    Other(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum SessionError {
+    #[error("{0}")]
+    Other(String),
 }

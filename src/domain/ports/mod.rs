@@ -1,1 +1,33 @@
-// Port trait definitions — added in Story 1.1b
+// Port traits — used by adapters (noop.rs, future real adapters) and services.
+// Suppress unused warnings: traits are consumed by adapter impls, not by domain code.
+#[allow(unused_imports)]
+mod channel;
+#[allow(unused_imports)]
+mod context;
+#[allow(unused_imports)]
+mod memory;
+#[allow(unused_imports)]
+mod persona;
+#[allow(unused_imports)]
+mod provider;
+#[allow(unused_imports)]
+mod scheduler;
+#[allow(unused_imports)]
+mod security;
+#[allow(unused_imports)]
+mod session_port;
+#[allow(unused_imports)]
+mod storage;
+#[allow(unused_imports)]
+mod toolset;
+
+pub use channel::ChannelPort;
+pub use context::ContextPort;
+pub use memory::MemoryPort;
+pub use persona::PersonaPort;
+pub use provider::ProviderPort;
+pub use scheduler::SchedulerPort;
+pub use security::SecurityPort;
+pub use session_port::SessionPort;
+pub use storage::StoragePort;
+pub use toolset::ToolSetPort;

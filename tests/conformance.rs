@@ -39,17 +39,14 @@ fn get_imports(path: &Path) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// AC1 / Task 3.6: Domain layer must not import I/O crates.
+/// Domain layer must not import I/O crates.
+/// Allowed: serde, serde_json, thiserror, async-trait, futures (pure types/traits), std::path.
+/// Forbidden: crossterm, ratatui, tokio, reqwest, arc_swap.
 #[test]
 fn test_domain_no_forbidden_crate_imports() {
-    let forbidden = [
-        "crossterm",
-        "ratatui",
-        "tokio",
-        "futures",
-        "reqwest",
-        "arc_swap",
-    ];
+    // futures is allowed — BoxStream/Stream are pure types, no I/O.
+    // See Story 1.1b AC7 for rationale.
+    let forbidden = ["crossterm", "ratatui", "tokio", "reqwest", "arc_swap"];
     let domain_dir = Path::new("src/domain");
     let files = collect_rs_files(domain_dir);
     assert!(!files.is_empty(), "No .rs files found in src/domain/");
