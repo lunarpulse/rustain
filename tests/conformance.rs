@@ -40,7 +40,7 @@ fn get_imports(path: &Path) -> Vec<(usize, String)> {
 }
 
 /// Domain layer must not import I/O crates.
-/// Allowed: serde, serde_json, thiserror, async-trait, futures (pure types/traits), std::path.
+/// Allowed: serde, serde_json, thiserror, async-trait, futures (pure types/traits), std::path, tracing (logging facade).
 /// Forbidden: crossterm, ratatui, tokio, reqwest, arc_swap.
 #[test]
 fn test_domain_no_forbidden_crate_imports() {
