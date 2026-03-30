@@ -4,6 +4,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::adapters::tui::app::{convert_crossterm_event, handle_input};
+use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
@@ -18,10 +19,13 @@ pub async fn run(
     config: &AppConfig,
 ) -> Result<()> {
     let size = terminal.size()?;
-    let mut state = TuiState::new(size.width, size.height);
+    let capability = detect_color_capability();
+    let mut state = TuiState::with_capability(size.width, size.height, capability);
 
     let mut terminal_events = EventStream::new();
-    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(250));
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(
+        state.theme.timing.tick_interval_ms,
+    ));
 
     // Render first frame immediately
     render(terminal, &state, &config.model)?;
@@ -98,17 +102,18 @@ fn render(terminal: &mut Tui, state: &TuiState, model: &str) -> Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area) {
+        match layout::compute_layout(area, &state.theme) {
             Some(app_layout) => {
                 let is_compact = area.width < 80 || area.height < 24;
 
-                chat_pane::render(frame, app_layout.chat_pane, false);
+                chat_pane::render(frame, app_layout.chat_pane, false, &state.theme);
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
                     model,
                     &state.status_message,
                     is_compact,
+                    &state.theme,
                 );
                 input_box::render(
                     frame,
@@ -116,6 +121,7 @@ fn render(terminal: &mut Tui, state: &TuiState, model: &str) -> Result<()> {
                     &state.input_buffer,
                     state.cursor_position,
                     state.focus,
+                    &state.theme,
                 );
             }
             None => {

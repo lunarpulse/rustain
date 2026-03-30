@@ -4,6 +4,7 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
+
 fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -13,14 +14,15 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) = layout::compute_layout(area) {
-                chat_pane::render(frame, app_layout.chat_pane, false);
+            if let Some(app_layout) = layout::compute_layout(area, &state.theme) {
+                chat_pane::render(frame, app_layout.chat_pane, false, &state.theme);
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
                     "claude-sonnet-4-6",
                     "idle",
                     false,
+                    &state.theme,
                 );
                 input_box::render(
                     frame,
@@ -28,6 +30,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     &state.input_buffer,
                     state.cursor_position,
                     state.focus,
+                    &state.theme,
                 );
             }
         })
@@ -87,9 +90,10 @@ fn test_tui_renders_compact_layout() {
 /// Layout returns None for terminals smaller than 60x16.
 #[test]
 fn test_tui_too_small_terminal() {
+    let theme = rustain::adapters::tui::theme::Theme::dark();
     let area = ratatui::prelude::Rect::new(0, 0, 50, 12);
     assert!(
-        layout::compute_layout(area).is_none(),
+        layout::compute_layout(area, &theme).is_none(),
         "Expected None for terminal too small"
     );
 }

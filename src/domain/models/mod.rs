@@ -10,6 +10,8 @@ mod session;
 mod stream;
 mod tools;
 mod usage;
+#[allow(dead_code)]
+pub mod visual;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
@@ -38,3 +40,5 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};
+#[allow(unused_imports)]
+pub use visual::{BlockBorder, DensityMode, OverlayType, PanelType, symbols};

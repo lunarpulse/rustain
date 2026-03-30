@@ -1,5 +1,8 @@
 use crate::domain::models::FocusState;
 
+use super::color_detect::ColorCapability;
+use super::theme::Theme;
+
 /// TUI-specific state for rendering.
 pub struct TuiState {
     pub focus: FocusState,
@@ -10,10 +13,16 @@ pub struct TuiState {
     pub cursor_position: usize,
     pub status_message: String,
     pub should_quit: bool,
+    pub theme: Theme,
 }
 
 impl TuiState {
+    #[allow(dead_code)]
     pub fn new(width: u16, height: u16) -> Self {
+        Self::with_capability(width, height, ColorCapability::TrueColor)
+    }
+
+    pub fn with_capability(width: u16, height: u16, capability: ColorCapability) -> Self {
         Self {
             focus: FocusState::Input,
             needs_redraw: true,
@@ -23,6 +32,7 @@ impl TuiState {
             cursor_position: 0,
             status_message: "idle".to_string(),
             should_quit: false,
+            theme: Theme::for_capability(capability),
         }
     }
 }

@@ -11,7 +11,7 @@ fn test_esc_toggles_focus() {
 
     // Esc → Chat
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-    assert_eq!(state.focus, FocusState::Chat);
+    assert_eq!(state.focus, FocusState::Chat { scroll_offset: 0 });
 
     // Esc → Input
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
@@ -22,7 +22,7 @@ fn test_esc_toggles_focus() {
 #[test]
 fn test_i_focuses_input_from_chat() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Chat;
+    state.focus = FocusState::Chat { scroll_offset: 0 };
 
     handle_input(&mut state, &DomainInputEvent::KeyPress('i'));
     assert_eq!(state.focus, FocusState::Input);
@@ -32,7 +32,7 @@ fn test_i_focuses_input_from_chat() {
 #[test]
 fn test_q_quits_from_chat() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Chat;
+    state.focus = FocusState::Chat { scroll_offset: 0 };
 
     handle_input(&mut state, &DomainInputEvent::KeyPress('q'));
     assert!(state.should_quit);

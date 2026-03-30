@@ -38,7 +38,7 @@ fn handle_char(state: &mut TuiState, c: char) -> bool {
             state.needs_redraw = true;
             true
         }
-        FocusState::Chat => match c {
+        FocusState::Chat { .. } => match c {
             'i' => {
                 state.focus = FocusState::Input;
                 state.needs_redraw = true;
@@ -50,6 +50,7 @@ fn handle_char(state: &mut TuiState, c: char) -> bool {
             }
             _ => false,
         },
+        FocusState::Sidebar { .. } | FocusState::Overlay(_) => false,
     }
 }
 
@@ -57,8 +58,9 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> bool {
     match key {
         DomainKey::Esc => {
             state.focus = match state.focus {
-                FocusState::Input => FocusState::Chat,
-                FocusState::Chat => FocusState::Input,
+                FocusState::Input => FocusState::Chat { scroll_offset: 0 },
+                FocusState::Chat { .. } => FocusState::Input,
+                FocusState::Sidebar { .. } | FocusState::Overlay(_) => FocusState::Input,
             };
             state.needs_redraw = true;
             true

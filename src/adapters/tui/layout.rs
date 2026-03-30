@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
 
+use super::theme::Theme;
+
 /// Layout regions for the TUI frame.
 pub struct AppLayout {
     pub chat_pane: Rect,
@@ -11,7 +13,7 @@ pub struct AppLayout {
 /// - >=80x24: full layout
 /// - 60x16 to 80x24: compact layout (same regions, minimal status)
 /// - <60x16: returns None (terminal too small)
-pub fn compute_layout(area: Rect) -> Option<AppLayout> {
+pub fn compute_layout(area: Rect, _theme: &Theme) -> Option<AppLayout> {
     if area.width < 60 || area.height < 16 {
         return None;
     }

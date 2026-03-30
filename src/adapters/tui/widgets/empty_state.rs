@@ -1,18 +1,20 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+use crate::adapters::tui::theme::Theme;
+
 /// Render the welcome/empty state message in the chat pane.
-pub fn render(frame: &mut Frame, area: Rect) {
+pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     let text = vec![
         Line::from(""),
         Line::from(Span::styled(
             "Welcome to Rustain.",
-            Style::default().fg(Color::White).bold(),
+            theme.typography.heading.fg(theme.colors.fg_primary),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "Type a message to start.",
-            Style::default().fg(Color::DarkGray),
+            theme.typography.meta.fg(theme.colors.fg_muted),
         )),
     ];
 
