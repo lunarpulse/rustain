@@ -35,7 +35,7 @@ pub use permission::{
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionState};
 #[allow(unused_imports)]
-pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
+pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};
 #[allow(unused_imports)]
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]

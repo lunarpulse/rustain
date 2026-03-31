@@ -42,6 +42,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rolling-file = "0.2"
 
+# ── HTTP client (provider adapters) ─────────────────────────────
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], optional = true }
+
 # ── Utilities ────────────────────────────────────────────────────
 async-trait = "0.1"
 arc-swap = "1.7"
@@ -59,10 +62,11 @@ dirs = "6.0"
 tokio-test = "0.4"
 tempfile = "3.0"
 pretty_assertions = "1"
+mockito = "1"
 
 [features]
 default = ["anthropic"]
-anthropic = []
+anthropic = ["dep:reqwest"]
 openai = []
 
 [profile.release]

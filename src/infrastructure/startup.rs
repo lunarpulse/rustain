@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use clap::Parser;
 use tokio::sync::mpsc;
@@ -5,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::adapters::cli::commands::Cli;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
+use crate::domain::ports::ProviderPort;
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, signals};
 
@@ -13,8 +16,9 @@ use crate::infrastructure::{config, logging, signals};
 /// 2. Load config
 /// 3. Initialize logging
 /// 4. Install panic hook
-/// 5. Setup terminal
-/// 6. Enter event loop
+/// 5. Construct provider
+/// 6. Setup terminal
+/// 7. Enter event loop
 pub async fn run() -> Result<()> {
     // 1. Parse CLI args
     let cli = Cli::parse();
@@ -29,24 +33,64 @@ pub async fn run() -> Result<()> {
     // 4. Install panic hook
     signals::install_panic_hook();
 
-    // 5. Create domain event channel
+    // 5. Construct provider adapter
+    let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
+
+    // 6. Create domain event channel
     let (domain_tx, mut domain_rx) = mpsc::unbounded_channel::<AppEvent>();
 
     // Store shutdown sender for signal handlers
     signals::set_shutdown_sender(domain_tx.clone());
     signals::install_signal_handlers().await;
 
-    // 6. Setup terminal
+    // 7. Setup terminal
     let mut tui = terminal::setup()?;
 
-    // 7. Run event loop
-    let result = event_loop::run(&mut tui, &mut domain_rx, &app_config).await;
+    // 8. Run event loop
+    let result = event_loop::run(&mut tui, &mut domain_rx, domain_tx, &app_config, provider).await;
 
-    // 8. Teardown terminal (always, even on error)
+    // 9. Teardown terminal (always, even on error)
     if let Err(e) = terminal::teardown() {
         tracing::error!("Terminal teardown failed: {}", e);
     }
     tracing::info!("Rustain shutdown complete.");
 
     result
+}
+
+/// Build the provider adapter based on configuration and environment.
+fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn ProviderPort>> {
+    #[cfg(feature = "anthropic")]
+    {
+        match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(api_key) => {
+                let adapter = crate::adapters::anthropic::AnthropicAdapter::new(
+                    api_key,
+                    config.model.clone(),
+                    None,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create Anthropic adapter: {}", e))?;
+                tracing::info!("Anthropic provider initialized (model: {})", config.model);
+                Ok(Arc::new(adapter))
+            }
+            Err(_) => {
+                eprintln!(
+                    "Error: ANTHROPIC_API_KEY not set.\n\n\
+                     To use rustain, set your Anthropic API key:\n\
+                     \n\
+                     export ANTHROPIC_API_KEY=sk-ant-...\n\
+                     \n\
+                     Get your API key at: https://console.anthropic.com/"
+                );
+                std::process::exit(3);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "anthropic"))]
+    {
+        let _ = config;
+        tracing::warn!("No provider feature enabled — using NoOp provider");
+        Ok(Arc::new(crate::adapters::noop::NoOpProvider))
+    }
 }
