@@ -325,19 +325,15 @@ fn test_focus_state_variants() {
 
     // 4 variants: Input, Chat, Sidebar, Overlay
     let input = FocusState::Input;
-    let chat = FocusState::Chat { scroll_offset: 42 };
+    let chat = FocusState::Chat;
     let sidebar = FocusState::Sidebar {
         panel: PanelType::History,
         selected: 0,
     };
     let overlay = FocusState::Overlay(OverlayType::CommandPalette);
 
-    // Chat destructures with scroll_offset
-    if let FocusState::Chat { scroll_offset } = chat {
-        assert_eq!(scroll_offset, 42);
-    } else {
-        panic!("Expected Chat variant");
-    }
+    // Chat is a unit variant (scroll state owned by TuiState)
+    assert_eq!(chat, FocusState::Chat);
 
     // All variants are distinct
     assert_ne!(input, chat);

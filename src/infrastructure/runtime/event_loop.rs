@@ -204,7 +204,7 @@ fn check_message_submit(
     use crate::domain::models::FocusState;
 
     if let DomainInputEvent::SpecialKey(DomainKey::Enter) = event {
-        if state.focus == FocusState::Input && !state.input_buffer.is_empty() {
+        if matches!(state.focus, FocusState::Input) && !state.input_buffer.is_empty() {
             return Some(state.input_buffer.clone());
         }
     }
