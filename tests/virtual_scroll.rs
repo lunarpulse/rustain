@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
+use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::{ChatMessage, Conversation, MessageRole, StreamingState};
 
 fn make_conversation(msg_count: usize) -> Conversation {
@@ -62,6 +65,7 @@ fn test_virtual_scroll_1000_messages_performance() {
                 true,
                 &theme,
                 &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -93,7 +97,15 @@ fn test_virtual_scroll_relative_scaling() {
             .draw(|frame| {
                 let area = frame.area();
                 chat_pane::render(
-                    frame, area, &conv_100, &streaming, 0, true, &theme, &mut cache,
+                    frame,
+                    area,
+                    &conv_100,
+                    &streaming,
+                    0,
+                    true,
+                    &theme,
+                    &mut cache,
+                    &HashMap::<String, ToolBlockState>::new(),
                 );
             })
             .unwrap();
@@ -112,7 +124,15 @@ fn test_virtual_scroll_relative_scaling() {
             .draw(|frame| {
                 let area = frame.area();
                 chat_pane::render(
-                    frame, area, &conv_1000, &streaming, 0, true, &theme, &mut cache,
+                    frame,
+                    area,
+                    &conv_1000,
+                    &streaming,
+                    0,
+                    true,
+                    &theme,
+                    &mut cache,
+                    &HashMap::<String, ToolBlockState>::new(),
                 );
             })
             .unwrap();
@@ -152,6 +172,7 @@ fn test_virtual_scroll_zero_messages() {
                 true,
                 &theme,
                 &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
             );
             assert_eq!(result.total_content_height, 0);
         })
@@ -180,6 +201,7 @@ fn test_virtual_scroll_one_message() {
                 true,
                 &theme,
                 &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
             );
             assert!(result.total_content_height > 0);
             assert_eq!(result.block_boundaries.len(), 1);
@@ -232,6 +254,7 @@ fn test_virtual_scroll_only_user_messages() {
                 true,
                 &theme,
                 &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
             );
             assert_eq!(result.message_boundaries.len(), 5);
             assert_eq!(result.block_boundaries.len(), 5);

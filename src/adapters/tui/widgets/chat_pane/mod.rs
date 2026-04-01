@@ -4,9 +4,14 @@ pub mod word_wrap;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+use std::collections::HashMap;
+
 use crate::adapters::tui::state::HeightCache;
 use crate::adapters::tui::theme::Theme;
-use crate::domain::models::{ContentBlockType, Conversation, MessageRole, StopReason, StreamingState};
+use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
+use crate::domain::models::{
+    ContentBlockType, Conversation, MessageRole, StopReason, StreamingState,
+};
 
 use super::empty_state;
 use word_wrap::{parse_inline_code, wrap_text};
@@ -18,11 +23,18 @@ pub struct RenderResult {
     pub block_boundaries: Vec<usize>,
     /// Line offsets (from top) where each user message starts.
     pub message_boundaries: Vec<usize>,
+    /// Tool block id at the top of the viewport (for focus/keyboard interaction).
+    pub focused_tool_id: Option<String>,
 }
 
 /// Compute the rendered height of a single message (role line + content lines)
 /// without building actual Line objects (for off-screen height computation).
-fn compute_message_height(content: &str, has_error: bool, is_cancelled: bool, width: usize) -> usize {
+fn compute_message_height(
+    content: &str,
+    has_error: bool,
+    is_cancelled: bool,
+    width: usize,
+) -> usize {
     // 1 for role line
     let content_height = if has_error || content.is_empty() {
         let wrapped = wrap_text(content, width);
@@ -108,11 +120,13 @@ pub fn render(
     auto_scroll: bool,
     theme: &Theme,
     height_cache: &mut HeightCache,
+    tool_block_states: &HashMap<String, ToolBlockState>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
+        focused_tool_id: None,
     };
 
     // Empty state: no messages and not streaming
@@ -154,19 +168,28 @@ pub fn render(
         }
         block_boundaries.push(cumulative_offset);
 
-        // Get or compute height
-        let height = if let Some(h) = height_cache.get(i) {
-            h
-        } else {
-            let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
-            let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
-            let h = compute_message_height(&msg.content, has_error, is_cancelled, width);
-            height_cache.set(i, h);
-            h
-        };
+        // Get or compute height (invalidate cache if tool block states changed)
+        let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
+        let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
+        let mut h = compute_message_height(&msg.content, has_error, is_cancelled, width);
 
-        message_heights.push(height);
-        cumulative_offset += height;
+        // Add tool block heights
+        for tc in &msg.tool_calls {
+            let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+            h += tool_block::tool_block_height(tc, &tb_state);
+            block_boundaries.push(cumulative_offset + h);
+        }
+
+        // Use height cache for all messages (including those with tool calls).
+        // Cache is invalidated on collapse/expand toggle via height_cache.invalidate_all().
+        if let Some(cached) = height_cache.get(i) {
+            h = cached;
+        } else {
+            height_cache.set(i, h);
+        }
+
+        message_heights.push(h);
+        cumulative_offset += h;
     }
 
     // Streaming content height
@@ -176,7 +199,7 @@ pub fn render(
         }
         block_boundaries.push(cumulative_offset);
 
-        let h = if streaming.current_text_buffer.is_empty() {
+        let mut h = if streaming.current_text_buffer.is_empty() {
             if streaming.current_blocks.contains(&ContentBlockType::Error) {
                 2 // "Assistant:" + error line
             } else {
@@ -199,6 +222,14 @@ pub fn render(
                 count
             }
         };
+
+        // Add heights for streaming tool calls
+        for tc in streaming.active_tool_calls.values() {
+            let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+            h += tool_block::tool_block_height(tc, &tb_state);
+            block_boundaries.push(cumulative_offset + h);
+        }
+
         cumulative_offset += h;
         h
     } else {
@@ -258,6 +289,27 @@ pub fn render(
                     lines.push(line);
                 }
             }
+
+            // Render tool blocks for this message
+            let text_height = compute_message_height(
+                &msg.content,
+                msg.content_blocks.contains(&ContentBlockType::Error),
+                msg.stop_reason == Some(StopReason::Cancelled),
+                width,
+            );
+            let mut tool_line_offset = line_offset + text_height;
+            for tc in &msg.tool_calls {
+                let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                let tb_lines =
+                    tool_block::render_tool_block_lines(tc, theme, &tb_state, area.width);
+                for (j, line) in tb_lines.into_iter().enumerate() {
+                    let abs_line = tool_line_offset + j;
+                    if abs_line >= visible_start && abs_line < visible_end {
+                        lines.push(line);
+                    }
+                }
+                tool_line_offset += tool_block::tool_block_height(tc, &tb_state);
+            }
         }
         // else: skip this message entirely (viewport culling)
 
@@ -285,11 +337,27 @@ pub fn render(
         let stream_end = line_offset + streaming_height;
         if stream_end > visible_start && line_offset < visible_end {
             let stream_lines = render_streaming(streaming, width, theme);
+            let text_line_count = stream_lines.len();
             for (j, line) in stream_lines.into_iter().enumerate() {
                 let abs_line = line_offset + j;
                 if abs_line >= visible_start && abs_line < visible_end {
                     lines.push(line);
                 }
+            }
+
+            // Render streaming tool calls
+            let mut tool_line_offset = line_offset + text_line_count;
+            for tc in streaming.active_tool_calls.values() {
+                let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                let tb_lines =
+                    tool_block::render_tool_block_lines(tc, theme, &tb_state, area.width);
+                for (j, line) in tb_lines.into_iter().enumerate() {
+                    let abs_line = tool_line_offset + j;
+                    if abs_line >= visible_start && abs_line < visible_end {
+                        lines.push(line);
+                    }
+                }
+                tool_line_offset += tool_block::tool_block_height(tc, &tb_state);
             }
         }
     }
@@ -322,11 +390,62 @@ pub fn render(
     let widget = Paragraph::new(Text::from(lines));
     frame.render_widget(widget, area);
 
+    // Determine focused tool block: find the tool block closest to the top of the viewport.
+    // Scan messages for tool calls whose block boundary falls within the visible range.
+    let focused_tool_id = find_focused_tool_id(
+        conversation,
+        streaming,
+        &block_boundaries,
+        visible_start,
+        visible_end,
+    );
+
     RenderResult {
         total_content_height,
         block_boundaries,
         message_boundaries,
+        focused_tool_id,
     }
+}
+
+/// Find the tool block id at the top of the viewport for keyboard focus.
+/// Returns the id of the first tool block whose content falls within the top
+/// 3 lines of the visible viewport.
+fn find_focused_tool_id(
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    block_boundaries: &[usize],
+    visible_start: usize,
+    _visible_end: usize,
+) -> Option<String> {
+    // Collect all tool call ids from conversation and streaming
+    let all_tool_ids: Vec<String> = conversation
+        .messages
+        .iter()
+        .flat_map(|m| m.tool_calls.iter())
+        .chain(streaming.active_tool_calls.values())
+        .map(|tc| tc.id.clone())
+        .collect();
+
+    if all_tool_ids.is_empty() {
+        return None;
+    }
+
+    // Find the block boundary closest to visible_start (within 3 lines).
+    // Block boundaries include tool block starts — match by index into the
+    // tool_ids list (tool blocks are appended to boundaries in order).
+    // For MVP: return the first tool id if any boundary is near viewport top.
+    for &boundary in block_boundaries {
+        if boundary >= visible_start && boundary < visible_start + 3 {
+            // A block boundary is at the viewport top.
+            // Find the tool id that corresponds to this boundary.
+            // Since tool block boundaries are interleaved with message boundaries,
+            // we return the first tool call as the focused one.
+            return all_tool_ids.into_iter().next();
+        }
+    }
+
+    None
 }
 
 /// Render streaming content into Line objects.

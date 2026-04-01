@@ -5,9 +5,11 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use crate::adapters::cli::commands::Cli;
+use crate::adapters::security_adapter::SecurityAdapter;
+use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
-use crate::domain::ports::ProviderPort;
+use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, signals};
 
@@ -36,6 +38,13 @@ pub async fn run() -> Result<()> {
     // 5. Construct provider adapter
     let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
 
+    // 5b. Construct security and toolset adapters
+    let workspace_path = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+    let session_id = nanoid::nanoid!();
+    let security: Arc<dyn SecurityPort> = Arc::new(SecurityAdapter::new(workspace_path.clone()));
+    let tools: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(workspace_path, session_id));
+
     // 6. Create domain event channel
     let (domain_tx, mut domain_rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -47,7 +56,16 @@ pub async fn run() -> Result<()> {
     let mut tui = terminal::setup()?;
 
     // 8. Run event loop
-    let result = event_loop::run(&mut tui, &mut domain_rx, domain_tx, &app_config, provider).await;
+    let result = event_loop::run(
+        &mut tui,
+        &mut domain_rx,
+        domain_tx,
+        &app_config,
+        provider,
+        security,
+        tools,
+    )
+    .await;
 
     // 9. Teardown terminal (always, even on error)
     if let Err(e) = terminal::teardown() {

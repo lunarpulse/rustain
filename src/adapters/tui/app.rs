@@ -65,6 +65,21 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
+    // Any keypress dismisses an active peek overlay (AC5)
+    if state.focus == FocusState::Chat {
+        let had_peek = state
+            .tool_block_states
+            .values()
+            .any(|tbs| tbs.peek_active);
+        if had_peek {
+            for tbs in state.tool_block_states.values_mut() {
+                tbs.peek_active = false;
+            }
+            state.needs_redraw = true;
+            return InputAction::Consumed;
+        }
+    }
+
     match state.focus {
         FocusState::Input => {
             let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
@@ -170,6 +185,20 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
                 InputAction::Consumed
             }
+            // p = peek preview on focused collapsed tool block
+            'p' => {
+                if let Some(ref tool_id) = state.focused_tool_id {
+                    let entry = state
+                        .tool_block_states
+                        .entry(tool_id.clone())
+                        .or_default();
+                    if entry.collapsed {
+                        entry.peek_active = !entry.peek_active;
+                        state.needs_redraw = true;
+                    }
+                }
+                InputAction::Consumed
+            }
             _ => InputAction::Ignored,
         },
         FocusState::Sidebar { .. } | FocusState::Overlay(_) => InputAction::Ignored,
@@ -177,6 +206,21 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 }
 
 fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    // Any keypress dismisses an active peek overlay (AC5)
+    if state.focus == FocusState::Chat {
+        let had_peek = state
+            .tool_block_states
+            .values()
+            .any(|tbs| tbs.peek_active);
+        if had_peek {
+            for tbs in state.tool_block_states.values_mut() {
+                tbs.peek_active = false;
+            }
+            state.needs_redraw = true;
+            return InputAction::Consumed;
+        }
+    }
+
     match key {
         DomainKey::Esc => {
             state.focus = match state.focus {
@@ -204,6 +248,21 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::Right if state.focus == FocusState::Input => {
             if state.cursor_position < state.input_buffer.chars().count() {
                 state.cursor_position += 1;
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Enter if state.focus == FocusState::Chat => {
+            // Toggle collapse/expand on focused tool block
+            if let Some(ref tool_id) = state.focused_tool_id {
+                let entry = state
+                    .tool_block_states
+                    .entry(tool_id.clone())
+                    .or_default();
+                entry.collapsed = !entry.collapsed;
+                entry.peek_active = false; // dismiss peek on toggle
+                // Invalidate height cache since expanded height differs
+                state.height_cache.invalidate_all();
                 state.needs_redraw = true;
             }
             InputAction::Consumed

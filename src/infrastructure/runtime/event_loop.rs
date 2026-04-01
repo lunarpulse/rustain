@@ -16,7 +16,7 @@ use crate::domain::models::{
     AppConfig, ChatMessage, CompletionOptions, Conversation, FocusState, MessageRole,
     StreamingState, UserMessage, apply_chunk, generate_conversation_id,
 };
-use crate::domain::ports::ProviderPort;
+use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
 use crate::domain::services::message_builder;
 use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::turn;
@@ -28,6 +28,8 @@ pub async fn run(
     domain_tx: mpsc::UnboundedSender<AppEvent>,
     config: &AppConfig,
     provider: Arc<dyn ProviderPort>,
+    security: Arc<dyn SecurityPort>,
+    tools: Arc<dyn ToolSetPort>,
 ) -> Result<()> {
     let size = terminal.size()?;
     let capability = detect_color_capability();
@@ -104,6 +106,8 @@ pub async fn run(
                                             &provider,
                                             config,
                                             &domain_tx,
+                                            &security,
+                                            &tools,
                                         );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model) {
@@ -117,8 +121,21 @@ pub async fn run(
                                 }
                                 InputAction::CancelOrQuit => {
                                     if streaming.is_streaming {
+                                        // AC12: Finalize active tool calls with [aborted] before clearing
+                                        for (_, tc) in streaming.active_tool_calls.iter_mut() {
+                                            if tc.result.is_none() {
+                                                tc.result = Some(crate::domain::models::ToolResultInfo {
+                                                    content: "[aborted]".to_string(),
+                                                    is_error: true,
+                                                });
+                                                tc.completed_at_ms = Some(now_unix() as u64 * 1000);
+                                            }
+                                        }
+
                                         // Abort streaming: preserve partial response
-                                        if !streaming.current_text_buffer.is_empty() {
+                                        if !streaming.current_text_buffer.is_empty()
+                                            || !streaming.active_tool_calls.is_empty()
+                                        {
                                             let content = std::mem::take(&mut streaming.current_text_buffer);
                                             conversation.messages.push(ChatMessage {
                                                 role: MessageRole::Assistant,
@@ -192,6 +209,8 @@ pub async fn run(
                                         &provider,
                                         config,
                                         &domain_tx,
+                                        &security,
+                                        &tools,
                                     );
                                     // Force immediate render for typing indicator
                                     match render(terminal, &mut state, &conversation, &streaming, &config.model) {
@@ -201,17 +220,10 @@ pub async fn run(
                                 }
                             }
                             ChunkAction::TurnContinuing => {
-                                // Sprint 0 safety: tool loop not yet implemented.
-                                // Reset streaming state so the user isn't locked out.
-                                // Sprint 1 (Story 1.5) replaces this with actual tool execution.
-                                tracing::warn!("TurnContinuing received but tool loop not implemented — resetting streaming state");
-                                streaming.is_streaming = false;
-                                streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                                streaming.current_text_buffer.clear();
-                                streaming.current_blocks.clear();
-                                streaming.active_tool_calls.clear();
-                                _active_turn = None;
-                                state.status_message = "Ready (tool_use unsupported in Sprint 0)".to_string();
+                                // Tool execution loop is handled inside run_turn.
+                                // The streaming stays active — tool results will arrive as
+                                // ProviderChunk(ToolResult) followed by more streaming.
+                                state.status_message = "Executing tools...".to_string();
                                 state.needs_redraw = true;
                             }
                             ChunkAction::None => {}
@@ -269,6 +281,8 @@ fn start_turn(
     provider: &Arc<dyn ProviderPort>,
     config: &AppConfig,
     domain_tx: &mpsc::UnboundedSender<AppEvent>,
+    security: &Arc<dyn SecurityPort>,
+    tools: &Arc<dyn ToolSetPort>,
 ) {
     // Add user ChatMessage to conversation
     conversation.messages.push(ChatMessage {
@@ -284,11 +298,13 @@ fn start_turn(
     // Build messages list for provider
     let messages = message_builder::build_api_messages(conversation);
 
+    let tool_defs = tools.available_tools();
     let options = CompletionOptions {
         model: config.model.clone(),
         max_tokens: 8192,
         system_prompt: String::new(),
         temperature: None,
+        tools: tool_defs,
     };
 
     // Clear any stale buffers from a previous turn (e.g. after TurnContinuing or SystemNotice)
@@ -303,6 +319,8 @@ fn start_turn(
         messages,
         options,
         domain_tx.clone(),
+        security.clone(),
+        tools.clone(),
     ));
     *active_turn = Some(handle);
 
@@ -370,12 +388,25 @@ fn render(
     let mut content_height = 0usize;
     let mut block_bounds = Vec::new();
     let mut msg_bounds = Vec::new();
-    let height_cache = &mut state.height_cache;
+    let mut focused_tool_id: Option<String> = None;
+
+    // Split borrows: height_cache needs &mut, tool_block_states needs &
+    // Both are fields of state, so we extract refs before the closure.
+    let TuiState {
+        ref mut height_cache,
+        ref tool_block_states,
+        ref theme,
+        ref status_message,
+        ref input_buffer,
+        cursor_position,
+        focus,
+        ..
+    } = *state;
 
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area, &state.theme) {
+        match layout::compute_layout(area, theme) {
             Some(app_layout) => {
                 let is_compact = area.width < 80 || area.height < 24;
 
@@ -386,19 +417,41 @@ fn render(
                     streaming,
                     scroll_offset,
                     auto_scroll,
-                    &state.theme,
+                    theme,
                     height_cache,
+                    tool_block_states,
                 );
                 content_height = result.total_content_height;
                 block_bounds = result.block_boundaries;
                 msg_bounds = result.message_boundaries;
+                focused_tool_id = result.focused_tool_id;
+
+                // Render peek overlay if any tool block has peek_active (AC5)
+                for (tool_id, tbs) in tool_block_states.iter() {
+                    if tbs.peek_active {
+                        // Find the tool call info for this tool block
+                        let tc = conversation
+                            .messages
+                            .iter()
+                            .flat_map(|m| m.tool_calls.iter())
+                            .chain(streaming.active_tool_calls.values())
+                            .find(|tc| tc.id == *tool_id);
+                        if let Some(tc) = tc {
+                            let (paragraph, area) = crate::adapters::tui::widgets::tool_block::render_peek_overlay(tc, theme, app_layout.chat_pane);
+                            frame.render_widget(ratatui::widgets::Clear, area);
+                            frame.render_widget(paragraph, area);
+                        }
+                        break; // Only one peek at a time
+                    }
+                }
+
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
                     model,
-                    &state.status_message,
+                    status_message,
                     is_compact,
-                    &state.theme,
+                    theme,
                     scroll_offset,
                     &msg_bounds,
                     content_height,
@@ -407,10 +460,10 @@ fn render(
                 input_box::render(
                     frame,
                     app_layout.input_area,
-                    &state.input_buffer,
-                    state.cursor_position,
-                    state.focus,
-                    &state.theme,
+                    input_buffer,
+                    cursor_position,
+                    focus,
+                    theme,
                 );
             }
             None => {
@@ -426,6 +479,7 @@ fn render(
     state.total_content_height = content_height;
     state.block_boundaries = block_bounds;
     state.message_boundaries = msg_bounds;
+    state.focused_tool_id = focused_tool_id;
 
     // Resolve pending anchor from resize: use new heights to find correct scroll_offset.
     if let Some(anchor_idx) = state.pending_anchor.take() {

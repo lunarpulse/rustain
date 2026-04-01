@@ -1,5 +1,5 @@
-//! Simple pass-through turn orchestrator.
-//! Sprint 1 (Story 1.5) wraps this in a tool loop with permission chain.
+//! Turn orchestrator with tool execution loop.
+//! Sprint 1 pattern: stream → collect tool calls → execute → loop.
 
 use std::sync::Arc;
 
@@ -7,43 +7,196 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::domain::events::AppEvent;
-use crate::domain::models::{CompletionOptions, Message, NoticeLevel, StopReason, StreamChunk};
-use crate::domain::ports::ProviderPort;
+use crate::domain::models::{
+    CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCallInfo,
+    ToolResultMessage,
+};
+use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
+use crate::domain::services::permission_chain::{self, PermissionDecision};
 
-/// Execute a single turn: stream completion from the provider and forward
-/// chunks as `AppEvent::ProviderChunk` through the event channel.
+/// Execute a turn: stream completion, execute tools, loop until EndTurn.
 ///
-/// This is the Sprint 0 simple pass-through — no tool loop, no retry.
+/// The agentic loop:
+/// 1. Call stream_completion with current messages
+/// 2. Forward all chunks as AppEvent::ProviderChunk
+/// 3. On TurnComplete(ToolUse): execute tools, append results, loop to 1
+/// 4. On TurnComplete(EndTurn): done
+/// Maximum number of tool execution loop iterations before forcing termination.
+const MAX_TOOL_ITERATIONS: usize = 25;
+
 pub async fn run_turn(
     provider: Arc<dyn ProviderPort>,
-    messages: Vec<Message>,
+    mut messages: Vec<Message>,
     options: CompletionOptions,
     event_tx: mpsc::UnboundedSender<AppEvent>,
+    security: Arc<dyn SecurityPort>,
+    tools: Arc<dyn ToolSetPort>,
 ) {
-    match provider.stream_completion(messages, options).await {
-        Ok(stream) => {
-            futures::pin_mut!(stream);
-            let mut received_turn_complete = false;
-            while let Some(chunk) = stream.next().await {
-                if matches!(chunk, StreamChunk::TurnComplete { .. }) {
-                    received_turn_complete = true;
-                }
-                let _ = event_tx.send(AppEvent::ProviderChunk(chunk));
-            }
-            // Safety: if stream ended without TurnComplete, synthesize one so the
-            // event loop doesn't stay stuck in is_streaming=true forever.
-            if !received_turn_complete {
-                tracing::warn!("Provider stream ended without TurnComplete — synthesizing end");
-                let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::Error {
-                    content: "Stream disconnected unexpectedly".to_string(),
-                }));
-                let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
-                    stop_reason: StopReason::Cancelled,
-                }));
-            }
+    let mut iteration = 0;
+    loop {
+        iteration += 1;
+        if iteration > MAX_TOOL_ITERATIONS {
+            tracing::warn!("Tool execution loop exceeded {} iterations — terminating", MAX_TOOL_ITERATIONS);
+            let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::Error {
+                content: format!("Tool execution loop exceeded {} iterations", MAX_TOOL_ITERATIONS),
+            }));
+            let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
+                stop_reason: StopReason::Cancelled,
+            }));
+            return;
         }
-        Err(e) => {
-            let _ = event_tx.send(AppEvent::SystemNotice(NoticeLevel::Error, format!("{e}")));
+        match provider
+            .stream_completion(messages.clone(), options.clone())
+            .await
+        {
+            Ok(stream) => {
+                futures::pin_mut!(stream);
+                let mut received_turn_complete = false;
+                let mut stop_reason = StopReason::EndTurn;
+                let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+
+                while let Some(chunk) = stream.next().await {
+                    match &chunk {
+                        StreamChunk::TurnComplete { stop_reason: sr } => {
+                            received_turn_complete = true;
+                            stop_reason = sr.clone();
+                        }
+                        StreamChunk::ToolUse { id, name, input } => {
+                            tool_calls.push(ToolCallInfo {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input: input.clone(),
+                                result: None,
+                                started_at_ms: Some(now_ms()),
+                                completed_at_ms: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                    let _ = event_tx.send(AppEvent::ProviderChunk(chunk));
+                }
+
+                // Safety: synthesize TurnComplete if stream ended without one
+                if !received_turn_complete {
+                    tracing::warn!("Provider stream ended without TurnComplete — synthesizing end");
+                    let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::Error {
+                        content: "Stream disconnected unexpectedly".to_string(),
+                    }));
+                    let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled,
+                    }));
+                    return;
+                }
+
+                match stop_reason {
+                    StopReason::ToolUse => {
+                        // Execute tool calls and continue the loop
+                        if tool_calls.is_empty() {
+                            tracing::warn!("TurnComplete(ToolUse) but no tool calls collected — synthesizing EndTurn");
+                            let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
+                                stop_reason: StopReason::EndTurn,
+                            }));
+                            return;
+                        }
+
+                        // Build the assistant message with tool_use content for the conversation
+                        // (The event loop handles this via apply_chunk, but we need to build
+                        //  the messages list for the next stream_completion call)
+                        messages.push(Message {
+                            role: MessageRole::Assistant,
+                            content: String::new(), // Text was already forwarded via chunks
+                            images: vec![],
+                            tool_results: vec![],
+                            context_prefix: None,
+                        });
+
+                        let mut tool_result_messages = Vec::new();
+
+                        for tc in &tool_calls {
+                            let decision =
+                                permission_chain::check(security.as_ref(), &tc.name, &tc.input)
+                                    .await;
+
+                            let result = match decision {
+                                PermissionDecision::Allow | PermissionDecision::AlwaysAllow => {
+                                    match tools.execute(&tc.name, tc.input.clone()).await {
+                                        Ok(mut result) => {
+                                            result.tool_use_id = tc.id.clone();
+                                            result
+                                        }
+                                        Err(e) => crate::domain::models::ToolResult {
+                                            tool_use_id: tc.id.clone(),
+                                            content: format!("Tool execution failed: {}", e),
+                                            is_error: true,
+                                        },
+                                    }
+                                }
+                                PermissionDecision::Deny(reason) => {
+                                    crate::domain::models::ToolResult {
+                                        tool_use_id: tc.id.clone(),
+                                        content: format!("Permission denied: {}", reason),
+                                        is_error: true,
+                                    }
+                                }
+                                PermissionDecision::Cancel => {
+                                    // User cancelled — stop the turn
+                                    let _ = event_tx.send(AppEvent::ProviderChunk(
+                                        StreamChunk::TurnComplete {
+                                            stop_reason: StopReason::Cancelled,
+                                        },
+                                    ));
+                                    return;
+                                }
+                            };
+
+                            // Send ToolResult chunk so apply_chunk processes it
+                            let _ =
+                                event_tx.send(AppEvent::ProviderChunk(StreamChunk::ToolResult {
+                                    id: result.tool_use_id.clone(),
+                                    content: result.content.clone(),
+                                    is_error: result.is_error,
+                                }));
+
+                            tool_result_messages.push(ToolResultMessage {
+                                tool_use_id: result.tool_use_id,
+                                content: result.content,
+                                is_error: result.is_error,
+                            });
+                        }
+
+                        // Append tool results as a user message for the next completion
+                        messages.push(Message {
+                            role: MessageRole::User,
+                            content: String::new(),
+                            images: vec![],
+                            tool_results: tool_result_messages,
+                            context_prefix: None,
+                        });
+
+                        // Clear tool_calls for next iteration
+                        tool_calls.clear();
+
+                        // Loop back to stream_completion
+                        continue;
+                    }
+                    StopReason::EndTurn | StopReason::MaxTokens | StopReason::Cancelled => {
+                        // Turn is done
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = event_tx.send(AppEvent::SystemNotice(NoticeLevel::Error, format!("{e}")));
+                return;
+            }
         }
     }
+}
+
+/// Get current unix timestamp in milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

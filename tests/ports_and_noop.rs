@@ -32,6 +32,7 @@ async fn test_noop_provider_returns_error() {
         max_tokens: 100,
         system_prompt: String::new(),
         temperature: None,
+        tools: vec![],
     };
     let result = provider.stream_completion(messages, options).await;
     assert!(result.is_err());

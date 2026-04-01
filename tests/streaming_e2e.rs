@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
+use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, StreamingPhase,
@@ -61,6 +64,7 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -98,6 +102,7 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -146,6 +151,7 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -190,6 +196,7 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();

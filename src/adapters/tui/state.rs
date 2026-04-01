@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::FocusState;
 
 use super::color_detect::ColorCapability;
@@ -43,7 +44,6 @@ impl HeightCache {
     pub fn invalidate_last(&mut self, message_index: usize) {
         self.entries.remove(&message_index);
     }
-
 }
 
 /// TUI-specific state for rendering.
@@ -69,6 +69,11 @@ pub struct TuiState {
     /// Pending anchor message index for resize scroll preservation.
     /// Set by resize handler, consumed by next render to recompute scroll_offset.
     pub pending_anchor: Option<usize>,
+    /// Per-tool-block collapsed/expanded/peek state, keyed by tool_use_id.
+    pub tool_block_states: HashMap<String, ToolBlockState>,
+    /// Currently focused tool block id (set by chat pane render when a tool block
+    /// is at the top of the viewport after J/K navigation).
+    pub focused_tool_id: Option<String>,
 }
 
 impl TuiState {
@@ -95,6 +100,8 @@ impl TuiState {
             message_boundaries: Vec::new(),
             height_cache: HeightCache::default(),
             pending_anchor: None,
+            tool_block_states: HashMap::new(),
+            focused_tool_id: None,
         }
     }
 }

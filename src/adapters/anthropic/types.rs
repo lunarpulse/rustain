@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::{CompletionOptions, Message, MessageRole};
+use crate::domain::models::{CompletionOptions, Message, MessageRole, ToolDefinition};
 
 // ─── Request Types ──────────────────────────────────────────────────────────
 
@@ -17,8 +17,27 @@ pub struct AnthropicRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AnthropicToolDef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<AnthropicMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnthropicToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl From<&ToolDefinition> for AnthropicToolDef {
+    fn from(td: &ToolDefinition) -> Self {
+        Self {
+            name: td.name.clone(),
+            description: td.description.clone(),
+            input_schema: td.input_schema.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +114,9 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
             })
             .collect();
 
+        let tools: Vec<AnthropicToolDef> =
+            options.tools.iter().map(AnthropicToolDef::from).collect();
+
         AnthropicRequest {
             model: options.model.clone(),
             max_tokens: options.max_tokens,
@@ -102,6 +124,7 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
             messages: anthropic_messages,
             stream: true,
             temperature: options.temperature,
+            tools,
             metadata: None,
         }
     }
@@ -215,6 +238,7 @@ mod tests {
             max_tokens: 8192,
             system_prompt: "You are helpful.".into(),
             temperature: None,
+            tools: vec![],
         };
 
         let req = AnthropicRequest::from((messages.as_slice(), &options));
@@ -246,6 +270,7 @@ mod tests {
             max_tokens: 1024,
             system_prompt: String::new(),
             temperature: Some(0.7),
+            tools: vec![],
         };
 
         let req = AnthropicRequest::from((messages.as_slice(), &options));
@@ -276,6 +301,7 @@ mod tests {
             max_tokens: 8192,
             system_prompt: String::new(),
             temperature: None,
+            tools: vec![],
         };
 
         let req = AnthropicRequest::from((messages.as_slice(), &options));

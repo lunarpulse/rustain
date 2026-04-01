@@ -67,7 +67,7 @@ mod streaming_integration {
 
     #[test]
     fn test_full_sse_to_stream_chunk_text_flow() {
-        use rustain::adapters::anthropic::sse::{SseFrame, SseLineBuffer};
+        use rustain::adapters::anthropic::sse::SseLineBuffer;
         use rustain::adapters::anthropic::stream::StreamTransformer;
 
         let mut buf = SseLineBuffer::new();
@@ -307,6 +307,7 @@ data: {\"type\":\"message_stop\"}\n\
             max_tokens: 4096,
             system_prompt: "Be concise.".into(),
             temperature: Some(0.5),
+            tools: vec![],
         };
 
         let req = AnthropicRequest::from((messages.as_slice(), &options));
@@ -374,6 +375,7 @@ data: {\"type\":\"message_stop\"}\n\
                     max_tokens: 1024,
                     system_prompt: String::new(),
                     temperature: None,
+                    tools: vec![],
                 },
             )
             .await;
@@ -422,6 +424,7 @@ data: {\"type\":\"message_stop\"}\n\
                     max_tokens: 1024,
                     system_prompt: String::new(),
                     temperature: None,
+                    tools: vec![],
                 },
             )
             .await;
@@ -471,6 +474,7 @@ data: {\"type\":\"message_stop\"}\n\
                     max_tokens: 1024,
                     system_prompt: String::new(),
                     temperature: None,
+                    tools: vec![],
                 },
             )
             .await;
@@ -543,6 +547,7 @@ data: {\"type\":\"message_stop\"}\n\
                     max_tokens: 1024,
                     system_prompt: String::new(),
                     temperature: None,
+                    tools: vec![],
                 },
             )
             .await;
@@ -648,8 +653,11 @@ data: {\"type\":\"message_stop\"}\n\
                 max_tokens: 100,
                 system_prompt: String::new(),
                 temperature: None,
+                tools: vec![],
             },
             tx,
+            Arc::new(rustain::adapters::noop::NoOpSecurity),
+            Arc::new(rustain::adapters::noop::NoOpToolSet),
         )
         .await;
 
@@ -707,6 +715,7 @@ data: {\"type\":\"message_stop\"}\n\
                     max_tokens: 1024,
                     system_prompt: String::new(),
                     temperature: None,
+                    tools: vec![],
                 },
             )
             .await;
@@ -755,6 +764,7 @@ data: {\"type\":\"message_stop\"}\n\
                     max_tokens: 100,
                     system_prompt: "Respond with exactly what the user asks.".into(),
                     temperature: Some(0.0),
+                    tools: vec![],
                 },
             )
             .await;

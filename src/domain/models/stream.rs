@@ -184,11 +184,24 @@ pub fn apply_chunk(
             ChunkAction::None
         }
 
-        StreamChunk::ToolResult { .. } => {
-            // ToolResult chunks are not expected during provider streaming;
-            // they originate from the tool execution loop (Sprint 1).
-            tracing::warn!("Unexpected ToolResult chunk during streaming");
-            ChunkAction::None
+        StreamChunk::ToolResult {
+            id,
+            content,
+            is_error,
+        } => {
+            // ToolResult chunks come from the tool execution loop.
+            // Update the corresponding ToolCallInfo in active_tool_calls.
+            if let Some(tc) = streaming.active_tool_calls.get_mut(&id) {
+                tc.result = Some(super::tools::ToolResultInfo {
+                    content: content.clone(),
+                    is_error,
+                });
+                tc.completed_at_ms = Some(now as u64 * 1000);
+                streaming.phase = StreamingPhase::AwaitingToolExecution;
+            } else {
+                tracing::warn!("ToolResult for unknown tool call id: {}", id);
+            }
+            ChunkAction::NeedsRedraw
         }
     }
 }
@@ -447,10 +460,23 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_chunk_unexpected_tool_result_ignored() {
+    fn test_apply_chunk_tool_result_updates_active_tool() {
         let mut conv = make_conversation();
         let mut streaming = make_streaming();
 
+        // First create a tool call
+        apply_chunk(
+            &mut conv,
+            &mut streaming,
+            StreamChunk::ToolUse {
+                id: "tool_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            1000,
+        );
+
+        // Now send the result
         let action = apply_chunk(
             &mut conv,
             &mut streaming,
@@ -459,10 +485,14 @@ mod tests {
                 content: "output".into(),
                 is_error: false,
             },
-            1000,
+            1001,
         );
 
-        assert_eq!(action, ChunkAction::None);
+        assert_eq!(action, ChunkAction::NeedsRedraw);
+        let tc = streaming.active_tool_calls.get("tool_1").unwrap();
+        assert!(tc.result.is_some());
+        assert_eq!(tc.result.as_ref().unwrap().content, "output");
+        assert_eq!(tc.completed_at_ms, Some(1_001_000));
     }
 
     #[test]

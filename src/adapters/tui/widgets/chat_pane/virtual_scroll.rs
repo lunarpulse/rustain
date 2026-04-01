@@ -210,5 +210,4 @@ mod tests {
         // total=100, vp=24, max=76. offset=46 => top_line=30, exact match at idx=1
         assert_eq!(offset_to_message_index(46, 24, &[0, 30, 60], 100), (2, 3));
     }
-
 }

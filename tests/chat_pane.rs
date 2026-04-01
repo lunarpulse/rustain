@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
+use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::{
     ChatMessage, ContentBlockType, Conversation, MessageRole, StreamingPhase, StreamingState,
 };
@@ -54,6 +57,7 @@ fn test_chat_pane_empty_shows_welcome() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -95,6 +99,7 @@ fn test_chat_pane_shows_user_message() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -136,6 +141,7 @@ fn test_chat_pane_shows_assistant_message() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -172,6 +178,7 @@ fn test_chat_pane_typing_indicator() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -211,6 +218,7 @@ fn test_chat_pane_streaming_text() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -258,6 +266,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -305,6 +314,7 @@ fn test_chat_pane_error_displays_in_red() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
@@ -353,6 +363,7 @@ fn test_chat_pane_streaming_error() {
                 true,
                 &theme,
                 &mut HeightCache::default(),
+                &HashMap::<String, ToolBlockState>::new(),
             );
         })
         .unwrap();
