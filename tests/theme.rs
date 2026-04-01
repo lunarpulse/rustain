@@ -381,6 +381,10 @@ fn test_tui_renders_with_theme_colors() {
                     "idle",
                     false,
                     &state.theme,
+                    0,
+                    &[],
+                    0,
+                    app_layout.chat_pane.height,
                 );
             }
         })

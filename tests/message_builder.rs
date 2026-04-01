@@ -25,6 +25,7 @@ fn test_build_api_messages_maps_roles() {
             tool_calls: vec![],
             created_at: 0,
             token_count: None,
+            stop_reason: None,
         },
         ChatMessage {
             role: MessageRole::Assistant,
@@ -33,6 +34,7 @@ fn test_build_api_messages_maps_roles() {
             tool_calls: vec![],
             created_at: 0,
             token_count: None,
+            stop_reason: None,
         },
     ]);
 

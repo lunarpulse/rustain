@@ -107,3 +107,41 @@ fn test_q_in_chat_returns_quit() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('q'));
     assert_eq!(action, InputAction::Quit);
 }
+
+/// AC7: Resize preserves approximate scroll position.
+#[test]
+fn test_resize_preserves_scroll_position() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.total_content_height = 100;
+    state.scroll_offset = 30;
+    state.auto_scroll = false;
+    state.message_boundaries = vec![0, 20, 40, 60, 80];
+
+    // Resize from 80x24 to 120x40
+    handle_input(&mut state, &DomainInputEvent::Resize(120, 40));
+
+    assert_eq!(state.terminal_width, 120);
+    assert_eq!(state.terminal_height, 40);
+    // Scroll offset should be approximately preserved (not 0, not at max)
+    assert!(
+        state.scroll_offset > 0,
+        "Expected scroll position preserved after resize, got offset={}",
+        state.scroll_offset
+    );
+}
+
+/// AC7: Resize at bottom (auto_scroll=true) stays at bottom.
+#[test]
+fn test_resize_at_bottom_stays_at_bottom() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.total_content_height = 100;
+    state.scroll_offset = 0;
+    state.auto_scroll = true;
+
+    handle_input(&mut state, &DomainInputEvent::Resize(120, 40));
+
+    assert_eq!(state.scroll_offset, 0);
+    assert!(state.auto_scroll);
+}

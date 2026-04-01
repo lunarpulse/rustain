@@ -153,6 +153,7 @@ pub fn apply_chunk(
                         .collect(),
                     created_at: now,
                     token_count: conv.usage.as_ref().map(|u| u.output_tokens),
+                    stop_reason: Some(stop_reason),
                 };
                 conv.messages.push(message);
                 streaming.is_streaming = false;
@@ -275,6 +276,7 @@ mod tests {
             tool_calls: vec![],
             created_at: 999,
             token_count: None,
+            stop_reason: None,
         });
 
         // Accumulate text
@@ -580,6 +582,7 @@ mod tests {
             tool_calls: vec![],
             created_at: 1002,
             token_count: None,
+            stop_reason: None,
         });
         streaming.is_streaming = true;
         apply_chunk(

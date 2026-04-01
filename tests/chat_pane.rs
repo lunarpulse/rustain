@@ -1,6 +1,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::domain::models::{
@@ -44,7 +45,16 @@ fn test_chat_pane_empty_shows_welcome() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -68,6 +78,7 @@ fn test_chat_pane_shows_user_message() {
         tool_calls: vec![],
         created_at: 0,
         token_count: None,
+        stop_reason: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -75,7 +86,16 @@ fn test_chat_pane_shows_user_message() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -99,6 +119,7 @@ fn test_chat_pane_shows_assistant_message() {
         tool_calls: vec![],
         created_at: 0,
         token_count: None,
+        stop_reason: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -106,7 +127,16 @@ fn test_chat_pane_shows_assistant_message() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -133,7 +163,16 @@ fn test_chat_pane_typing_indicator() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -163,7 +202,16 @@ fn test_chat_pane_streaming_text() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -187,6 +235,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         tool_calls: vec![],
         created_at: 0,
         token_count: None,
+        stop_reason: None,
     }]);
     let streaming = StreamingState {
         is_streaming: true,
@@ -200,7 +249,16 @@ fn test_chat_pane_user_message_before_typing_indicator() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -230,6 +288,7 @@ fn test_chat_pane_error_displays_in_red() {
         tool_calls: vec![],
         created_at: 0,
         token_count: None,
+        stop_reason: None,
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -237,7 +296,16 @@ fn test_chat_pane_error_displays_in_red() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -276,7 +344,16 @@ fn test_chat_pane_streaming_error() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 

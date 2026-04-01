@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::content::ContentBlockType;
+use super::stream::StopReason;
 use super::tools::ToolCallInfo;
 use super::usage::UsageInfo;
 
@@ -17,6 +18,9 @@ pub struct ChatMessage {
     /// Unix timestamp in seconds.
     pub created_at: i64,
     pub token_count: Option<u32>,
+    /// Why this message's generation stopped. `None` for user messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
 }
 
 /// Persistable conversation data.

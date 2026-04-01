@@ -13,8 +13,8 @@ use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::{
-    AppConfig, ChatMessage, CompletionOptions, Conversation, MessageRole, StreamingState,
-    UserMessage, apply_chunk, generate_conversation_id,
+    AppConfig, ChatMessage, CompletionOptions, Conversation, FocusState, MessageRole,
+    StreamingState, UserMessage, apply_chunk, generate_conversation_id,
 };
 use crate::domain::ports::ProviderPort;
 use crate::domain::services::message_builder;
@@ -57,14 +57,21 @@ pub async fn run(
     let mut _active_turn: Option<tokio::task::JoinHandle<()>> = None;
 
     // Render first frame immediately
-    render(
+    match render(
         terminal,
         &mut state,
         &conversation,
         &streaming,
         &config.model,
-    )?;
-    state.needs_redraw = false;
+    ) {
+        Ok(()) => state.needs_redraw = false,
+        Err(e) => {
+            handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal);
+            if state.should_quit {
+                return Ok(());
+            }
+        }
+    }
 
     loop {
         tokio::select! {
@@ -72,9 +79,6 @@ pub async fn run(
             Some(event_result) = terminal_events.next() => {
                 match event_result {
                     Ok(event) => {
-                        if is_ctrl_c(&event) {
-                            break;
-                        }
                         if let Some(domain_event) = convert_crossterm_event(&event) {
                             let action = handle_input(&mut state, &domain_event);
 
@@ -102,12 +106,49 @@ pub async fn run(
                                             &domain_tx,
                                         );
                                         // Force immediate render for typing indicator
-                                        render(terminal, &mut state, &conversation, &streaming, &config.model)?;
-                                        state.needs_redraw = false;
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model) {
+                                            Ok(()) => state.needs_redraw = false,
+                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                        }
                                     }
                                 }
                                 InputAction::Quit => {
                                     state.should_quit = true;
+                                }
+                                InputAction::CancelOrQuit => {
+                                    if streaming.is_streaming {
+                                        // Abort streaming: preserve partial response
+                                        if !streaming.current_text_buffer.is_empty() {
+                                            let content = std::mem::take(&mut streaming.current_text_buffer);
+                                            conversation.messages.push(ChatMessage {
+                                                role: MessageRole::Assistant,
+                                                content,
+                                                content_blocks: std::mem::take(&mut streaming.current_blocks),
+                                                tool_calls: streaming.active_tool_calls.drain().map(|(_, v)| v).collect(),
+                                                created_at: now_unix(),
+                                                token_count: None,
+                                                stop_reason: Some(crate::domain::models::StopReason::Cancelled),
+                                            });
+                                        }
+                                        // Abort the active turn task
+                                        if let Some(handle) = _active_turn.take() {
+                                            handle.abort();
+                                        }
+                                        // Reset streaming state
+                                        streaming.is_streaming = false;
+                                        streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                                        streaming.current_blocks.clear();
+                                        streaming.active_tool_calls.clear();
+                                        // Clear TurnQueue entirely
+                                        while turn_queue.dequeue().is_some() {}
+                                        // Ready for next input
+                                        state.focus = FocusState::Input;
+                                        state.status_message = "Ready".to_string();
+                                        state.needs_redraw = true;
+                                    } else {
+                                        // Not streaming → quit
+                                        state.should_quit = true;
+                                    }
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
@@ -153,8 +194,10 @@ pub async fn run(
                                         &domain_tx,
                                     );
                                     // Force immediate render for typing indicator
-                                    render(terminal, &mut state, &conversation, &streaming, &config.model)?;
-                                    state.needs_redraw = false;
+                                    match render(terminal, &mut state, &conversation, &streaming, &config.model) {
+                                        Ok(()) => state.needs_redraw = false,
+                                        Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                    }
                                 }
                             }
                             ChunkAction::TurnContinuing => {
@@ -196,8 +239,10 @@ pub async fn run(
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)
             _ = tick_interval.tick() => {
                 if state.needs_redraw {
-                    render(terminal, &mut state, &conversation, &streaming, &config.model)?;
-                    state.needs_redraw = false;
+                    match render(terminal, &mut state, &conversation, &streaming, &config.model) {
+                        Ok(()) => state.needs_redraw = false,
+                        Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                    }
                 }
             }
 
@@ -233,6 +278,7 @@ fn start_turn(
         tool_calls: vec![],
         created_at: now_unix(),
         token_count: None,
+        stop_reason: None,
     });
 
     // Build messages list for provider
@@ -272,16 +318,43 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
-fn is_ctrl_c(event: &crossterm::event::Event) -> bool {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    matches!(
-        event,
-        Event::Key(KeyEvent {
-            code: KeyCode::Char('c'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        })
-    )
+/// Handle a render failure: abort active turn, reset streaming, attempt terminal recovery.
+fn handle_render_error(
+    err: anyhow::Error,
+    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+    streaming: &mut StreamingState,
+    state: &mut TuiState,
+    terminal: &mut Tui,
+) {
+    tracing::error!("Render failed: {}", err);
+
+    // Abort active turn if running
+    if let Some(handle) = active_turn.take() {
+        handle.abort();
+    }
+
+    // Reset streaming state
+    streaming.is_streaming = false;
+    streaming.phase = crate::domain::models::StreamingPhase::Idle;
+    streaming.current_text_buffer.clear();
+    streaming.current_blocks.clear();
+    streaming.active_tool_calls.clear();
+
+    state.status_message = format!("Render failed: {}", err);
+    state.needs_redraw = true;
+
+    // Attempt terminal recovery
+    crate::adapters::tui::terminal::restore_terminal_raw();
+    match crate::adapters::tui::terminal::setup() {
+        Ok(new_terminal) => {
+            *terminal = new_terminal;
+            tracing::info!("Terminal recovered after render failure");
+        }
+        Err(recovery_err) => {
+            tracing::error!("Terminal recovery failed: {}", recovery_err);
+            state.should_quit = true;
+        }
+    }
 }
 
 /// Render the full TUI frame.
@@ -295,6 +368,9 @@ fn render(
     let scroll_offset = state.scroll_offset;
     let auto_scroll = state.auto_scroll;
     let mut content_height = 0usize;
+    let mut block_bounds = Vec::new();
+    let mut msg_bounds = Vec::new();
+    let height_cache = &mut state.height_cache;
 
     terminal.draw(|frame| {
         let area = frame.area();
@@ -303,7 +379,7 @@ fn render(
             Some(app_layout) => {
                 let is_compact = area.width < 80 || area.height < 24;
 
-                content_height = chat_pane::render(
+                let result = chat_pane::render(
                     frame,
                     app_layout.chat_pane,
                     conversation,
@@ -311,7 +387,11 @@ fn render(
                     scroll_offset,
                     auto_scroll,
                     &state.theme,
+                    height_cache,
                 );
+                content_height = result.total_content_height;
+                block_bounds = result.block_boundaries;
+                msg_bounds = result.message_boundaries;
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -319,6 +399,10 @@ fn render(
                     &state.status_message,
                     is_compact,
                     &state.theme,
+                    scroll_offset,
+                    &msg_bounds,
+                    content_height,
+                    app_layout.chat_pane.height,
                 );
                 input_box::render(
                     frame,
@@ -340,6 +424,23 @@ fn render(
     })?;
 
     state.total_content_height = content_height;
+    state.block_boundaries = block_bounds;
+    state.message_boundaries = msg_bounds;
+
+    // Resolve pending anchor from resize: use new heights to find correct scroll_offset.
+    if let Some(anchor_idx) = state.pending_anchor.take() {
+        if anchor_idx < state.block_boundaries.len() {
+            let anchor_line = state.block_boundaries[anchor_idx];
+            let vp = state.terminal_height as usize;
+            let max_offset = content_height.saturating_sub(vp);
+            state.scroll_offset = max_offset.saturating_sub(anchor_line);
+            state.auto_scroll = state.scroll_offset == 0;
+        } else {
+            // Anchor no longer valid (conversation changed during resize) — fall back to bottom
+            state.scroll_offset = 0;
+            state.auto_scroll = true;
+        }
+    }
 
     Ok(())
 }

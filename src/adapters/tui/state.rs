@@ -1,7 +1,50 @@
+use std::collections::HashMap;
+
 use crate::domain::models::FocusState;
 
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
+
+/// Direction for boundary navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+}
+
+/// Cache of rendered line heights for each message/block at current terminal width.
+/// Key: (message_index, block_index). Value: rendered line count.
+/// block_index 0 = role line + spacing, block_index 1+ = content blocks.
+/// For simplicity in MVP, we cache per-message (block_index always 0).
+#[derive(Debug, Default)]
+pub struct HeightCache {
+    entries: HashMap<usize, usize>,
+    /// Terminal width at which heights were computed.
+    pub cached_width: u16,
+}
+
+impl HeightCache {
+    /// Get cached height for a message index.
+    pub fn get(&self, message_index: usize) -> Option<usize> {
+        self.entries.get(&message_index).copied()
+    }
+
+    /// Set cached height for a message index.
+    pub fn set(&mut self, message_index: usize, height: usize) {
+        self.entries.insert(message_index, height);
+    }
+
+    /// Full invalidation (e.g., on resize).
+    pub fn invalidate_all(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Incremental invalidation: only invalidate the last message (streaming).
+    pub fn invalidate_last(&mut self, message_index: usize) {
+        self.entries.remove(&message_index);
+    }
+
+}
 
 /// TUI-specific state for rendering.
 pub struct TuiState {
@@ -17,6 +60,15 @@ pub struct TuiState {
     pub auto_scroll: bool,
     pub scroll_offset: usize,
     pub total_content_height: usize,
+    /// Line offsets for each content block boundary in rendered view.
+    pub block_boundaries: Vec<usize>,
+    /// Line offsets for each user message boundary in rendered view.
+    pub message_boundaries: Vec<usize>,
+    /// Height cache for virtual scrolling.
+    pub height_cache: HeightCache,
+    /// Pending anchor message index for resize scroll preservation.
+    /// Set by resize handler, consumed by next render to recompute scroll_offset.
+    pub pending_anchor: Option<usize>,
 }
 
 impl TuiState {
@@ -39,6 +91,10 @@ impl TuiState {
             auto_scroll: true,
             scroll_offset: 0,
             total_content_height: 0,
+            block_boundaries: Vec::new(),
+            message_boundaries: Vec::new(),
+            height_cache: HeightCache::default(),
+            pending_anchor: None,
         }
     }
 }

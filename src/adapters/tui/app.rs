@@ -1,4 +1,5 @@
-use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::state::{Direction, TuiState};
+use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
 
@@ -14,6 +15,8 @@ pub enum InputAction {
     SubmitMessage(String),
     /// User wants to exit.
     Quit,
+    /// Ctrl+C: cancel streaming if active, otherwise quit.
+    CancelOrQuit,
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -23,8 +26,26 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
         DomainInputEvent::KeyPress(c) => handle_char(state, *c),
         DomainInputEvent::SpecialKey(key) => handle_special_key(state, *key),
         DomainInputEvent::Resize(w, h) => {
+            // Anchor-based scroll preservation: find the message index at the
+            // top of the viewport using the *old* HeightCache before invalidation.
+            if state.scroll_offset > 0 && !state.block_boundaries.is_empty() {
+                let old_vp = state.terminal_height as usize;
+                let max_offset = state.total_content_height.saturating_sub(old_vp);
+                let clamped = state.scroll_offset.min(max_offset);
+                let top_line = max_offset.saturating_sub(clamped);
+
+                // Find which message index contains this top_line by scanning
+                // block_boundaries (sorted). The last boundary <= top_line is the anchor.
+                let anchor_idx = match state.block_boundaries.binary_search(&top_line) {
+                    Ok(i) => i,
+                    Err(i) => i.saturating_sub(1),
+                };
+                state.pending_anchor = Some(anchor_idx);
+            }
+
             state.terminal_width = *w;
             state.terminal_height = *h;
+            state.height_cache.invalidate_all();
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -89,6 +110,66 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 state.needs_redraw = true;
                 InputAction::Consumed
             }
+            // J (shift+j) = jump to next content block boundary (down, toward newer)
+            'J' => {
+                if let Some(new_offset) = find_next_boundary(
+                    state.scroll_offset,
+                    &state.block_boundaries,
+                    Direction::Down,
+                    state.total_content_height,
+                    state.terminal_height as usize,
+                ) {
+                    state.scroll_offset = new_offset;
+                    state.auto_scroll = new_offset == 0;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            // K (shift+k) = jump to previous content block boundary (up, toward older)
+            'K' => {
+                if let Some(new_offset) = find_next_boundary(
+                    state.scroll_offset,
+                    &state.block_boundaries,
+                    Direction::Up,
+                    state.total_content_height,
+                    state.terminal_height as usize,
+                ) {
+                    state.scroll_offset = new_offset;
+                    state.auto_scroll = false;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            // { = jump to previous user message
+            '{' => {
+                if let Some(new_offset) = find_next_boundary(
+                    state.scroll_offset,
+                    &state.message_boundaries,
+                    Direction::Up,
+                    state.total_content_height,
+                    state.terminal_height as usize,
+                ) {
+                    state.scroll_offset = new_offset;
+                    state.auto_scroll = false;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            // } = jump to next user message
+            '}' => {
+                if let Some(new_offset) = find_next_boundary(
+                    state.scroll_offset,
+                    &state.message_boundaries,
+                    Direction::Down,
+                    state.total_content_height,
+                    state.terminal_height as usize,
+                ) {
+                    state.scroll_offset = new_offset;
+                    state.auto_scroll = new_offset == 0;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
             _ => InputAction::Ignored,
         },
         FocusState::Sidebar { .. } | FocusState::Overlay(_) => InputAction::Ignored,
@@ -137,6 +218,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 InputAction::Consumed
             }
         }
+        DomainKey::CtrlC => InputAction::CancelOrQuit,
         _ => InputAction::Ignored,
     }
 }
@@ -150,9 +232,9 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
         Event::Key(KeyEvent {
             code, modifiers, ..
         }) => {
-            // Ctrl+C → Shutdown (handled separately in event loop)
+            // Ctrl+C → mapped to DomainKey::CtrlC, handled via InputAction::CancelOrQuit
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('c') {
-                return None; // Event loop handles this directly
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlC));
             }
 
             match code {

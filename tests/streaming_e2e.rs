@@ -1,6 +1,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::domain::events::ChunkAction;
@@ -51,7 +52,16 @@ fn test_e2e_message_to_streaming_response() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -69,6 +79,7 @@ fn test_e2e_message_to_streaming_response() {
         tool_calls: vec![],
         created_at: 1000,
         token_count: None,
+        stop_reason: None,
     });
 
     // Start streaming (typing indicator phase)
@@ -78,7 +89,16 @@ fn test_e2e_message_to_streaming_response() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -117,7 +137,16 @@ fn test_e2e_message_to_streaming_response() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 
@@ -152,7 +181,16 @@ fn test_e2e_message_to_streaming_response() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            chat_pane::render(frame, area, &conversation, &streaming, 0, true, &theme);
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut HeightCache::default(),
+            );
         })
         .unwrap();
 

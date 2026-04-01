@@ -113,3 +113,81 @@ fn test_empty_enter_returns_consumed() {
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::Consumed);
 }
+
+/// J/K at conversation start (no-op when no content or at boundary).
+#[test]
+fn test_block_jump_no_content_is_noop() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    // No content, no boundaries
+    state.total_content_height = 0;
+    state.block_boundaries = vec![];
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.scroll_offset, 0);
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('K'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.scroll_offset, 0);
+}
+
+/// J at bottom is no-op.
+#[test]
+fn test_block_jump_down_at_bottom_noop() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.total_content_height = 100;
+    state.block_boundaries = vec![0, 25, 50, 75];
+    state.scroll_offset = 0; // at bottom
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.scroll_offset, 0);
+}
+
+/// K at top is no-op.
+#[test]
+fn test_block_jump_up_at_top_noop() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.total_content_height = 100;
+    state.block_boundaries = vec![0, 25, 50, 75];
+    state.scroll_offset = 76; // at top (max_offset = 100-24 = 76)
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('K'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.scroll_offset, 76);
+}
+
+/// {/} with no user messages is no-op.
+#[test]
+fn test_message_jump_no_user_messages_noop() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.total_content_height = 100;
+    state.message_boundaries = vec![]; // No user messages
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('{'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.scroll_offset, 0);
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('}'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.scroll_offset, 0);
+}
+
+/// J/K with single block: J from scrolled position should jump to bottom.
+#[test]
+fn test_block_jump_single_block() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.total_content_height = 50;
+    state.block_boundaries = vec![0];
+    state.scroll_offset = 10;
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
+    assert_eq!(action, InputAction::Consumed);
+    // Should jump to bottom (offset 0)
+    assert_eq!(state.scroll_offset, 0);
+}

@@ -53,6 +53,7 @@ pub enum DomainKey {
     Left,
     Right,
     Tab,
+    CtrlC,
 }
 
 /// Payload for domain-originated events (placeholder for future stories).
