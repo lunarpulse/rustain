@@ -40,6 +40,9 @@ pub enum DomainError {
     #[error(transparent)]
     Session(#[from] SessionError),
 
+    #[error(transparent)]
+    TurnQueue(#[from] TurnQueueError),
+
     #[error("Startup error: {0}")]
     Startup(String),
 
@@ -182,4 +185,10 @@ pub enum SchedulerError {
 pub enum SessionError {
     #[error("{0}")]
     Other(String),
+}
+
+#[derive(Debug, Error)]
+pub enum TurnQueueError {
+    #[error("Message queue full")]
+    QueueFull,
 }

@@ -1,4 +1,4 @@
-use rustain::adapters::tui::app::handle_input;
+use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
@@ -28,14 +28,14 @@ fn test_i_focuses_input_from_chat() {
     assert_eq!(state.focus, FocusState::Input);
 }
 
-/// AC: 'q' in chat focus → quit.
+/// AC: 'q' in chat focus → Quit action.
 #[test]
 fn test_q_quits_from_chat() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
 
-    handle_input(&mut state, &DomainInputEvent::KeyPress('q'));
-    assert!(state.should_quit);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('q'));
+    assert_eq!(action, InputAction::Quit);
 }
 
 /// Typing in input mode adds to buffer.
@@ -94,13 +94,22 @@ fn test_multibyte_chars_in_input() {
     assert_eq!(state.cursor_position, 2);
 }
 
-/// Enter clears input buffer (placeholder send).
+/// Enter with text returns SubmitMessage and clears buffer.
 #[test]
-fn test_enter_clears_input() {
+fn test_enter_returns_submit_message() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
-    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
 
+    assert_eq!(action, InputAction::SubmitMessage("x".to_string()));
     assert_eq!(state.input_buffer, "");
     assert_eq!(state.cursor_position, 0);
+}
+
+/// Enter with empty buffer returns Consumed (not SubmitMessage).
+#[test]
+fn test_empty_enter_returns_consumed() {
+    let mut state = TuiState::new(80, 24);
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert_eq!(action, InputAction::Consumed);
 }

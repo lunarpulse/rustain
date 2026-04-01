@@ -166,12 +166,14 @@ pub fn apply_chunk(
 
         StreamChunk::Error { content } => {
             tracing::warn!("Stream error chunk: {}", content);
+            streaming.current_text_buffer.push_str(&content);
             streaming.current_blocks.push(ContentBlockType::Error);
             ChunkAction::NeedsRedraw
         }
 
         StreamChunk::Blocked { content } => {
             tracing::warn!("Stream blocked chunk: {}", content);
+            streaming.current_text_buffer.push_str(&content);
             streaming.current_blocks.push(ContentBlockType::Error);
             ChunkAction::NeedsRedraw
         }

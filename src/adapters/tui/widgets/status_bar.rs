@@ -9,15 +9,20 @@ pub fn render(
     area: Rect,
     model: &str,
     status: &str,
-    _compact: bool,
+    compact: bool,
     theme: &Theme,
 ) {
+    // Both compact and standard modes currently show model + status only.
+    // Compact branch will diverge when additional status info is added.
+    let _ = compact;
     let content = format!(" {} | {}", model, status);
 
-    let widget = Paragraph::new(content).style(
-        Style::default()
-            .fg(theme.colors.status_fg)
-            .bg(theme.colors.status_bg),
-    );
+    let fg = if status.contains("Streaming") {
+        theme.colors.status_streaming
+    } else {
+        theme.colors.status_fg
+    };
+
+    let widget = Paragraph::new(content).style(Style::default().fg(fg).bg(theme.colors.status_bg));
     frame.render_widget(widget, area);
 }

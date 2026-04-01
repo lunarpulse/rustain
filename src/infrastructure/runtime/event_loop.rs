@@ -5,7 +5,7 @@ use crossterm::event::EventStream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::adapters::tui::app::{convert_crossterm_event, handle_input};
+use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
@@ -13,10 +13,12 @@ use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::{
-    AppConfig, CompletionOptions, Conversation, Message, MessageRole, StreamingState, apply_chunk,
-    generate_conversation_id,
+    AppConfig, ChatMessage, CompletionOptions, Conversation, MessageRole, StreamingState,
+    UserMessage, apply_chunk, generate_conversation_id,
 };
 use crate::domain::ports::ProviderPort;
+use crate::domain::services::message_builder;
+use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::turn;
 
 /// Run the 4-branch tokio::select! event loop.
@@ -49,12 +51,19 @@ pub async fn run(
         fork_source: None,
     };
     let mut streaming = StreamingState::default();
+    let mut turn_queue = TurnQueue::default();
 
     // Track active turn task for cancellation
     let mut _active_turn: Option<tokio::task::JoinHandle<()>> = None;
 
     // Render first frame immediately
-    render(terminal, &state, &config.model)?;
+    render(
+        terminal,
+        &mut state,
+        &conversation,
+        &streaming,
+        &config.model,
+    )?;
     state.needs_redraw = false;
 
     loop {
@@ -67,58 +76,40 @@ pub async fn run(
                             break;
                         }
                         if let Some(domain_event) = convert_crossterm_event(&event) {
-                            // Check if Enter was pressed with input text (message submission)
-                            let submitted_text = check_message_submit(&state, &domain_event);
-                            handle_input(&mut state, &domain_event);
+                            let action = handle_input(&mut state, &domain_event);
 
-                            if let Some(text) = submitted_text {
-                                if !streaming.is_streaming {
-                                    // Add user ChatMessage to conversation
-                                    conversation.messages.push(
-                                        crate::domain::models::ChatMessage {
-                                            role: MessageRole::User,
+                            match action {
+                                InputAction::SubmitMessage(text) => {
+                                    if streaming.is_streaming {
+                                        // Queue message during streaming
+                                        let msg = UserMessage {
                                             content: text,
-                                            content_blocks: vec![],
-                                            tool_calls: vec![],
-                                            created_at: now_unix(),
-                                            token_count: None,
-                                        },
-                                    );
-
-                                    // Build messages list for provider
-                                    let messages: Vec<Message> = conversation
-                                        .messages
-                                        .iter()
-                                        .map(|cm| Message {
-                                            role: cm.role,
-                                            content: cm.content.clone(),
                                             images: vec![],
-                                            tool_results: vec![],
-                                            context_prefix: None,
-                                        })
-                                        .collect();
-
-                                    let options = CompletionOptions {
-                                        model: config.model.clone(),
-                                        max_tokens: 8192,
-                                        system_prompt: String::new(),
-                                        temperature: None,
-                                    };
-
-                                    streaming.is_streaming = true;
-                                    streaming.phase = crate::domain::models::StreamingPhase::Idle;
-
-                                    let handle = tokio::spawn(turn::run_turn(
-                                        provider.clone(),
-                                        messages,
-                                        options,
-                                        domain_tx.clone(),
-                                    ));
-                                    _active_turn = Some(handle);
-
-                                    state.status_message = "Streaming...".to_string();
-                                    state.needs_redraw = true;
+                                        };
+                                        if turn_queue.enqueue(msg).is_err() {
+                                            state.status_message = "Message queue full".to_string();
+                                            state.needs_redraw = true;
+                                        }
+                                    } else {
+                                        start_turn(
+                                            &text,
+                                            &mut conversation,
+                                            &mut streaming,
+                                            &mut state,
+                                            &mut _active_turn,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                        );
+                                        // Force immediate render for typing indicator
+                                        render(terminal, &mut state, &conversation, &streaming, &config.model)?;
+                                        state.needs_redraw = false;
+                                    }
                                 }
+                                InputAction::Quit => {
+                                    state.should_quit = true;
+                                }
+                                InputAction::Consumed | InputAction::Ignored => {}
                             }
                         }
                     }
@@ -148,6 +139,23 @@ pub async fn run(
                                 state.status_message = "Ready".to_string();
                                 state.needs_redraw = true;
                                 _active_turn = None;
+
+                                // Auto-send queued messages
+                                if let Some(queued_msg) = turn_queue.dequeue() {
+                                    start_turn(
+                                        &queued_msg.content,
+                                        &mut conversation,
+                                        &mut streaming,
+                                        &mut state,
+                                        &mut _active_turn,
+                                        &provider,
+                                        config,
+                                        &domain_tx,
+                                    );
+                                    // Force immediate render for typing indicator
+                                    render(terminal, &mut state, &conversation, &streaming, &config.model)?;
+                                    state.needs_redraw = false;
+                                }
                             }
                             ChunkAction::TurnContinuing => {
                                 // Sprint 0 safety: tool loop not yet implemented.
@@ -156,6 +164,9 @@ pub async fn run(
                                 tracing::warn!("TurnContinuing received but tool loop not implemented — resetting streaming state");
                                 streaming.is_streaming = false;
                                 streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                                streaming.current_text_buffer.clear();
+                                streaming.current_blocks.clear();
+                                streaming.active_tool_calls.clear();
                                 _active_turn = None;
                                 state.status_message = "Ready (tool_use unsupported in Sprint 0)".to_string();
                                 state.needs_redraw = true;
@@ -167,6 +178,14 @@ pub async fn run(
                         state.status_message = msg;
                         state.needs_redraw = true;
                         streaming.is_streaming = false;
+                        streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                        streaming.current_text_buffer.clear();
+                        streaming.current_blocks.clear();
+                        streaming.active_tool_calls.clear();
+                        // Abort the active turn task if running
+                        if let Some(handle) = _active_turn.take() {
+                            handle.abort();
+                        }
                     }
                     _ => {
                         state.needs_redraw = true;
@@ -177,7 +196,7 @@ pub async fn run(
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)
             _ = tick_interval.tick() => {
                 if state.needs_redraw {
-                    render(terminal, &state, &config.model)?;
+                    render(terminal, &mut state, &conversation, &streaming, &config.model)?;
                     state.needs_redraw = false;
                 }
             }
@@ -194,21 +213,55 @@ pub async fn run(
     Ok(())
 }
 
-/// Check if the user is about to submit a message (Enter key in Input focus with text).
-/// Returns the text if so. Must be called BEFORE handle_input clears the buffer.
-fn check_message_submit(
-    state: &TuiState,
-    event: &crate::domain::events::DomainInputEvent,
-) -> Option<String> {
-    use crate::domain::events::{DomainInputEvent, DomainKey};
-    use crate::domain::models::FocusState;
+/// Start a new turn: add user message, spawn provider streaming task.
+#[allow(clippy::too_many_arguments)]
+fn start_turn(
+    text: &str,
+    conversation: &mut Conversation,
+    streaming: &mut StreamingState,
+    state: &mut TuiState,
+    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+    provider: &Arc<dyn ProviderPort>,
+    config: &AppConfig,
+    domain_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    // Add user ChatMessage to conversation
+    conversation.messages.push(ChatMessage {
+        role: MessageRole::User,
+        content: text.to_string(),
+        content_blocks: vec![],
+        tool_calls: vec![],
+        created_at: now_unix(),
+        token_count: None,
+    });
 
-    if let DomainInputEvent::SpecialKey(DomainKey::Enter) = event {
-        if matches!(state.focus, FocusState::Input) && !state.input_buffer.is_empty() {
-            return Some(state.input_buffer.clone());
-        }
-    }
-    None
+    // Build messages list for provider
+    let messages = message_builder::build_api_messages(conversation);
+
+    let options = CompletionOptions {
+        model: config.model.clone(),
+        max_tokens: 8192,
+        system_prompt: String::new(),
+        temperature: None,
+    };
+
+    // Clear any stale buffers from a previous turn (e.g. after TurnContinuing or SystemNotice)
+    streaming.current_text_buffer.clear();
+    streaming.current_blocks.clear();
+    streaming.active_tool_calls.clear();
+    streaming.is_streaming = true;
+    streaming.phase = crate::domain::models::StreamingPhase::AccumulatingText;
+
+    let handle = tokio::spawn(turn::run_turn(
+        provider.clone(),
+        messages,
+        options,
+        domain_tx.clone(),
+    ));
+    *active_turn = Some(handle);
+
+    state.status_message = "Streaming...".to_string();
+    state.needs_redraw = true;
 }
 
 /// Get current unix timestamp in seconds.
@@ -232,7 +285,17 @@ fn is_ctrl_c(event: &crossterm::event::Event) -> bool {
 }
 
 /// Render the full TUI frame.
-fn render(terminal: &mut Tui, state: &TuiState, model: &str) -> Result<()> {
+fn render(
+    terminal: &mut Tui,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    model: &str,
+) -> Result<()> {
+    let scroll_offset = state.scroll_offset;
+    let auto_scroll = state.auto_scroll;
+    let mut content_height = 0usize;
+
     terminal.draw(|frame| {
         let area = frame.area();
 
@@ -240,7 +303,15 @@ fn render(terminal: &mut Tui, state: &TuiState, model: &str) -> Result<()> {
             Some(app_layout) => {
                 let is_compact = area.width < 80 || area.height < 24;
 
-                chat_pane::render(frame, app_layout.chat_pane, false, &state.theme);
+                content_height = chat_pane::render(
+                    frame,
+                    app_layout.chat_pane,
+                    conversation,
+                    streaming,
+                    scroll_offset,
+                    auto_scroll,
+                    &state.theme,
+                );
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -267,6 +338,8 @@ fn render(terminal: &mut Tui, state: &TuiState, model: &str) -> Result<()> {
             }
         }
     })?;
+
+    state.total_content_height = content_height;
 
     Ok(())
 }

@@ -14,6 +14,9 @@ pub struct TuiState {
     pub status_message: String,
     pub should_quit: bool,
     pub theme: Theme,
+    pub auto_scroll: bool,
+    pub scroll_offset: usize,
+    pub total_content_height: usize,
 }
 
 impl TuiState {
@@ -33,6 +36,9 @@ impl TuiState {
             status_message: "idle".to_string(),
             should_quit: false,
             theme: Theme::for_capability(capability),
+            auto_scroll: true,
+            scroll_offset: 0,
+            total_content_height: 0,
         }
     }
 }

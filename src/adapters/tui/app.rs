@@ -2,9 +2,23 @@ use crate::adapters::tui::state::TuiState;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
 
+/// Action returned by handle_input to tell the event loop what to do.
+/// app.rs is a pure input→action mapper; the event loop owns all side effects.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InputAction {
+    /// Event handled, no further action needed.
+    Consumed,
+    /// Event not handled by this focus mode.
+    Ignored,
+    /// Enter pressed with this text (buffer already cleared by handle_input).
+    SubmitMessage(String),
+    /// User wants to exit.
+    Quit,
+}
+
 /// Handle a domain input event by updating TUI state.
-/// Returns true if the event was consumed.
-pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> bool {
+/// Returns an InputAction telling the event loop what to do.
+pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
     match event {
         DomainInputEvent::KeyPress(c) => handle_char(state, *c),
         DomainInputEvent::SpecialKey(key) => handle_special_key(state, *key),
@@ -12,11 +26,11 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> bool {
             state.terminal_width = *w;
             state.terminal_height = *h;
             state.needs_redraw = true;
-            true
+            InputAction::Consumed
         }
         DomainInputEvent::FocusGained | DomainInputEvent::FocusLost => {
             state.needs_redraw = true;
-            true
+            InputAction::Consumed
         }
     }
 }
@@ -29,32 +43,59 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn handle_char(state: &mut TuiState, c: char) -> bool {
+fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     match state.focus {
         FocusState::Input => {
             let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
             state.input_buffer.insert(byte_pos, c);
             state.cursor_position += 1;
             state.needs_redraw = true;
-            true
+            InputAction::Consumed
         }
         FocusState::Chat => match c {
             'i' => {
                 state.focus = FocusState::Input;
                 state.needs_redraw = true;
-                true
+                InputAction::Consumed
             }
-            'q' => {
-                state.should_quit = true;
-                true
+            'q' => InputAction::Quit,
+            // j = scroll down (toward newer content) = decrement offset-from-bottom
+            // offset=0 means "at bottom"; j moves toward bottom, so offset decreases
+            'j' => {
+                if state.scroll_offset > 0 {
+                    state.scroll_offset -= 1;
+                    state.auto_scroll = state.scroll_offset == 0;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
             }
-            _ => false,
+            // k = scroll up (toward older content) = increment offset-from-bottom
+            // Clamped to max scrollable range to prevent unbounded growth
+            'k' => {
+                let max_offset = state
+                    .total_content_height
+                    .saturating_sub(state.terminal_height as usize);
+                if state.scroll_offset < max_offset {
+                    state.scroll_offset += 1;
+                    state.auto_scroll = false;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            // G = jump to bottom, re-enable auto-scroll
+            'G' => {
+                state.scroll_offset = 0;
+                state.auto_scroll = true;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Ignored,
         },
-        FocusState::Sidebar { .. } | FocusState::Overlay(_) => false,
+        FocusState::Sidebar { .. } | FocusState::Overlay(_) => InputAction::Ignored,
     }
 }
 
-fn handle_special_key(state: &mut TuiState, key: DomainKey) -> bool {
+fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     match key {
         DomainKey::Esc => {
             state.focus = match state.focus {
@@ -63,7 +104,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> bool {
                 FocusState::Sidebar { .. } | FocusState::Overlay(_) => FocusState::Input,
             };
             state.needs_redraw = true;
-            true
+            InputAction::Consumed
         }
         DomainKey::Backspace if state.focus == FocusState::Input => {
             if state.cursor_position > 0 {
@@ -72,30 +113,31 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> bool {
                 state.input_buffer.remove(byte_pos);
                 state.needs_redraw = true;
             }
-            true
+            InputAction::Consumed
         }
         DomainKey::Left if state.focus == FocusState::Input => {
             state.cursor_position = state.cursor_position.saturating_sub(1);
             state.needs_redraw = true;
-            true
+            InputAction::Consumed
         }
         DomainKey::Right if state.focus == FocusState::Input => {
             if state.cursor_position < state.input_buffer.chars().count() {
                 state.cursor_position += 1;
                 state.needs_redraw = true;
             }
-            true
+            InputAction::Consumed
         }
         DomainKey::Enter if state.focus == FocusState::Input => {
-            // Placeholder: clear input on Enter (send message in later stories)
             if !state.input_buffer.is_empty() {
-                state.input_buffer.clear();
+                let text = std::mem::take(&mut state.input_buffer);
                 state.cursor_position = 0;
                 state.needs_redraw = true;
+                InputAction::SubmitMessage(text)
+            } else {
+                InputAction::Consumed
             }
-            true
         }
-        _ => false,
+        _ => InputAction::Ignored,
     }
 }
 

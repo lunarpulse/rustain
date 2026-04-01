@@ -4,18 +4,39 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
+use rustain::domain::models::{Conversation, StreamingState};
 
 fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
 
     let state = TuiState::new(width, height);
+    let conversation = Conversation {
+        id: String::new(),
+        title: String::new(),
+        messages: Vec::new(),
+        created_at: 0,
+        updated_at: 0,
+        last_response_at: None,
+        session_id: None,
+        usage: None,
+        fork_source: None,
+    };
+    let streaming = StreamingState::default();
 
     terminal
         .draw(|frame| {
             let area = frame.area();
             if let Some(app_layout) = layout::compute_layout(area, &state.theme) {
-                chat_pane::render(frame, app_layout.chat_pane, false, &state.theme);
+                chat_pane::render(
+                    frame,
+                    app_layout.chat_pane,
+                    &conversation,
+                    &streaming,
+                    state.scroll_offset,
+                    state.auto_scroll,
+                    &state.theme,
+                );
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
