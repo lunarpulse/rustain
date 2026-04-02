@@ -45,9 +45,7 @@ pub async fn check(
 
     // Step 3: Workspace restriction (file tools)
     if let Some((path_str, op)) = extract_file_path(tool_name, input) {
-        if let Err(e) =
-            security.check_workspace_access(std::path::Path::new(&path_str), op)
-        {
+        if let Err(e) = security.check_workspace_access(std::path::Path::new(&path_str), op) {
             return PermissionDecision::Deny(e.to_string());
         }
     } else if matches!(tool_name, "Read" | "read") {
@@ -58,9 +56,10 @@ pub async fn check(
         }
     } else if matches!(tool_name, "Write" | "write" | "Edit" | "edit") {
         if input.get("file_path").and_then(|v| v.as_str()).is_none() {
-            return PermissionDecision::Deny(
-                format!("{} tool missing required 'file_path' field", tool_name),
-            );
+            return PermissionDecision::Deny(format!(
+                "{} tool missing required 'file_path' field",
+                tool_name
+            ));
         }
     }
 
@@ -78,7 +77,10 @@ pub async fn check(
 
 /// Extract file_path and infer FileOperation from tool name.
 /// Returns None for tools that don't operate on file paths.
-fn extract_file_path(tool_name: &str, input: &serde_json::Value) -> Option<(String, FileOperation)> {
+fn extract_file_path(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Option<(String, FileOperation)> {
     let op = match tool_name {
         "Read" | "read" => FileOperation::Read,
         "Write" | "write" | "Edit" | "edit" => FileOperation::Write,

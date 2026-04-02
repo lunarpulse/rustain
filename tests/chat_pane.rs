@@ -58,6 +58,7 @@ fn test_chat_pane_empty_shows_welcome() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -100,6 +101,7 @@ fn test_chat_pane_shows_user_message() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -142,6 +144,7 @@ fn test_chat_pane_shows_assistant_message() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -179,6 +182,7 @@ fn test_chat_pane_typing_indicator() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -219,6 +223,7 @@ fn test_chat_pane_streaming_text() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -267,6 +272,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -315,6 +321,7 @@ fn test_chat_pane_error_displays_in_red() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -364,6 +371,7 @@ fn test_chat_pane_streaming_error() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();

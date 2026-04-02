@@ -4,13 +4,14 @@ pub mod word_wrap;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::adapters::tui::state::HeightCache;
 use crate::adapters::tui::theme::Theme;
+use crate::adapters::tui::widgets::feedback_block;
 use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
 use crate::domain::models::{
-    ContentBlockType, Conversation, MessageRole, StopReason, StreamingState,
+    ContentBlockType, Conversation, FeedbackBlock, MessageRole, StopReason, StreamingState,
 };
 
 use super::empty_state;
@@ -121,6 +122,7 @@ pub fn render(
     theme: &Theme,
     height_cache: &mut HeightCache,
     tool_block_states: &HashMap<String, ToolBlockState>,
+    feedback_blocks: &BTreeMap<String, FeedbackBlock>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -236,7 +238,7 @@ pub fn render(
         0
     };
 
-    let total_content_height = cumulative_offset;
+    let mut total_content_height = cumulative_offset;
 
     // Phase 2: Determine visible range using offset-from-bottom model
     let effective_offset = if auto_scroll {
@@ -361,6 +363,44 @@ pub fn render(
             }
         }
     }
+
+    // Render feedback blocks at the bottom of conversation
+    if !feedback_blocks.is_empty() {
+        if line_offset > 0 {
+            let spacing_end = line_offset + spacing;
+            if spacing_end > visible_start && line_offset < visible_end {
+                let start = if line_offset >= visible_start {
+                    0
+                } else {
+                    visible_start - line_offset
+                };
+                let end = spacing.min(visible_end.saturating_sub(line_offset));
+                for _ in start..end {
+                    lines.push(Line::from(""));
+                }
+            }
+            line_offset += spacing;
+        }
+        for fb in feedback_blocks.values() {
+            let fb_lines = feedback_block::render_feedback_lines(fb, area.width, theme);
+            let fb_height = fb_lines.len();
+            block_boundaries.push(line_offset);
+            let fb_end = line_offset + fb_height;
+            if fb_end > visible_start && line_offset < visible_end {
+                for (j, line) in fb_lines.into_iter().enumerate() {
+                    let abs_line = line_offset + j;
+                    if abs_line >= visible_start && abs_line < visible_end {
+                        lines.push(line);
+                    }
+                }
+            }
+            line_offset += fb_height;
+            cumulative_offset = line_offset;
+        }
+    }
+
+    // Recalculate total height with feedback blocks
+    total_content_height = cumulative_offset;
 
     // AC3: Jump-to-bottom indicator when scrolled away from bottom during streaming
     if !auto_scroll && streaming.is_streaming && !lines.is_empty() {

@@ -12,6 +12,7 @@ pub enum ContentBlockType {
     ToolResult,
     PermissionPrompt,
     Error,
+    Feedback,
 
     // v0.5
     Thinking,

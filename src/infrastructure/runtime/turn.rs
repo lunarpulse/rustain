@@ -36,9 +36,15 @@ pub async fn run_turn(
     loop {
         iteration += 1;
         if iteration > MAX_TOOL_ITERATIONS {
-            tracing::warn!("Tool execution loop exceeded {} iterations — terminating", MAX_TOOL_ITERATIONS);
+            tracing::warn!(
+                "Tool execution loop exceeded {} iterations — terminating",
+                MAX_TOOL_ITERATIONS
+            );
             let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::Error {
-                content: format!("Tool execution loop exceeded {} iterations", MAX_TOOL_ITERATIONS),
+                content: format!(
+                    "Tool execution loop exceeded {} iterations",
+                    MAX_TOOL_ITERATIONS
+                ),
             }));
             let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
                 stop_reason: StopReason::Cancelled,
@@ -92,10 +98,13 @@ pub async fn run_turn(
                     StopReason::ToolUse => {
                         // Execute tool calls and continue the loop
                         if tool_calls.is_empty() {
-                            tracing::warn!("TurnComplete(ToolUse) but no tool calls collected — synthesizing EndTurn");
-                            let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
-                                stop_reason: StopReason::EndTurn,
-                            }));
+                            tracing::warn!(
+                                "TurnComplete(ToolUse) but no tool calls collected — synthesizing EndTurn"
+                            );
+                            let _ =
+                                event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
+                                    stop_reason: StopReason::EndTurn,
+                                }));
                             return;
                         }
 
@@ -113,6 +122,53 @@ pub async fn run_turn(
                         let mut tool_result_messages = Vec::new();
 
                         for tc in &tool_calls {
+                            // Special handling for AskUserQuestion tool
+                            if tc.name == "AskUserQuestion" {
+                                let question = tc
+                                    .input
+                                    .get("question")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("(no question text)")
+                                    .to_string();
+                                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                                let _ = event_tx.send(AppEvent::AskUserQuestion {
+                                    tool_use_id: tc.id.clone(),
+                                    question,
+                                    response_tx: resp_tx,
+                                });
+                                // Wait for user's answer
+                                let answer = match resp_rx.await {
+                                    Ok(a) => a,
+                                    Err(_) => {
+                                        // Channel dropped — user cancelled
+                                        let _ = event_tx.send(AppEvent::ProviderChunk(
+                                            StreamChunk::TurnComplete {
+                                                stop_reason: StopReason::Cancelled,
+                                            },
+                                        ));
+                                        return;
+                                    }
+                                };
+                                let result = crate::domain::models::ToolResult {
+                                    tool_use_id: tc.id.clone(),
+                                    content: answer.clone(),
+                                    is_error: false,
+                                };
+                                let _ = event_tx.send(AppEvent::ProviderChunk(
+                                    StreamChunk::ToolResult {
+                                        id: result.tool_use_id.clone(),
+                                        content: result.content.clone(),
+                                        is_error: result.is_error,
+                                    },
+                                ));
+                                tool_result_messages.push(ToolResultMessage {
+                                    tool_use_id: result.tool_use_id,
+                                    content: result.content,
+                                    is_error: result.is_error,
+                                });
+                                continue;
+                            }
+
                             let decision =
                                 permission_chain::check(security.as_ref(), &tc.name, &tc.input)
                                     .await;

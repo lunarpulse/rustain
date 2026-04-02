@@ -1,4 +1,6 @@
-use crate::domain::models::{ApprovalDecision, NoticeLevel, PermissionMode, StreamChunk, ToolResult};
+use crate::domain::models::{
+    ApprovalDecision, NoticeLevel, PermissionMode, StreamChunk, ToolResult,
+};
 
 /// Domain-level application events flowing through the event loop.
 /// crossterm types MUST NOT appear here — the adapter converts them to DomainInputEvent.
@@ -29,6 +31,14 @@ pub enum AppEvent {
     },
     /// Change the active permission mode.
     SetPermissionMode(PermissionMode),
+    /// Retry a message after backoff delay has elapsed.
+    RetryMessage(String),
+    /// AskUserQuestion tool call — display question card and send answer via oneshot.
+    AskUserQuestion {
+        tool_use_id: String,
+        question: String,
+        response_tx: tokio::sync::oneshot::Sender<String>,
+    },
 }
 
 /// Event wrapping a tool execution result.

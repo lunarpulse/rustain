@@ -136,8 +136,11 @@ mod tests {
     #[test]
     fn test_permission_prompt_renders_two_lines() {
         let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines =
-            render_permission_lines("Bash", &serde_json::json!({"command": "cargo test"}), &theme);
+        let lines = render_permission_lines(
+            "Bash",
+            &serde_json::json!({"command": "cargo test"}),
+            &theme,
+        );
         assert_eq!(lines.len(), 2);
 
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();

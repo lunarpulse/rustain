@@ -45,8 +45,7 @@ pub async fn run() -> Result<()> {
     let workspace_path = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
     let session_id = nanoid::nanoid!();
-    let security_adapter =
-        SecurityAdapter::new(workspace_path.clone(), domain_tx.clone());
+    let security_adapter = SecurityAdapter::new(workspace_path.clone(), domain_tx.clone());
     // Load AlwaysAllow rules from .claude/settings.json
     security_adapter.init_allowed_rules().await;
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);

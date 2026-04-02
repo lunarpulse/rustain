@@ -378,14 +378,14 @@ fn test_tui_renders_with_theme_colors() {
                     frame,
                     app_layout.status_bar,
                     "test-model",
-                    "idle",
-                    false,
+                    &state.status,
                     &state.theme,
                     0,
                     &[],
                     0,
                     app_layout.chat_pane.height,
                     rustain::domain::models::PermissionMode::Normal,
+                    state.token_usage.as_ref(),
                 );
             }
         })

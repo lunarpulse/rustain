@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use crossterm::event::EventStream;
@@ -14,8 +15,9 @@ use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
-    ApprovalDecision, AppConfig, ChatMessage, CompletionOptions, Conversation, FocusState,
-    MessageRole, StreamingState, UserMessage, apply_chunk, generate_conversation_id,
+    AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
+    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, StatusState, StreamingState,
+    UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
 use crate::domain::services::message_builder;
@@ -95,7 +97,11 @@ pub async fn run(
                                             images: vec![],
                                         };
                                         if turn_queue.enqueue(msg).is_err() {
-                                            state.status_message = "Message queue full".to_string();
+                                            state.status_before_flash = Some(state.status.clone());
+                                            state.status = StatusState::Flash {
+                                            message: "Message queue full".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
                                             state.needs_redraw = true;
                                         }
                                     } else {
@@ -171,7 +177,7 @@ pub async fn run(
                                         while turn_queue.dequeue().is_some() {}
                                         // Ready for next input
                                         state.focus = FocusState::Input;
-                                        state.status_message = "Ready".to_string();
+                                        state.status = StatusState::Idle;
                                         state.needs_redraw = true;
                                     } else {
                                         // Not streaming → quit
@@ -195,6 +201,68 @@ pub async fn run(
                                         let _ = pending.response_tx.send(ApprovalDecision::AlwaysAllow);
                                         advance_permission_queue(&mut state);
                                     }
+                                }
+                                InputAction::FeedbackRetry => {
+                                    // Clear the feedback block and retry the last user message
+                                    if let Some(fb_id) = state.active_feedback_id.take() {
+                                        state.feedback_blocks.remove(&fb_id);
+                                    }
+                                    // Get retry attempt count
+                                    let attempt = state.retry_state.as_ref().map_or(0, |r| r.attempt);
+                                    let max_attempts: u8 = 5;
+                                    if attempt >= max_attempts {
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = StatusState::Flash {
+                                            message: "Max retries reached".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                        state.retry_state = None;
+                                        state.needs_redraw = true;
+                                    } else {
+                                        let delay = next_delay(attempt);
+                                        state.retry_state = Some(RetryState {
+                                            attempt: attempt + 1,
+                                            max_attempts,
+                                            delay_ms: delay,
+                                        });
+                                        state.status = StatusState::Retrying {
+                                            attempt: attempt + 1,
+                                            max: max_attempts,
+                                            next_in_ms: delay,
+                                        };
+                                        state.needs_redraw = true;
+
+                                        // Find the last user message to retry
+                                        let last_user_text = conversation
+                                            .messages
+                                            .iter()
+                                            .rev()
+                                            .find(|m| m.role == MessageRole::User)
+                                            .map(|m| m.content.clone());
+
+                                        if let Some(text) = last_user_text {
+                                            // Remove failed assistant response after the last user message
+                                            if let Some(pos) = conversation.messages.iter().rposition(|m| m.role == MessageRole::User) {
+                                                conversation.messages.truncate(pos);
+                                            }
+                                            // Schedule retry after actual backoff delay
+                                            let delay_duration = std::time::Duration::from_millis(delay);
+                                            let tx = domain_tx.clone();
+                                            let retry_text = text;
+                                            tokio::spawn(async move {
+                                                tokio::time::sleep(delay_duration).await;
+                                                let _ = tx.send(AppEvent::RetryMessage(retry_text));
+                                            });
+                                        }
+                                    }
+                                }
+                                InputAction::SubmitQuestionAnswer(answer) => {
+                                    // Send answer back via oneshot channel
+                                    if let Some(tx) = state.question_response_tx.take() {
+                                        let _ = tx.send(answer);
+                                    }
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
@@ -223,7 +291,12 @@ pub async fn run(
                                 state.needs_redraw = true;
                             }
                             ChunkAction::TurnComplete { .. } => {
-                                state.status_message = "Ready".to_string();
+                                state.status = StatusState::Idle;
+                                // Sync token usage from conversation to TUI state
+                                state.token_usage = conversation.usage.clone();
+                                // Clear stale feedback/retry state on successful turn
+                                state.active_feedback_id = None;
+                                state.retry_state = None;
                                 state.needs_redraw = true;
                                 _active_turn = None;
 
@@ -252,24 +325,53 @@ pub async fn run(
                                 // Tool execution loop is handled inside run_turn.
                                 // The streaming stays active — tool results will arrive as
                                 // ProviderChunk(ToolResult) followed by more streaming.
-                                state.status_message = "Executing tools...".to_string();
+                                state.status = StatusState::Executing {
+                                    tool_name: "tools".to_string(),
+                                    elapsed_ms: 0,
+                                };
                                 state.needs_redraw = true;
                             }
                             ChunkAction::None => {}
                         }
                     }
-                    AppEvent::SystemNotice(_level, msg) => {
-                        state.status_message = msg;
-                        state.needs_redraw = true;
+                    AppEvent::SystemNotice(level, msg) => {
+                        // Reset streaming state
                         streaming.is_streaming = false;
                         streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                        streaming.current_text_buffer.clear();
+                        // Preserve partial response text (NFR21) — do NOT clear current_text_buffer
+                        // Only clear blocks tracking and tool calls
                         streaming.current_blocks.clear();
                         streaming.active_tool_calls.clear();
                         // Abort the active turn task if running
                         if let Some(handle) = _active_turn.take() {
                             handle.abort();
                         }
+
+                        // Create a FeedbackBlock for errors; flash for others
+                        match level {
+                            crate::domain::models::NoticeLevel::Error => {
+                                static FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                                let fb_id = format!("fb-{}", FB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                                let fb = FeedbackBlock {
+                                    id: fb_id.clone(),
+                                    level: FeedbackLevel::Error,
+                                    message: msg,
+                                    actions: vec![FeedbackAction::Retry],
+                                };
+                                state.feedback_blocks.insert(fb_id.clone(), fb);
+                                state.active_feedback_id = Some(fb_id);
+                                state.status = StatusState::Idle;
+                                state.focus = FocusState::Chat; // Switch to chat so [r] works
+                            }
+                            _ => {
+                                state.status_before_flash = Some(state.status.clone());
+                                state.status = StatusState::Flash {
+                                    message: msg,
+                                    remaining_ms: state.theme.timing.status_flash_ms,
+                                };
+                            }
+                        }
+                        state.needs_redraw = true;
                     }
                     AppEvent::PermissionRequest {
                         tool_name,
@@ -299,7 +401,50 @@ pub async fn run(
                             crate::domain::models::PermissionMode::Normal => "Normal",
                             crate::domain::models::PermissionMode::Yolo => "YOLO",
                         };
-                        state.status_message = format!("Permission mode: {}", mode_str);
+                        state.status_before_flash = Some(state.status.clone());
+                        state.status = StatusState::Flash {
+                            message: format!("Permission mode: {}", mode_str),
+                            remaining_ms: state.theme.timing.status_flash_ms,
+                        };
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::RetryMessage(text) => {
+                        // Delayed retry arrived — start the turn now
+                        state.status = StatusState::Streaming;
+                        start_turn(
+                            &text,
+                            &mut conversation,
+                            &mut streaming,
+                            &mut state,
+                            &mut _active_turn,
+                            &provider,
+                            config,
+                            &domain_tx,
+                            &security,
+                            &tools,
+                        );
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
+                            Ok(()) => state.needs_redraw = false,
+                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                        }
+                    }
+                    AppEvent::AskUserQuestion {
+                        tool_use_id,
+                        question,
+                        response_tx,
+                    } => {
+                        use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
+                        state.ask_user_question = Some(AskUserQuestionState {
+                            tool_use_id,
+                            question,
+                            input_buffer: String::new(),
+                            cursor_position: 0,
+                            submitted_answer: None,
+                        });
+                        state.question_response_tx = Some(response_tx);
+                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                            ConfirmationType::Question,
+                        ));
                         state.needs_redraw = true;
                     }
                     _ => {
@@ -310,6 +455,24 @@ pub async fn run(
 
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)
             _ = tick_interval.tick() => {
+                // Update elapsed_ms for Executing state each tick
+                let tick_ms = state.theme.timing.tick_interval_ms;
+                if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
+                    *elapsed_ms += tick_ms;
+                    state.needs_redraw = true;
+                }
+
+                // Flash message expiry: decrement remaining_ms each tick
+                if let StatusState::Flash { remaining_ms, .. } = &mut state.status {
+                    if *remaining_ms <= tick_ms {
+                        // Flash expired — revert to previous status or Idle
+                        state.status = state.status_before_flash.take().unwrap_or(StatusState::Idle);
+                        state.needs_redraw = true;
+                    } else {
+                        *remaining_ms -= tick_ms;
+                    }
+                }
+
                 if state.needs_redraw {
                     match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                         Ok(()) => state.needs_redraw = false,
@@ -384,7 +547,7 @@ fn start_turn(
     ));
     *active_turn = Some(handle);
 
-    state.status_message = "Streaming...".to_string();
+    state.status = StatusState::Streaming;
     state.needs_redraw = true;
 }
 
@@ -418,7 +581,11 @@ fn handle_render_error(
     streaming.current_blocks.clear();
     streaming.active_tool_calls.clear();
 
-    state.status_message = format!("Render failed: {}", err);
+    state.status_before_flash = Some(state.status.clone());
+    state.status = StatusState::Flash {
+        message: format!("Render failed: {}", err),
+        remaining_ms: state.theme.timing.status_flash_ms,
+    };
     state.needs_redraw = true;
 
     // Attempt terminal recovery
@@ -439,9 +606,7 @@ fn handle_render_error(
 fn advance_permission_queue(state: &mut TuiState) {
     if let Some(next) = state.permission_queue.pop() {
         state.pending_permission = Some(next);
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::Permission,
-        ));
+        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
     } else {
         state.focus = FocusState::Input;
     }
@@ -471,9 +636,12 @@ fn render(
     let TuiState {
         ref mut height_cache,
         ref tool_block_states,
+        ref feedback_blocks,
         ref pending_permission,
+        ref ask_user_question,
         ref theme,
-        ref status_message,
+        ref status,
+        ref token_usage,
         ref input_buffer,
         cursor_position,
         focus,
@@ -485,7 +653,7 @@ fn render(
 
         match layout::compute_layout(area, theme) {
             Some(app_layout) => {
-                let is_compact = area.width < 80 || area.height < 24;
+                let _is_compact = area.width < 80 || area.height < 24;
 
                 let result = chat_pane::render(
                     frame,
@@ -497,6 +665,7 @@ fn render(
                     theme,
                     height_cache,
                     tool_block_states,
+                    feedback_blocks,
                 );
                 content_height = result.total_content_height;
                 block_bounds = result.block_boundaries;
@@ -514,7 +683,12 @@ fn render(
                             .chain(streaming.active_tool_calls.values())
                             .find(|tc| tc.id == *tool_id);
                         if let Some(tc) = tc {
-                            let (paragraph, area) = crate::adapters::tui::widgets::tool_block::render_peek_overlay(tc, theme, app_layout.chat_pane);
+                            let (paragraph, area) =
+                                crate::adapters::tui::widgets::tool_block::render_peek_overlay(
+                                    tc,
+                                    theme,
+                                    app_layout.chat_pane,
+                                );
                             frame.render_widget(ratatui::widgets::Clear, area);
                             frame.render_widget(paragraph, area);
                         }
@@ -543,18 +717,39 @@ fn render(
                     frame.render_widget(paragraph, prompt_area);
                 }
 
+                // Render AskUserQuestion card at bottom of chat pane if active
+                if let Some(aq) = ask_user_question {
+                    use crate::adapters::tui::widgets::ask_user_question;
+                    let aq_lines = ask_user_question::render_ask_user_lines(
+                        aq,
+                        app_layout.chat_pane.width,
+                        theme,
+                    );
+                    let aq_height = aq_lines.len() as u16;
+                    let aq_area = ratatui::prelude::Rect {
+                        x: app_layout.chat_pane.x,
+                        y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                            - aq_height.min(app_layout.chat_pane.height),
+                        width: app_layout.chat_pane.width,
+                        height: aq_height.min(app_layout.chat_pane.height),
+                    };
+                    let paragraph = ratatui::widgets::Paragraph::new(aq_lines);
+                    frame.render_widget(ratatui::widgets::Clear, aq_area);
+                    frame.render_widget(paragraph, aq_area);
+                }
+
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
                     model,
-                    status_message,
-                    is_compact,
+                    status,
                     theme,
                     scroll_offset,
                     &msg_bounds,
                     content_height,
                     app_layout.chat_pane.height,
                     permission_mode,
+                    token_usage.as_ref(),
                 );
                 input_box::render(
                     frame,

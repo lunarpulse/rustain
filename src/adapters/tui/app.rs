@@ -1,8 +1,8 @@
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
 use crate::domain::events::{DomainInputEvent, DomainKey};
-use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::FocusState;
+use crate::domain::models::visual::{ConfirmationType, OverlayType};
 
 /// Action returned by handle_input to tell the event loop what to do.
 /// app.rs is a pure input→action mapper; the event loop owns all side effects.
@@ -24,6 +24,10 @@ pub enum InputAction {
     PermissionDeny,
     /// Permission prompt: user pressed a.
     PermissionAlwaysAllow,
+    /// Feedback block: user pressed r to retry.
+    FeedbackRetry,
+    /// AskUserQuestion: user submitted their answer.
+    SubmitQuestionAnswer(String),
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -73,9 +77,7 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     // Permission prompt focus: only y/n/a are handled, all others ignored
-    if state.focus
-        == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
-    {
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match c {
             'y' => InputAction::PermissionAllow,
             'n' => InputAction::PermissionDeny,
@@ -84,12 +86,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         };
     }
 
+    // AskUserQuestion focus: type into question input buffer
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question)) {
+        if let Some(ref mut aq) = state.ask_user_question {
+            aq.input_buffer.push(c);
+            aq.cursor_position += 1;
+            state.needs_redraw = true;
+        }
+        return InputAction::Consumed;
+    }
+
     // Any keypress dismisses an active peek overlay (AC5)
     if state.focus == FocusState::Chat {
-        let had_peek = state
-            .tool_block_states
-            .values()
-            .any(|tbs| tbs.peek_active);
+        let had_peek = state.tool_block_states.values().any(|tbs| tbs.peek_active);
         if had_peek {
             for tbs in state.tool_block_states.values_mut() {
                 tbs.peek_active = false;
@@ -108,6 +117,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             InputAction::Consumed
         }
         FocusState::Chat => match c {
+            // Feedback block action: retry
+            'r' if state.active_feedback_id.is_some() => {
+                return InputAction::FeedbackRetry;
+            }
             'i' => {
                 state.focus = FocusState::Input;
                 state.needs_redraw = true;
@@ -207,10 +220,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             // p = peek preview on focused collapsed tool block
             'p' => {
                 if let Some(ref tool_id) = state.focused_tool_id {
-                    let entry = state
-                        .tool_block_states
-                        .entry(tool_id.clone())
-                        .or_default();
+                    let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                     if entry.collapsed {
                         entry.peek_active = !entry.peek_active;
                         state.needs_redraw = true;
@@ -226,21 +236,55 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 
 fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Permission prompt: Esc → Deny
-    if state.focus
-        == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
-    {
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match key {
             DomainKey::Esc => InputAction::PermissionDeny,
             _ => InputAction::Consumed, // Ignore all other special keys
         };
     }
 
+    // AskUserQuestion: Enter submits, Backspace deletes, Esc cancels
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question)) {
+        return match key {
+            DomainKey::Enter => {
+                if let Some(ref mut aq) = state.ask_user_question {
+                    if aq.input_buffer.is_empty() {
+                        return InputAction::Consumed; // Don't submit empty answer
+                    }
+                    let answer = std::mem::take(&mut aq.input_buffer);
+                    aq.submitted_answer = Some(answer.clone());
+                    aq.cursor_position = 0;
+                    state.needs_redraw = true;
+                    InputAction::SubmitQuestionAnswer(answer)
+                } else {
+                    InputAction::Consumed
+                }
+            }
+            DomainKey::Backspace => {
+                if let Some(ref mut aq) = state.ask_user_question {
+                    if aq.cursor_position > 0 {
+                        aq.cursor_position -= 1;
+                        aq.input_buffer.pop();
+                        state.needs_redraw = true;
+                    }
+                }
+                InputAction::Consumed
+            }
+            DomainKey::Esc => {
+                // Cancel question — dismiss and drop oneshot sender so run_turn gets RecvError
+                state.ask_user_question = None;
+                drop(state.question_response_tx.take());
+                state.focus = FocusState::Input;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        };
+    }
+
     // Any keypress dismisses an active peek overlay (AC5)
     if state.focus == FocusState::Chat {
-        let had_peek = state
-            .tool_block_states
-            .values()
-            .any(|tbs| tbs.peek_active);
+        let had_peek = state.tool_block_states.values().any(|tbs| tbs.peek_active);
         if had_peek {
             for tbs in state.tool_block_states.values_mut() {
                 tbs.peek_active = false;
@@ -284,10 +328,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::Enter if state.focus == FocusState::Chat => {
             // Toggle collapse/expand on focused tool block
             if let Some(ref tool_id) = state.focused_tool_id {
-                let entry = state
-                    .tool_block_states
-                    .entry(tool_id.clone())
-                    .or_default();
+                let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                 entry.collapsed = !entry.collapsed;
                 entry.peek_active = false; // dismiss peek on toggle
                 // Invalidate height cache since expanded height differs

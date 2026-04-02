@@ -41,19 +41,20 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     &state.theme,
                     &mut HeightCache::default(),
                     &HashMap::<String, ToolBlockState>::new(),
+                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
                     "claude-sonnet-4-6",
-                    "idle",
-                    false,
+                    &state.status,
                     &state.theme,
                     0,
                     &[],
                     0,
                     app_layout.chat_pane.height,
                     rustain::domain::models::PermissionMode::Normal,
+                    state.token_usage.as_ref(),
                 );
                 input_box::render(
                     frame,

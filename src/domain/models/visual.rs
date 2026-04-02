@@ -33,6 +33,7 @@ pub enum PanelType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfirmationType {
     Permission,
+    Question,
 }
 
 /// Overlay types for modal focus targets.
@@ -52,6 +53,7 @@ pub mod symbols {
     pub const WORKING: char = '●';
     pub const ERROR: char = '✗';
     pub const WARNING: char = '⚠';
+    pub const INFO: char = 'ℹ';
     pub const OWNED: char = '♦';
     pub const PEER: char = '◇';
 }

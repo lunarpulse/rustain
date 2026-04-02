@@ -1,7 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
-use crate::domain::models::{ApprovalDecision, FocusState};
+use crate::domain::models::{
+    ApprovalDecision, FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
+};
 
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
@@ -81,7 +84,11 @@ pub struct TuiState {
     pub terminal_height: u16,
     pub input_buffer: String,
     pub cursor_position: usize,
-    pub status_message: String,
+    pub status: StatusState,
+    /// Cumulative token usage for the current session.
+    pub token_usage: Option<UsageInfo>,
+    /// Previous status state for flash message revert.
+    pub status_before_flash: Option<StatusState>,
     pub should_quit: bool,
     pub theme: Theme,
     pub auto_scroll: bool,
@@ -105,6 +112,16 @@ pub struct TuiState {
     pub pending_permission: Option<PendingPermission>,
     /// Queue for additional permission requests that arrive while one is displayed.
     pub permission_queue: PermissionQueue,
+    /// Active retry state for provider error recovery.
+    pub retry_state: Option<RetryState>,
+    /// Feedback blocks displayed in conversation, keyed by block ID.
+    pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
+    /// The ID of the most recent active (actionable) feedback block.
+    pub active_feedback_id: Option<String>,
+    /// Active AskUserQuestion card state.
+    pub ask_user_question: Option<AskUserQuestionState>,
+    /// Oneshot sender for AskUserQuestion responses.
+    pub question_response_tx: Option<tokio::sync::oneshot::Sender<String>>,
 }
 
 impl TuiState {
@@ -121,7 +138,9 @@ impl TuiState {
             terminal_height: height,
             input_buffer: String::new(),
             cursor_position: 0,
-            status_message: "idle".to_string(),
+            status: StatusState::Idle,
+            token_usage: None,
+            status_before_flash: None,
             should_quit: false,
             theme: Theme::for_capability(capability),
             auto_scroll: true,
@@ -135,6 +154,11 @@ impl TuiState {
             focused_tool_id: None,
             pending_permission: None,
             permission_queue: PermissionQueue::default(),
+            retry_state: None,
+            feedback_blocks: BTreeMap::new(),
+            active_feedback_id: None,
+            ask_user_question: None,
+            question_response_tx: None,
         }
     }
 }

@@ -66,6 +66,7 @@ fn test_virtual_scroll_1000_messages_performance() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
         })
         .unwrap();
@@ -106,6 +107,7 @@ fn test_virtual_scroll_relative_scaling() {
                     &theme,
                     &mut cache,
                     &HashMap::<String, ToolBlockState>::new(),
+                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
             .unwrap();
@@ -133,6 +135,7 @@ fn test_virtual_scroll_relative_scaling() {
                     &theme,
                     &mut cache,
                     &HashMap::<String, ToolBlockState>::new(),
+                    &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
             .unwrap();
@@ -173,6 +176,7 @@ fn test_virtual_scroll_zero_messages() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
             assert_eq!(result.total_content_height, 0);
         })
@@ -202,6 +206,7 @@ fn test_virtual_scroll_one_message() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
             assert!(result.total_content_height > 0);
             assert_eq!(result.block_boundaries.len(), 1);
@@ -255,6 +260,7 @@ fn test_virtual_scroll_only_user_messages() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
             );
             assert_eq!(result.message_boundaries.len(), 5);
             assert_eq!(result.block_boundaries.len(), 5);
