@@ -1,6 +1,7 @@
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
 use crate::domain::events::{DomainInputEvent, DomainKey};
+use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::FocusState;
 
 /// Action returned by handle_input to tell the event loop what to do.
@@ -17,6 +18,12 @@ pub enum InputAction {
     Quit,
     /// Ctrl+C: cancel streaming if active, otherwise quit.
     CancelOrQuit,
+    /// Permission prompt: user pressed y.
+    PermissionAllow,
+    /// Permission prompt: user pressed n.
+    PermissionDeny,
+    /// Permission prompt: user pressed a.
+    PermissionAlwaysAllow,
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -65,6 +72,18 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
+    // Permission prompt focus: only y/n/a are handled, all others ignored
+    if state.focus
+        == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
+    {
+        return match c {
+            'y' => InputAction::PermissionAllow,
+            'n' => InputAction::PermissionDeny,
+            'a' => InputAction::PermissionAlwaysAllow,
+            _ => InputAction::Consumed, // Ignore all other keys
+        };
+    }
+
     // Any keypress dismisses an active peek overlay (AC5)
     if state.focus == FocusState::Chat {
         let had_peek = state
@@ -206,6 +225,16 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 }
 
 fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    // Permission prompt: Esc → Deny
+    if state.focus
+        == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
+    {
+        return match key {
+            DomainKey::Esc => InputAction::PermissionDeny,
+            _ => InputAction::Consumed, // Ignore all other special keys
+        };
+    }
+
     // Any keypress dismisses an active peek overlay (AC5)
     if state.focus == FocusState::Chat {
         let had_peek = state

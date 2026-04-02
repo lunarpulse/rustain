@@ -1,9 +1,9 @@
-use crate::domain::models::{NoticeLevel, StreamChunk, ToolResult};
+use crate::domain::models::{ApprovalDecision, NoticeLevel, PermissionMode, StreamChunk, ToolResult};
 
 /// Domain-level application events flowing through the event loop.
 /// crossterm types MUST NOT appear here — the adapter converts them to DomainInputEvent.
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum AppEvent {
     /// Converted terminal input (crossterm → domain)
     InputEvent(DomainInputEvent),
@@ -21,6 +21,14 @@ pub enum AppEvent {
     SystemNotice(NoticeLevel, String),
     /// Internal domain events (legacy — kept for backward compat with 1.1a event loop)
     DomainEvent(DomainEventPayload),
+    /// Permission request from SecurityAdapter — TUI displays PermissionCard, user responds via oneshot.
+    PermissionRequest {
+        tool_name: String,
+        tool_input: serde_json::Value,
+        response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
+    },
+    /// Change the active permission mode.
+    SetPermissionMode(PermissionMode),
 }
 
 /// Event wrapping a tool execution result.

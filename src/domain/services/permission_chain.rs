@@ -44,36 +44,24 @@ pub async fn check(
     }
 
     // Step 3: Workspace restriction (file tools)
-    match tool_name {
-        "Read" | "read" => match input.get("file_path").and_then(|v| v.as_str()) {
-            Some(path) => {
-                if let Err(e) =
-                    security.check_workspace_access(std::path::Path::new(path), FileOperation::Read)
-                {
-                    return PermissionDecision::Deny(e.to_string());
-                }
-            }
-            None => {
-                return PermissionDecision::Deny(
-                    "Read tool missing required 'file_path' field".to_string(),
-                );
-            }
-        },
-        "Write" | "write" => match input.get("file_path").and_then(|v| v.as_str()) {
-            Some(path) => {
-                if let Err(e) = security
-                    .check_workspace_access(std::path::Path::new(path), FileOperation::Write)
-                {
-                    return PermissionDecision::Deny(e.to_string());
-                }
-            }
-            None => {
-                return PermissionDecision::Deny(
-                    "Write tool missing required 'file_path' field".to_string(),
-                );
-            }
-        },
-        _ => {}
+    if let Some((path_str, op)) = extract_file_path(tool_name, input) {
+        if let Err(e) =
+            security.check_workspace_access(std::path::Path::new(&path_str), op)
+        {
+            return PermissionDecision::Deny(e.to_string());
+        }
+    } else if matches!(tool_name, "Read" | "read") {
+        if input.get("file_path").and_then(|v| v.as_str()).is_none() {
+            return PermissionDecision::Deny(
+                "Read tool missing required 'file_path' field".to_string(),
+            );
+        }
+    } else if matches!(tool_name, "Write" | "write" | "Edit" | "edit") {
+        if input.get("file_path").and_then(|v| v.as_str()).is_none() {
+            return PermissionDecision::Deny(
+                format!("{} tool missing required 'file_path' field", tool_name),
+            );
+        }
     }
 
     // Step 4: Request permission
@@ -86,6 +74,18 @@ pub async fn check(
         Ok(ApprovalDecision::Cancel) => PermissionDecision::Cancel,
         Err(e) => PermissionDecision::Deny(e.to_string()),
     }
+}
+
+/// Extract file_path and infer FileOperation from tool name.
+/// Returns None for tools that don't operate on file paths.
+fn extract_file_path(tool_name: &str, input: &serde_json::Value) -> Option<(String, FileOperation)> {
+    let op = match tool_name {
+        "Read" | "read" => FileOperation::Read,
+        "Write" | "write" | "Edit" | "edit" => FileOperation::Write,
+        _ => return None,
+    };
+    let path = input.get("file_path").and_then(|v| v.as_str())?;
+    Some((path.to_string(), op))
 }
 
 // Tests moved to tests/security.rs to satisfy domain purity conformance test.

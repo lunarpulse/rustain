@@ -29,6 +29,12 @@ pub enum PanelType {
     Adapters,
 }
 
+/// Types of confirmation dialogs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConfirmationType {
+    Permission,
+}
+
 /// Overlay types for modal focus targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayType {
@@ -37,7 +43,7 @@ pub enum OverlayType {
     ProfileSwitcher,
     WhichKey,
     Help,
-    // TODO(1.6): Add Confirmation(ConfirmationType) when permission system story implements it
+    Confirmation(ConfirmationType),
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

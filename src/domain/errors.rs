@@ -123,6 +123,9 @@ pub enum PermissionError {
     #[error("Workspace violation: {0}")]
     WorkspaceViolation(String),
 
+    #[error("Permission request cancelled")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

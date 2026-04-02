@@ -38,15 +38,19 @@ pub async fn run() -> Result<()> {
     // 5. Construct provider adapter
     let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
 
+    // 6. Create domain event channel (before security adapter, which needs the sender)
+    let (domain_tx, mut domain_rx) = mpsc::unbounded_channel::<AppEvent>();
+
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
     let session_id = nanoid::nanoid!();
-    let security: Arc<dyn SecurityPort> = Arc::new(SecurityAdapter::new(workspace_path.clone()));
+    let security_adapter =
+        SecurityAdapter::new(workspace_path.clone(), domain_tx.clone());
+    // Load AlwaysAllow rules from .claude/settings.json
+    security_adapter.init_allowed_rules().await;
+    let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
     let tools: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(workspace_path, session_id));
-
-    // 6. Create domain event channel
-    let (domain_tx, mut domain_rx) = mpsc::unbounded_channel::<AppEvent>();
 
     // Store shutdown sender for signal handlers
     signals::set_shutdown_sender(domain_tx.clone());

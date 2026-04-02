@@ -244,4 +244,29 @@ mod tests {
         let debug = format!("{:?}", adapter);
         assert!(debug.contains("localhost:8080"));
     }
+
+    #[test]
+    fn test_api_key_never_in_serialized_output() {
+        let key = "sk-ant-secret-key-12345";
+        let adapter = AnthropicAdapter::new(
+            key.to_string(),
+            "claude-sonnet-4-6".to_string(),
+            None,
+        )
+        .unwrap();
+
+        // Debug output must not contain the key
+        let debug = format!("{:?}", adapter);
+        assert!(
+            !debug.contains(key),
+            "API key leaked in Debug output"
+        );
+
+        // Display/toString must not leak key either (Debug is the only impl)
+        let debug2 = format!("{:?}", &adapter as &dyn std::fmt::Debug);
+        assert!(
+            !debug2.contains(key),
+            "API key leaked in dyn Debug output"
+        );
+    }
 }

@@ -12,9 +12,10 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use crate::domain::events::{AppEvent, ChunkAction};
+use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
-    AppConfig, ChatMessage, CompletionOptions, Conversation, FocusState, MessageRole,
-    StreamingState, UserMessage, apply_chunk, generate_conversation_id,
+    ApprovalDecision, AppConfig, ChatMessage, CompletionOptions, Conversation, FocusState,
+    MessageRole, StreamingState, UserMessage, apply_chunk, generate_conversation_id,
 };
 use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
 use crate::domain::services::message_builder;
@@ -65,6 +66,7 @@ pub async fn run(
         &conversation,
         &streaming,
         &config.model,
+        security.as_ref(),
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
@@ -110,7 +112,7 @@ pub async fn run(
                                             &tools,
                                         );
                                         // Force immediate render for typing indicator
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -120,6 +122,15 @@ pub async fn run(
                                     state.should_quit = true;
                                 }
                                 InputAction::CancelOrQuit => {
+                                    // Explicitly deny any pending permission before aborting
+                                    if let Some(pending) = state.pending_permission.take() {
+                                        let _ = pending.response_tx.send(ApprovalDecision::Deny);
+                                        state.focus = FocusState::Input;
+                                    }
+                                    // Deny all queued permission requests
+                                    while let Some(queued) = state.permission_queue.pop() {
+                                        let _ = queued.response_tx.send(ApprovalDecision::Deny);
+                                    }
                                     if streaming.is_streaming {
                                         // AC12: Finalize active tool calls with [aborted] before clearing
                                         for (_, tc) in streaming.active_tool_calls.iter_mut() {
@@ -165,6 +176,24 @@ pub async fn run(
                                     } else {
                                         // Not streaming → quit
                                         state.should_quit = true;
+                                    }
+                                }
+                                InputAction::PermissionAllow => {
+                                    if let Some(pending) = state.pending_permission.take() {
+                                        let _ = pending.response_tx.send(ApprovalDecision::Allow);
+                                        advance_permission_queue(&mut state);
+                                    }
+                                }
+                                InputAction::PermissionDeny => {
+                                    if let Some(pending) = state.pending_permission.take() {
+                                        let _ = pending.response_tx.send(ApprovalDecision::Deny);
+                                        advance_permission_queue(&mut state);
+                                    }
+                                }
+                                InputAction::PermissionAlwaysAllow => {
+                                    if let Some(pending) = state.pending_permission.take() {
+                                        let _ = pending.response_tx.send(ApprovalDecision::AlwaysAllow);
+                                        advance_permission_queue(&mut state);
                                     }
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
@@ -213,7 +242,7 @@ pub async fn run(
                                         &tools,
                                     );
                                     // Force immediate render for typing indicator
-                                    match render(terminal, &mut state, &conversation, &streaming, &config.model) {
+                                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                                         Ok(()) => state.needs_redraw = false,
                                         Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                     }
@@ -242,6 +271,37 @@ pub async fn run(
                             handle.abort();
                         }
                     }
+                    AppEvent::PermissionRequest {
+                        tool_name,
+                        tool_input,
+                        response_tx,
+                    } => {
+                        use crate::adapters::tui::state::PendingPermission;
+                        let new_pending = PendingPermission {
+                            tool_name,
+                            tool_input,
+                            response_tx,
+                        };
+                        if state.pending_permission.is_some() {
+                            // Queue if another permission prompt is already displayed
+                            state.permission_queue.push(new_pending);
+                        } else {
+                            state.pending_permission = Some(new_pending);
+                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                ConfirmationType::Permission,
+                            ));
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SetPermissionMode(mode) => {
+                        security.set_mode(mode);
+                        let mode_str = match mode {
+                            crate::domain::models::PermissionMode::Normal => "Normal",
+                            crate::domain::models::PermissionMode::Yolo => "YOLO",
+                        };
+                        state.status_message = format!("Permission mode: {}", mode_str);
+                        state.needs_redraw = true;
+                    }
                     _ => {
                         state.needs_redraw = true;
                     }
@@ -251,7 +311,7 @@ pub async fn run(
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)
             _ = tick_interval.tick() => {
                 if state.needs_redraw {
-                    match render(terminal, &mut state, &conversation, &streaming, &config.model) {
+                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                         Ok(()) => state.needs_redraw = false,
                         Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                     }
@@ -375,6 +435,19 @@ fn handle_render_error(
     }
 }
 
+/// Advance the permission queue: pop next pending request or restore Input focus.
+fn advance_permission_queue(state: &mut TuiState) {
+    if let Some(next) = state.permission_queue.pop() {
+        state.pending_permission = Some(next);
+        state.focus = FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::Permission,
+        ));
+    } else {
+        state.focus = FocusState::Input;
+    }
+    state.needs_redraw = true;
+}
+
 /// Render the full TUI frame.
 fn render(
     terminal: &mut Tui,
@@ -382,6 +455,7 @@ fn render(
     conversation: &Conversation,
     streaming: &StreamingState,
     model: &str,
+    security: &dyn SecurityPort,
 ) -> Result<()> {
     let scroll_offset = state.scroll_offset;
     let auto_scroll = state.auto_scroll;
@@ -390,11 +464,14 @@ fn render(
     let mut msg_bounds = Vec::new();
     let mut focused_tool_id: Option<String> = None;
 
+    let permission_mode = security.current_mode();
+
     // Split borrows: height_cache needs &mut, tool_block_states needs &
     // Both are fields of state, so we extract refs before the closure.
     let TuiState {
         ref mut height_cache,
         ref tool_block_states,
+        ref pending_permission,
         ref theme,
         ref status_message,
         ref input_buffer,
@@ -445,6 +522,27 @@ fn render(
                     }
                 }
 
+                // Render permission prompt at bottom of chat pane if pending
+                if let Some(pending) = pending_permission {
+                    use crate::adapters::tui::widgets::permission_prompt;
+                    let prompt_lines = permission_prompt::render_permission_lines(
+                        &pending.tool_name,
+                        &pending.tool_input,
+                        theme,
+                    );
+                    let prompt_height = prompt_lines.len() as u16;
+                    let prompt_area = ratatui::prelude::Rect {
+                        x: app_layout.chat_pane.x,
+                        y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                            - prompt_height.min(app_layout.chat_pane.height),
+                        width: app_layout.chat_pane.width,
+                        height: prompt_height.min(app_layout.chat_pane.height),
+                    };
+                    let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
+                    frame.render_widget(ratatui::widgets::Clear, prompt_area);
+                    frame.render_widget(paragraph, prompt_area);
+                }
+
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -456,6 +554,7 @@ fn render(
                     &msg_bounds,
                     content_height,
                     app_layout.chat_pane.height,
+                    permission_mode,
                 );
                 input_box::render(
                     frame,

@@ -1,28 +1,33 @@
 //! Concrete SecurityPort adapter.
-//! Wraps the same blocklist and path validation logic as rustycode's SecurityValidator.
-//! For this story: request_permission always returns Allow (YOLO-like behavior).
-//! Story 1-6 adds the full permission prompt flow.
+//! Wraps blocklist, path validation, and permission prompt flow via oneshot channels.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::domain::errors::PermissionError;
-use crate::domain::models::{ApprovalDecision, FileOperation, PathAccessType, PermissionMode};
+use crate::domain::events::AppEvent;
+use crate::domain::models::{
+    ApprovalDecision, FileOperation, PathAccessType, PermissionMode, PermissionRule,
+};
 use crate::domain::ports::SecurityPort;
 
-/// SecurityPort implementation with blocklist enforcement and workspace boundary checks.
+/// SecurityPort implementation with blocklist enforcement, workspace boundary checks,
+/// and permission prompt flow via oneshot channels.
 pub struct SecurityAdapter {
     workspace_path: PathBuf,
     blocked_commands: Vec<String>,
     blocked_paths: Vec<String>,
     mode: Arc<AtomicU8>,
+    event_tx: mpsc::UnboundedSender<AppEvent>,
+    pub allowed_rules: RwLock<Vec<PermissionRule>>,
 }
 
 impl SecurityAdapter {
-    pub fn new(workspace_path: PathBuf) -> Self {
+    pub fn new(workspace_path: PathBuf, event_tx: mpsc::UnboundedSender<AppEvent>) -> Self {
         let blocked_commands = vec![
             "rm -rf /".to_string(),
             "dd if=/dev/zero".to_string(),
@@ -50,8 +55,125 @@ impl SecurityAdapter {
             workspace_path,
             blocked_commands,
             blocked_paths,
-            mode: Arc::new(AtomicU8::new(PermissionMode::Yolo as u8)),
+            mode: Arc::new(AtomicU8::new(PermissionMode::Normal as u8)),
+            event_tx,
+            allowed_rules: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Check if a tool call matches any AlwaysAllow rule.
+    fn matches_allowed_rule(
+        rules: &[PermissionRule],
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> bool {
+        for rule in rules {
+            if rule.tool_name != tool_name {
+                continue;
+            }
+            match &rule.pattern {
+                None => return true, // Matches all calls of this tool
+                Some(pattern) => {
+                    // Extract the relevant input value based on tool type
+                    let input_value = if tool_name == "Bash" || tool_name == "bash" {
+                        tool_input.get("command").and_then(|v| v.as_str())
+                    } else {
+                        tool_input.get("file_path").and_then(|v| v.as_str())
+                    };
+                    if let Some(val) = input_value {
+                        // Exact match (case-insensitive) — prefix matching is too permissive
+                        if val.to_lowercase() == pattern.to_lowercase() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Build a PermissionRule from a tool call when user selects AlwaysAllow.
+    fn build_rule(tool_name: &str, tool_input: &serde_json::Value) -> PermissionRule {
+        let pattern = match tool_name {
+            "Bash" | "bash" => tool_input
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+        PermissionRule {
+            tool_name: tool_name.to_string(),
+            pattern,
+        }
+    }
+
+    /// Load AlwaysAllow rules from settings.json.
+    pub fn load_settings(&self, workspace: &Path) -> Vec<PermissionRule> {
+        let settings_path = workspace.join(".claude").join("settings.json");
+        let content = match std::fs::read_to_string(&settings_path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let allow_array = match json
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+        {
+            Some(a) => a,
+            None => return Vec::new(),
+        };
+        allow_array
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| parse_rule_string(s))
+            .collect()
+    }
+
+    /// Persist current AlwaysAllow rules to settings.json (read-merge-write to preserve other fields).
+    fn persist_settings(workspace: &Path, rules: &[PermissionRule]) {
+        let settings_dir = workspace.join(".claude");
+        if let Err(e) = std::fs::create_dir_all(&settings_dir) {
+            tracing::warn!("Failed to create settings directory: {}", e);
+            return;
+        }
+        let settings_path = settings_dir.join("settings.json");
+
+        // Read existing settings to preserve unrelated fields
+        let mut root: serde_json::Value = std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let allow_strings: Vec<String> = rules.iter().map(|r| format_rule_string(r)).collect();
+
+        // Merge: update only permissions.allow, preserve everything else
+        root.as_object_mut()
+            .unwrap()
+            .entry("permissions")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .map(|perms| perms.insert("allow".to_string(), serde_json::json!(allow_strings)));
+
+        match serde_json::to_string_pretty(&root) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(&settings_path, content) {
+                    tracing::warn!("Failed to persist settings.json: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("Failed to serialize settings: {}", e),
+        }
+    }
+
+    /// Initialize allowed_rules from settings.json (called at startup).
+    /// Always replaces in-memory state, even if disk has empty array.
+    pub async fn init_allowed_rules(&self) {
+        let rules = self.load_settings(&self.workspace_path);
+        let mut allowed = self.allowed_rules.write().await;
+        *allowed = rules;
     }
 
     /// Validate a shell command against the blocklist.
@@ -160,6 +282,36 @@ impl SecurityAdapter {
     }
 }
 
+/// Parse a rule string like "Bash(cargo test)" or "Read" into a PermissionRule.
+/// Uses the first `(` and the *matching last* `)` as delimiters to handle
+/// patterns containing parentheses (e.g., `Bash(echo $(whoami))`).
+fn parse_rule_string(s: &str) -> PermissionRule {
+    if let Some(paren_start) = s.find('(') {
+        if let Some(paren_end) = s.rfind(')') {
+            if paren_end > paren_start {
+                let tool_name = s[..paren_start].to_string();
+                let pattern = s[paren_start + 1..paren_end].to_string();
+                return PermissionRule {
+                    tool_name,
+                    pattern: Some(pattern),
+                };
+            }
+        }
+    }
+    PermissionRule {
+        tool_name: s.to_string(),
+        pattern: None,
+    }
+}
+
+/// Format a PermissionRule as a string like "Bash(cargo test)" or "Read".
+fn format_rule_string(rule: &PermissionRule) -> String {
+    match &rule.pattern {
+        Some(pattern) => format!("{}({})", rule.tool_name, pattern),
+        None => rule.tool_name.clone(),
+    }
+}
+
 impl std::fmt::Debug for SecurityAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecurityAdapter")
@@ -185,18 +337,50 @@ impl SecurityPort for SecurityAdapter {
 
     async fn request_permission(
         &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
     ) -> Result<ApprovalDecision, PermissionError> {
-        // Story 1-5: always auto-approve (YOLO-like behavior).
-        // Story 1-6 adds the full PermissionCard prompt flow via oneshot channel.
-        Ok(ApprovalDecision::Allow)
+        // YOLO mode: auto-approve everything
+        if self.current_mode() == PermissionMode::Yolo {
+            return Ok(ApprovalDecision::Allow);
+        }
+
+        // Normal mode: check AlwaysAllow rules first
+        {
+            let rules = self.allowed_rules.read().await;
+            if Self::matches_allowed_rule(&rules, tool_name, tool_input) {
+                return Ok(ApprovalDecision::AlwaysAllow);
+            }
+        }
+
+        // No rule matched — send permission request to TUI via oneshot
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        self.event_tx
+            .send(AppEvent::PermissionRequest {
+                tool_name: tool_name.to_string(),
+                tool_input: tool_input.clone(),
+                response_tx: tx,
+            })
+            .map_err(|_| PermissionError::Cancelled)?;
+
+        let decision = rx.await.map_err(|_| PermissionError::Cancelled)?;
+
+        // Handle AlwaysAllow: add rule and persist
+        if decision == ApprovalDecision::AlwaysAllow {
+            let rule = Self::build_rule(tool_name, tool_input);
+            let mut rules = self.allowed_rules.write().await;
+            rules.push(rule);
+            Self::persist_settings(&self.workspace_path, &rules);
+        }
+
+        Ok(decision)
     }
 
     fn current_mode(&self) -> PermissionMode {
-        match self.mode.load(Ordering::Relaxed) {
-            0 => PermissionMode::Normal,
-            _ => PermissionMode::Yolo,
+        match self.mode.load(Ordering::Acquire) {
+            1 => PermissionMode::Yolo,
+            _ => PermissionMode::Normal, // Default to most restrictive mode for unknown values
         }
     }
 
@@ -205,7 +389,7 @@ impl SecurityPort for SecurityAdapter {
             PermissionMode::Normal => 0u8,
             PermissionMode::Yolo => 1u8,
         };
-        self.mode.store(val, Ordering::Relaxed);
+        self.mode.store(val, Ordering::Release);
     }
 }
 
@@ -215,7 +399,8 @@ mod tests {
     use std::env;
 
     fn make_adapter() -> SecurityAdapter {
-        SecurityAdapter::new(env::current_dir().unwrap())
+        let (tx, _rx) = mpsc::unbounded_channel();
+        SecurityAdapter::new(env::current_dir().unwrap(), tx)
     }
 
     #[test]
@@ -282,26 +467,128 @@ mod tests {
     #[test]
     fn test_permission_mode_switching() {
         let adapter = make_adapter();
-        assert_eq!(adapter.current_mode(), PermissionMode::Yolo);
-        adapter.set_mode(PermissionMode::Normal);
+        // Default mode is now Normal (changed from Yolo in 1-5)
         assert_eq!(adapter.current_mode(), PermissionMode::Normal);
         adapter.set_mode(PermissionMode::Yolo);
         assert_eq!(adapter.current_mode(), PermissionMode::Yolo);
+        adapter.set_mode(PermissionMode::Normal);
+        assert_eq!(adapter.current_mode(), PermissionMode::Normal);
     }
 
     #[tokio::test]
-    async fn test_request_permission_always_allows() {
+    async fn test_request_permission_yolo_auto_allows() {
         let adapter = make_adapter();
+        adapter.set_mode(PermissionMode::Yolo);
         let result = adapter
-            .request_permission("bash", &serde_json::json!({"command": "ls"}))
+            .request_permission("Bash", &serde_json::json!({"command": "ls"}))
             .await;
         assert_eq!(result.unwrap(), ApprovalDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn test_request_permission_normal_sends_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let adapter = SecurityAdapter::new(env::current_dir().unwrap(), tx);
+        // Normal mode — request_permission sends PermissionRequest event
+        let handle = tokio::spawn(async move {
+            adapter
+                .request_permission("Bash", &serde_json::json!({"command": "cargo test"}))
+                .await
+        });
+
+        // Receive the PermissionRequest event and respond
+        if let Some(AppEvent::PermissionRequest { response_tx, .. }) = rx.recv().await {
+            let _ = response_tx.send(ApprovalDecision::Allow);
+        }
+
+        let result = handle.await.unwrap();
+        assert_eq!(result.unwrap(), ApprovalDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn test_always_allow_rule_matching() {
+        let adapter = make_adapter();
+        adapter.set_mode(PermissionMode::Normal);
+        {
+            let mut rules = adapter.allowed_rules.write().await;
+            rules.push(PermissionRule {
+                tool_name: "Read".to_string(),
+                pattern: None,
+            });
+            rules.push(PermissionRule {
+                tool_name: "Bash".to_string(),
+                pattern: Some("cargo test".to_string()),
+            });
+        }
+
+        // Read matches rule without pattern — returns AlwaysAllow for rule matches
+        let result = adapter
+            .request_permission("Read", &serde_json::json!({"file_path": "src/main.rs"}))
+            .await;
+        assert_eq!(result.unwrap(), ApprovalDecision::AlwaysAllow);
+
+        // Bash with exact matching command
+        let result = adapter
+            .request_permission("Bash", &serde_json::json!({"command": "cargo test"}))
+            .await;
+        assert_eq!(result.unwrap(), ApprovalDecision::AlwaysAllow);
+    }
+
+    #[test]
+    fn test_parse_rule_string() {
+        let rule = parse_rule_string("Read");
+        assert_eq!(rule.tool_name, "Read");
+        assert!(rule.pattern.is_none());
+
+        let rule = parse_rule_string("Bash(cargo test)");
+        assert_eq!(rule.tool_name, "Bash");
+        assert_eq!(rule.pattern.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn test_format_rule_string() {
+        let rule = PermissionRule {
+            tool_name: "Read".to_string(),
+            pattern: None,
+        };
+        assert_eq!(format_rule_string(&rule), "Read");
+
+        let rule = PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("cargo build".to_string()),
+        };
+        assert_eq!(format_rule_string(&rule), "Bash(cargo build)");
     }
 
     #[test]
     fn test_permission_chain_blocked_overrides_allow() {
         let adapter = make_adapter();
-        // Even though request_permission would Allow, blocklist should block first
         assert!(adapter.check_blocklist("rm -rf /").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_settings_persistence_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let adapter = SecurityAdapter::new(tmp.path().to_path_buf(), tx);
+
+        let rules = vec![
+            PermissionRule {
+                tool_name: "Bash".to_string(),
+                pattern: Some("cargo test".to_string()),
+            },
+            PermissionRule {
+                tool_name: "Read".to_string(),
+                pattern: None,
+            },
+        ];
+        SecurityAdapter::persist_settings(tmp.path(), &rules);
+
+        let loaded = adapter.load_settings(tmp.path());
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].tool_name, "Bash");
+        assert_eq!(loaded[0].pattern.as_deref(), Some("cargo test"));
+        assert_eq!(loaded[1].tool_name, "Read");
+        assert!(loaded[1].pattern.is_none());
     }
 }

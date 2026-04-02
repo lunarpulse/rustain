@@ -1,10 +1,37 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
-use crate::domain::models::FocusState;
+use crate::domain::models::{ApprovalDecision, FocusState};
 
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
+
+/// Pending permission request awaiting user response.
+pub struct PendingPermission {
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
+}
+
+/// Queue for permission requests that arrive while another is being displayed.
+#[derive(Default)]
+pub struct PermissionQueue {
+    queue: VecDeque<PendingPermission>,
+}
+
+impl PermissionQueue {
+    pub fn push(&mut self, p: PendingPermission) {
+        self.queue.push_back(p);
+    }
+
+    pub fn pop(&mut self) -> Option<PendingPermission> {
+        self.queue.pop_front()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
 
 /// Direction for boundary navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +101,10 @@ pub struct TuiState {
     /// Currently focused tool block id (set by chat pane render when a tool block
     /// is at the top of the viewport after J/K navigation).
     pub focused_tool_id: Option<String>,
+    /// Pending permission request awaiting user y/n/a response.
+    pub pending_permission: Option<PendingPermission>,
+    /// Queue for additional permission requests that arrive while one is displayed.
+    pub permission_queue: PermissionQueue,
 }
 
 impl TuiState {
@@ -102,6 +133,8 @@ impl TuiState {
             pending_anchor: None,
             tool_block_states: HashMap::new(),
             focused_tool_id: None,
+            pending_permission: None,
+            permission_queue: PermissionQueue::default(),
         }
     }
 }
