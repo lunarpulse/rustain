@@ -122,6 +122,8 @@ pub struct TuiState {
     pub ask_user_question: Option<AskUserQuestionState>,
     /// Oneshot sender for AskUserQuestion responses.
     pub question_response_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    /// Whether project context files were loaded (for status bar indicator).
+    pub has_project_context: bool,
 }
 
 impl TuiState {
@@ -159,6 +161,7 @@ impl TuiState {
             active_feedback_id: None,
             ask_user_question: None,
             question_response_tx: None,
+            has_project_context: false,
         }
     }
 }

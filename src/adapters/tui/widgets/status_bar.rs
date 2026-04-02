@@ -18,17 +18,20 @@ pub fn render(
     viewport_height: u16,
     permission_mode: PermissionMode,
     token_usage: Option<&UsageInfo>,
+    has_project_context: bool,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
     let sep = " │ ";
 
-    // Build left side: model │ mode │ tokens │ status
-    // Spec layout: "sonnet-4-6 │ normal │ ↑1.2k ↓3.4k │ Ready"
-    let mut left_spans: Vec<Span> = vec![Span::styled(
-        format!(" {}", model),
-        Style::default().fg(fg),
-    )];
+    // Build left side: model [ctx] │ mode │ tokens │ status
+    // Spec layout: "sonnet-4-6 [ctx] │ normal │ ↑1.2k ↓3.4k │ Ready"
+    let model_label = if has_project_context {
+        format!(" {} [ctx]", model)
+    } else {
+        format!(" {}", model)
+    };
+    let mut left_spans: Vec<Span> = vec![Span::styled(model_label, Style::default().fg(fg))];
 
     // Permission mode (second segment)
     let mode_text = match permission_mode {
@@ -37,10 +40,7 @@ pub fn render(
     };
     left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
     left_spans.push(match permission_mode {
-        PermissionMode::Normal => Span::styled(
-            mode_text.to_string(),
-            Style::default().fg(fg),
-        ),
+        PermissionMode::Normal => Span::styled(mode_text.to_string(), Style::default().fg(fg)),
         PermissionMode::Yolo => Span::styled(
             mode_text.to_string(),
             Style::default()

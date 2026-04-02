@@ -386,6 +386,7 @@ fn test_tui_renders_with_theme_colors() {
                     app_layout.chat_pane.height,
                     rustain::domain::models::PermissionMode::Normal,
                     state.token_usage.as_ref(),
+                    state.has_project_context,
                 );
             }
         })

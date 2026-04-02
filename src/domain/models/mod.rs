@@ -6,6 +6,7 @@ mod focus;
 mod message;
 mod notice;
 mod permission;
+pub mod project_context;
 mod session;
 mod stream;
 mod tools;

@@ -55,6 +55,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     app_layout.chat_pane.height,
                     rustain::domain::models::PermissionMode::Normal,
                     state.token_usage.as_ref(),
+                    state.has_project_context,
                 );
                 input_box::render(
                     frame,

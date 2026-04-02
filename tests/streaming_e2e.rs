@@ -65,7 +65,8 @@ fn test_e2e_message_to_streaming_response() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();
@@ -104,7 +105,8 @@ fn test_e2e_message_to_streaming_response() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();
@@ -154,7 +156,8 @@ fn test_e2e_message_to_streaming_response() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();
@@ -200,7 +203,8 @@ fn test_e2e_message_to_streaming_response() {
                 &theme,
                 &mut HeightCache::default(),
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();

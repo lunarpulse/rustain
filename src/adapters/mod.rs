@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod noop;
+pub mod persona_adapter;
+pub mod project_context_loader;
 pub mod security_adapter;
 pub mod toolset_adapter;
 pub mod tui;

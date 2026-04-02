@@ -5,11 +5,14 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use crate::adapters::cli::commands::Cli;
+use crate::adapters::persona_adapter::PersonaAdapter;
+use crate::adapters::project_context_loader::ProjectContextLoader;
 use crate::adapters::security_adapter::SecurityAdapter;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
-use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
+use crate::domain::models::NoticeLevel;
+use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, ToolSetPort};
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, signals};
 
@@ -49,7 +52,43 @@ pub async fn run() -> Result<()> {
     // Load AlwaysAllow rules from .claude/settings.json
     security_adapter.init_allowed_rules().await;
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
-    let tools: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(workspace_path, session_id));
+    let tools: Arc<dyn ToolSetPort> =
+        Arc::new(ToolSetAdapter::new(workspace_path.clone(), session_id));
+
+    // 5c. Discover and load project context
+    let context_loader = ProjectContextLoader::new(workspace_path.clone());
+    let project_context = context_loader.discover().unwrap_or_else(|e| {
+        tracing::warn!("Failed to discover project context: {}", e);
+        crate::domain::models::project_context::ProjectContext::empty()
+    });
+    let persona_adapter = PersonaAdapter::new(project_context);
+
+    // Emit context loading notices (Phase D: Task 7)
+    if persona_adapter.has_context() {
+        let paths: Vec<String> = persona_adapter
+            .file_paths()
+            .iter()
+            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+            .collect();
+        let msg = format!(
+            "Project context: {} ({} chars)",
+            paths.join(", "),
+            persona_adapter.total_chars(),
+        );
+        tracing::info!("{}", msg);
+        let _ = domain_tx.send(AppEvent::SystemNotice(NoticeLevel::Info, msg));
+
+        if persona_adapter.is_truncated() {
+            let warn_msg = format!(
+                "Project context truncated: some files omitted (budget: {} chars)",
+                crate::domain::models::project_context::CONTEXT_BUDGET_CHARS,
+            );
+            tracing::warn!("{}", warn_msg);
+            let _ = domain_tx.send(AppEvent::SystemNotice(NoticeLevel::Warning, warn_msg));
+        }
+    }
+
+    let persona: Arc<dyn PersonaPort> = Arc::new(persona_adapter);
 
     // Store shutdown sender for signal handlers
     signals::set_shutdown_sender(domain_tx.clone());
@@ -67,6 +106,8 @@ pub async fn run() -> Result<()> {
         provider,
         security,
         tools,
+        persona,
+        workspace_path,
     )
     .await;
 

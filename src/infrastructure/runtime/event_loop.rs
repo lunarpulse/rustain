@@ -19,7 +19,7 @@ use crate::domain::models::{
     FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, StatusState, StreamingState,
     UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
-use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
+use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, ToolSetPort};
 use crate::domain::services::message_builder;
 use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::turn;
@@ -33,10 +33,15 @@ pub async fn run(
     provider: Arc<dyn ProviderPort>,
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
+    persona: Arc<dyn PersonaPort>,
+    workspace_path: std::path::PathBuf,
 ) -> Result<()> {
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
+
+    // Set project context indicator based on persona
+    state.has_project_context = !persona.system_prompt(&workspace_path).is_empty();
 
     let mut terminal_events = EventStream::new();
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(
@@ -116,6 +121,8 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools,
+                                            &persona,
+                                            &workspace_path,
                                         );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
@@ -313,6 +320,8 @@ pub async fn run(
                                         &domain_tx,
                                         &security,
                                         &tools,
+                                        &persona,
+                                        &workspace_path,
                                     );
                                     // Force immediate render for typing indicator
                                     match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
@@ -347,7 +356,7 @@ pub async fn run(
                             handle.abort();
                         }
 
-                        // Create a FeedbackBlock for errors; flash for others
+                        // Create FeedbackBlock for errors and warnings; flash for info
                         match level {
                             crate::domain::models::NoticeLevel::Error => {
                                 static FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -362,6 +371,18 @@ pub async fn run(
                                 state.active_feedback_id = Some(fb_id);
                                 state.status = StatusState::Idle;
                                 state.focus = FocusState::Chat; // Switch to chat so [r] works
+                            }
+                            crate::domain::models::NoticeLevel::Warning => {
+                                static WFB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                                let fb_id = format!("wfb-{}", WFB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                                let fb = FeedbackBlock {
+                                    id: fb_id.clone(),
+                                    level: FeedbackLevel::Warning,
+                                    message: msg,
+                                    actions: vec![FeedbackAction::Compact],
+                                };
+                                state.feedback_blocks.insert(fb_id, fb);
+                                // Don't change focus — warning is informational, not blocking
                             }
                             _ => {
                                 state.status_before_flash = Some(state.status.clone());
@@ -422,6 +443,8 @@ pub async fn run(
                             &domain_tx,
                             &security,
                             &tools,
+                            &persona,
+                            &workspace_path,
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                             Ok(()) => state.needs_redraw = false,
@@ -506,6 +529,8 @@ fn start_turn(
     domain_tx: &mpsc::UnboundedSender<AppEvent>,
     security: &Arc<dyn SecurityPort>,
     tools: &Arc<dyn ToolSetPort>,
+    persona: &Arc<dyn PersonaPort>,
+    workspace_path: &std::path::Path,
 ) {
     // Add user ChatMessage to conversation
     conversation.messages.push(ChatMessage {
@@ -525,7 +550,7 @@ fn start_turn(
     let options = CompletionOptions {
         model: config.model.clone(),
         max_tokens: 8192,
-        system_prompt: String::new(),
+        system_prompt: persona.system_prompt(workspace_path),
         temperature: None,
         tools: tool_defs,
     };
@@ -645,6 +670,7 @@ fn render(
         ref input_buffer,
         cursor_position,
         focus,
+        has_project_context,
         ..
     } = *state;
 
@@ -750,6 +776,7 @@ fn render(
                     app_layout.chat_pane.height,
                     permission_mode,
                     token_usage.as_ref(),
+                    has_project_context,
                 );
                 input_box::render(
                     frame,
