@@ -300,6 +300,7 @@ data: {\"type\":\"message_stop\"}\n\
             content: "What is Rust?".into(),
             images: vec![],
             tool_results: vec![],
+            tool_uses: vec![],
             context_prefix: None,
         }];
         let options = CompletionOptions {
@@ -368,6 +369,7 @@ data: {\"type\":\"message_stop\"}\n\
                     content: "hi".into(),
                     images: vec![],
                     tool_results: vec![],
+                    tool_uses: vec![],
                     context_prefix: None,
                 }],
                 CompletionOptions {
@@ -417,6 +419,7 @@ data: {\"type\":\"message_stop\"}\n\
                     content: "hi".into(),
                     images: vec![],
                     tool_results: vec![],
+                    tool_uses: vec![],
                     context_prefix: None,
                 }],
                 CompletionOptions {
@@ -467,6 +470,7 @@ data: {\"type\":\"message_stop\"}\n\
                     content: "hi".into(),
                     images: vec![],
                     tool_results: vec![],
+                    tool_uses: vec![],
                     context_prefix: None,
                 }],
                 CompletionOptions {
@@ -540,6 +544,7 @@ data: {\"type\":\"message_stop\"}\n\
                     content: "Hello".into(),
                     images: vec![],
                     tool_results: vec![],
+                    tool_uses: vec![],
                     context_prefix: None,
                 }],
                 CompletionOptions {
@@ -646,6 +651,7 @@ data: {\"type\":\"message_stop\"}\n\
                 content: "hi".into(),
                 images: vec![],
                 tool_results: vec![],
+                tool_uses: vec![],
                 context_prefix: None,
             }],
             CompletionOptions {
@@ -757,6 +763,7 @@ data: {\"type\":\"message_stop\"}\n\
                     content: "Say exactly: hello".into(),
                     images: vec![],
                     tool_results: vec![],
+                    tool_uses: vec![],
                     context_prefix: None,
                 }],
                 CompletionOptions {

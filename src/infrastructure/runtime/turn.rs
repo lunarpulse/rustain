@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCallInfo,
-    ToolResultMessage,
+    ToolResultMessage, ToolUseMessage,
 };
 use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
 use crate::domain::services::permission_chain::{self, PermissionDecision};
@@ -60,6 +60,7 @@ pub async fn run_turn(
                 let mut received_turn_complete = false;
                 let mut stop_reason = StopReason::EndTurn;
                 let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+                let mut accumulated_text = String::new();
 
                 while let Some(chunk) = stream.next().await {
                     match &chunk {
@@ -76,6 +77,9 @@ pub async fn run_turn(
                                 started_at_ms: Some(now_ms()),
                                 completed_at_ms: None,
                             });
+                        }
+                        StreamChunk::Text { content, .. } => {
+                            accumulated_text.push_str(content);
                         }
                         _ => {}
                     }
@@ -108,14 +112,23 @@ pub async fn run_turn(
                             return;
                         }
 
-                        // Build the assistant message with tool_use content for the conversation
-                        // (The event loop handles this via apply_chunk, but we need to build
-                        //  the messages list for the next stream_completion call)
+                        // Build the assistant message with accumulated text and tool_use blocks.
+                        // The Anthropic API requires the assistant's tool_use blocks to be
+                        // present in the message history for multi-turn tool conversations.
+                        let tool_use_msgs: Vec<ToolUseMessage> = tool_calls
+                            .iter()
+                            .map(|tc| ToolUseMessage {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                input: tc.input.clone(),
+                            })
+                            .collect();
                         messages.push(Message {
                             role: MessageRole::Assistant,
-                            content: String::new(), // Text was already forwarded via chunks
+                            content: std::mem::take(&mut accumulated_text),
                             images: vec![],
                             tool_results: vec![],
+                            tool_uses: tool_use_msgs,
                             context_prefix: None,
                         });
 
@@ -226,6 +239,7 @@ pub async fn run_turn(
                             content: String::new(),
                             images: vec![],
                             tool_results: tool_result_messages,
+                            tool_uses: vec![],
                             context_prefix: None,
                         });
 

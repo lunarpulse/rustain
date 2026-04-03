@@ -1,4 +1,6 @@
-use crate::domain::models::{Conversation, Message, MessageRole, ToolResultMessage};
+use crate::domain::models::{
+    Conversation, Message, MessageRole, ToolResultMessage, ToolUseMessage,
+};
 
 /// Build provider API messages from a conversation's chat history.
 /// Maps ChatMessage -> Message for each conversation message.
@@ -9,11 +11,27 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
     let mut messages = Vec::new();
 
     for cm in &conversation.messages {
+        // For assistant messages with tool calls, include tool_use blocks
+        // so the Anthropic API can match tool_results to their originating calls.
+        let tool_uses = if cm.role == MessageRole::Assistant {
+            cm.tool_calls
+                .iter()
+                .map(|tc| ToolUseMessage {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    input: tc.input.clone(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
         messages.push(Message {
             role: cm.role,
             content: cm.content.clone(),
             images: vec![],
             tool_results: vec![],
+            tool_uses,
             context_prefix: None,
         });
 
@@ -37,6 +55,7 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                     content: String::new(),
                     images: vec![],
                     tool_results: results,
+                    tool_uses: vec![],
                     context_prefix: None,
                 });
             }

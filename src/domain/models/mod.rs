@@ -27,7 +27,9 @@ pub use conversation::{
 };
 pub use focus::FocusState;
 #[allow(unused_imports)]
-pub use message::{ImageAttachment, Message, MessageRole, ToolResultMessage, UserMessage};
+pub use message::{
+    ImageAttachment, Message, MessageRole, ToolResultMessage, ToolUseMessage, UserMessage,
+};
 pub use notice::{
     FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
 };

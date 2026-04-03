@@ -25,6 +25,7 @@ async fn test_noop_provider_returns_error() {
         content: "hello".to_string(),
         images: vec![],
         tool_results: vec![],
+        tool_uses: vec![],
         context_prefix: None,
     }];
     let options = CompletionOptions {

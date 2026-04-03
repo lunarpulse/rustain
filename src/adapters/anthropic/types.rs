@@ -51,6 +51,12 @@ pub struct AnthropicMessage {
 pub enum AnthropicContent {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
@@ -76,7 +82,7 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
 
         let anthropic_messages: Vec<AnthropicMessage> = messages
             .iter()
-            .map(|msg| {
+            .filter_map(|msg| {
                 let role = match msg.role {
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
@@ -93,24 +99,36 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
                     });
                 }
 
-                // Add text content
+                // Add text content (skip empty to avoid API rejection)
                 if !msg.content.is_empty() {
                     content.push(AnthropicContent::Text {
                         text: msg.content.clone(),
                     });
                 }
 
-                // If no content was added (empty message), add empty text
-                if content.is_empty() {
-                    content.push(AnthropicContent::Text {
-                        text: String::new(),
+                // Add tool_use blocks (assistant messages in multi-turn tool conversations)
+                for tu in &msg.tool_uses {
+                    content.push(AnthropicContent::ToolUse {
+                        id: tu.id.clone(),
+                        name: tu.name.clone(),
+                        input: tu.input.clone(),
                     });
                 }
 
-                AnthropicMessage {
+                // Safety: skip messages with truly empty content (programming error).
+                // The Anthropic API rejects empty text blocks, so never synthesize one.
+                if content.is_empty() {
+                    tracing::warn!(
+                        "Skipping message with empty content (role={:?}) — this indicates a bug in message construction",
+                        msg.role
+                    );
+                    return None;
+                }
+
+                Some(AnthropicMessage {
                     role: role.to_string(),
                     content,
-                }
+                })
             })
             .collect();
 
@@ -222,7 +240,7 @@ pub struct ErrorPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{ImageAttachment, ToolResultMessage};
+    use crate::domain::models::ToolResultMessage;
 
     #[test]
     fn test_anthropic_request_from_messages_basic() {
@@ -231,6 +249,7 @@ mod tests {
             content: "hello".into(),
             images: vec![],
             tool_results: vec![],
+            tool_uses: vec![],
             context_prefix: None,
         }];
         let options = CompletionOptions {
@@ -263,6 +282,7 @@ mod tests {
             content: "hi".into(),
             images: vec![],
             tool_results: vec![],
+            tool_uses: vec![],
             context_prefix: None,
         }];
         let options = CompletionOptions {
@@ -294,6 +314,7 @@ mod tests {
                 content: "file contents here".into(),
                 is_error: false,
             }],
+            tool_uses: vec![],
             context_prefix: None,
         }];
         let options = CompletionOptions {
@@ -351,5 +372,120 @@ mod tests {
             }
             _ => panic!("Expected Error"),
         }
+    }
+
+    #[test]
+    fn test_empty_content_message_is_filtered_out() {
+        // Regression test: empty content messages must not produce empty text blocks
+        // (Anthropic API rejects "text content blocks must be non-empty")
+        let messages = vec![
+            Message {
+                role: MessageRole::User,
+                content: "hello".into(),
+                images: vec![],
+                tool_results: vec![],
+                tool_uses: vec![],
+                context_prefix: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: String::new(), // Empty content, no tool_uses
+                images: vec![],
+                tool_results: vec![],
+                tool_uses: vec![],
+                context_prefix: None,
+            },
+        ];
+        let options = CompletionOptions {
+            model: "claude-sonnet-4-6".into(),
+            max_tokens: 8192,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+
+        let req = AnthropicRequest::from((messages.as_slice(), &options));
+
+        // Empty assistant message should be filtered out
+        assert_eq!(req.messages.len(), 1, "Empty message should be filtered out");
+        assert_eq!(req.messages[0].role, "user");
+
+        // Verify no empty text blocks exist anywhere in the request
+        let json = serde_json::to_value(&req).unwrap();
+        for msg in json["messages"].as_array().unwrap() {
+            for block in msg["content"].as_array().unwrap() {
+                if block["type"] == "text" {
+                    assert!(
+                        !block["text"].as_str().unwrap().is_empty(),
+                        "Found empty text block — this would cause HTTP 400"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_assistant_tool_use_blocks_serialized() {
+        // Regression test: assistant messages with tool_use blocks must include them
+        // for the Anthropic API to match tool_results in the next user message
+        use crate::domain::models::ToolUseMessage;
+
+        let messages = vec![
+            Message {
+                role: MessageRole::User,
+                content: "read file.txt".into(),
+                images: vec![],
+                tool_results: vec![],
+                tool_uses: vec![],
+                context_prefix: None,
+            },
+            Message {
+                role: MessageRole::Assistant,
+                content: "I'll read that file.".into(),
+                images: vec![],
+                tool_results: vec![],
+                tool_uses: vec![ToolUseMessage {
+                    id: "toolu_123".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({"file_path": "file.txt"}),
+                }],
+                context_prefix: None,
+            },
+            Message {
+                role: MessageRole::User,
+                content: String::new(),
+                images: vec![],
+                tool_results: vec![ToolResultMessage {
+                    tool_use_id: "toolu_123".into(),
+                    content: "file contents here".into(),
+                    is_error: false,
+                }],
+                tool_uses: vec![],
+                context_prefix: None,
+            },
+        ];
+        let options = CompletionOptions {
+            model: "claude-sonnet-4-6".into(),
+            max_tokens: 8192,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+
+        let req = AnthropicRequest::from((messages.as_slice(), &options));
+        let json = serde_json::to_value(&req).unwrap();
+
+        // Assistant message should have both text and tool_use blocks
+        let assistant_content = &json["messages"][1]["content"];
+        assert_eq!(assistant_content[0]["type"], "text");
+        assert_eq!(assistant_content[0]["text"], "I'll read that file.");
+        assert_eq!(assistant_content[1]["type"], "tool_use");
+        assert_eq!(assistant_content[1]["id"], "toolu_123");
+        assert_eq!(assistant_content[1]["name"], "Read");
+
+        // Tool result user message should have tool_result block
+        let tool_result_content = &json["messages"][2]["content"];
+        assert_eq!(tool_result_content[0]["type"], "tool_result");
+        assert_eq!(tool_result_content[0]["tool_use_id"], "toolu_123");
     }
 }

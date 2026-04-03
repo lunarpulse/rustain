@@ -17,7 +17,18 @@ pub struct Message {
     pub content: String,
     pub images: Vec<ImageAttachment>,
     pub tool_results: Vec<ToolResultMessage>,
+    /// Tool use blocks from assistant messages (needed for multi-turn tool conversations).
+    pub tool_uses: Vec<ToolUseMessage>,
     pub context_prefix: Option<String>,
+}
+
+/// A tool use block from an assistant message, sent back for multi-turn tool conversations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolUseMessage {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
 }
 
 /// A tool result included in a follow-up message to the provider.
