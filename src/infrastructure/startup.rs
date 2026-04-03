@@ -31,14 +31,24 @@ pub async fn run() -> Result<()> {
     // 2. Load config
     let app_config = config::load();
 
-    // 3. Initialize logging
-    logging::init(&cli.log_level)?;
+    // 3. Initialize logging (hold guard to flush on drop)
+    let _log_guard = logging::init(&cli.log_level)?;
     tracing::info!("Starting rustain...");
 
     // 4. Install panic hook
     signals::install_panic_hook();
 
-    // 5. Construct provider adapter
+    // 5. Apply model override from env (before provider + event loop, so status bar sees it)
+    let mut app_config = app_config;
+    if let Some(model_override) = std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        tracing::info!("Model override from ANTHROPIC_DEFAULT_SONNET_MODEL: {}", model_override);
+        app_config.model = model_override;
+    }
+
+    // 5a. Construct provider adapter
     let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
 
     // 6. Create domain event channel (before security adapter, which needs the sender)
@@ -121,32 +131,55 @@ pub async fn run() -> Result<()> {
 }
 
 /// Build the provider adapter based on configuration and environment.
+///
+/// Auth precedence (CC-compatible): `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`.
+/// - `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer {token}` (gateways/proxies)
+/// - `ANTHROPIC_API_KEY` → `X-Api-Key: {key}` (direct Anthropic)
 fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn ProviderPort>> {
     #[cfg(feature = "anthropic")]
     {
-        match std::env::var("ANTHROPIC_API_KEY") {
-            Ok(api_key) => {
-                let adapter = crate::adapters::anthropic::AnthropicAdapter::new(
-                    api_key,
-                    config.model.clone(),
-                    None,
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to create Anthropic adapter: {}", e))?;
-                tracing::info!("Anthropic provider initialized (model: {})", config.model);
-                Ok(Arc::new(adapter))
-            }
-            Err(_) => {
-                eprintln!(
-                    "Error: ANTHROPIC_API_KEY not set.\n\n\
-                     To use rustain, set your Anthropic API key:\n\
-                     \n\
-                     export ANTHROPIC_API_KEY=sk-ant-...\n\
-                     \n\
-                     Get your API key at: https://console.anthropic.com/"
-                );
-                std::process::exit(3);
-            }
+        use crate::adapters::anthropic::AuthMode;
+
+        // 1. Resolve auth: ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY (CC precedence)
+        let auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|s| !s.is_empty());
+        let api_key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty());
+
+        if auth_token.is_some() && api_key.is_some() {
+            tracing::warn!("Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
         }
+
+        let auth_mode = if let Some(token) = auth_token {
+            tracing::info!("Using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
+            AuthMode::BearerToken(token)
+        } else if let Some(key) = api_key {
+            tracing::info!("Using ANTHROPIC_API_KEY (X-Api-Key auth)");
+            AuthMode::ApiKey(key)
+        } else {
+            anyhow::bail!(
+                "No API key found.\n\n\
+                 Set one of:\n\
+                 \n\
+                 export ANTHROPIC_API_KEY=sk-ant-...       # Direct Anthropic\n\
+                 export ANTHROPIC_AUTH_TOKEN=your-key       # Anthropic-compatible gateway\n\
+                 \n\
+                 Get your API key at: https://console.anthropic.com/"
+            );
+        };
+
+        // 2. Resolve base URL (filter empty to preserve default)
+        let base_url = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|s| !s.is_empty());
+        if let Some(ref url) = base_url {
+            tracing::info!("Custom base URL: {}", url);
+        }
+
+        let adapter = crate::adapters::anthropic::AnthropicAdapter::new(
+            auth_mode,
+            config.model.clone(),
+            base_url,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create Anthropic adapter: {}", e))?;
+        tracing::info!("Anthropic provider initialized (model: {})", config.model);
+        Ok(Arc::new(adapter))
     }
 
     #[cfg(not(feature = "anthropic"))]

@@ -5,6 +5,7 @@
 mod streaming_integration {
     use std::collections::VecDeque;
 
+    use rustain::adapters::anthropic::AuthMode;
     use rustain::domain::events::ChunkAction;
     use rustain::domain::models::{
         ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason,
@@ -331,7 +332,7 @@ data: {\"type\":\"message_stop\"}\n\
         use rustain::domain::ports::ProviderPort;
 
         let adapter =
-            AnthropicAdapter::new("test-key".into(), "claude-sonnet-4-6".into(), None).unwrap();
+            AnthropicAdapter::new(AuthMode::ApiKey("test-key".into()), "claude-sonnet-4-6".into(), None).unwrap();
 
         // Abort with no active task should succeed
         let result = adapter.abort().await;
@@ -356,7 +357,7 @@ data: {\"type\":\"message_stop\"}\n\
             .await;
 
         let adapter = AnthropicAdapter::new(
-            "invalid-key".into(),
+            AuthMode::ApiKey("invalid-key".into()),
             "claude-sonnet-4-6".into(),
             Some(server.url()),
         )
@@ -406,7 +407,7 @@ data: {\"type\":\"message_stop\"}\n\
             .await;
 
         let adapter = AnthropicAdapter::new(
-            "test-key".into(),
+            AuthMode::ApiKey("test-key".into()),
             "claude-sonnet-4-6".into(),
             Some(server.url()),
         )
@@ -457,7 +458,7 @@ data: {\"type\":\"message_stop\"}\n\
             .await;
 
         let adapter = AnthropicAdapter::new(
-            "test-key".into(),
+            AuthMode::ApiKey("test-key".into()),
             "claude-sonnet-4-6".into(),
             Some(server.url()),
         )
@@ -531,7 +532,7 @@ data: {\"type\":\"message_stop\"}\n\
             .await;
 
         let adapter = AnthropicAdapter::new(
-            "test-key".into(),
+            AuthMode::ApiKey("test-key".into()),
             "claude-sonnet-4-6".into(),
             Some(server.url()),
         )
@@ -711,7 +712,7 @@ data: {\"type\":\"message_stop\"}\n\
         use rustain::domain::ports::ProviderPort;
 
         let adapter =
-            AnthropicAdapter::new("test-key".into(), "claude-sonnet-4-6".into(), None).unwrap();
+            AnthropicAdapter::new(AuthMode::ApiKey("test-key".into()), "claude-sonnet-4-6".into(), None).unwrap();
 
         let result = adapter
             .stream_completion(
@@ -754,7 +755,7 @@ data: {\"type\":\"message_stop\"}\n\
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .expect("ANTHROPIC_API_KEY must be set for live test");
 
-        let adapter = AnthropicAdapter::new(api_key, "claude-sonnet-4-6".into(), None).unwrap();
+        let adapter = AnthropicAdapter::new(AuthMode::ApiKey(api_key), "claude-sonnet-4-6".into(), None).unwrap();
 
         let stream = adapter
             .stream_completion(
@@ -796,5 +797,166 @@ data: {\"type\":\"message_stop\"}\n\
 
         assert!(has_text, "Expected at least one Text chunk from live API");
         assert!(has_complete, "Expected TurnComplete(EndTurn) from live API");
+    }
+
+    // ─── Story 2.0: Provider config tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_api_key_auth_sends_x_api_key_header() {
+        use rustain::adapters::anthropic::AnthropicAdapter;
+        use rustain::domain::ports::ProviderPort;
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "test-api-key-123")
+            .match_header("anthropic-version", "2023-06-01")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"test\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            .create_async()
+            .await;
+
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey("test-api-key-123".into()),
+            "claude-sonnet-4-6".into(),
+            Some(server.url()),
+        )
+        .unwrap();
+
+        let result = adapter
+            .stream_completion(
+                vec![Message {
+                    role: MessageRole::User,
+                    content: "hi".into(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                }],
+                CompletionOptions {
+                    model: "claude-sonnet-4-6".into(),
+                    max_tokens: 100,
+                    system_prompt: String::new(),
+                    temperature: None,
+                    tools: vec![],
+                },
+            )
+            .await;
+
+        assert!(result.is_ok(), "Request should succeed with ApiKey auth");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_bearer_token_auth_sends_authorization_header() {
+        use rustain::adapters::anthropic::AnthropicAdapter;
+        use rustain::domain::ports::ProviderPort;
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_header("authorization", "Bearer my-bearer-token-xyz")
+            .match_header("anthropic-version", "2023-06-01")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"test\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+            .create_async()
+            .await;
+
+        let adapter = AnthropicAdapter::new(
+            AuthMode::BearerToken("my-bearer-token-xyz".into()),
+            "glm-4.7".into(),
+            Some(server.url()),
+        )
+        .unwrap();
+
+        let result = adapter
+            .stream_completion(
+                vec![Message {
+                    role: MessageRole::User,
+                    content: "hi".into(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                }],
+                CompletionOptions {
+                    model: "glm-4.7".into(),
+                    max_tokens: 100,
+                    system_prompt: String::new(),
+                    temperature: None,
+                    tools: vec![],
+                },
+            )
+            .await;
+
+        assert!(result.is_ok(), "Request should succeed with BearerToken auth");
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn test_custom_base_url_passed_through() {
+        use rustain::adapters::anthropic::AnthropicAdapter;
+
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey("test-key".into()),
+            "claude-sonnet-4-6".into(),
+            Some("https://api.z.ai/api/anthropic".into()),
+        )
+        .unwrap();
+
+        let debug = format!("{:?}", adapter);
+        assert!(
+            debug.contains("https://api.z.ai/api/anthropic"),
+            "Custom base URL should appear in debug output"
+        );
+    }
+
+    #[test]
+    fn test_model_override_reflected_in_adapter() {
+        use rustain::adapters::anthropic::AnthropicAdapter;
+
+        let adapter = AnthropicAdapter::new(
+            AuthMode::BearerToken("token".into()),
+            "glm-4.7".into(),
+            None,
+        )
+        .unwrap();
+
+        let debug = format!("{:?}", adapter);
+        assert!(
+            debug.contains("glm-4.7"),
+            "Overridden model name should appear in debug output"
+        );
+    }
+
+    #[test]
+    fn test_debug_shows_auth_mode_and_base_url() {
+        use rustain::adapters::anthropic::AnthropicAdapter;
+
+        // ApiKey mode
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey("secret".into()),
+            "claude-sonnet-4-6".into(),
+            None,
+        )
+        .unwrap();
+        let debug = format!("{:?}", adapter);
+        assert!(debug.contains("ApiKey(***)"));
+        assert!(debug.contains("api.anthropic.com"));
+        assert!(!debug.contains("secret"));
+
+        // BearerToken mode with custom URL
+        let adapter = AnthropicAdapter::new(
+            AuthMode::BearerToken("secret".into()),
+            "glm-4.7".into(),
+            Some("https://api.z.ai/api/anthropic".into()),
+        )
+        .unwrap();
+        let debug = format!("{:?}", adapter);
+        assert!(debug.contains("BearerToken(***)"));
+        assert!(debug.contains("api.z.ai"));
+        assert!(!debug.contains("secret"));
     }
 }

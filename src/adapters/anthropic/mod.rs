@@ -21,12 +21,23 @@ use self::sse::SseLineBuffer;
 use self::stream::StreamTransformer;
 use self::types::AnthropicRequest;
 
+/// Authentication mode for Anthropic-compatible APIs.
+///
+/// Direct Anthropic uses `X-Api-Key` header; gateways/proxies (e.g., Z.AI) use `Authorization: Bearer`.
+#[derive(Clone)]
+pub enum AuthMode {
+    /// Standard Anthropic auth: sends `X-Api-Key: {key}` header.
+    ApiKey(String),
+    /// Gateway/proxy auth: sends `Authorization: Bearer {token}` header.
+    BearerToken(String),
+}
+
 /// Anthropic API adapter. Implements `ProviderPort` for streaming completions.
 ///
-/// `Debug` is manually implemented to mask `api_key` (AC5 — prevent accidental key leakage).
+/// `Debug` is manually implemented to mask credentials (prevent accidental key leakage).
 pub struct AnthropicAdapter {
     client: reqwest::Client,
-    api_key: String,
+    auth_mode: AuthMode,
     model: String,
     base_url: String,
     #[allow(dead_code)] // Used by abort() method
@@ -36,14 +47,23 @@ pub struct AnthropicAdapter {
 impl AnthropicAdapter {
     /// Create a new AnthropicAdapter.
     ///
-    /// Returns `ProviderError::Auth` if `api_key` is empty.
+    /// Returns `ProviderError::Auth` if the credential in `auth_mode` is empty or whitespace-only.
     pub fn new(
-        api_key: String,
+        auth_mode: AuthMode,
         model: String,
         base_url: Option<String>,
     ) -> Result<Self, ProviderError> {
-        if api_key.is_empty() {
+        let credential = match &auth_mode {
+            AuthMode::ApiKey(key) => key,
+            AuthMode::BearerToken(token) => token,
+        };
+        if credential.trim().is_empty() {
             return Err(ProviderError::AuthenticationFailed);
+        }
+        if credential.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            return Err(ProviderError::Other(
+                "Credential contains control characters (newlines, tabs, etc.) — check your env var or config".to_string(),
+            ));
         }
 
         let client = reqwest::Client::builder()
@@ -52,9 +72,12 @@ impl AnthropicAdapter {
 
         Ok(Self {
             client,
-            api_key,
+            auth_mode,
             model,
-            base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+            base_url: base_url
+                .unwrap_or_else(|| "https://api.anthropic.com".to_string())
+                .trim_end_matches('/')
+                .to_string(),
             abort_handle: Arc::new(Mutex::new(None)),
         })
     }
@@ -62,8 +85,12 @@ impl AnthropicAdapter {
 
 impl fmt::Debug for AnthropicAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let auth_display = match &self.auth_mode {
+            AuthMode::ApiKey(_) => "ApiKey(***)",
+            AuthMode::BearerToken(_) => "BearerToken(***)",
+        };
         f.debug_struct("AnthropicAdapter")
-            .field("api_key", &"***")
+            .field("auth_mode", &auth_display)
             .field("model", &self.model)
             .field("base_url", &self.base_url)
             .finish()
@@ -87,16 +114,43 @@ impl ProviderPort for AnthropicAdapter {
 
         let url = format!("{}/v1/messages", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
+        let auth_header_name = match &self.auth_mode {
+            AuthMode::ApiKey(_) => "x-api-key",
+            AuthMode::BearerToken(_) => "authorization",
+        };
+        tracing::debug!(
+            target_url = %url,
+            auth_type = auth_header_name,
+            model = %options.model,
+            message_count = messages.len(),
+            "Sending completion request"
+        );
+        tracing::trace!(
+            request_body = %serde_json::to_string(&request_body).unwrap_or_default(),
+            "Full request body"
+        );
+
+        let request = match &self.auth_mode {
+            AuthMode::ApiKey(key) => self.client.post(&url).header("x-api-key", key),
+            AuthMode::BearerToken(token) => self
+                .client
+                .post(&url)
+                .header("authorization", format!("Bearer {}", token)),
+        };
+
+        let response = request
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&request_body)
             .send()
             .await
             .map_err(|e| ProviderError::ConnectionFailed(e.to_string()))?;
+
+        tracing::debug!(
+            status = %response.status(),
+            "Response received from {}",
+            self.base_url
+        );
 
         let status = response.status();
         if !status.is_success() {
@@ -200,7 +254,7 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_debug_masks_api_key() {
         let adapter = AnthropicAdapter::new(
-            "sk-ant-test-key".to_string(),
+            AuthMode::ApiKey("sk-ant-test-key".to_string()),
             "claude-sonnet-4-6".to_string(),
             None,
         )
@@ -209,12 +263,46 @@ mod tests {
         let debug_output = format!("{:?}", adapter);
         assert!(!debug_output.contains("sk-ant-test-key"));
         assert!(debug_output.contains("***"));
+        assert!(debug_output.contains("ApiKey"));
         assert!(debug_output.contains("claude-sonnet-4-6"));
     }
 
     #[test]
+    fn test_anthropic_adapter_debug_masks_bearer_token() {
+        let adapter = AnthropicAdapter::new(
+            AuthMode::BearerToken("my-secret-token".to_string()),
+            "glm-4.7".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let debug_output = format!("{:?}", adapter);
+        assert!(!debug_output.contains("my-secret-token"));
+        assert!(debug_output.contains("***"));
+        assert!(debug_output.contains("BearerToken"));
+    }
+
+    #[test]
     fn test_anthropic_adapter_missing_api_key() {
-        let result = AnthropicAdapter::new(String::new(), "claude-sonnet-4-6".to_string(), None);
+        let result = AnthropicAdapter::new(
+            AuthMode::ApiKey(String::new()),
+            "claude-sonnet-4-6".to_string(),
+            None,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ProviderError::AuthenticationFailed => {}
+            other => panic!("Expected AuthenticationFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_adapter_missing_bearer_token() {
+        let result = AnthropicAdapter::new(
+            AuthMode::BearerToken(String::new()),
+            "claude-sonnet-4-6".to_string(),
+            None,
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             ProviderError::AuthenticationFailed => {}
@@ -225,7 +313,7 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_provider_id() {
         let adapter = AnthropicAdapter::new(
-            "test-key".to_string(),
+            AuthMode::ApiKey("test-key".to_string()),
             "claude-sonnet-4-6".to_string(),
             None,
         )
@@ -236,7 +324,7 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_custom_base_url() {
         let adapter = AnthropicAdapter::new(
-            "test-key".to_string(),
+            AuthMode::ApiKey("test-key".to_string()),
             "claude-sonnet-4-6".to_string(),
             Some("http://localhost:8080".to_string()),
         )
@@ -248,15 +336,31 @@ mod tests {
     #[test]
     fn test_api_key_never_in_serialized_output() {
         let key = "sk-ant-secret-key-12345";
-        let adapter =
-            AnthropicAdapter::new(key.to_string(), "claude-sonnet-4-6".to_string(), None).unwrap();
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey(key.to_string()),
+            "claude-sonnet-4-6".to_string(),
+            None,
+        )
+        .unwrap();
 
-        // Debug output must not contain the key
         let debug = format!("{:?}", adapter);
         assert!(!debug.contains(key), "API key leaked in Debug output");
 
-        // Display/toString must not leak key either (Debug is the only impl)
         let debug2 = format!("{:?}", &adapter as &dyn std::fmt::Debug);
         assert!(!debug2.contains(key), "API key leaked in dyn Debug output");
+    }
+
+    #[test]
+    fn test_bearer_token_never_in_serialized_output() {
+        let token = "super-secret-bearer-token-xyz";
+        let adapter = AnthropicAdapter::new(
+            AuthMode::BearerToken(token.to_string()),
+            "glm-4.7".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let debug = format!("{:?}", adapter);
+        assert!(!debug.contains(token), "Bearer token leaked in Debug output");
     }
 }
