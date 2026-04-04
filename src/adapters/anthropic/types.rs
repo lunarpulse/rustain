@@ -100,9 +100,16 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
                 }
 
                 // Add text content (skip empty to avoid API rejection)
-                if !msg.content.is_empty() {
+                // Prepend context_prefix if present (used for session expiry rebuild)
+                let text_content = match &msg.context_prefix {
+                    Some(prefix) if !prefix.is_empty() => {
+                        format!("{}\n\n{}", prefix, msg.content)
+                    }
+                    _ => msg.content.clone(),
+                };
+                if !text_content.is_empty() {
                     content.push(AnthropicContent::Text {
-                        text: msg.content.clone(),
+                        text: text_content,
                     });
                 }
 

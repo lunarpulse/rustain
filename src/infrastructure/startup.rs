@@ -112,32 +112,79 @@ pub async fn run() -> Result<()> {
         ));
     }
 
-    let restored_conversation = match storage.list_conversations().await {
-        Ok(summaries) if !summaries.is_empty() => {
-            let most_recent = &summaries[0];
-            match storage.load_conversation(&most_recent.id).await {
-                Ok(Some(conv)) => {
-                    tracing::info!(
-                        "Restored session: {} ({} messages)",
-                        conv.title.as_str(),
-                        conv.messages.len()
-                    );
-                    Some(conv)
-                }
-                Ok(None) => {
-                    tracing::warn!("Session file listed but not loadable");
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load last session: {}", e);
-                    None
-                }
+    // Session restoration: --new skips restore, --session <id> loads specific session
+    // recovery_prompt: Some((title, token_count)) if crash detected
+    let (restored_conversation, recovery_prompt) = if cli.new {
+        tracing::info!("Starting new session (--new flag)");
+        (None, None)
+    } else if let Some(ref session_id) = cli.session {
+        // Validate --session <id> exists BEFORE terminal setup
+        match storage.load_conversation_with_exit(session_id).await {
+            Ok(Some((conv, _clean_exit))) => {
+                tracing::info!(
+                    "Restored specific session: {} ({} messages)",
+                    conv.title.as_str(),
+                    conv.messages.len()
+                );
+                // Don't show recovery prompt for explicit --session restore
+                (Some(conv), None)
+            }
+            Ok(None) => {
+                eprintln!("Error: session '{}' not found", session_id);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: failed to load session '{}': {}", session_id, e);
+                std::process::exit(1);
             }
         }
-        _ => None,
+    } else {
+        // Default: load most recent session with crash detection
+        match storage.list_conversations().await {
+            Ok(summaries) if !summaries.is_empty() => {
+                let most_recent = &summaries[0];
+                match storage.load_conversation_with_exit(&most_recent.id).await {
+                    Ok(Some((conv, clean_exit))) => {
+                        tracing::info!(
+                            "Restored session: {} ({} messages, clean_exit={})",
+                            conv.title.as_str(),
+                            conv.messages.len(),
+                            clean_exit,
+                        );
+                        let recovery = if !clean_exit && !conv.messages.is_empty() {
+                            // Crash detected: prepare recovery prompt info
+                            let title = if conv.title.is_empty() {
+                                "Untitled".to_string()
+                            } else {
+                                conv.title.clone()
+                            };
+                            let token_count = conv
+                                .messages
+                                .last()
+                                .and_then(|m| m.token_count)
+                                .unwrap_or(0);
+                            Some((title, token_count))
+                        } else {
+                            None
+                        };
+                        (Some(conv), recovery)
+                    }
+                    Ok(None) => {
+                        tracing::warn!("Session file listed but not loadable");
+                        (None, None)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load last session: {}", e);
+                        (None, None)
+                    }
+                }
+            }
+            _ => (None, None),
+        }
     };
 
-    let storage: Arc<dyn StoragePort> = Arc::new(storage);
+    let storage = Arc::new(storage);
+    let storage_port: Arc<dyn StoragePort> = storage.clone();
 
     // Store shutdown sender for signal handlers
     signals::set_shutdown_sender(domain_tx.clone());
@@ -156,9 +203,11 @@ pub async fn run() -> Result<()> {
         security,
         tools,
         persona,
+        storage_port,
         storage,
         workspace_path,
         restored_conversation,
+        recovery_prompt,
     )
     .await;
 

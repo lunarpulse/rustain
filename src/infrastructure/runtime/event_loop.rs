@@ -12,12 +12,17 @@ use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
+
+/// Timeout for background tasks (title generation, session save).
+/// Separate from shutdown persist timeout (2s) which is more critical.
+const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, StatusState, StreamChunk,
-    StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
+    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, SessionManager, SessionState,
+    StatusState, StreamChunk, StreamingState, UserMessage, apply_chunk, generate_conversation_id,
+    next_delay,
 };
 use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::message_builder;
@@ -25,6 +30,7 @@ use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::turn;
 
 /// Run the 4-branch tokio::select! event loop.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     terminal: &mut Tui,
     domain_events_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
@@ -35,8 +41,10 @@ pub async fn run(
     tools: Arc<dyn ToolSetPort>,
     persona: Arc<dyn PersonaPort>,
     storage: Arc<dyn StoragePort>,
+    fs_storage: Arc<crate::adapters::filesystem::FileSystemStorage>,
     workspace_path: std::path::PathBuf,
     restored_conversation: Option<Conversation>,
+    recovery_prompt: Option<(String, u32)>,
 ) -> Result<()> {
     let size = terminal.size()?;
     let capability = detect_color_capability();
@@ -71,8 +79,34 @@ pub async fn run(
     let mut turn_queue = TurnQueue::default();
     let mut _pending_save: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Initialize SessionManager based on whether we have a restored session
+    let mut session_manager = if conversation.session_id.is_some() {
+        SessionManager::new(SessionState::Active {
+            id: conversation
+                .session_id
+                .clone()
+                .unwrap_or_default(),
+        })
+    } else {
+        SessionManager::new(SessionState::Empty)
+    };
+
+    // Mark session as in-flight (clean_exit = false) for crash detection
+    if !conversation.messages.is_empty() {
+        let fs_ref = fs_storage.clone();
+        let conv_clone = conversation.clone();
+        if let Err(e) = fs_ref.save_conversation_with_exit(&conv_clone, false).await {
+            tracing::warn!("Failed to mark session in-flight: {}", e);
+        }
+    }
+
     // Track active turn task for cancellation
     let mut _active_turn: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Send recovery prompt if crash detected (before first render)
+    if let Some((title, token_count)) = recovery_prompt {
+        let _ = domain_tx.send(AppEvent::RecoveryPrompt { title, token_count });
+    }
 
     // Render first frame immediately
     match render(
@@ -99,6 +133,67 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         if let Some(domain_event) = convert_crossterm_event(&event) {
+                            // Intercept input when recovery prompt is active
+                            if state.active_feedback_id.as_deref() == Some("recovery") {
+                                use crate::domain::events::DomainInputEvent;
+                                match &domain_event {
+                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Enter)
+                                    | DomainInputEvent::KeyPress('y') => {
+                                        // Continue: dismiss recovery block, keep conversation
+                                        state.feedback_blocks.remove("recovery");
+                                        state.active_feedback_id = None;
+                                        state.focus = FocusState::Input;
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlC)
+                                    | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
+                                        // Always allow quit escape hatch
+                                        state.feedback_blocks.remove("recovery");
+                                        state.active_feedback_id = None;
+                                        state.should_quit = true;
+                                        continue;
+                                    }
+                                    DomainInputEvent::KeyPress('n') => {
+                                        // New session: dismiss block, reset conversation
+                                        state.feedback_blocks.remove("recovery");
+                                        state.active_feedback_id = None;
+                                        conversation.messages.clear();
+                                        conversation.title = String::new();
+                                        conversation.id = generate_conversation_id();
+                                        conversation.session_id = Some(generate_conversation_id());
+                                        conversation.created_at = now_unix();
+                                        conversation.updated_at = now_unix();
+                                        conversation.last_response_at = None;
+                                        conversation.usage = None;
+                                        state.focus = FocusState::Input;
+                                        state.needs_redraw = true;
+                                        // Persist the fresh conversation with clean_exit = true
+                                        // (avoids phantom crash detection on next startup)
+                                        let fs_ref = fs_storage.clone();
+                                        let conv_clone = conversation.clone();
+                                        if let Some(prev) = _pending_save.take() {
+                                            let _ = prev.await;
+                                        }
+                                        _pending_save = Some(tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                BACKGROUND_TASK_TIMEOUT,
+                                                fs_ref.save_conversation_with_exit(&conv_clone, true),
+                                            ).await {
+                                                Ok(Ok(())) => {}
+                                                Ok(Err(e)) => tracing::error!("Failed to persist new session: {}", e),
+                                                Err(_) => tracing::warn!("Background task 'new_session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs()),
+                                            }
+                                        }));
+                                        continue;
+                                    }
+                                    _ => {
+                                        // Block all other input while recovery prompt is active
+                                        continue;
+                                    }
+                                }
+                            }
+
                             let action = handle_input(&mut state, &domain_event);
 
                             match action {
@@ -131,6 +226,7 @@ pub async fn run(
                                             &tools,
                                             &persona,
                                             &workspace_path,
+                                            &mut session_manager,
                                         );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
@@ -327,8 +423,17 @@ pub async fn run(
                                     let storage_ref = storage.clone();
                                     let conv_clone = conversation.clone();
                                     _pending_save = Some(tokio::spawn(async move {
-                                        if let Err(e) = storage_ref.save_conversation(&conv_clone).await {
-                                            tracing::error!("Failed to persist session: {}", e);
+                                        match tokio::time::timeout(
+                                            BACKGROUND_TASK_TIMEOUT,
+                                            storage_ref.save_conversation(&conv_clone),
+                                        ).await {
+                                            Ok(Ok(())) => {}
+                                            Ok(Err(e)) => {
+                                                tracing::error!("Failed to persist session: {}", e);
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!("Background task 'session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
+                                            }
                                         }
                                     }));
                                 }
@@ -343,12 +448,18 @@ pub async fn run(
                                     let user_msg = conversation.messages[0].content.clone();
                                     let assistant_msg = truncate(&conversation.messages[1].content, 500);
                                     tokio::spawn(async move {
-                                        match generate_title(&*provider_ref, &model, &user_msg, &assistant_msg).await {
-                                            Ok(title) => {
+                                        match tokio::time::timeout(
+                                            BACKGROUND_TASK_TIMEOUT,
+                                            generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
+                                        ).await {
+                                            Ok(Ok(title)) => {
                                                 let _ = event_tx_ref.send(AppEvent::TitleGenerated { title });
                                             }
-                                            Err(e) => {
+                                            Ok(Err(e)) => {
                                                 tracing::warn!("Title generation failed: {}", e);
+                                            }
+                                            Err(_) => {
+                                                tracing::warn!("Background task 'title_generation' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
                                             }
                                         }
                                     });
@@ -369,6 +480,7 @@ pub async fn run(
                                         &tools,
                                         &persona,
                                         &workspace_path,
+                                        &mut session_manager,
                                     );
                                     // Force immediate render for typing indicator
                                     match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
@@ -391,16 +503,34 @@ pub async fn run(
                         }
                     }
                     AppEvent::SystemNotice(level, msg) => {
-                        // Reset streaming state
-                        streaming.is_streaming = false;
-                        streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                        // Preserve partial response text (NFR21) — do NOT clear current_text_buffer
-                        // Only clear blocks tracking and tool calls
-                        streaming.current_blocks.clear();
-                        streaming.active_tool_calls.clear();
-                        // Abort the active turn task if running
-                        if let Some(handle) = _active_turn.take() {
-                            handle.abort();
+                        // Detect session expiry from provider authentication errors.
+                        // Use tightened matches to avoid false positives (e.g., "401" in line numbers).
+                        if matches!(level, crate::domain::models::NoticeLevel::Error)
+                            && (msg.contains("Authentication failed")
+                                || msg.contains("HTTP 401")
+                                || msg.contains("status: 401")
+                                || msg.to_lowercase().contains("session expired"))
+                        {
+                            session_manager.mark_invalidated(
+                                conversation.session_id.clone(),
+                            );
+                            tracing::info!("Session invalidated due to auth error, will rebuild on next message");
+                        }
+
+                        // Only reset streaming state for Error/Warning notices.
+                        // Info notices are informational and must NOT abort active streaming turns
+                        // (e.g., session rebuild sends Info after spawning a new turn).
+                        if !matches!(level, crate::domain::models::NoticeLevel::Info) {
+                            streaming.is_streaming = false;
+                            streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                            // Preserve partial response text (NFR21) — do NOT clear current_text_buffer
+                            // Only clear blocks tracking and tool calls
+                            streaming.current_blocks.clear();
+                            streaming.active_tool_calls.clear();
+                            // Abort the active turn task if running
+                            if let Some(handle) = _active_turn.take() {
+                                handle.abort();
+                            }
                         }
 
                         // Create FeedbackBlock for errors and warnings; flash for info
@@ -492,6 +622,7 @@ pub async fn run(
                             &tools,
                             &persona,
                             &workspace_path,
+                            &mut session_manager,
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                             Ok(()) => state.needs_redraw = false,
@@ -508,8 +639,17 @@ pub async fn run(
                         let storage_ref = storage.clone();
                         let conv_clone = conversation.clone();
                         _pending_save = Some(tokio::spawn(async move {
-                            if let Err(e) = storage_ref.save_conversation(&conv_clone).await {
-                                tracing::error!("Failed to persist title: {}", e);
+                            match tokio::time::timeout(
+                                BACKGROUND_TASK_TIMEOUT,
+                                storage_ref.save_conversation(&conv_clone),
+                            ).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => {
+                                    tracing::error!("Failed to persist title: {}", e);
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Background task 'title_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
+                                }
                             }
                         }));
                     }
@@ -530,6 +670,25 @@ pub async fn run(
                         state.focus = FocusState::Overlay(OverlayType::Confirmation(
                             ConfirmationType::Question,
                         ));
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::RecoveryPrompt { title, token_count } => {
+                        let msg = format!(
+                            "\u{2139} Recovered: '{}' (partial response, {} tokens). [Enter/y] continue [n] new",
+                            title, token_count,
+                        );
+                        let fb = FeedbackBlock {
+                            id: "recovery".to_string(),
+                            level: FeedbackLevel::Info,
+                            message: msg,
+                            actions: vec![
+                                FeedbackAction::Custom("[Enter] continue".to_string()),
+                                FeedbackAction::StartFresh,
+                            ],
+                        };
+                        state.feedback_blocks.insert("recovery".to_string(), fb);
+                        state.active_feedback_id = Some("recovery".to_string());
+                        state.focus = FocusState::Chat;
                         state.needs_redraw = true;
                     }
                     _ => {
@@ -580,17 +739,17 @@ pub async fn run(
         let _ = prev.await;
     }
 
-    // Persist conversation before shutdown (AC4, AC5)
+    // Persist conversation before shutdown with clean_exit = true (graceful shutdown)
     if !conversation.messages.is_empty() {
         conversation.updated_at = now_unix();
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            storage.save_conversation(&conversation),
+            fs_storage.save_conversation_with_exit(&conversation, true),
         )
         .await
         {
             Ok(Ok(())) => {
-                tracing::info!("Session persisted on shutdown");
+                tracing::info!("Session persisted on shutdown (clean_exit=true)");
             }
             Ok(Err(e)) => {
                 tracing::error!("Failed to persist session on shutdown: {}", e);
@@ -619,6 +778,7 @@ fn start_turn(
     tools: &Arc<dyn ToolSetPort>,
     persona: &Arc<dyn PersonaPort>,
     workspace_path: &std::path::Path,
+    session_manager: &mut SessionManager,
 ) {
     // Add user ChatMessage to conversation
     conversation.messages.push(ChatMessage {
@@ -632,7 +792,29 @@ fn start_turn(
     });
 
     // Build messages list for provider
-    let messages = message_builder::build_api_messages(conversation);
+    let mut messages = message_builder::build_api_messages(conversation);
+
+    // If session manager indicates history rebuild needed, prepend context
+    if session_manager.needs_history_rebuild() {
+        use crate::domain::services::history_rebuild;
+        let context = history_rebuild::build_history_context(&conversation.messages[..conversation.messages.len().saturating_sub(1)]);
+        // Attach context_prefix to the actual user input message (matching `text`),
+        // not to a synthetic tool-result message that build_api_messages may have appended.
+        if let Some(target_msg) = messages.iter_mut().rev().find(|m| m.role == MessageRole::User && m.content == text) {
+            target_msg.context_prefix = Some(context);
+        } else if let Some(last_msg) = messages.last_mut() {
+            // Fallback: attach to last message if exact match not found
+            last_msg.context_prefix = Some(context);
+        }
+        let new_session_id = generate_conversation_id();
+        conversation.session_id = Some(new_session_id.clone());
+        session_manager.mark_active(new_session_id);
+        let msg_count = conversation.messages.len().saturating_sub(1);
+        let _ = domain_tx.send(AppEvent::SystemNotice(
+            crate::domain::models::NoticeLevel::Info,
+            format!("\u{2139}\u{fe0f} Session restarted with your conversation history ({} messages).", msg_count),
+        ));
+    }
 
     let tool_defs = tools.available_tools();
     let options = CompletionOptions {

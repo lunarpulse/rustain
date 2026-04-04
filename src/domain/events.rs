@@ -41,6 +41,11 @@ pub enum AppEvent {
         question: String,
         response_tx: tokio::sync::oneshot::Sender<String>,
     },
+    /// Crash recovery prompt — display recovery FeedbackBlock on startup.
+    RecoveryPrompt {
+        title: String,
+        token_count: u32,
+    },
 }
 
 /// Event wrapping a tool execution result.

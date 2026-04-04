@@ -38,7 +38,7 @@ pub use permission::{
     ApprovalDecision, FileOperation, PathAccessType, PermissionMode, PermissionRule,
 };
 #[allow(unused_imports)]
-pub use session::{SessionId, SessionState};
+pub use session::{SessionId, SessionManager, SessionState};
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};
 #[allow(unused_imports)]

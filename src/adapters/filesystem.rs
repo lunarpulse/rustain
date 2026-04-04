@@ -42,11 +42,66 @@ impl FileSystemStorage {
 
     /// Sanitize a conversation ID to prevent path traversal.
     fn sanitize_id(id: &str) -> &str {
-        if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             id
         } else {
             "invalid"
         }
+    }
+
+    /// Save a conversation with the `clean_exit` flag set (used for graceful shutdown).
+    pub async fn save_conversation_with_exit(
+        &self,
+        conv: &Conversation,
+        clean_exit: bool,
+    ) -> Result<(), StorageError> {
+        self.ensure_dir().await?;
+
+        let persisted = PersistedConversation::from_conversation_with_exit(conv, clean_exit);
+        let json = serde_json::to_string_pretty(&persisted)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+        let sanitized = Self::sanitize_id(&conv.id);
+        let path = self.session_path(&conv.id);
+        let tmp_path = self.sessions_dir.join(format!("{}.meta.json.tmp", sanitized));
+        tokio::fs::write(&tmp_path, json.as_bytes())
+            .await
+            .map_err(|e| StorageError::IoError(format!("Failed to write session file: {}", e)))?;
+        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StorageError::IoError(format!("Failed to rename session file: {}", e)));
+        }
+
+        Ok(())
+    }
+
+    /// Load a conversation and return its `clean_exit` flag for crash detection.
+    pub async fn load_conversation_with_exit(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Conversation, bool)>, StorageError> {
+        let path = self.session_path(id);
+
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read session file: {}",
+                    e
+                )));
+            }
+        };
+
+        let persisted: PersistedConversation = serde_json::from_str(&content)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+        let clean_exit = persisted.clean_exit;
+        Ok(Some((persisted.to_conversation(), clean_exit)))
     }
 }
 
@@ -62,7 +117,8 @@ impl StoragePort for FileSystemStorage {
         let path = self.session_path(&conv.id);
 
         // Write atomically: write to temp file, then rename
-        let tmp_path = self.sessions_dir.join(format!("{}.meta.json.tmp", &conv.id));
+        let sanitized = Self::sanitize_id(&conv.id);
+        let tmp_path = self.sessions_dir.join(format!("{}.meta.json.tmp", sanitized));
         tokio::fs::write(&tmp_path, json.as_bytes())
             .await
             .map_err(|e| StorageError::IoError(format!("Failed to write session file: {}", e)))?;
@@ -162,10 +218,18 @@ struct PersistedConversation {
     pub last_response_at: Option<i64>,
     #[serde(default)]
     pub usage: Option<UsageInfo>,
+    /// Crash detection flag: `false` while session is in-flight, `true` after graceful shutdown.
+    /// Defaults to `false` for forward compat (old files trigger recovery prompt — safe default).
+    #[serde(default)]
+    pub clean_exit: bool,
 }
 
 impl PersistedConversation {
     fn from_conversation(conv: &Conversation) -> Self {
+        Self::from_conversation_with_exit(conv, false)
+    }
+
+    fn from_conversation_with_exit(conv: &Conversation, clean_exit: bool) -> Self {
         Self {
             id: conv.id.clone(),
             title: conv.title.clone(),
@@ -176,6 +240,7 @@ impl PersistedConversation {
             updated_at: Some(conv.updated_at),
             last_response_at: conv.last_response_at,
             usage: conv.usage.clone(),
+            clean_exit,
         }
     }
 
@@ -382,5 +447,70 @@ mod tests {
 
         let summaries = storage.list_conversations().await.unwrap();
         assert!(summaries.is_empty());
+    }
+
+    // 7.3: clean_exit flag defaults to false and is true after graceful save
+    #[tokio::test]
+    async fn test_clean_exit_false_by_default() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv = make_test_conversation();
+
+        // Normal save (via StoragePort) sets clean_exit = false
+        storage.save_conversation(&conv).await.unwrap();
+
+        let (_, clean_exit) = storage
+            .load_conversation_with_exit("test-conv-123")
+            .await
+            .unwrap()
+            .expect("should load");
+        assert!(!clean_exit, "default save should have clean_exit = false");
+    }
+
+    #[tokio::test]
+    async fn test_clean_exit_true_after_graceful_shutdown() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv = make_test_conversation();
+
+        // Graceful shutdown save sets clean_exit = true
+        storage
+            .save_conversation_with_exit(&conv, true)
+            .await
+            .unwrap();
+
+        let (_, clean_exit) = storage
+            .load_conversation_with_exit("test-conv-123")
+            .await
+            .unwrap()
+            .expect("should load");
+        assert!(clean_exit, "graceful save should have clean_exit = true");
+    }
+
+    #[tokio::test]
+    async fn test_clean_exit_backward_compat() {
+        // Old session files without clean_exit field should default to false
+        let tmp = TempDir::new().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let json = r#"{
+            "id": "old-session",
+            "title": "Old Session",
+            "messages": [],
+            "createdAt": 1700000000
+        }"#;
+        std::fs::write(sessions_dir.join("old-session.meta.json"), json).unwrap();
+
+        let storage = FileSystemStorage::new(sessions_dir);
+        let (_, clean_exit) = storage
+            .load_conversation_with_exit("old-session")
+            .await
+            .unwrap()
+            .expect("should load old session");
+        assert!(
+            !clean_exit,
+            "old sessions without clean_exit should default to false (trigger recovery)"
+        );
     }
 }
