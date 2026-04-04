@@ -27,6 +27,16 @@ pub fn log_file_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("rustain.log"))
 }
 
+/// Resolve the workspace directory (current working directory).
+pub fn workspace_dir() -> Result<PathBuf> {
+    std::env::current_dir().context("Could not determine current working directory")
+}
+
+/// Resolve the `{workspace}/.claude/sessions/` directory for session persistence.
+pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(".claude").join("sessions")
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

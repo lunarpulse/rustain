@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod filesystem;
 pub mod noop;
 pub mod persona_adapter;
 pub mod project_context_loader;

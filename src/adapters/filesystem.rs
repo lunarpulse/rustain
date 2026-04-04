@@ -1,0 +1,386 @@
+//! FileSystemStorage adapter — persists conversations to `{workspace}/.claude/sessions/`.
+//!
+//! Implements `StoragePort` using async file I/O via `tokio::fs`.
+//! Session files use CC-compatible camelCase JSON format (`.meta.json`).
+
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+
+use crate::domain::errors::StorageError;
+use crate::domain::models::{Conversation, ConversationSummary};
+use crate::domain::ports::StoragePort;
+
+/// Filesystem-backed storage for conversations.
+///
+/// Stores each conversation as `{sessions_dir}/{id}.meta.json`.
+#[derive(Debug)]
+pub struct FileSystemStorage {
+    sessions_dir: PathBuf,
+}
+
+impl FileSystemStorage {
+    /// Create a new `FileSystemStorage` targeting the given sessions directory.
+    pub fn new(sessions_dir: PathBuf) -> Self {
+        Self { sessions_dir }
+    }
+
+    /// Ensure the sessions directory exists.
+    pub async fn ensure_dir(&self) -> Result<(), StorageError> {
+        tokio::fs::create_dir_all(&self.sessions_dir)
+            .await
+            .map_err(|e| StorageError::IoError(format!("Failed to create sessions dir: {}", e)))
+    }
+
+    /// Build the file path for a given conversation ID.
+    ///
+    /// Validates that the ID contains only safe characters (alphanumeric, `-`, `_`)
+    /// to prevent path traversal attacks from crafted session files.
+    fn session_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir.join(format!("{}.meta.json", Self::sanitize_id(id)))
+    }
+
+    /// Sanitize a conversation ID to prevent path traversal.
+    fn sanitize_id(id: &str) -> &str {
+        if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            id
+        } else {
+            "invalid"
+        }
+    }
+}
+
+#[async_trait]
+impl StoragePort for FileSystemStorage {
+    async fn save_conversation(&self, conv: &Conversation) -> Result<(), StorageError> {
+        self.ensure_dir().await?;
+
+        let persisted = PersistedConversation::from_conversation(conv);
+        let json = serde_json::to_string_pretty(&persisted)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+        let path = self.session_path(&conv.id);
+
+        // Write atomically: write to temp file, then rename
+        let tmp_path = self.sessions_dir.join(format!("{}.meta.json.tmp", &conv.id));
+        tokio::fs::write(&tmp_path, json.as_bytes())
+            .await
+            .map_err(|e| StorageError::IoError(format!("Failed to write session file: {}", e)))?;
+        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+            // Clean up temp file on rename failure
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StorageError::IoError(format!("Failed to rename session file: {}", e)));
+        }
+
+        Ok(())
+    }
+
+    async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError> {
+        let path = self.session_path(id);
+
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::IoError(format!("Failed to read session file: {}", e))),
+        };
+
+        let persisted: PersistedConversation = serde_json::from_str(&content)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+
+        Ok(Some(persisted.to_conversation()))
+    }
+
+    async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError> {
+        let mut entries = match tokio::fs::read_dir(&self.sessions_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(StorageError::IoError(format!("Failed to read sessions dir: {}", e))),
+        };
+
+        let mut summaries = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| StorageError::IoError(e.to_string()))?
+        {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".meta.json") && !n.ends_with(".meta.json.tmp"))
+            {
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(content) => {
+                        if let Ok(persisted) =
+                            serde_json::from_str::<PersistedConversation>(&content)
+                        {
+                            summaries.push(ConversationSummary {
+                                id: persisted.id,
+                                title: persisted.title,
+                                created_at: persisted.created_at,
+                                updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
+                                message_count: persisted.messages.len(),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read session file {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+
+        // Sort by updatedAt desc (most recent first)
+        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(summaries)
+    }
+}
+
+// ── PersistedConversation serde wrapper ────────────────────────────
+
+use serde::{Deserialize, Serialize};
+
+use crate::domain::models::{ChatMessage, ForkSource};
+use crate::domain::models::UsageInfo;
+
+/// CC-compatible on-disk format with camelCase JSON field naming.
+/// All optional fields use `#[serde(default)]` for forward compatibility.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedConversation {
+    pub id: String,
+    pub title: String,
+    pub messages: Vec<ChatMessage>,
+    pub created_at: i64,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub fork_source: Option<ForkSource>,
+    #[serde(default)]
+    pub updated_at: Option<i64>,
+    #[serde(default)]
+    pub last_response_at: Option<i64>,
+    #[serde(default)]
+    pub usage: Option<UsageInfo>,
+}
+
+impl PersistedConversation {
+    fn from_conversation(conv: &Conversation) -> Self {
+        Self {
+            id: conv.id.clone(),
+            title: conv.title.clone(),
+            messages: conv.messages.clone(),
+            created_at: conv.created_at,
+            session_id: conv.session_id.clone(),
+            fork_source: conv.fork_source.clone(),
+            updated_at: Some(conv.updated_at),
+            last_response_at: conv.last_response_at,
+            usage: conv.usage.clone(),
+        }
+    }
+
+    fn to_conversation(self) -> Conversation {
+        Conversation {
+            id: self.id,
+            title: self.title,
+            messages: self.messages,
+            created_at: self.created_at,
+            updated_at: self.updated_at.unwrap_or(self.created_at),
+            last_response_at: self.last_response_at,
+            session_id: self.session_id,
+            usage: self.usage,
+            fork_source: self.fork_source,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{ChatMessage, MessageRole, StopReason};
+    use tempfile::TempDir;
+
+    fn make_test_conversation() -> Conversation {
+        Conversation {
+            id: "test-conv-123".to_string(),
+            title: "Test Conversation".to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "Hello".to_string(),
+                    content_blocks: vec![],
+                    tool_calls: vec![],
+                    created_at: 1700000000,
+                    token_count: None,
+                    stop_reason: None,
+                },
+                ChatMessage {
+                    role: MessageRole::Assistant,
+                    content: "Hi there!".to_string(),
+                    content_blocks: vec![],
+                    tool_calls: vec![],
+                    created_at: 1700000001,
+                    token_count: Some(10),
+                    stop_reason: Some(StopReason::EndTurn),
+                },
+            ],
+            created_at: 1700000000,
+            updated_at: 1700000001,
+            last_response_at: Some(1700000001),
+            session_id: Some("sess-abc".to_string()),
+            usage: Some(UsageInfo {
+                input_tokens: 5,
+                output_tokens: 10,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            }),
+            fork_source: None,
+        }
+    }
+
+    // 6.1: save_conversation creates valid JSON with camelCase keys
+    #[tokio::test]
+    async fn test_save_creates_camel_case_json() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv = make_test_conversation();
+
+        storage.save_conversation(&conv).await.unwrap();
+
+        let path = tmp.path().join("sessions/test-conv-123.meta.json");
+        assert!(path.exists());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Verify camelCase field names
+        assert!(content.contains("\"createdAt\""));
+        assert!(content.contains("\"updatedAt\""));
+        assert!(content.contains("\"lastResponseAt\""));
+        assert!(content.contains("\"sessionId\""));
+        assert!(content.contains("\"contentBlocks\""));
+        assert!(content.contains("\"toolCalls\""));
+        // Verify it's valid JSON
+        let _: serde_json::Value = serde_json::from_str(&content).unwrap();
+    }
+
+    // 6.2: load_conversation reads back saved conversation with all fields
+    #[tokio::test]
+    async fn test_roundtrip_save_load() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv = make_test_conversation();
+
+        storage.save_conversation(&conv).await.unwrap();
+        let loaded = storage
+            .load_conversation("test-conv-123")
+            .await
+            .unwrap()
+            .expect("should load conversation");
+
+        assert_eq!(loaded.id, conv.id);
+        assert_eq!(loaded.title, conv.title);
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.created_at, conv.created_at);
+        assert_eq!(loaded.updated_at, conv.updated_at);
+        assert_eq!(loaded.last_response_at, conv.last_response_at);
+        assert_eq!(loaded.session_id, conv.session_id);
+        assert!(loaded.usage.is_some());
+        assert!(loaded.fork_source.is_none());
+
+        // Verify message content preserved
+        assert_eq!(loaded.messages[0].content, "Hello");
+        assert_eq!(loaded.messages[1].content, "Hi there!");
+        assert_eq!(loaded.messages[1].stop_reason, Some(StopReason::EndTurn));
+    }
+
+    // 6.3: Forward compatibility — file with unknown fields loads without error
+    #[tokio::test]
+    async fn test_forward_compatibility_unknown_fields() {
+        let tmp = TempDir::new().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Write a JSON file with extra unknown fields (simulating a future version)
+        let json = r#"{
+            "id": "future-conv",
+            "title": "Future Session",
+            "messages": [],
+            "createdAt": 1700000000,
+            "updatedAt": 1700000001,
+            "unknownField": "some value",
+            "anotherNewField": { "nested": true },
+            "enabledMcpServers": ["server1"]
+        }"#;
+        std::fs::write(sessions_dir.join("future-conv.meta.json"), json).unwrap();
+
+        let storage = FileSystemStorage::new(sessions_dir);
+        let loaded = storage
+            .load_conversation("future-conv")
+            .await
+            .unwrap()
+            .expect("should load despite unknown fields");
+
+        assert_eq!(loaded.id, "future-conv");
+        assert_eq!(loaded.title, "Future Session");
+        assert_eq!(loaded.updated_at, 1700000001);
+    }
+
+    // 6.4: list_conversations returns sorted summaries
+    #[tokio::test]
+    async fn test_list_conversations_sorted() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        // Save three conversations with different timestamps
+        for (id, ts) in [("c1", 1000), ("c2", 3000), ("c3", 2000)] {
+            let mut conv = make_test_conversation();
+            conv.id = id.to_string();
+            conv.title = format!("Conv {}", id);
+            conv.updated_at = ts;
+            storage.save_conversation(&conv).await.unwrap();
+        }
+
+        let summaries = storage.list_conversations().await.unwrap();
+        assert_eq!(summaries.len(), 3);
+        // Sorted by updatedAt desc
+        assert_eq!(summaries[0].id, "c2");
+        assert_eq!(summaries[1].id, "c3");
+        assert_eq!(summaries[2].id, "c1");
+        assert_eq!(summaries[0].message_count, 2);
+    }
+
+    // 6.5: Missing sessions directory is auto-created
+    #[tokio::test]
+    async fn test_auto_create_sessions_dir() {
+        let tmp = TempDir::new().unwrap();
+        let sessions_dir = tmp.path().join("deeply").join("nested").join("sessions");
+        let storage = FileSystemStorage::new(sessions_dir.clone());
+
+        assert!(!sessions_dir.exists());
+
+        let conv = make_test_conversation();
+        storage.save_conversation(&conv).await.unwrap();
+
+        assert!(sessions_dir.exists());
+        assert!(sessions_dir.join("test-conv-123.meta.json").exists());
+    }
+
+    // Load non-existent conversation returns None
+    #[tokio::test]
+    async fn test_load_nonexistent_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        let result = storage.load_conversation("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    // List on non-existent directory returns empty
+    #[tokio::test]
+    async fn test_list_nonexistent_dir_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("no-such-dir"));
+
+        let summaries = storage.list_conversations().await.unwrap();
+        assert!(summaries.is_empty());
+    }
+}

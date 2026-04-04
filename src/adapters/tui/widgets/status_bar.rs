@@ -19,6 +19,7 @@ pub fn render(
     permission_mode: PermissionMode,
     token_usage: Option<&UsageInfo>,
     has_project_context: bool,
+    session_title: Option<&str>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -32,6 +33,16 @@ pub fn render(
         format!(" {}", model)
     };
     let mut left_spans: Vec<Span> = vec![Span::styled(model_label, Style::default().fg(fg))];
+
+    // Session title (after model, if restored session)
+    if let Some(title) = session_title {
+        let display = if title.is_empty() { "Untitled" } else { title };
+        left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+        left_spans.push(Span::styled(
+            display.to_string(),
+            Style::default().fg(fg),
+        ));
+    }
 
     // Permission mode (second segment)
     let mode_text = match permission_mode {

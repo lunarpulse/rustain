@@ -5,6 +5,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use crate::adapters::cli::commands::Cli;
+use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::project_context_loader::ProjectContextLoader;
 use crate::adapters::security_adapter::SecurityAdapter;
@@ -12,9 +13,9 @@ use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
-use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, ToolSetPort};
+use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::infrastructure::runtime::event_loop;
-use crate::infrastructure::{config, logging, signals};
+use crate::infrastructure::{config, logging, paths, signals};
 
 /// Ordered startup sequence.
 /// 1. Parse CLI args
@@ -100,6 +101,44 @@ pub async fn run() -> Result<()> {
 
     let persona: Arc<dyn PersonaPort> = Arc::new(persona_adapter);
 
+    // 5d. Construct storage adapter and load last session
+    let sessions_dir = paths::sessions_dir(&workspace_path);
+    let storage = FileSystemStorage::new(sessions_dir);
+    if let Err(e) = storage.ensure_dir().await {
+        tracing::warn!("Failed to create sessions directory: {}", e);
+        let _ = domain_tx.send(AppEvent::SystemNotice(
+            NoticeLevel::Warning,
+            format!("Session persistence unavailable: {}", e),
+        ));
+    }
+
+    let restored_conversation = match storage.list_conversations().await {
+        Ok(summaries) if !summaries.is_empty() => {
+            let most_recent = &summaries[0];
+            match storage.load_conversation(&most_recent.id).await {
+                Ok(Some(conv)) => {
+                    tracing::info!(
+                        "Restored session: {} ({} messages)",
+                        conv.title.as_str(),
+                        conv.messages.len()
+                    );
+                    Some(conv)
+                }
+                Ok(None) => {
+                    tracing::warn!("Session file listed but not loadable");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load last session: {}", e);
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let storage: Arc<dyn StoragePort> = Arc::new(storage);
+
     // Store shutdown sender for signal handlers
     signals::set_shutdown_sender(domain_tx.clone());
     signals::install_signal_handlers().await;
@@ -117,7 +156,9 @@ pub async fn run() -> Result<()> {
         security,
         tools,
         persona,
+        storage,
         workspace_path,
+        restored_conversation,
     )
     .await;
 

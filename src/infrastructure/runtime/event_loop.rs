@@ -19,7 +19,7 @@ use crate::domain::models::{
     FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, StatusState, StreamingState,
     UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
-use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, ToolSetPort};
+use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::message_builder;
 use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::turn;
@@ -34,7 +34,9 @@ pub async fn run(
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     persona: Arc<dyn PersonaPort>,
+    storage: Arc<dyn StoragePort>,
     workspace_path: std::path::PathBuf,
+    restored_conversation: Option<Conversation>,
 ) -> Result<()> {
     let size = terminal.size()?;
     let capability = detect_color_capability();
@@ -49,7 +51,7 @@ pub async fn run(
     ));
 
     // Conversation and streaming state for MVP single-tab
-    let mut conversation = Conversation {
+    let mut conversation = restored_conversation.unwrap_or_else(|| Conversation {
         id: generate_conversation_id(),
         title: String::new(),
         messages: Vec::new(),
@@ -59,9 +61,15 @@ pub async fn run(
         session_id: None,
         usage: None,
         fork_source: None,
-    };
+    });
+    // Ensure session_id is set (new conversations don't have one yet)
+    if conversation.session_id.is_none() {
+        conversation.session_id = Some(generate_conversation_id());
+    }
+
     let mut streaming = StreamingState::default();
     let mut turn_queue = TurnQueue::default();
+    let mut _pending_save: Option<tokio::task::JoinHandle<()>> = None;
 
     // Track active turn task for cancellation
     let mut _active_turn: Option<tokio::task::JoinHandle<()>> = None;
@@ -297,7 +305,7 @@ pub async fn run(
                             ChunkAction::NeedsRedraw => {
                                 state.needs_redraw = true;
                             }
-                            ChunkAction::TurnComplete { .. } => {
+                            ChunkAction::TurnComplete { persist, .. } => {
                                 state.status = StatusState::Idle;
                                 // Sync token usage from conversation to TUI state
                                 state.token_usage = conversation.usage.clone();
@@ -306,6 +314,24 @@ pub async fn run(
                                 state.retry_state = None;
                                 state.needs_redraw = true;
                                 _active_turn = None;
+
+                                // Persist conversation on turn complete
+                                if persist {
+                                    let now = now_unix();
+                                    conversation.updated_at = now;
+                                    conversation.last_response_at = Some(now);
+                                    // Await any previous in-flight save before starting a new one
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    let storage_ref = storage.clone();
+                                    let conv_clone = conversation.clone();
+                                    _pending_save = Some(tokio::spawn(async move {
+                                        if let Err(e) = storage_ref.save_conversation(&conv_clone).await {
+                                            tracing::error!("Failed to persist session: {}", e);
+                                        }
+                                    }));
+                                }
 
                                 // Auto-send queued messages
                                 if let Some(queued_msg) = turn_queue.dequeue() {
@@ -510,6 +536,32 @@ pub async fn run(
 
         if state.should_quit {
             break;
+        }
+    }
+
+    // Await any in-flight save before shutdown persist
+    if let Some(prev) = _pending_save.take() {
+        let _ = prev.await;
+    }
+
+    // Persist conversation before shutdown (AC4, AC5)
+    if !conversation.messages.is_empty() {
+        conversation.updated_at = now_unix();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            storage.save_conversation(&conversation),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::info!("Session persisted on shutdown");
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Failed to persist session on shutdown: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!("Session save timed out on shutdown (>2s), proceeding with teardown");
+            }
         }
     }
 
@@ -764,6 +816,11 @@ fn render(
                     frame.render_widget(paragraph, aq_area);
                 }
 
+                let session_title = if !conversation.title.is_empty() {
+                    Some(conversation.title.as_str())
+                } else {
+                    None
+                };
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -777,6 +834,7 @@ fn render(
                     permission_mode,
                     token_usage.as_ref(),
                     has_project_context,
+                    session_title,
                 );
                 input_box::render(
                     frame,

@@ -247,6 +247,7 @@ impl TestHarness {
                         PermissionMode::Normal,
                         None, // token_usage
                         has_project_context,
+                        None, // session_title
                     );
 
                     input_box::render(
