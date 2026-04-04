@@ -16,8 +16,8 @@ use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, StatusState, StreamingState,
-    UserMessage, apply_chunk, generate_conversation_id, next_delay,
+    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, StatusState, StreamChunk,
+    StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::message_builder;
@@ -305,7 +305,7 @@ pub async fn run(
                             ChunkAction::NeedsRedraw => {
                                 state.needs_redraw = true;
                             }
-                            ChunkAction::TurnComplete { persist, .. } => {
+                            ChunkAction::TurnComplete { persist, trigger_title_generation } => {
                                 state.status = StatusState::Idle;
                                 // Sync token usage from conversation to TUI state
                                 state.token_usage = conversation.usage.clone();
@@ -331,6 +331,27 @@ pub async fn run(
                                             tracing::error!("Failed to persist session: {}", e);
                                         }
                                     }));
+                                }
+
+                                // Spawn background title generation (AC1, AC3, AC5)
+                                if trigger_title_generation && conversation.title.is_empty()
+                                    && conversation.messages.len() >= 2
+                                {
+                                    let provider_ref = provider.clone();
+                                    let event_tx_ref = domain_tx.clone();
+                                    let model = config.model.clone();
+                                    let user_msg = conversation.messages[0].content.clone();
+                                    let assistant_msg = truncate(&conversation.messages[1].content, 500);
+                                    tokio::spawn(async move {
+                                        match generate_title(&*provider_ref, &model, &user_msg, &assistant_msg).await {
+                                            Ok(title) => {
+                                                let _ = event_tx_ref.send(AppEvent::TitleGenerated { title });
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("Title generation failed: {}", e);
+                                            }
+                                        }
+                                    });
                                 }
 
                                 // Auto-send queued messages
@@ -476,6 +497,21 @@ pub async fn run(
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                         }
+                    }
+                    AppEvent::TitleGenerated { title } => {
+                        conversation.title = title;
+                        state.needs_redraw = true;
+                        // Persist the updated title
+                        if let Some(prev) = _pending_save.take() {
+                            let _ = prev.await;
+                        }
+                        let storage_ref = storage.clone();
+                        let conv_clone = conversation.clone();
+                        _pending_save = Some(tokio::spawn(async move {
+                            if let Err(e) = storage_ref.save_conversation(&conv_clone).await {
+                                tracing::error!("Failed to persist title: {}", e);
+                            }
+                        }));
                     }
                     AppEvent::AskUserQuestion {
                         tool_use_id,
@@ -876,4 +912,157 @@ fn render(
     }
 
     Ok(())
+}
+
+/// Truncate a string to `max_len` characters, appending "…" if truncated.
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let mut truncated: String = s.chars().take(max_len).collect();
+        truncated.push('…');
+        truncated
+    }
+}
+
+/// Generate a concise title for a conversation using the LLM provider.
+async fn generate_title(
+    provider: &dyn ProviderPort,
+    model: &str,
+    user_msg: &str,
+    assistant_msg: &str,
+) -> Result<String> {
+    use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
+
+    let prompt_content = format!(
+        "User: {}\n\nAssistant: {}",
+        user_msg, assistant_msg
+    );
+    let messages = vec![Message {
+        role: MsgRole::User,
+        content: prompt_content,
+        images: vec![],
+        tool_results: vec![],
+        tool_uses: vec![],
+        context_prefix: None,
+    }];
+    let options = CompletionOptions {
+        model: model.to_string(),
+        max_tokens: 30,
+        system_prompt: "Generate a concise title (under 60 characters) for this conversation. Output only the title, no quotes or explanation.".to_string(),
+        temperature: None,
+        tools: vec![],
+    };
+
+    let stream = provider.stream_completion(messages, options).await?;
+    futures::pin_mut!(stream);
+
+    let mut title = String::new();
+    while let Some(chunk) = stream.next().await {
+        if let StreamChunk::Text { content, .. } = chunk {
+            title.push_str(&content);
+        }
+    }
+
+    // Post-process: trim, strip surrounding quotes, enforce 60-char max
+    let title = post_process_title(&title);
+    if title.is_empty() {
+        anyhow::bail!("Title generation produced empty result");
+    }
+    Ok(title)
+}
+
+/// Post-process a generated title: trim whitespace, strip surrounding quotes,
+/// enforce 60-character maximum with ellipsis truncation.
+pub fn post_process_title(raw: &str) -> String {
+    let mut title = raw.trim().to_string();
+    // Strip surrounding quotes (both " and ') — uses strip_prefix/strip_suffix to avoid
+    // byte-index panics on single-char or multi-byte inputs (review finding F3)
+    if let Some(inner) = title.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        title = inner.to_string();
+    } else if let Some(inner) = title.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        title = inner.to_string();
+    }
+    // Enforce 60-char max
+    if title.chars().count() > 60 {
+        title = title.chars().take(57).collect::<String>() + "...";
+    }
+    title
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_post_process_title_trims_whitespace() {
+        assert_eq!(post_process_title("  Hello World  "), "Hello World");
+    }
+
+    #[test]
+    fn test_post_process_title_strips_double_quotes() {
+        assert_eq!(post_process_title("\"Quoted Title\""), "Quoted Title");
+    }
+
+    #[test]
+    fn test_post_process_title_strips_single_quotes() {
+        assert_eq!(post_process_title("'Single Quoted'"), "Single Quoted");
+    }
+
+    #[test]
+    fn test_post_process_title_no_strip_mismatched_quotes() {
+        assert_eq!(post_process_title("\"Mismatched'"), "\"Mismatched'");
+    }
+
+    #[test]
+    fn test_post_process_title_single_char_quote_no_panic() {
+        // F3: previously panicked with title[1..0] on single-char quote
+        assert_eq!(post_process_title("\""), "\"");
+        assert_eq!(post_process_title("'"), "'");
+    }
+
+    #[test]
+    fn test_post_process_title_empty_inside_quotes() {
+        assert_eq!(post_process_title("\"\""), "");
+        assert_eq!(post_process_title("''"), "");
+    }
+
+    #[test]
+    fn test_post_process_title_truncates_at_60_chars() {
+        let long = "A".repeat(70);
+        let result = post_process_title(&long);
+        assert_eq!(result.len(), 60); // 57 A's + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_post_process_title_preserves_under_60() {
+        let short = "Short Title";
+        assert_eq!(post_process_title(short), "Short Title");
+    }
+
+    #[test]
+    fn test_post_process_title_exactly_60_chars() {
+        let exact = "A".repeat(60);
+        assert_eq!(post_process_title(&exact), exact);
+    }
+
+    #[test]
+    fn test_truncate_short_string() {
+        assert_eq!(truncate("Hello", 10), "Hello");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        let long = "A".repeat(600);
+        let result = truncate(&long, 500);
+        assert_eq!(result.chars().count(), 501); // 500 chars + '…'
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        let exact = "A".repeat(500);
+        assert_eq!(truncate(&exact, 500), exact);
+    }
 }
