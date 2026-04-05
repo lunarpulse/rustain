@@ -39,9 +39,12 @@ pub async fn run() -> Result<()> {
     // 4. Install panic hook
     signals::install_panic_hook();
 
-    // 4a. Intercept init subcommand BEFORE provider construction and terminal setup
+    // 4a. Intercept init/doctor subcommands BEFORE provider construction and terminal setup
     if let Some(Command::Init) = cli.command {
         return crate::adapters::cli::init::run_init().await;
+    }
+    if let Some(Command::Doctor { terminal }) = cli.command {
+        return crate::adapters::cli::doctor::run_doctor(terminal).await;
     }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)

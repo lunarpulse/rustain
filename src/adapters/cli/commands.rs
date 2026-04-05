@@ -24,4 +24,10 @@ pub struct Cli {
 pub enum Command {
     /// Initialize rustain configuration
     Init,
+    /// Check setup health and diagnose problems
+    Doctor {
+        /// Show detailed terminal diagnostics
+        #[arg(long)]
+        terminal: bool,
+    },
 }
