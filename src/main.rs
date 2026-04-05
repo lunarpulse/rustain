@@ -2,9 +2,10 @@ mod adapters;
 mod domain;
 mod infrastructure;
 
-use anyhow::Result;
-
 #[tokio::main]
-async fn main() -> Result<()> {
-    infrastructure::startup::run().await
+async fn main() {
+    if let Err(e) = infrastructure::startup::run().await {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
 }

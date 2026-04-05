@@ -12,7 +12,6 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 /// Resolve the `~/.config/rustain/` config directory, creating it if it doesn't exist.
-#[allow(dead_code)]
 pub fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
         .context("Could not determine config directory")?

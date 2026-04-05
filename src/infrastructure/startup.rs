@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use tokio::sync::mpsc;
 
-use crate::adapters::cli::commands::Cli;
+use crate::adapters::cli::commands::{Cli, Command};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::project_context_loader::ProjectContextLoader;
@@ -38,6 +38,11 @@ pub async fn run() -> Result<()> {
 
     // 4. Install panic hook
     signals::install_panic_hook();
+
+    // 4a. Intercept init subcommand BEFORE provider construction and terminal setup
+    if let Some(Command::Init) = cli.command {
+        return crate::adapters::cli::init::run_init().await;
+    }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
