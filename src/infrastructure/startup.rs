@@ -17,6 +17,19 @@ use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort,
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, paths, signals};
 
+/// Error type for subcommand exits where output was already printed.
+/// Used by `main.rs` to suppress redundant error display.
+#[derive(Debug)]
+pub struct SubcommandExit;
+
+impl std::fmt::Display for SubcommandExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "subcommand exited with error")
+    }
+}
+
+impl std::error::Error for SubcommandExit {}
+
 /// Ordered startup sequence.
 /// 1. Parse CLI args
 /// 2. Load config
@@ -44,15 +57,19 @@ pub async fn run() -> Result<()> {
         return crate::adapters::cli::init::run_init().await;
     }
     if let Some(Command::Doctor { terminal }) = cli.command {
-        return crate::adapters::cli::doctor::run_doctor(terminal).await;
+        // Doctor already prints its own summary via display_results().
+        // Suppress anyhow error display to avoid duplicate output (DF-045).
+        return crate::adapters::cli::doctor::run_doctor(terminal)
+            .await
+            .map_err(|e| {
+                tracing::error!("Doctor subcommand failed: {e}");
+                SubcommandExit.into()
+            });
     }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
-    if let Some(model_override) = std::env::var("ANTHROPIC_DEFAULT_SONNET_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(model_override) = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_DEFAULT_SONNET_MODEL") {
         tracing::info!("Model override from ANTHROPIC_DEFAULT_SONNET_MODEL: {}", model_override);
         app_config.model = model_override;
     }
@@ -239,8 +256,8 @@ fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn P
         use crate::adapters::anthropic::AuthMode;
 
         // 1. Resolve auth: ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY (CC precedence)
-        let auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|s| !s.is_empty());
-        let api_key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|s| !s.is_empty());
+        let auth_token = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_AUTH_TOKEN");
+        let api_key = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_API_KEY");
 
         if auth_token.is_some() && api_key.is_some() {
             tracing::warn!("Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
@@ -265,7 +282,7 @@ fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn P
         };
 
         // 2. Resolve base URL (filter empty to preserve default)
-        let base_url = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|s| !s.is_empty());
+        let base_url = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL");
         if let Some(ref url) = base_url {
             tracing::info!("Custom base URL: {}", url);
         }

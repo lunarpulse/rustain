@@ -41,16 +41,9 @@ impl FileSystemStorage {
     }
 
     /// Sanitize a conversation ID to prevent path traversal.
+    /// Delegates to shared utility; returns "invalid" on failure for backward compatibility.
     fn sanitize_id(id: &str) -> &str {
-        if !id.is_empty()
-            && id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            id
-        } else {
-            "invalid"
-        }
+        crate::infrastructure::utils::sanitize_id(id).unwrap_or("invalid")
     }
 
     /// Save a conversation with the `clean_exit` flag set (used for graceful shutdown).

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::infrastructure::{paths, terminal_info};
+use crate::infrastructure::{paths, terminal_info, utils};
 
 // ──────────────────────────────────────────────────────────────────
 // Health check framework (Task 2)
@@ -122,22 +122,19 @@ impl ApiKeyCheck {
     fn resolve_base_url(&self) -> (String, bool) {
         let custom = match &self.base_url_override {
             Some(val) => val.clone(),
-            None => std::env::var("ANTHROPIC_BASE_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
+            None => utils::env_var_trimmed("ANTHROPIC_BASE_URL"),
         };
         let is_custom = custom.is_some();
-        let url = custom
-            .unwrap_or_else(|| "https://api.anthropic.com".to_string())
-            .trim_end_matches('/')
-            .to_string();
+        let url = utils::normalize_base_url(
+            &custom.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+        );
         (url, is_custom)
     }
 
     fn resolve_key_value(&self, var_name: &str) -> String {
         match &self.key_value_override {
             Some(val) => val.clone(),
-            None => std::env::var(var_name).unwrap_or_default(),
+            None => utils::env_var_trimmed(var_name).unwrap_or_default(),
         }
     }
 }
@@ -256,11 +253,9 @@ impl ApiEndpointCheck {
     fn resolve_base_url(&self) -> Option<String> {
         match &self.base_url_override {
             Some(val) => val.clone(),
-            None => std::env::var("ANTHROPIC_BASE_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
+            None => utils::env_var_trimmed("ANTHROPIC_BASE_URL"),
         }
-        .map(|s| s.trim_end_matches('/').to_string())
+        .map(|s| utils::normalize_base_url(&s))
     }
 }
 
@@ -506,14 +501,9 @@ impl HealthCheck for TerminalCheck {
     }
 
     async fn run(&self) -> CheckResult {
-        let emulator = std::env::var("TERM_PROGRAM")
-            .ok()
-            .filter(|s| !s.is_empty())
+        let emulator = utils::env_var_trimmed("TERM_PROGRAM")
             .unwrap_or_else(|| {
-                std::env::var("TERM")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "unknown".to_string())
+                utils::env_var_trimmed("TERM").unwrap_or_else(|| "unknown".to_string())
             });
 
         let color = terminal_info::detect_color_capability();
@@ -523,9 +513,9 @@ impl HealthCheck for TerminalCheck {
             Err(_) => "unknown".to_string(),
         };
 
-        let multiplexer = if std::env::var("TMUX").ok().filter(|s| !s.is_empty()).is_some() {
+        let multiplexer = if utils::env_var_is_set("TMUX") {
             Some("tmux")
-        } else if std::env::var("STY").ok().filter(|s| !s.is_empty()).is_some() {
+        } else if utils::env_var_is_set("STY") {
             Some("screen")
         } else {
             None
@@ -564,14 +554,14 @@ impl HealthCheck for TerminalDetailCheck {
         let mut details = Vec::new();
 
         // Key detection: tmux prefix conflict
-        if std::env::var("TMUX").ok().filter(|s| !s.is_empty()).is_some() {
+        if utils::env_var_is_set("TMUX") {
             details.push("tmux detected: Ctrl+B prefix may conflict with chord keys".to_string());
         }
 
         // Unicode support
-        let has_utf8 = std::env::var("LANG")
-            .or_else(|_| std::env::var("LC_ALL"))
-            .or_else(|_| std::env::var("LC_CTYPE"))
+        let has_utf8 = utils::env_var_trimmed("LANG")
+            .or_else(|| utils::env_var_trimmed("LC_ALL"))
+            .or_else(|| utils::env_var_trimmed("LC_CTYPE"))
             .map(|v| v.to_lowercase().contains("utf-8") || v.to_lowercase().contains("utf8"))
             .unwrap_or(false);
         details.push(format!(
@@ -580,9 +570,9 @@ impl HealthCheck for TerminalDetailCheck {
         ));
 
         // Color env vars
-        let colorterm = std::env::var("COLORTERM").unwrap_or_else(|_| "unset".to_string());
-        let term = std::env::var("TERM").unwrap_or_else(|_| "unset".to_string());
-        let no_color = if std::env::var("NO_COLOR").is_ok() {
+        let colorterm = utils::env_var_trimmed("COLORTERM").unwrap_or_else(|| "unset".to_string());
+        let term = utils::env_var_trimmed("TERM").unwrap_or_else(|| "unset".to_string());
+        let no_color = if utils::env_var_is_set("NO_COLOR") {
             "set"
         } else {
             "unset"
@@ -593,7 +583,7 @@ impl HealthCheck for TerminalDetailCheck {
         ));
 
         // Clipboard support heuristic (OSC 52)
-        let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+        let term_program = utils::env_var_trimmed("TERM_PROGRAM").unwrap_or_default();
         let osc52_terminals = ["alacritty", "kitty", "iTerm2", "foot", "wezterm"];
         let clipboard = if osc52_terminals
             .iter()
@@ -606,8 +596,8 @@ impl HealthCheck for TerminalDetailCheck {
         details.push(format!("Clipboard: {}", clipboard));
 
         // SSH detection
-        let is_ssh = std::env::var("SSH_CLIENT").ok().filter(|s| !s.is_empty()).is_some()
-            || std::env::var("SSH_TTY").ok().filter(|s| !s.is_empty()).is_some();
+        let is_ssh = utils::env_var_is_set("SSH_CLIENT")
+            || utils::env_var_is_set("SSH_TTY");
         if is_ssh {
             details.push("SSH session detected".to_string());
         }

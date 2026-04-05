@@ -77,18 +77,12 @@ pub async fn run_init_with_paths(
 /// Checks ANTHROPIC_AUTH_TOKEN first (CC precedence), then ANTHROPIC_API_KEY.
 /// Filters out empty and whitespace-only values. NEVER returns the key value (NFR11).
 pub fn find_api_key_var() -> Option<&'static str> {
-    if std::env::var("ANTHROPIC_AUTH_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_some()
-    {
+    use crate::infrastructure::utils::env_var_is_set;
+
+    if env_var_is_set("ANTHROPIC_AUTH_TOKEN") {
         return Some("ANTHROPIC_AUTH_TOKEN");
     }
-    if std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_some()
-    {
+    if env_var_is_set("ANTHROPIC_API_KEY") {
         return Some("ANTHROPIC_API_KEY");
     }
     None

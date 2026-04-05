@@ -26,18 +26,20 @@ impl std::fmt::Display for ColorCapability {
 /// 3. `$TERM` contains "256color" → Color256
 /// 4. Otherwise → Color16
 pub fn detect_color_capability() -> ColorCapability {
-    if std::env::var("NO_COLOR").is_ok() {
+    use crate::infrastructure::utils::{env_var_is_set, env_var_trimmed};
+
+    if env_var_is_set("NO_COLOR") {
         return ColorCapability::Monochrome;
     }
 
-    if let Ok(colorterm) = std::env::var("COLORTERM") {
+    if let Some(colorterm) = env_var_trimmed("COLORTERM") {
         let ct = colorterm.to_lowercase();
         if ct.contains("truecolor") || ct.contains("24bit") {
             return ColorCapability::TrueColor;
         }
     }
 
-    if let Ok(term) = std::env::var("TERM") {
+    if let Some(term) = env_var_trimmed("TERM") {
         if term.contains("256color") {
             return ColorCapability::Color256;
         }

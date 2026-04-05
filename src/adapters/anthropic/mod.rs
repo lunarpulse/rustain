@@ -74,10 +74,9 @@ impl AnthropicAdapter {
             client,
             auth_mode,
             model,
-            base_url: base_url
-                .unwrap_or_else(|| "https://api.anthropic.com".to_string())
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: crate::infrastructure::utils::normalize_base_url(
+                &base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
+            ),
             abort_handle: Arc::new(Mutex::new(None)),
         })
     }
