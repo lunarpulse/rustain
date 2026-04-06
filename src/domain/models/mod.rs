@@ -1,3 +1,4 @@
+pub mod autocomplete;
 mod completion;
 mod config;
 mod content;

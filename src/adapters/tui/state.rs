@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
+use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::{
     ApprovalDecision, FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
 };
@@ -238,6 +239,112 @@ impl Default for ReverseSearchState {
     }
 }
 
+/// Resolved file mention tracked from autocomplete selection.
+/// Stored so we don't re-parse with regex at send time.
+#[derive(Debug, Clone)]
+pub struct ResolvedMention {
+    /// File path relative to workspace.
+    pub path: String,
+}
+
+/// State for inline autocomplete popup (/ commands and @ file mentions).
+// Covers: UX-DR75
+pub struct AutocompleteState {
+    pub active: bool,
+    pub kind: AutocompleteKind,
+    /// Cursor position where the trigger character (/ or @) was typed.
+    pub trigger_position: usize,
+    /// Characters typed after the trigger, used for filtering.
+    pub filter_text: String,
+    /// Current filtered suggestions.
+    pub suggestions: Vec<AutocompleteSuggestion>,
+    /// Currently highlighted suggestion (0-based, wraps around).
+    pub selected_index: usize,
+    /// Scroll offset for long suggestion lists.
+    pub scroll_offset: usize,
+}
+
+impl AutocompleteState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            kind: AutocompleteKind::SlashCommand,
+            trigger_position: 0,
+            filter_text: String::new(),
+            suggestions: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+        }
+    }
+
+    /// Open autocomplete with the given kind and trigger position.
+    #[allow(dead_code)]
+    pub fn open(&mut self, kind: AutocompleteKind, trigger_position: usize, suggestions: Vec<AutocompleteSuggestion>) {
+        self.active = true;
+        self.kind = kind;
+        self.trigger_position = trigger_position;
+        self.filter_text.clear();
+        self.suggestions = suggestions;
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Dismiss the autocomplete popup.
+    pub fn dismiss(&mut self) {
+        self.active = false;
+        self.filter_text.clear();
+        self.suggestions.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Navigate up or down in the suggestion list (wraps around).
+    pub fn navigate(&mut self, direction: Direction) {
+        if self.suggestions.is_empty() {
+            return;
+        }
+        match direction {
+            Direction::Up => {
+                if self.selected_index == 0 {
+                    self.selected_index = self.suggestions.len() - 1;
+                } else {
+                    self.selected_index -= 1;
+                }
+            }
+            Direction::Down => {
+                self.selected_index = (self.selected_index + 1) % self.suggestions.len();
+            }
+        }
+        // Adjust scroll offset to keep selected item visible
+        let max_visible = 8;
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + max_visible {
+            self.scroll_offset = self.selected_index + 1 - max_visible;
+        }
+    }
+
+    /// Update the filter text and reset selection.
+    #[allow(dead_code)]
+    pub fn update_filter(&mut self, filter: String, suggestions: Vec<AutocompleteSuggestion>) {
+        self.filter_text = filter;
+        self.suggestions = suggestions;
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Get the currently selected suggestion, if any.
+    pub fn selected(&self) -> Option<&AutocompleteSuggestion> {
+        self.suggestions.get(self.selected_index)
+    }
+}
+
+impl Default for AutocompleteState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// TUI-specific state for rendering.
 pub struct TuiState {
     pub focus: FocusState,
@@ -297,6 +404,12 @@ pub struct TuiState {
     pub reverse_search: ReverseSearchState,
     /// Vertical scroll offset within the input box when lines exceed max height.
     pub input_scroll_offset: usize,
+    /// Autocomplete popup state (/ commands and @ file mentions).
+    // Covers: UX-DR75
+    pub autocomplete: AutocompleteState,
+    /// Resolved file mentions from autocomplete selections in the current input.
+    /// Cleared on submit. Used at send time to attach file context.
+    pub resolved_mentions: Vec<ResolvedMention>,
 }
 
 impl TuiState {
@@ -339,6 +452,8 @@ impl TuiState {
             multiline_mode: false,
             reverse_search: ReverseSearchState::new(),
             input_scroll_offset: 0,
+            autocomplete: AutocompleteState::new(),
+            resolved_mentions: Vec::new(),
         }
     }
 }

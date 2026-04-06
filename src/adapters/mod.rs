@@ -1,4 +1,6 @@
 pub mod cli;
+pub mod command_registry;
+pub mod file_scanner;
 pub mod filesystem;
 pub mod noop;
 pub mod persona_adapter;

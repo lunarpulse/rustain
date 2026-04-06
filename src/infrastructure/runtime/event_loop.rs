@@ -6,12 +6,14 @@ use crossterm::event::EventStream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
+use crate::adapters::command_registry::CommandRegistry;
+use crate::adapters::file_scanner;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
-use crate::adapters::tui::widgets::{chat_pane, input_box, reverse_search, status_bar};
+use crate::adapters::tui::widgets::{autocomplete_popup, chat_pane, input_box, reverse_search, status_bar};
 
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
@@ -78,6 +80,12 @@ pub async fn run(
     let mut streaming = StreamingState::default();
     let mut turn_queue = TurnQueue::default();
     let mut _pending_save: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Lazy-initialized command registry (NFR10: not scanned at startup)
+    let mut command_registry = CommandRegistry::new();
+
+    // P4: Cache last filter text to avoid re-scanning on every keystroke
+    let mut last_autocomplete_filter = String::new();
 
     // Initialize SessionManager based on whether we have a restored session
     let mut session_manager = if conversation.session_id.is_some() {
@@ -196,12 +204,48 @@ pub async fn run(
 
                             let action = handle_input(&mut state, &domain_event);
 
+                            // P4: Only re-populate autocomplete when filter text actually changed
+                            if state.autocomplete.active && state.autocomplete.filter_text != last_autocomplete_filter {
+                                last_autocomplete_filter = state.autocomplete.filter_text.clone();
+                                populate_autocomplete_suggestions(
+                                    &mut state,
+                                    &mut command_registry,
+                                    &workspace_path,
+                                );
+                            } else if !state.autocomplete.active {
+                                last_autocomplete_filter.clear();
+                            }
+
                             match action {
                                 InputAction::SubmitMessage(text) => {
+                                    // Resolve any file mentions from autocomplete selections
+                                    let send_text = if !state.resolved_mentions.is_empty() {
+                                        let (file_contexts, file_errors) = resolve_file_context(&state.resolved_mentions, &workspace_path, security.as_ref());
+                                        state.resolved_mentions.clear();
+                                        // P9: Show FeedbackBlock for each file resolution error
+                                        for err in &file_errors {
+                                            let fb = FeedbackBlock {
+                                                id: generate_conversation_id(),
+                                                message: err.reason.clone(),
+                                                level: FeedbackLevel::Error,
+                                                actions: vec![],
+                                            };
+                                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                                            state.needs_redraw = true;
+                                        }
+                                        if !file_contexts.is_empty() {
+                                            let prefix = message_builder::build_file_context_prefix(&file_contexts);
+                                            format!("{}{}", prefix, text)
+                                        } else {
+                                            text
+                                        }
+                                    } else {
+                                        text
+                                    };
                                     if streaming.is_streaming {
                                         // Queue message during streaming
                                         let msg = UserMessage {
-                                            content: text,
+                                            content: send_text,
                                             images: vec![],
                                         };
                                         if turn_queue.enqueue(msg).is_err() {
@@ -214,7 +258,7 @@ pub async fn run(
                                         }
                                     } else {
                                         start_turn(
-                                            &text,
+                                            &send_text,
                                             &mut conversation,
                                             &mut streaming,
                                             &mut state,
@@ -374,6 +418,142 @@ pub async fn run(
                                     }
                                     state.focus = FocusState::Input;
                                     state.needs_redraw = true;
+                                }
+                                InputAction::ExecuteCommand(cmd) => {
+                                    if cmd == "new" {
+                                        // /new command: save current, create fresh session
+                                        // AC7: save current conversation if it has messages
+                                        if !conversation.messages.is_empty() {
+                                            conversation.updated_at = now_unix();
+                                            if let Some(prev) = _pending_save.take() {
+                                                let _ = prev.await;
+                                            }
+                                            let fs_ref = fs_storage.clone();
+                                            let conv_clone = conversation.clone();
+                                            _pending_save = Some(tokio::spawn(async move {
+                                                match tokio::time::timeout(
+                                                    BACKGROUND_TASK_TIMEOUT,
+                                                    fs_ref.save_conversation_with_exit(&conv_clone, true),
+                                                ).await {
+                                                    Ok(Ok(())) => {}
+                                                    Ok(Err(e)) => tracing::error!("Failed to save session before /new: {}", e),
+                                                    Err(_) => tracing::warn!("Session save timed out before /new"),
+                                                }
+                                            }));
+                                        }
+                                        // Create fresh conversation
+                                        conversation = Conversation {
+                                            id: generate_conversation_id(),
+                                            title: String::new(),
+                                            messages: Vec::new(),
+                                            created_at: now_unix(),
+                                            updated_at: now_unix(),
+                                            last_response_at: None,
+                                            session_id: Some(generate_conversation_id()),
+                                            usage: None,
+                                            fork_source: None,
+                                        };
+                                        // Reset TUI state
+                                        state.input_buffer.clear();
+                                        state.cursor_position = 0;
+                                        state.input_scroll_offset = 0;
+                                        state.scroll_offset = 0;
+                                        state.auto_scroll = true;
+                                        state.total_content_height = 0;
+                                        state.block_boundaries.clear();
+                                        state.message_boundaries.clear();
+                                        state.height_cache.invalidate_all();
+                                        state.tool_block_states.clear();
+                                        state.focused_tool_id = None;
+                                        state.feedback_blocks.clear();
+                                        state.active_feedback_id = None;
+                                        state.autocomplete.dismiss();
+                                        state.resolved_mentions.clear();
+                                        state.token_usage = None;
+                                        state.focus = FocusState::Input;
+                                        state.status = StatusState::Idle;
+                                        state.needs_redraw = true;
+                                        // Reset session manager
+                                        session_manager = SessionManager::new(SessionState::Active {
+                                            id: conversation.session_id.clone().unwrap_or_default(),
+                                        });
+                                        // Reset streaming state
+                                        streaming = StreamingState::default();
+                                        while turn_queue.dequeue().is_some() {}
+                                        if let Some(handle) = _active_turn.take() {
+                                            handle.abort();
+                                        }
+                                    }
+                                }
+                                InputAction::SubmitWithContext { text, command } => {
+                                    // Build context-enriched message
+                                    let mut context_prefix = String::new();
+
+                                    // Resolve command context if present
+                                    if let Some(ref cmd_name) = command {
+                                        if let Some(cmd_ctx) = resolve_command_context(cmd_name, &command_registry) {
+                                            context_prefix.push_str(&message_builder::build_command_context_prefix(&cmd_ctx));
+                                        }
+                                    }
+
+                                    // Resolve file mentions
+                                    let (file_contexts, file_errors) = resolve_file_context(&state.resolved_mentions, &workspace_path, security.as_ref());
+                                    if !file_contexts.is_empty() {
+                                        context_prefix.push_str(&message_builder::build_file_context_prefix(&file_contexts));
+                                    }
+                                    // P9: Show FeedbackBlock for each file resolution error
+                                    for err in &file_errors {
+                                        let fb = FeedbackBlock {
+                                            id: generate_conversation_id(),
+                                            message: err.reason.clone(),
+                                            level: FeedbackLevel::Error,
+                                            actions: vec![],
+                                        };
+                                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                                        state.needs_redraw = true;
+                                    }
+                                    state.resolved_mentions.clear();
+
+                                    let full_text = if context_prefix.is_empty() {
+                                        text
+                                    } else {
+                                        format!("{}{}", context_prefix, text)
+                                    };
+
+                                    if streaming.is_streaming {
+                                        let msg = UserMessage {
+                                            content: full_text,
+                                            images: vec![],
+                                        };
+                                        if turn_queue.enqueue(msg).is_err() {
+                                            state.status_before_flash = Some(state.status.clone());
+                                            state.status = StatusState::Flash {
+                                                message: "Message queue full".to_string(),
+                                                remaining_ms: state.theme.timing.status_flash_ms,
+                                            };
+                                            state.needs_redraw = true;
+                                        }
+                                    } else {
+                                        start_turn(
+                                            &full_text,
+                                            &mut conversation,
+                                            &mut streaming,
+                                            &mut state,
+                                            &mut _active_turn,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                            &security,
+                                            &tools,
+                                            &persona,
+                                            &workspace_path,
+                                            &mut session_manager,
+                                        );
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
+                                            Ok(()) => state.needs_redraw = false,
+                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                        }
+                                    }
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
@@ -944,6 +1124,7 @@ fn render(
         multiline_mode,
         input_scroll_offset,
         ref reverse_search,
+        ref autocomplete,
         ..
     } = *state;
 
@@ -1078,6 +1259,16 @@ fn render(
                         theme,
                     );
                 }
+
+                // Render autocomplete popup above input box
+                if autocomplete.active {
+                    autocomplete_popup::render(
+                        frame,
+                        app_layout.input_area,
+                        autocomplete,
+                        theme,
+                    );
+                }
             }
             None => {
                 // Terminal too small
@@ -1186,6 +1377,136 @@ pub fn post_process_title(raw: &str) -> String {
         title = title.chars().take(57).collect::<String>() + "...";
     }
     title
+}
+
+/// Populate autocomplete suggestions based on current state.
+/// Called after handle_input when autocomplete is active.
+fn populate_autocomplete_suggestions(
+    state: &mut TuiState,
+    command_registry: &mut CommandRegistry,
+    workspace_path: &std::path::Path,
+) {
+    use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
+
+    match state.autocomplete.kind {
+        AutocompleteKind::SlashCommand => {
+            // Lazy-load command discovery on first slash
+            if !command_registry.is_discovered() {
+                command_registry.discover_into(workspace_path);
+            }
+            let filtered = command_registry.filter(&state.autocomplete.filter_text);
+            state.autocomplete.suggestions = filtered
+                .into_iter()
+                .map(|cmd| AutocompleteSuggestion::SlashCommand {
+                    name: cmd.name.clone(),
+                    description: cmd.description.clone(),
+                })
+                .collect();
+            // Reset selection if suggestions changed
+            if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+            }
+        }
+        AutocompleteKind::FileMention => {
+            let results = file_scanner::scan_workspace_files(
+                workspace_path,
+                &state.autocomplete.filter_text,
+                50,
+            );
+            state.autocomplete.suggestions = results
+                .into_iter()
+                .map(|f| AutocompleteSuggestion::FilePath {
+                    path: f.relative_path,
+                    is_dir: f.is_dir,
+                })
+                .collect();
+            if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+            }
+        }
+    }
+}
+
+/// Resolve file mentions and build context prefix for a message submission.
+/// Reads file contents in the adapter layer (no file I/O in domain).
+/// Errors encountered during file context resolution, for FeedbackBlock display.
+struct FileContextError {
+    #[allow(dead_code)]
+    path: String,
+    reason: String,
+}
+
+fn resolve_file_context(
+    mentions: &[crate::adapters::tui::state::ResolvedMention],
+    workspace_path: &std::path::Path,
+    security: &dyn SecurityPort,
+) -> (Vec<message_builder::ResolvedFileContext>, Vec<FileContextError>) {
+    use crate::domain::models::FileOperation;
+
+    let mut resolved = Vec::new();
+    let mut errors = Vec::new();
+    for mention in mentions {
+        let full_path = workspace_path.join(&mention.path);
+
+        // P3: Validate path is within workspace before reading
+        let canonical = match full_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                errors.push(FileContextError {
+                    path: mention.path.clone(),
+                    reason: format!("File not found: {}", mention.path),
+                });
+                continue;
+            }
+        };
+        if let Err(e) = security.check_workspace_access(&canonical, FileOperation::Read) {
+            tracing::warn!("Security check failed for mention {}: {}", mention.path, e);
+            errors.push(FileContextError {
+                path: mention.path.clone(),
+                reason: format!("Access denied: {}", mention.path),
+            });
+            continue;
+        }
+
+        match std::fs::read_to_string(&canonical) {
+            Ok(content) => {
+                // P2: Limit to ~100KB per file — use floor_char_boundary to avoid UTF-8 panic
+                #[allow(clippy::incompatible_msrv)] // stable since 1.80, MSRV is 1.85
+                let truncated = if content.len() > 100_000 {
+                    let boundary = content.floor_char_boundary(100_000);
+                    content[..boundary].to_string()
+                } else {
+                    content
+                };
+                resolved.push(message_builder::ResolvedFileContext {
+                    path: mention.path.clone(),
+                    content: truncated,
+                });
+            }
+            Err(_) => {
+                errors.push(FileContextError {
+                    path: mention.path.clone(),
+                    reason: format!("File not found: {}", mention.path),
+                });
+            }
+        }
+    }
+    (resolved, errors)
+}
+
+/// Resolve a user-defined slash command's content.
+fn resolve_command_context(
+    cmd_name: &str,
+    command_registry: &CommandRegistry,
+) -> Option<message_builder::ResolvedCommandContext> {
+    let cmd_def = command_registry.find(cmd_name)?;
+    let content = cmd_def.content.as_ref()?;
+    Some(message_builder::ResolvedCommandContext {
+        name: cmd_name.to_string(),
+        content: content.clone(),
+    })
 }
 
 #[cfg(test)]

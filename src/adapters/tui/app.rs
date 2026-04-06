@@ -3,6 +3,7 @@ use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary
 use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
+use crate::domain::models::autocomplete::AutocompleteKind;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 
 /// Action returned by handle_input to tell the event loop what to do.
@@ -29,6 +30,14 @@ pub enum InputAction {
     FeedbackRetry,
     /// AskUserQuestion: user submitted their answer.
     SubmitQuestionAnswer(String),
+    /// Execute a built-in command (e.g., "/new").
+    ExecuteCommand(String),
+    /// Submit message with file context and/or command context.
+    /// Contains (user_text, resolved_mentions, command_name_if_any).
+    SubmitWithContext {
+        text: String,
+        command: Option<String>,
+    },
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -120,6 +129,59 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 
     match state.focus {
         FocusState::Input => {
+            // When autocomplete is active, intercept characters to update filter
+            if state.autocomplete.active {
+                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                state.input_buffer.insert(byte_pos, c);
+                state.cursor_position += 1;
+                // Extract filter text: everything after the trigger character
+                let trigger = state.autocomplete.trigger_position;
+                let filter: String = state
+                    .input_buffer
+                    .chars()
+                    .skip(trigger + 1)
+                    .take(state.cursor_position.saturating_sub(trigger + 1))
+                    .collect();
+                // Signal that autocomplete filter needs updating
+                // The actual filtering is done by the event loop which has access to registries
+                state.autocomplete.filter_text = filter;
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+
+            // Detect '/' at position 0 → trigger slash command autocomplete
+            if c == '/' && state.cursor_position == 0 && state.input_buffer.is_empty() {
+                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                state.input_buffer.insert(byte_pos, c);
+                state.cursor_position += 1;
+                state.autocomplete.active = true;
+                state.autocomplete.kind = AutocompleteKind::SlashCommand;
+                state.autocomplete.trigger_position = 0;
+                state.autocomplete.filter_text.clear();
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+                // Suggestions will be populated by the event loop (lazy loading)
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+
+            // Detect '@' anywhere → trigger file mention autocomplete
+            if c == '@' {
+                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                state.input_buffer.insert(byte_pos, c);
+                let trigger_pos = state.cursor_position;
+                state.cursor_position += 1;
+                state.autocomplete.active = true;
+                state.autocomplete.kind = AutocompleteKind::FileMention;
+                state.autocomplete.trigger_position = trigger_pos;
+                state.autocomplete.filter_text.clear();
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+                // Suggestions will be populated by the event loop
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+
             let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
             state.input_buffer.insert(byte_pos, c);
             state.cursor_position += 1;
@@ -304,6 +366,16 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
     }
 
+    // Autocomplete overlay handling — intercept keys when autocomplete is active
+    // Covers: UX-DR75 (autocomplete)
+    if state.autocomplete.active && state.focus == FocusState::Input {
+        let result = handle_autocomplete_key(state, key);
+        if result != InputAction::Ignored {
+            return result;
+        }
+        // Ignored = autocomplete dismissed, fall through to normal key handling
+    }
+
     // Reverse search overlay handling
     // Covers: UX-DR74 (reverse search)
     if state.reverse_search.active {
@@ -366,6 +438,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         // Ctrl+R: activate reverse search
         // Covers: UX-DR74
         DomainKey::CtrlR if state.focus == FocusState::Input => {
+            // P16: Dismiss autocomplete if active — only one overlay at a time
+            if state.autocomplete.active {
+                state.autocomplete.dismiss();
+            }
             state.reverse_search.active = true;
             state.reverse_search.query.clear();
             state.reverse_search.matches.clear();
@@ -530,7 +606,36 @@ fn submit_message(state: &mut TuiState) -> InputAction {
     state.input_history.reset_navigation();
     state.cursor_position = 0;
     state.input_scroll_offset = 0;
+    state.autocomplete.dismiss();
     state.needs_redraw = true;
+
+    // Check if this is a slash command
+    if let Some(after_slash) = text.strip_prefix('/') {
+        let cmd_name = after_slash.split_whitespace().next().unwrap_or("").to_string();
+        if !cmd_name.is_empty() {
+            // Check if it's a built-in command
+            if cmd_name == "new" {
+                return InputAction::ExecuteCommand(cmd_name);
+            }
+            // User-defined command: submit with command context
+            let remainder = after_slash[cmd_name.len()..].trim().to_string();
+            state.resolved_mentions.clear();
+            return InputAction::SubmitWithContext {
+                text: remainder,
+                command: Some(cmd_name),
+            };
+        }
+    }
+
+    // If there are resolved file mentions, use SubmitWithContext so the event loop
+    // can read state.resolved_mentions before clearing them.
+    if !state.resolved_mentions.is_empty() {
+        return InputAction::SubmitWithContext {
+            text,
+            command: None,
+        };
+    }
+
     InputAction::SubmitMessage(text)
 }
 
@@ -542,6 +647,120 @@ fn ensure_cursor_visible(state: &mut TuiState) {
         state.input_scroll_offset = cursor_row + 1 - max_visible;
     } else if cursor_row < state.input_scroll_offset {
         state.input_scroll_offset = cursor_row;
+    }
+}
+
+/// Handle keys while autocomplete popup is active.
+// Covers: UX-DR75
+fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    match key {
+        // Up/Down navigate the suggestion list
+        DomainKey::Up => {
+            state.autocomplete.navigate(Direction::Up);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Down => {
+            state.autocomplete.navigate(Direction::Down);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // Tab or Enter selects the current suggestion
+        DomainKey::Tab | DomainKey::Enter => {
+            if let Some(suggestion) = state.autocomplete.selected().cloned() {
+                apply_autocomplete_selection(state, &suggestion);
+            }
+            state.autocomplete.dismiss();
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // Esc dismisses the popup
+        DomainKey::Esc => {
+            state.autocomplete.dismiss();
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // Backspace: if cursor goes back to/before trigger position, dismiss
+        DomainKey::Backspace => {
+            if state.cursor_position == state.autocomplete.trigger_position.saturating_add(1) {
+                // Cursor is exactly one past trigger — remove the trigger character and dismiss
+                if state.cursor_position > 0 {
+                    state.cursor_position -= 1;
+                    let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                    state.input_buffer.remove(byte_pos);
+                }
+                state.autocomplete.dismiss();
+                state.needs_redraw = true;
+                InputAction::Consumed
+            } else if state.cursor_position <= state.autocomplete.trigger_position {
+                // Cursor somehow at or before trigger — just dismiss without editing
+                state.autocomplete.dismiss();
+                state.needs_redraw = true;
+                InputAction::Consumed
+            } else {
+                // Normal backspace within filter text
+                if state.cursor_position > 0 {
+                    state.cursor_position -= 1;
+                    let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                    state.input_buffer.remove(byte_pos);
+                    // Update filter text
+                    let trigger = state.autocomplete.trigger_position;
+                    let filter: String = state
+                        .input_buffer
+                        .chars()
+                        .skip(trigger + 1)
+                        .take(state.cursor_position.saturating_sub(trigger + 1))
+                        .collect();
+                    state.autocomplete.filter_text = filter;
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+        }
+        DomainKey::CtrlC => {
+            state.autocomplete.dismiss();
+            InputAction::CancelOrQuit
+        }
+        // All other special keys dismiss autocomplete and fall through to normal handling
+        _ => {
+            state.autocomplete.dismiss();
+            state.needs_redraw = true;
+            InputAction::Ignored
+        }
+    }
+}
+
+/// Apply the selected autocomplete suggestion to the input buffer.
+fn apply_autocomplete_selection(
+    state: &mut TuiState,
+    suggestion: &crate::domain::models::autocomplete::AutocompleteSuggestion,
+) {
+    use crate::adapters::tui::state::ResolvedMention;
+    use crate::domain::models::autocomplete::AutocompleteSuggestion;
+
+    let trigger = state.autocomplete.trigger_position;
+
+    match suggestion {
+        AutocompleteSuggestion::SlashCommand { name, .. } => {
+            // Replace everything from trigger to cursor with "/<name>"
+            let before: String = state.input_buffer.chars().take(trigger).collect();
+            let after: String = state.input_buffer.chars().skip(state.cursor_position).collect();
+            state.input_buffer = format!("{}/{}{}", before, name, after);
+            state.cursor_position = trigger + 1 + name.chars().count();
+        }
+        AutocompleteSuggestion::FilePath { path, .. } => {
+            // Replace everything from trigger to cursor with "@<path>"
+            let before: String = state.input_buffer.chars().take(trigger).collect();
+            let after: String = state.input_buffer.chars().skip(state.cursor_position).collect();
+            state.input_buffer = format!("{}@{}{}", before, path, after);
+            state.cursor_position = trigger + 1 + path.chars().count();
+            // Track resolved mention for file context attachment at send time (deduplicate)
+            if !state.resolved_mentions.iter().any(|m| m.path == *path) {
+                state.resolved_mentions.push(ResolvedMention {
+                    path: path.clone(),
+                });
+            }
+        }
     }
 }
 
@@ -651,6 +870,7 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
                 KeyCode::Home => Some(DomainInputEvent::SpecialKey(DomainKey::Home)),
                 KeyCode::End => Some(DomainInputEvent::SpecialKey(DomainKey::End)),
                 KeyCode::Tab => Some(DomainInputEvent::SpecialKey(DomainKey::Tab)),
+                KeyCode::BackTab => Some(DomainInputEvent::SpecialKey(DomainKey::ShiftTab)),
                 _ => None,
             }
         }

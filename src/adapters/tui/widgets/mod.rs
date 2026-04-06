@@ -1,4 +1,5 @@
 pub mod ask_user_question;
+pub mod autocomplete_popup;
 pub mod chat_pane;
 pub mod empty_state;
 pub mod feedback_block;

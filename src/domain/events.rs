@@ -83,6 +83,7 @@ pub enum DomainKey {
     Home,
     End,
     Tab,
+    ShiftTab,
     CtrlC,
     CtrlE,
     CtrlR,

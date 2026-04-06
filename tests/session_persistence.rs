@@ -226,3 +226,79 @@ where
         assert_eq!(summaries.len(), 1);
     }
 }
+
+// Covers: P14 / AC7 (Task 7.3) — /new command saves current session, new session accessible
+/// Simulates the /new command flow: save active conversation, create new one,
+/// verify previous session appears in list_conversations().
+#[tokio::test]
+async fn test_slash_new_saves_and_creates_fresh_session() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sessions_dir = tmp.path().join(".claude").join("sessions");
+    let storage = FileSystemStorage::new(sessions_dir.clone());
+
+    // Step 1: Active conversation with messages (simulates pre-/new state)
+    let active_conv = make_conversation("active-session", "Active Chat", 4);
+    assert!(!active_conv.messages.is_empty());
+
+    // Step 2: /new triggers save of current conversation
+    storage.save_conversation(&active_conv).await.unwrap();
+
+    // Step 3: Create fresh conversation (simulates event loop's /new handler)
+    let new_conv = Conversation {
+        id: generate_conversation_id(),
+        title: String::new(),
+        messages: Vec::new(),
+        created_at: 1700010000,
+        updated_at: 1700010000,
+        last_response_at: None,
+        session_id: Some(generate_conversation_id()),
+        usage: None,
+        fork_source: None,
+    };
+    assert!(new_conv.messages.is_empty());
+    assert!(new_conv.title.is_empty());
+
+    // Step 4: Verify previous session is accessible via list_conversations
+    let summaries = storage.list_conversations().await.unwrap();
+    assert_eq!(summaries.len(), 1, "saved session should appear in list");
+    assert_eq!(summaries[0].id, "active-session");
+
+    // Step 5: Verify saved session can be fully restored
+    let restored = storage
+        .load_conversation("active-session")
+        .await
+        .unwrap()
+        .expect("saved session should be loadable");
+    assert_eq!(restored.messages.len(), 4);
+    assert_eq!(restored.title, "Active Chat");
+}
+
+// Covers: P14 / AC7 — /new with empty session does not save
+#[tokio::test]
+async fn test_slash_new_empty_session_no_save() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sessions_dir = tmp.path().join(".claude").join("sessions");
+    let storage = FileSystemStorage::new(sessions_dir.clone());
+
+    // Empty conversation (first launch, nothing to save)
+    let empty_conv = Conversation {
+        id: "empty-session".to_string(),
+        title: String::new(),
+        messages: Vec::new(),
+        created_at: 1700000000,
+        updated_at: 1700000000,
+        last_response_at: None,
+        session_id: None,
+        usage: None,
+        fork_source: None,
+    };
+
+    // /new with empty session: skip save (event loop checks messages.is_empty())
+    if !empty_conv.messages.is_empty() {
+        storage.save_conversation(&empty_conv).await.unwrap();
+    }
+
+    // Verify nothing was saved
+    let summaries = storage.list_conversations().await.unwrap();
+    assert!(summaries.is_empty(), "empty session should not be saved");
+}

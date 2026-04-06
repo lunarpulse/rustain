@@ -48,6 +48,9 @@ pub enum OverlayType {
     /// Reverse search overlay for input history (Ctrl+R).
     // Covers: UX-DR74
     ReverseSearch,
+    /// Inline autocomplete popup (/ or @).
+    // Covers: UX-DR75
+    Autocomplete(super::autocomplete::AutocompleteKind),
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).
