@@ -2,6 +2,7 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::DomainInputEvent;
 
 /// AC4: Event processing sets needs_redraw flag.
+// Covers: NFR2 (redraw efficiency)
 #[test]
 fn test_tick_needs_redraw_flag() {
     let mut state = TuiState::new(80, 24);
@@ -19,6 +20,7 @@ fn test_tick_needs_redraw_flag() {
 }
 
 /// AC4: Resize events update terminal dimensions and trigger redraw.
+// Covers: NFR2 (redraw efficiency)
 #[test]
 fn test_resize_event_updates_state() {
     let mut state = TuiState::new(80, 24);

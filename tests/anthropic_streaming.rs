@@ -37,6 +37,7 @@ mod streaming_integration {
 
     // ─── Task 9.1: SseLineBuffer tests (beyond inline tests) ─────────────
 
+    // Covers: FR1 (streaming)
     #[test]
     fn test_sse_buffer_rapid_succession_events() {
         use rustain::adapters::anthropic::sse::SseLineBuffer;
@@ -48,6 +49,7 @@ mod streaming_integration {
         assert_eq!(frames.len(), 3);
     }
 
+    // Covers: FR1 (streaming)
     #[test]
     fn test_sse_buffer_interleaved_partial_feeds() {
         use rustain::adapters::anthropic::sse::SseLineBuffer;
@@ -66,6 +68,7 @@ mod streaming_integration {
 
     // ─── Task 9.2: SSE-to-StreamChunk mapping ───────────────────────────
 
+    // Covers: FR1 (streaming), FR2 (content blocks)
     #[test]
     fn test_full_sse_to_stream_chunk_text_flow() {
         use rustain::adapters::anthropic::sse::SseLineBuffer;
@@ -126,6 +129,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.3: apply_chunk integration ──────────────────────────────
 
+    // Covers: FR1 (streaming), FR2 (content blocks)
     #[test]
     fn test_apply_chunk_full_turn_sequence() {
         let mut conv = make_conversation();
@@ -227,6 +231,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.7: MockProvider integration ─────────────────────────────
 
+    // Covers: FR1 (streaming), FR2 (content blocks)
     #[test]
     fn test_mock_provider_apply_chunk_sequence() {
         // Simulate a complete turn with pre-defined StreamChunks
@@ -292,6 +297,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.4: AnthropicRequest construction ────────────────────────
 
+    // Covers: FR1 (streaming), NFR11 (no API keys logged)
     #[test]
     fn test_anthropic_request_json_structure() {
         use rustain::adapters::anthropic::types::AnthropicRequest;
@@ -326,6 +332,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.5: Abort test ───────────────────────────────────────────
 
+    // Covers: FR3 (abort)
     #[tokio::test]
     async fn test_anthropic_adapter_abort_succeeds() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -341,6 +348,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.6: HTTP error mapping ───────────────────────────────────
 
+    // Covers: FR14 (retry/backoff)
     #[tokio::test]
     async fn test_anthropic_adapter_401_returns_auth_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -391,6 +399,7 @@ data: {\"type\":\"message_stop\"}\n\
         mock.assert_async().await;
     }
 
+    // Covers: FR14 (retry/backoff)
     #[tokio::test]
     async fn test_anthropic_adapter_429_returns_rate_limit_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -443,6 +452,7 @@ data: {\"type\":\"message_stop\"}\n\
         mock.assert_async().await;
     }
 
+    // Covers: FR14 (retry/backoff)
     #[tokio::test]
     async fn test_anthropic_adapter_500_returns_connection_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -496,6 +506,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.8: Provider conformance with mock HTTP ──────────────────
 
+    // Covers: FR1 (streaming), FR2 (content blocks)
     #[tokio::test]
     async fn test_anthropic_adapter_streaming_with_mock_server() {
         use futures::StreamExt;
@@ -604,6 +615,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Review fix: run_turn synthesizes TurnComplete on stream disconnect ──
 
+    // Covers: FR1 (streaming), FR14 (retry/backoff)
     #[tokio::test]
     async fn test_run_turn_emits_error_on_stream_disconnect() {
         use futures::stream;
@@ -705,6 +717,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Review fix: empty messages returns error ───────────────────────
 
+    // Covers: FR1 (streaming)
     #[tokio::test]
     async fn test_anthropic_adapter_empty_messages_returns_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -745,6 +758,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Task 9.9: Live smoke test ──────────────────────────────────────
 
+    // Covers: FR1 (streaming)
     #[tokio::test]
     #[ignore] // Only run manually: cargo test test_anthropic_live_streaming -- --ignored
     async fn test_anthropic_live_streaming() {
@@ -801,6 +815,7 @@ data: {\"type\":\"message_stop\"}\n\
 
     // ─── Story 2.0: Provider config tests ──────────────────────────────
 
+    // Covers: FR1 (streaming), NFR11 (no API keys logged)
     #[tokio::test]
     async fn test_api_key_auth_sends_x_api_key_header() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -848,6 +863,7 @@ data: {\"type\":\"message_stop\"}\n\
         mock.assert_async().await;
     }
 
+    // Covers: FR1 (streaming), NFR11 (no API keys logged)
     #[tokio::test]
     async fn test_bearer_token_auth_sends_authorization_header() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -895,6 +911,7 @@ data: {\"type\":\"message_stop\"}\n\
         mock.assert_async().await;
     }
 
+    // Covers: FR1 (streaming)
     #[test]
     fn test_custom_base_url_passed_through() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -913,6 +930,7 @@ data: {\"type\":\"message_stop\"}\n\
         );
     }
 
+    // Covers: FR1 (streaming)
     #[test]
     fn test_model_override_reflected_in_adapter() {
         use rustain::adapters::anthropic::AnthropicAdapter;
@@ -931,6 +949,7 @@ data: {\"type\":\"message_stop\"}\n\
         );
     }
 
+    // Covers: NFR11 (no API keys logged)
     #[test]
     fn test_debug_shows_auth_mode_and_base_url() {
         use rustain::adapters::anthropic::AnthropicAdapter;

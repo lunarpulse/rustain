@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 
 use super::theme::Theme;
+use super::widgets::input_box;
 
 /// Layout regions for the TUI frame.
 pub struct AppLayout {
@@ -10,18 +11,22 @@ pub struct AppLayout {
 }
 
 /// Compute the three-region layout based on terminal size.
+/// Input area height is dynamic based on content (multi-line support).
 /// - >=80x24: full layout
 /// - 60x16 to 80x24: compact layout (same regions, minimal status)
 /// - <60x16: returns None (terminal too small)
-pub fn compute_layout(area: Rect, _theme: &Theme) -> Option<AppLayout> {
+// Covers: FR16, UX-DR76
+pub fn compute_layout(area: Rect, _theme: &Theme, input: &str) -> Option<AppLayout> {
     if area.width < 60 || area.height < 16 {
         return None;
     }
 
+    let input_height = input_box::input_area_height(input, area.width);
+
     let chunks = Layout::vertical([
-        Constraint::Min(1),    // chat pane (fills remaining)
-        Constraint::Length(1), // status bar
-        Constraint::Length(3), // input area
+        Constraint::Min(1),              // chat pane (fills remaining)
+        Constraint::Length(1),           // status bar
+        Constraint::Length(input_height), // input area (dynamic)
     ])
     .split(area);
 

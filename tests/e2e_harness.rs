@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 use ratatui::backend::TestBackend;
+use ratatui::style::Style;
 use ratatui::Terminal;
 
 use rustain::adapters::tui::app::{handle_input, InputAction};
@@ -214,13 +215,15 @@ impl TestHarness {
         let focus = self.state.focus.clone();
         let has_project_context = self.state.has_project_context;
         let total_content_height = self.state.total_content_height;
+        let multiline_mode = self.state.multiline_mode;
+        let input_scroll_offset = self.state.input_scroll_offset;
         let msg_boundaries: Vec<usize> = vec![];
         let viewport_height: u16 = 20; // approximate for status bar
 
         self.terminal
             .draw(|frame| {
                 let area = frame.area();
-                if let Some(app_layout) = layout::compute_layout(area, theme) {
+                if let Some(app_layout) = layout::compute_layout(area, theme, input_buffer) {
                     chat_pane::render(
                         frame,
                         app_layout.chat_pane,
@@ -248,6 +251,7 @@ impl TestHarness {
                         None, // token_usage
                         has_project_context,
                         None, // session_title
+                        multiline_mode,
                     );
 
                     input_box::render(
@@ -257,6 +261,8 @@ impl TestHarness {
                         cursor_position,
                         focus,
                         theme,
+                        multiline_mode,
+                        input_scroll_offset,
                     );
                 }
             })
@@ -474,20 +480,188 @@ impl TestHarness {
     }
 }
 
+// ── Style/Color Assertion Helpers ────────────────────────────────────────
+// Covers: AC5 (style/color assertion helpers for TUI test infrastructure)
+
+/// Extract the `Style` of a specific cell in the rendered buffer.
+///
+/// `row` and `col` are zero-based coordinates.
+pub fn buffer_cell_style(buffer: &ratatui::buffer::Buffer, row: u16, col: u16) -> Style {
+    use ratatui::prelude::Position;
+    buffer
+        .cell(Position::new(col, row))
+        .map(|cell| Style {
+            fg: Some(cell.fg),
+            bg: Some(cell.bg),
+            underline_color: None,
+            add_modifier: cell.modifier,
+            sub_modifier: ratatui::style::Modifier::empty(),
+        })
+        .unwrap_or_default()
+}
+
+/// Scan the buffer for `text` and verify that every matching character
+/// satisfies the style predicate `check`. Returns `true` if at least one
+/// occurrence is found where all characters pass the predicate.
+pub fn buffer_contains_styled_text(
+    buffer: &ratatui::buffer::Buffer,
+    text: &str,
+    check: impl Fn(&Style) -> bool,
+) -> bool {
+    let cells = buffer.content();
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() || cells.len() < chars.len() {
+        return false;
+    }
+
+    'outer: for start in 0..=(cells.len() - chars.len()) {
+        for (i, &expected) in chars.iter().enumerate() {
+            let cell = &cells[start + i];
+            if cell.symbol().chars().next().unwrap_or(' ') != expected {
+                continue 'outer;
+            }
+        }
+        // Text matched — now check style for every character
+        let all_styled = (0..chars.len()).all(|i| {
+            let cell = &cells[start + i];
+            let style = Style {
+                fg: Some(cell.fg),
+                bg: Some(cell.bg),
+                underline_color: None,
+                add_modifier: cell.modifier,
+                sub_modifier: ratatui::style::Modifier::empty(),
+            };
+            check(&style)
+        });
+        if all_styled {
+            return true;
+        }
+    }
+    false
+}
+
+impl TestHarness {
+    /// Assert that the status bar row contains `text`.
+    ///
+    /// The status bar is always 1 row, positioned at `height - 4`
+    /// (layout: chat fills remaining, status = 1 row, input = 3 rows).
+    pub fn assert_status_bar_contains(&self, text: &str) {
+        assert!(!text.is_empty(), "assert_status_bar_contains called with empty text — this always passes");
+        let buf = self.terminal.backend().buffer().clone();
+        let height = buf.area.height;
+        let width = buf.area.width as usize;
+        // Status bar sits at row (height - 4): 3 rows for input area + 1 for status bar itself
+        let status_row = height.saturating_sub(4);
+
+        let row_start = status_row as usize * width;
+        let row_end = (row_start + width).min(buf.content().len());
+        let row_text: String = buf.content()[row_start..row_end]
+            .iter()
+            .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+            .collect();
+
+        assert!(
+            row_text.contains(text),
+            "Expected status bar (row {}) to contain {:?}, but got: {:?}",
+            status_row,
+            text,
+            row_text.trim()
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STYLE HELPER TESTS
+// ═══════════════════════════════════════════════════════════════════════════
+// Covers: AC5 (unit tests for style assertion helpers)
+
+#[test]
+fn test_buffer_cell_style_returns_correct_style() {
+    let backend = TestBackend::new(20, 3);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::dark();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                "BOLD TEXT",
+                Style::default()
+                    .fg(theme.colors.error)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+            frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer().clone();
+    let style = buffer_cell_style(&buf, 0, 0); // 'B' of "BOLD TEXT"
+    assert_eq!(style.fg, Some(theme.colors.error));
+    assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+}
+
+#[test]
+fn test_buffer_contains_styled_text_finds_styled_match() {
+    let backend = TestBackend::new(40, 3);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::dark();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::raw("normal "),
+                ratatui::text::Span::styled("ERROR", Style::default().fg(theme.colors.error)),
+                ratatui::text::Span::raw(" rest"),
+            ]);
+            frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer().clone();
+
+    // Should find "ERROR" with error color
+    assert!(buffer_contains_styled_text(&buf, "ERROR", |s| s.fg
+        == Some(theme.colors.error)));
+
+    // Should NOT find "normal" with error color
+    assert!(!buffer_contains_styled_text(&buf, "normal", |s| s.fg
+        == Some(theme.colors.error)));
+}
+
+#[test]
+fn test_buffer_contains_styled_text_empty_text_returns_false() {
+    let backend = TestBackend::new(10, 1);
+    let terminal = Terminal::new(backend).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    assert!(!buffer_contains_styled_text(&buf, "", |_| true));
+}
+
+#[test]
+fn test_assert_status_bar_contains_finds_model() {
+    let mut h = TestHarness::new();
+    h.render();
+    h.assert_status_bar_contains("mock-model");
+    h.assert_status_bar_contains("Normal");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // E2E SMOKE TESTS
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Covers: FR38 (status bar), AC5 (style helpers)
 #[test]
 fn test_e2e_fresh_session_empty_state() {
     let mut h = TestHarness::new();
     h.render();
 
     h.assert_screen_contains("Welcome to Rustain", "Empty state should show welcome");
-    h.assert_screen_contains("mock-model", "Status bar should show model name");
-    h.assert_screen_contains("Normal", "Status bar should show permission mode");
+    // AC5: Use status bar assertion helper instead of generic screen_contains
+    h.assert_status_bar_contains("mock-model");
+    h.assert_status_bar_contains("Normal");
 }
 
+// Covers: FR16 (input controls)
 #[test]
 fn test_e2e_type_and_submit_message() {
     let mut h = TestHarness::new();
@@ -505,6 +679,7 @@ fn test_e2e_type_and_submit_message() {
     );
 }
 
+// Covers: FR1 (streaming), FR2 (content blocks), FR3 (abort preserves)
 #[test]
 fn test_e2e_simple_streaming_response() {
     let mut h = TestHarness::new();
@@ -546,6 +721,7 @@ fn test_e2e_simple_streaming_response() {
         .expect("API messages should be valid after simple turn");
 }
 
+// Covers: FR1 (streaming), NFR2 (redraw)
 #[test]
 fn test_e2e_typing_indicator_during_streaming() {
     let mut h = TestHarness::new();
@@ -557,6 +733,14 @@ fn test_e2e_typing_indicator_during_streaming() {
     h.assert_screen_contains("Hello", "Message content visible");
     h.assert_screen_contains("···", "Typing indicator visible during streaming");
 
+    // AC5: Verify typing indicator uses muted color (style assertion)
+    let buf = h.terminal.backend().buffer().clone();
+    let muted = h.theme.colors.fg_muted;
+    assert!(
+        buffer_contains_styled_text(&buf, "···", |s| s.fg == Some(muted)),
+        "Typing indicator should render with fg_muted color"
+    );
+
     // Process first text chunk
     h.process_chunk(StreamChunk::Text {
         content: "Hi there!".to_string(),
@@ -567,6 +751,7 @@ fn test_e2e_typing_indicator_during_streaming() {
     h.assert_screen_contains("Hi there!", "Streamed text visible");
 }
 
+// Covers: FR3 (abort preserves partial)
 #[test]
 fn test_e2e_abort_preserves_partial_response() {
     let mut h = TestHarness::new();
@@ -597,6 +782,7 @@ fn test_e2e_abort_preserves_partial_response() {
     );
 }
 
+// Covers: FR1 (streaming error)
 #[test]
 fn test_e2e_error_during_streaming() {
     let mut h = TestHarness::new();
@@ -618,6 +804,7 @@ fn test_e2e_error_during_streaming() {
     assert!(h.conversation.messages.len() >= 1, "At least user message exists");
 }
 
+// Covers: FR23 (tool execution), FR29 (tool blocks)
 #[test]
 fn test_e2e_tool_use_conversation_state() {
     let mut h = TestHarness::new();
@@ -673,6 +860,7 @@ fn test_e2e_tool_use_conversation_state() {
     );
 }
 
+// Covers: FR23 (tool execution), NFR19 (API message integrity)
 #[test]
 fn test_e2e_api_messages_valid_after_tool_use() {
     let mut h = TestHarness::new();
@@ -731,6 +919,7 @@ fn test_e2e_api_messages_valid_after_tool_use() {
     assert_eq!(assistant.tool_uses[0].name, "Read");
 }
 
+// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
 fn test_e2e_scroll_navigation() {
     let mut h = TestHarness::new();
@@ -771,6 +960,7 @@ fn test_e2e_scroll_navigation() {
     assert_eq!(h.state.scroll_offset, 0, "G should jump to bottom");
 }
 
+// Covers: FR22 (vim keybindings), FR16 (input controls)
 #[test]
 fn test_e2e_keyboard_focus_switching() {
     let mut h = TestHarness::new();
@@ -795,6 +985,7 @@ fn test_e2e_keyboard_focus_switching() {
     assert!(matches!(action, InputAction::Quit));
 }
 
+// Covers: FR1 (streaming), FR2 (content blocks)
 #[test]
 fn test_e2e_multi_turn_conversation() {
     let mut h = TestHarness::new();
@@ -838,6 +1029,7 @@ fn test_e2e_multi_turn_conversation() {
         .expect("Multi-turn API messages should be valid");
 }
 
+// Covers: NFR2 (responsive layout)
 #[test]
 fn test_e2e_compact_layout() {
     // Test at minimum supported size (60x16)
@@ -862,6 +1054,7 @@ fn test_e2e_compact_layout() {
     h.assert_screen_contains("Hi!", "Response visible in compact layout");
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_e2e_empty_system_prompt_no_crash() {
     let mut h = TestHarness::new();

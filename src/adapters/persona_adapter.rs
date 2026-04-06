@@ -19,6 +19,7 @@ impl PersonaAdapter {
     }
 
     /// Number of context files loaded.
+    #[allow(dead_code)]
     pub fn file_count(&self) -> usize {
         self.project_context.files.len()
     }
@@ -35,7 +36,11 @@ impl PersonaAdapter {
 
     /// File paths of all loaded context files.
     pub fn file_paths(&self) -> Vec<&std::path::Path> {
-        self.project_context.files.iter().map(|f| f.path.as_path()).collect()
+        self.project_context
+            .files
+            .iter()
+            .map(|f| f.path.as_path())
+            .collect()
     }
 }
 

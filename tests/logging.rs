@@ -4,6 +4,7 @@ use rustain::infrastructure::paths;
 use std::path::Path;
 
 /// AC5: Log file path resolves to ~/.rustain/rustain.log.
+// Covers: NFR3 (logging infrastructure)
 #[test]
 fn test_log_file_path() {
     let path = paths::log_file_path().unwrap();
@@ -20,6 +21,7 @@ fn test_log_file_path() {
 }
 
 /// AC5: Data directory is created when resolving log path.
+// Covers: NFR3 (logging infrastructure)
 #[test]
 fn test_data_dir_created() {
     let dir = paths::data_dir().unwrap();
@@ -30,9 +32,10 @@ fn test_data_dir_created() {
 }
 
 /// AC5: Logging init does not panic and creates the log file.
-/// Note: Can only init tracing once per process — this test verifies
+/// Note: Can only init tracing once per process -- this test verifies
 /// the log directory setup, not the full tracing init (which would
 /// conflict with other tests that also init tracing).
+// Covers: NFR3 (logging infrastructure)
 #[test]
 fn test_log_directory_writable() {
     let dir = paths::data_dir().unwrap();

@@ -30,7 +30,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) = layout::compute_layout(area, &state.theme) {
+            if let Some(app_layout) = layout::compute_layout(area, &state.theme, &state.input_buffer) {
                 chat_pane::render(
                     frame,
                     app_layout.chat_pane,
@@ -57,6 +57,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     state.token_usage.as_ref(),
                     state.has_project_context,
                     None,
+                    state.multiline_mode,
                 );
                 input_box::render(
                     frame,
@@ -65,6 +66,8 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     state.cursor_position,
                     state.focus,
                     &state.theme,
+                    state.multiline_mode,
+                    state.input_scroll_offset,
                 );
             }
         })
@@ -74,6 +77,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
 }
 
 /// AC2 (partial): TUI frame renders with chat pane, status bar, and input area.
+// Covers: NFR1 (cold start), NFR2 (redraw)
 #[test]
 fn test_tui_renders_empty_state() {
     let terminal = render_frame(80, 24);
@@ -104,6 +108,7 @@ fn test_tui_renders_empty_state() {
 }
 
 /// AC2: Layout adapts for compact terminals.
+// Covers: NFR2 (responsive layout)
 #[test]
 fn test_tui_renders_compact_layout() {
     let terminal = render_frame(70, 20);
@@ -122,12 +127,13 @@ fn test_tui_renders_compact_layout() {
 }
 
 /// Layout returns None for terminals smaller than 60x16.
+// Covers: NFR2 (responsive layout)
 #[test]
 fn test_tui_too_small_terminal() {
     let theme = rustain::adapters::tui::theme::Theme::dark();
     let area = ratatui::prelude::Rect::new(0, 0, 50, 12);
     assert!(
-        layout::compute_layout(area, &theme).is_none(),
+        layout::compute_layout(area, &theme, "").is_none(),
         "Expected None for terminal too small"
     );
 }

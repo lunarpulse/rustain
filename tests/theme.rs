@@ -5,12 +5,14 @@ use rustain::adapters::tui::theme::Theme;
 
 // ── Task 5.1: Theme::dark() returns valid theme with all fields populated ──
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_dark_theme_name() {
     let theme = Theme::dark();
     assert_eq!(theme.name, "dark");
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_dark_theme_colors_populated() {
     let theme = Theme::dark();
@@ -23,6 +25,7 @@ fn test_dark_theme_colors_populated() {
     assert_ne!(theme.colors.info, Color::Reset);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_dark_theme_spacing_populated() {
     let theme = Theme::dark();
@@ -43,6 +46,7 @@ fn test_dark_theme_spacing_populated() {
     assert!((theme.spacing.sidebar_width_ratio - 0.3).abs() < f32::EPSILON);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_dark_theme_timing_populated() {
     let theme = Theme::dark();
@@ -56,6 +60,7 @@ fn test_dark_theme_timing_populated() {
     assert_eq!(theme.timing.auto_scroll_resume_ms, 200);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_dark_theme_typography_levels() {
     let theme = Theme::dark();
@@ -91,6 +96,7 @@ fn test_dark_theme_typography_levels() {
 
 // ── Task 5.3: Monochrome degradation ──
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_monochrome_all_colors_reset() {
     let theme = Theme::for_capability(ColorCapability::Monochrome);
@@ -110,6 +116,7 @@ fn test_monochrome_all_colors_reset() {
 }
 
 // ── Task 5.4: Color16 degradation ──
+// Covers: UX-DR5 (color detection and degradation)
 
 fn is_named_ansi(color: Color) -> bool {
     matches!(
@@ -181,6 +188,7 @@ fn test_color16_uses_named_colors() {
 }
 
 // ── Task 5.5: WCAG AA contrast validation ──
+// Covers: UX-DR5 (color detection and degradation), NFR5 (accessibility)
 
 fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
     let linearize = |c: u8| -> f64 {
@@ -266,6 +274,7 @@ fn test_wcag_aa_contrast_truecolor() {
 
 // ── Task 5.6: SemanticSymbol constants ──
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_semantic_symbols() {
     use rustain::domain::models::visual::symbols;
@@ -279,6 +288,7 @@ fn test_semantic_symbols() {
 
 // ── Task 5.7: BlockBorder and DensityMode enum variants ──
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_block_border_variants() {
     use rustain::domain::models::BlockBorder;
@@ -300,6 +310,7 @@ fn test_block_border_variants() {
     assert_eq!(deserialized, BlockBorder::SolidThin);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_density_mode_variants() {
     use rustain::domain::models::DensityMode;
@@ -318,6 +329,7 @@ fn test_density_mode_variants() {
 
 // ── Task 5.9: FocusState variant count and structure ──
 
+// Covers: FR22 (vim keybindings)
 #[test]
 fn test_focus_state_variants() {
     use rustain::domain::models::FocusState;
@@ -341,6 +353,7 @@ fn test_focus_state_variants() {
     assert_ne!(input, overlay);
 }
 
+// Covers: FR22 (vim keybindings)
 #[test]
 fn test_overlay_type_variants() {
     use rustain::domain::models::visual::OverlayType;
@@ -356,8 +369,9 @@ fn test_overlay_type_variants() {
     assert_eq!(variants.len(), 5);
 }
 
-// ── Task 5.8: Integration test — TUI renders with Theme applied ──
+// ── Task 5.8: Integration test -- TUI renders with Theme applied ──
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_tui_renders_with_theme_colors() {
     use ratatui::Terminal;
@@ -373,7 +387,7 @@ fn test_tui_renders_with_theme_colors() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) = layout::compute_layout(area, &state.theme) {
+            if let Some(app_layout) = layout::compute_layout(area, &state.theme, &state.input_buffer) {
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -388,6 +402,7 @@ fn test_tui_renders_with_theme_colors() {
                     state.token_usage.as_ref(),
                     state.has_project_context,
                     None,
+                    state.multiline_mode,
                 );
             }
         })
@@ -410,6 +425,7 @@ fn test_tui_renders_with_theme_colors() {
 
 // ── Review patch: Color256 degradation boundary test ──
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_color256_degradation_boundary_values() {
     let theme = Theme::for_capability(ColorCapability::Color256);

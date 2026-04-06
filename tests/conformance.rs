@@ -39,6 +39,7 @@ fn get_imports(path: &Path) -> Vec<(usize, String)> {
         .collect()
 }
 
+// Covers: Architecture invariant (hexagonal directory structure)
 /// Domain layer must not import I/O crates.
 /// Allowed: serde, serde_json, thiserror, async-trait, futures (pure types/traits), std::path, tracing (logging facade).
 /// Forbidden: crossterm, ratatui, tokio, reqwest, arc_swap.
@@ -75,6 +76,7 @@ fn test_domain_no_forbidden_crate_imports() {
     );
 }
 
+// Covers: Architecture invariant (hexagonal directory structure)
 /// AC1 / Task 3.6: Domain layer must not import from adapters/ or infrastructure/.
 #[test]
 fn test_domain_no_adapter_or_infra_imports() {
@@ -106,6 +108,7 @@ fn test_domain_no_adapter_or_infra_imports() {
     );
 }
 
+// Covers: Architecture invariant (hexagonal directory structure)
 /// AC1: Hexagonal directory structure exists with all required modules.
 #[test]
 fn test_hexagonal_directory_structure() {
@@ -156,6 +159,7 @@ fn test_hexagonal_directory_structure() {
     );
 }
 
+// Covers: Architecture invariant (hexagonal directory structure)
 /// Adapters must not import from other adapters (no adapter-to-adapter).
 /// Exception: adapters/tui/ submodules can import from each other.
 #[test]
@@ -190,6 +194,66 @@ fn test_no_cross_adapter_imports() {
     assert!(
         violations.is_empty(),
         "Cross-adapter imports found:\n{}",
+        violations.join("\n")
+    );
+}
+
+// Covers: Architecture invariant (shared utility adoption), AC6
+/// Raw `env::var()` must not appear outside the shared utility and known exceptions.
+///
+/// The shared utility `infrastructure/utils.rs` provides `env_var_trimmed()` — all other
+/// code should use that wrapper. Exceptions:
+/// - `src/infrastructure/utils.rs` — the shared utility itself
+/// - `src/adapters/cli/init.rs` lines 276-277 — test backup/restore (Story 2-5 decision)
+#[test]
+fn test_no_raw_env_var_outside_utils() {
+    let src_dir = Path::new("src");
+    let files = collect_rs_files(src_dir);
+    assert!(!files.is_empty(), "No .rs files found in src/");
+
+    let allowed_files: &[&str] = &["src/infrastructure/utils.rs"];
+
+    // init.rs exception lines (test backup/restore per Story 2-5)
+    let init_rs_suffix = std::path::Path::new("src/adapters/cli/init.rs");
+    let init_rs_allowed_lines: &[usize] = &[276, 277];
+
+    let mut violations = Vec::new();
+
+    for file in &files {
+        // Skip entirely allowed files
+        if allowed_files.iter().any(|a| file.ends_with(a)) {
+            continue;
+        }
+
+        let content = fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("conformance scan: failed to read {}: {e}", file.display()));
+        for (line_num_0, line) in content.lines().enumerate() {
+            let line_num = line_num_0 + 1;
+            let trimmed = line.trim();
+
+            // Skip comments
+            if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                continue;
+            }
+
+            if trimmed.contains("env::var(") {
+                // Special exception: init.rs specific lines
+                if file.ends_with(init_rs_suffix) && init_rs_allowed_lines.contains(&line_num) {
+                    continue;
+                }
+                violations.push(format!(
+                    "{}:{} — raw env::var() usage (use infrastructure::utils::env_var_trimmed instead): {}",
+                    file.display(),
+                    line_num,
+                    trimmed
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Raw env::var() found outside allowed locations:\n{}",
         violations.join("\n")
     );
 }

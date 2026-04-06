@@ -1,5 +1,6 @@
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
+use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
@@ -76,6 +77,15 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
+    // Reverse search: typing adds to query
+    // Covers: UX-DR74
+    if state.reverse_search.active {
+        state.reverse_search.query.push(c);
+        update_reverse_search_matches(state);
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+
     // Permission prompt focus: only y/n/a are handled, all others ignored
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match c {
@@ -294,8 +304,31 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
     }
 
+    // Reverse search overlay handling
+    // Covers: UX-DR74 (reverse search)
+    if state.reverse_search.active {
+        return handle_reverse_search_key(state, key);
+    }
+
     match key {
         DomainKey::Esc => {
+            // In multiline mode with content: submit message (alternative send)
+            // If navigating history, cancel navigation instead of submitting.
+            // Covers: UX-DR76
+            if state.focus == FocusState::Input
+                && state.multiline_mode
+                && !state.input_buffer.is_empty()
+            {
+                if state.input_history.is_navigating() {
+                    state.input_history.reset_navigation();
+                    state.input_buffer.clear();
+                    state.cursor_position = 0;
+                    state.input_scroll_offset = 0;
+                    state.needs_redraw = true;
+                    return InputAction::Consumed;
+                }
+                return submit_message(state);
+            }
             state.focus = match state.focus {
                 FocusState::Input => FocusState::Chat,
                 FocusState::Chat => FocusState::Input,
@@ -304,6 +337,44 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             state.needs_redraw = true;
             InputAction::Consumed
         }
+
+        // Shift+Enter: always insert newline (when terminal supports it)
+        // Covers: UX-DR76 (Shift+Enter)
+        DomainKey::ShiftEnter if state.focus == FocusState::Input => {
+            insert_newline(state);
+            InputAction::Consumed
+        }
+
+        // Ctrl+Enter: submit in multiline mode
+        // Covers: UX-DR76
+        DomainKey::CtrlEnter if state.focus == FocusState::Input => {
+            if !state.input_buffer.is_empty() {
+                submit_message(state)
+            } else {
+                InputAction::Consumed
+            }
+        }
+
+        // Ctrl+E: toggle multi-line mode
+        // Covers: UX-DR76 (Ctrl+E fallback)
+        DomainKey::CtrlE if state.focus == FocusState::Input => {
+            state.multiline_mode = !state.multiline_mode;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
+        // Ctrl+R: activate reverse search
+        // Covers: UX-DR74
+        DomainKey::CtrlR if state.focus == FocusState::Input => {
+            state.reverse_search.active = true;
+            state.reverse_search.query.clear();
+            state.reverse_search.matches.clear();
+            state.reverse_search.selected_match = 0;
+            state.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
         DomainKey::Backspace if state.focus == FocusState::Input => {
             if state.cursor_position > 0 {
                 state.cursor_position -= 1;
@@ -313,6 +384,18 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             }
             InputAction::Consumed
         }
+
+        // Delete key: remove character at cursor position
+        DomainKey::Delete if state.focus == FocusState::Input => {
+            let total_chars = state.input_buffer.chars().count();
+            if state.cursor_position < total_chars {
+                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                state.input_buffer.remove(byte_pos);
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+
         DomainKey::Left if state.focus == FocusState::Input => {
             state.cursor_position = state.cursor_position.saturating_sub(1);
             state.needs_redraw = true;
@@ -325,35 +408,208 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             }
             InputAction::Consumed
         }
+
+        // Home: move to start of current line
+        DomainKey::Home if state.focus == FocusState::Input => {
+            let (row, _col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row, 0);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
+        // End: move to end of current line
+        DomainKey::End if state.focus == FocusState::Input => {
+            let (row, _col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let line_len = input_box::line_len_at_row(&state.input_buffer, row);
+            state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row, line_len);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
+        // Up/Down in Input focus: multi-line navigation or history
+        // Covers: UX-DR74, UX-DR76
+        DomainKey::Up if state.focus == FocusState::Input => {
+            let has_multiline_content = state.input_buffer.contains('\n');
+            let (row, col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+
+            if has_multiline_content && row > 0 && !state.input_history.is_navigating() {
+                // Move cursor up one line (only if not already navigating history)
+                let target_col = col.min(input_box::line_len_at_row(&state.input_buffer, row - 1));
+                state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row - 1, target_col);
+                ensure_cursor_visible(state);
+                state.needs_redraw = true;
+            } else if state.input_buffer.is_empty()
+                || state.input_history.is_navigating()
+                || !has_multiline_content
+            {
+                // Navigate history
+                let current = state.input_buffer.clone();
+                if let Some(entry) = state.input_history.navigate_up(&current) {
+                    state.input_buffer = entry.to_string();
+                    state.cursor_position = state.input_buffer.chars().count();
+                    state.input_scroll_offset = 0;
+                    ensure_cursor_visible(state);
+                    state.needs_redraw = true;
+                }
+            }
+            InputAction::Consumed
+        }
+
+        DomainKey::Down if state.focus == FocusState::Input => {
+            let has_multiline_content = state.input_buffer.contains('\n');
+            let (row, col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let total_lines = input_box::line_count(&state.input_buffer);
+
+            if has_multiline_content && row + 1 < total_lines && !state.input_history.is_navigating() {
+                // Move cursor down one line (only if not already navigating history)
+                let target_col = col.min(input_box::line_len_at_row(&state.input_buffer, row + 1));
+                state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row + 1, target_col);
+                ensure_cursor_visible(state);
+                state.needs_redraw = true;
+            } else if state.input_history.is_navigating() {
+                // Navigate history forward
+                if let Some(entry) = state.input_history.navigate_down() {
+                    state.input_buffer = entry.to_string();
+                    state.cursor_position = state.input_buffer.chars().count();
+                    state.input_scroll_offset = 0;
+                    ensure_cursor_visible(state);
+                    state.needs_redraw = true;
+                }
+            }
+            InputAction::Consumed
+        }
+
         DomainKey::Enter if state.focus == FocusState::Chat => {
             // Toggle collapse/expand on focused tool block
             if let Some(ref tool_id) = state.focused_tool_id {
                 let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                 entry.collapsed = !entry.collapsed;
-                entry.peek_active = false; // dismiss peek on toggle
-                // Invalidate height cache since expanded height differs
+                entry.peek_active = false;
                 state.height_cache.invalidate_all();
                 state.needs_redraw = true;
             }
             InputAction::Consumed
         }
+
+        // Enter in Input: behavior depends on multiline_mode
+        // Covers: UX-DR76
         DomainKey::Enter if state.focus == FocusState::Input => {
-            if !state.input_buffer.is_empty() {
-                let text = std::mem::take(&mut state.input_buffer);
-                state.cursor_position = 0;
-                state.needs_redraw = true;
-                InputAction::SubmitMessage(text)
+            if state.multiline_mode {
+                // In multiline mode, Enter inserts newline (only if buffer has content)
+                if !state.input_buffer.is_empty() {
+                    insert_newline(state);
+                }
+                InputAction::Consumed
+            } else if !state.input_buffer.is_empty() {
+                submit_message(state)
             } else {
                 InputAction::Consumed
             }
         }
+
         DomainKey::CtrlC => InputAction::CancelOrQuit,
         _ => InputAction::Ignored,
     }
 }
 
+/// Insert a newline at cursor position.
+// Covers: UX-DR76
+fn insert_newline(state: &mut TuiState) {
+    let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+    state.input_buffer.insert(byte_pos, '\n');
+    state.cursor_position += 1;
+    ensure_cursor_visible(state);
+    state.needs_redraw = true;
+}
+
+/// Submit the current input buffer as a message.
+// Covers: UX-DR77
+fn submit_message(state: &mut TuiState) -> InputAction {
+    let text = std::mem::take(&mut state.input_buffer);
+    state.input_history.push(text.clone());
+    state.input_history.reset_navigation();
+    state.cursor_position = 0;
+    state.input_scroll_offset = 0;
+    state.needs_redraw = true;
+    InputAction::SubmitMessage(text)
+}
+
+/// Ensure the cursor's row is visible within the input box scroll window.
+fn ensure_cursor_visible(state: &mut TuiState) {
+    let (cursor_row, _) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+    let max_visible = input_box::MAX_INPUT_LINES;
+    if cursor_row >= state.input_scroll_offset + max_visible {
+        state.input_scroll_offset = cursor_row + 1 - max_visible;
+    } else if cursor_row < state.input_scroll_offset {
+        state.input_scroll_offset = cursor_row;
+    }
+}
+
+/// Handle keys while reverse search overlay is active.
+// Covers: UX-DR74
+fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    match key {
+        DomainKey::Enter => {
+            // Select current match and populate input
+            if let Some(selected) = state.reverse_search.matches.get(state.reverse_search.selected_match) {
+                state.input_buffer = selected.1.clone();
+                state.cursor_position = state.input_buffer.chars().count();
+            }
+            state.reverse_search.active = false;
+            state.focus = FocusState::Input;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Esc => {
+            state.reverse_search.active = false;
+            state.focus = FocusState::Input;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Up | DomainKey::CtrlR => {
+            // Cycle to next match
+            if !state.reverse_search.matches.is_empty() {
+                state.reverse_search.selected_match =
+                    (state.reverse_search.selected_match + 1) % state.reverse_search.matches.len();
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Down => {
+            // Cycle to previous match
+            if !state.reverse_search.matches.is_empty() {
+                if state.reverse_search.selected_match == 0 {
+                    state.reverse_search.selected_match = state.reverse_search.matches.len() - 1;
+                } else {
+                    state.reverse_search.selected_match -= 1;
+                }
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Backspace => {
+            state.reverse_search.query.pop();
+            update_reverse_search_matches(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::CtrlC => InputAction::CancelOrQuit,
+        _ => InputAction::Consumed,
+    }
+}
+
+/// Update reverse search matches from current query.
+fn update_reverse_search_matches(state: &mut TuiState) {
+    let old_selected = state.reverse_search.selected_match;
+    let results = state.input_history.search(&state.reverse_search.query);
+    state.reverse_search.matches = results.into_iter().map(|(i, s)| (i, s.to_string())).collect();
+    let new_len = state.reverse_search.matches.len();
+    state.reverse_search.selected_match = old_selected.min(new_len.saturating_sub(1));
+}
+
 /// Convert a crossterm key event into a domain input event.
 /// This is the ONLY place where crossterm types are mapped to domain types.
+// Covers: FR16, UX-DR76, UX-DR74
 pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<DomainInputEvent> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -361,20 +617,39 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
         Event::Key(KeyEvent {
             code, modifiers, ..
         }) => {
-            // Ctrl+C → mapped to DomainKey::CtrlC, handled via InputAction::CancelOrQuit
+            // Ctrl+C → mapped to DomainKey::CtrlC
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('c') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlC));
+            }
+            // Ctrl+E → toggle multi-line mode
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
+            }
+            // Ctrl+R → reverse search
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('r') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlR));
             }
 
             match code {
                 KeyCode::Char(c) => Some(DomainInputEvent::KeyPress(*c)),
-                KeyCode::Enter => Some(DomainInputEvent::SpecialKey(DomainKey::Enter)),
+                KeyCode::Enter => {
+                    if modifiers.contains(KeyModifiers::SHIFT) {
+                        Some(DomainInputEvent::SpecialKey(DomainKey::ShiftEnter))
+                    } else if modifiers.contains(KeyModifiers::CONTROL) {
+                        Some(DomainInputEvent::SpecialKey(DomainKey::CtrlEnter))
+                    } else {
+                        Some(DomainInputEvent::SpecialKey(DomainKey::Enter))
+                    }
+                }
                 KeyCode::Esc => Some(DomainInputEvent::SpecialKey(DomainKey::Esc)),
                 KeyCode::Backspace => Some(DomainInputEvent::SpecialKey(DomainKey::Backspace)),
+                KeyCode::Delete => Some(DomainInputEvent::SpecialKey(DomainKey::Delete)),
                 KeyCode::Up => Some(DomainInputEvent::SpecialKey(DomainKey::Up)),
                 KeyCode::Down => Some(DomainInputEvent::SpecialKey(DomainKey::Down)),
                 KeyCode::Left => Some(DomainInputEvent::SpecialKey(DomainKey::Left)),
                 KeyCode::Right => Some(DomainInputEvent::SpecialKey(DomainKey::Right)),
+                KeyCode::Home => Some(DomainInputEvent::SpecialKey(DomainKey::Home)),
+                KeyCode::End => Some(DomainInputEvent::SpecialKey(DomainKey::End)),
                 KeyCode::Tab => Some(DomainInputEvent::SpecialKey(DomainKey::Tab)),
                 _ => None,
             }

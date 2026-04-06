@@ -15,6 +15,7 @@ fn make_test_adapter() -> SecurityAdapter {
     adapter
 }
 
+// Covers: FR24 (permission prompt), FR25 (permission modes)
 #[tokio::test]
 async fn test_safe_bash_command_allowed() {
     let security = NoOpSecurity;
@@ -27,6 +28,7 @@ async fn test_safe_bash_command_allowed() {
     assert_eq!(result, PermissionDecision::Allow);
 }
 
+// Covers: FR24 (permission prompt), FR25 (permission modes)
 #[tokio::test]
 async fn test_read_allowed_with_noop() {
     let security = NoOpSecurity;
@@ -39,6 +41,7 @@ async fn test_read_allowed_with_noop() {
     assert_eq!(result, PermissionDecision::Allow);
 }
 
+// Covers: FR27 (blocklist), FR24 (permission prompt)
 #[tokio::test]
 async fn test_blocked_command_denied_even_with_allow_permission() {
     let adapter = make_test_adapter();
@@ -51,6 +54,7 @@ async fn test_blocked_command_denied_even_with_allow_permission() {
     assert!(matches!(result, PermissionDecision::Deny(_)));
 }
 
+// Covers: FR28 (workspace restriction), NFR14 (workspace path restriction)
 #[tokio::test]
 async fn test_workspace_violation_denied() {
     let adapter = make_test_adapter();
@@ -63,6 +67,7 @@ async fn test_workspace_violation_denied() {
     assert!(matches!(result, PermissionDecision::Deny(_)));
 }
 
+// Covers: FR27 (blocklist)
 #[tokio::test]
 async fn test_blocklist_catches_fork_bomb() {
     use rustain::domain::ports::SecurityPort;
@@ -70,6 +75,7 @@ async fn test_blocklist_catches_fork_bomb() {
     assert!(adapter.check_blocklist(":(){ :|:& };:").is_err());
 }
 
+// Covers: FR24 (permission prompt), FR27 (blocklist)
 #[tokio::test]
 async fn test_multiple_tool_calls_sequential() {
     let adapter = make_test_adapter();
@@ -92,6 +98,7 @@ async fn test_multiple_tool_calls_sequential() {
     assert!(matches!(r2, PermissionDecision::Deny(_)));
 }
 
+// Covers: FR25 (permission modes), FR27 (blocklist)
 // Conformance: YOLO mode + blocked command → still blocked
 #[tokio::test]
 async fn test_yolo_mode_still_blocks_dangerous() {
@@ -107,6 +114,7 @@ async fn test_yolo_mode_still_blocks_dangerous() {
     assert!(matches!(result, PermissionDecision::Deny(_)));
 }
 
+// Covers: FR25 (permission modes)
 // Conformance: Normal mode + AlwaysAllow match → Allow (no prompt)
 #[tokio::test]
 async fn test_normal_mode_always_allow_match() {

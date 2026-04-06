@@ -219,6 +219,218 @@ fn test_virtual_scroll_one_message() {
         .unwrap();
 }
 
+// Covers: FR13 (auto-scroll), NFR4 (1000+ message performance), AC7 — viewport culling
+#[test]
+fn test_virtual_scroll_viewport_culling() {
+    let conversation = make_conversation(60);
+    let streaming = StreamingState::default();
+    let theme = Theme::dark();
+
+    // First render at bottom (scroll_offset = 0, auto_scroll = true) to get total height
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut cache = HeightCache::default();
+    let mut total_height = 0;
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let result = chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+            );
+            total_height = result.total_content_height;
+        })
+        .unwrap();
+
+    assert!(total_height > 24, "60 messages should exceed viewport height");
+
+    // Render scrolled to middle (offset = half of max scroll range)
+    let max_offset = total_height.saturating_sub(24);
+    let mid_offset = max_offset / 2;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut cache = HeightCache::default();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                mid_offset,
+                false, // NOT auto-scroll — use explicit offset
+                &theme,
+                &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+            );
+        })
+        .unwrap();
+
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .clone()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+        .collect();
+
+    // First message (index 0) should NOT be visible when scrolled to middle
+    assert!(
+        !text.contains("Message number 0 "),
+        "First message should not be visible when scrolled to middle"
+    );
+    // Last message (index 59) should NOT be visible when scrolled to middle
+    assert!(
+        !text.contains("Message number 59 "),
+        "Last message should not be visible when scrolled to middle"
+    );
+    // Some middle message should be visible
+    let has_middle = (20..40).any(|i| text.contains(&format!("Message number {}", i)));
+    assert!(has_middle, "Some middle messages should be visible");
+}
+
+// Covers: FR13 (auto-scroll), AC7 — jump to bottom shows last messages
+#[test]
+fn test_virtual_scroll_jump_to_bottom() {
+    let conversation = make_conversation(60);
+    let streaming = StreamingState::default();
+    let theme = Theme::dark();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut cache = HeightCache::default();
+
+    // Render at bottom (scroll_offset = 0, auto_scroll = true)
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true, // auto_scroll = jump to bottom
+                &theme,
+                &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+            );
+        })
+        .unwrap();
+
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .clone()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+        .collect();
+
+    // Last message should be visible
+    assert!(
+        text.contains("Message number 59"),
+        "Last message should be visible at bottom"
+    );
+    // First message should NOT be visible
+    assert!(
+        !text.contains("Message number 0 "),
+        "First message should not be visible at bottom"
+    );
+}
+
+// Covers: AC7 — messages above viewport not present in buffer
+#[test]
+fn test_virtual_scroll_above_viewport_not_rendered() {
+    let conversation = make_conversation(60);
+    let streaming = StreamingState::default();
+    let theme = Theme::dark();
+
+    // Scroll all the way to the top (max offset)
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut cache = HeightCache::default();
+    let mut total_height = 0;
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let result = chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                0,
+                true,
+                &theme,
+                &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+            );
+            total_height = result.total_content_height;
+        })
+        .unwrap();
+
+    let max_offset = total_height.saturating_sub(24);
+
+    // Now render at the top
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut cache = HeightCache::default();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            chat_pane::render(
+                frame,
+                area,
+                &conversation,
+                &streaming,
+                max_offset,
+                false,
+                &theme,
+                &mut cache,
+                &HashMap::<String, ToolBlockState>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+            );
+        })
+        .unwrap();
+
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .clone()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
+        .collect();
+
+    // First message should be visible at top
+    assert!(
+        text.contains("Message number 0"),
+        "First message should be visible when scrolled to top"
+    );
+    // Last message should NOT be visible
+    assert!(
+        !text.contains("Message number 59"),
+        "Last message should not be visible when scrolled to top"
+    );
+}
+
 /// Edge case: only user messages (no assistant).
 #[test]
 fn test_virtual_scroll_only_user_messages() {

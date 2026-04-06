@@ -15,6 +15,7 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
     }
 }
 
+// Covers: FR1 (streaming), FR15 (history rebuild)
 #[test]
 fn test_build_api_messages_maps_roles() {
     let conv = make_conversation(vec![
@@ -46,6 +47,7 @@ fn test_build_api_messages_maps_roles() {
     assert_eq!(messages[1].content, "hi there");
 }
 
+// Covers: FR1 (streaming), FR15 (history rebuild)
 #[test]
 fn test_build_api_messages_empty_conversation() {
     let conv = make_conversation(vec![]);

@@ -5,6 +5,7 @@ use rustain::domain::models::FocusState;
 
 /// Integration test: full navigation flow.
 /// Scroll up with k, block-jump with J/K, message-jump with {/}, verify scroll offsets.
+// Covers: FR22 (vim keybindings), FR13 (auto-scroll)
 #[test]
 fn test_full_navigation_flow() {
     let mut state = TuiState::new(80, 24);
@@ -59,6 +60,7 @@ fn test_full_navigation_flow() {
 }
 
 /// Integration test: scroll down with j returns to bottom.
+// Covers: FR22 (vim keybindings), FR13 (auto-scroll)
 #[test]
 fn test_scroll_down_returns_to_bottom() {
     let mut state = TuiState::new(80, 24);
@@ -80,6 +82,7 @@ fn test_scroll_down_returns_to_bottom() {
 }
 
 /// Integration test: } jump with multiple user messages.
+// Covers: FR22 (vim keybindings), FR13 (auto-scroll)
 #[test]
 fn test_message_jump_down_across_messages() {
     let mut state = TuiState::new(80, 24);

@@ -13,6 +13,7 @@ use rustain::domain::models::AppConfig;
 // ──────────────────────────────────────────────────
 
 /// `rustain doctor` sets command = Some(Command::Doctor { terminal: false }).
+// Covers: FR98 (doctor health)
 #[test]
 fn test_cli_doctor_subcommand() {
     let cli = Cli::parse_from(["rustain", "doctor"]);
@@ -26,6 +27,7 @@ fn test_cli_doctor_subcommand() {
 }
 
 /// `rustain doctor --terminal` sets terminal = true.
+// Covers: FR98 (doctor health)
 #[test]
 fn test_cli_doctor_terminal_flag() {
     let cli = Cli::parse_from(["rustain", "doctor", "--terminal"]);
@@ -36,6 +38,7 @@ fn test_cli_doctor_terminal_flag() {
 }
 
 /// Existing subcommands still work after adding Doctor.
+// Covers: FR98 (doctor health), FR97 (init wizard)
 #[test]
 fn test_cli_init_still_works() {
     let cli = Cli::parse_from(["rustain", "init"]);
@@ -43,6 +46,7 @@ fn test_cli_init_still_works() {
 }
 
 /// Bare `rustain` still sets command = None.
+// Covers: FR98 (doctor health)
 #[test]
 fn test_cli_no_subcommand_still_works() {
     let cli = Cli::parse_from(["rustain"]);
@@ -50,6 +54,7 @@ fn test_cli_no_subcommand_still_works() {
 }
 
 /// Existing --new flag still works.
+// Covers: FR98 (doctor health)
 #[test]
 fn test_cli_new_flag_unchanged() {
     let cli = Cli::parse_from(["rustain", "--new"]);
@@ -58,6 +63,7 @@ fn test_cli_new_flag_unchanged() {
 }
 
 /// Existing --session flag still works.
+// Covers: FR98 (doctor health)
 #[test]
 fn test_cli_session_flag_unchanged() {
     let cli = Cli::parse_from(["rustain", "--session", "abc-123"]);
@@ -66,6 +72,7 @@ fn test_cli_session_flag_unchanged() {
 }
 
 /// --log-level works as global flag with doctor subcommand.
+// Covers: FR98 (doctor health)
 #[test]
 fn test_cli_log_level_with_doctor() {
     let cli = Cli::parse_from(["rustain", "--log-level", "debug", "doctor"]);
@@ -80,6 +87,7 @@ fn test_cli_log_level_with_doctor() {
 // Task 8.2: CheckResult formatting
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[test]
 fn test_display_results_formats_all_statuses() {
     let results = vec![
@@ -110,6 +118,7 @@ fn test_display_results_formats_all_statuses() {
 // Task 8.3: Summary counting
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[test]
 fn test_summary_counts_various_combos() {
     let results = vec![
@@ -162,6 +171,7 @@ fn test_summary_counts_various_combos() {
 // Task 8.4: GlobalConfigCheck
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health), FR97 (init wizard)
 #[tokio::test]
 async fn test_global_config_valid_toml() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -178,6 +188,7 @@ async fn test_global_config_valid_toml() {
     assert!(result.message.contains("config.toml"));
 }
 
+// Covers: FR98 (doctor health), FR97 (init wizard)
 #[tokio::test]
 async fn test_global_config_invalid_toml_file() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -192,6 +203,7 @@ async fn test_global_config_invalid_toml_file() {
     assert!(result.fix.unwrap().contains("rustain init"));
 }
 
+// Covers: FR98 (doctor health), FR97 (init wizard)
 #[tokio::test]
 async fn test_global_config_missing_file() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -209,6 +221,7 @@ async fn test_global_config_missing_file() {
 // Task 8.5: WorkspaceConfigCheck
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_workspace_config_valid_json() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -228,6 +241,7 @@ async fn test_workspace_config_valid_json() {
     assert_eq!(result.status, CheckStatus::Pass);
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_workspace_config_invalid_json_file() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -243,6 +257,7 @@ async fn test_workspace_config_invalid_json_file() {
     assert_eq!(result.status, CheckStatus::Fail);
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_workspace_config_missing_file() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -260,6 +275,7 @@ async fn test_workspace_config_missing_file() {
 // Task 8.6: SessionStorageCheck
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_sessions_empty_directory() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -276,6 +292,7 @@ async fn test_sessions_empty_directory() {
     assert!(result.message.contains("empty"));
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_sessions_with_valid_files() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -308,6 +325,7 @@ async fn test_sessions_with_valid_files() {
     assert!(result.message.contains("3 saved"));
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_sessions_with_corrupted_file() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -331,6 +349,7 @@ async fn test_sessions_with_corrupted_file() {
     assert!(result.message.contains("corrupted"));
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_sessions_missing_dir_when_init_run() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -348,6 +367,7 @@ async fn test_sessions_missing_dir_when_init_run() {
     assert!(result.fix.unwrap().contains("rustain init"));
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_sessions_missing_dir_not_initialized() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -367,6 +387,7 @@ async fn test_sessions_missing_dir_not_initialized() {
 // Task 8.7: TerminalCheck (env-based)
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_terminal_check_runs() {
     use rustain::infrastructure::terminal_info::detect_color_capability;
@@ -386,6 +407,7 @@ async fn test_terminal_check_runs() {
 // Task 8.8: ApiKeyCheck with mockito
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health), NFR11 (no API keys logged)
 #[tokio::test]
 async fn test_api_key_not_set() {
     let check = ApiKeyCheck {
@@ -399,6 +421,7 @@ async fn test_api_key_not_set() {
     assert!(result.fix.is_some());
 }
 
+// Covers: FR98 (doctor health), NFR11 (no API keys logged)
 #[tokio::test]
 async fn test_api_key_valid_with_mock_400() {
     let mut server = mockito::Server::new_async().await;
@@ -423,6 +446,7 @@ async fn test_api_key_valid_with_mock_400() {
     mock.assert_async().await;
 }
 
+// Covers: FR98 (doctor health), NFR11 (no API keys logged)
 #[tokio::test]
 async fn test_api_key_invalid_401_with_mock() {
     let mut server = mockito::Server::new_async().await;
@@ -446,6 +470,7 @@ async fn test_api_key_invalid_401_with_mock() {
     mock.assert_async().await;
 }
 
+// Covers: FR98 (doctor health), NFR11 (no API keys logged)
 #[tokio::test]
 async fn test_api_key_bearer_auth_token() {
     let mut server = mockito::Server::new_async().await;
@@ -469,6 +494,7 @@ async fn test_api_key_bearer_auth_token() {
     mock.assert_async().await;
 }
 
+// Covers: FR98 (doctor health), NFR11 (no API keys logged)
 #[tokio::test]
 async fn test_api_key_custom_url_fix_message() {
     let mut server = mockito::Server::new_async().await;
@@ -499,6 +525,7 @@ async fn test_api_key_custom_url_fix_message() {
 // Task 8.10: terminal_info relocation
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[test]
 fn test_terminal_info_detect_color_returns_valid() {
     use rustain::infrastructure::terminal_info::{ColorCapability, detect_color_capability};
@@ -514,6 +541,7 @@ fn test_terminal_info_detect_color_returns_valid() {
     ));
 }
 
+// Covers: FR98 (doctor health)
 #[test]
 fn test_color_capability_display() {
     use rustain::infrastructure::terminal_info::ColorCapability;
@@ -528,6 +556,7 @@ fn test_color_capability_display() {
 // Task 8.11: Full doctor flow integration
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_full_doctor_flow_valid_workspace() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -580,6 +609,7 @@ async fn test_full_doctor_flow_valid_workspace() {
     assert!(session_result.message.contains("1 saved"));
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_full_doctor_flow_missing_config() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -611,6 +641,7 @@ async fn test_full_doctor_flow_missing_config() {
 // Review patches: WorkspaceDirCheck (P1)
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_workspace_dir_exists_integration() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -624,6 +655,7 @@ async fn test_workspace_dir_exists_integration() {
     assert_eq!(result.status, CheckStatus::Pass);
 }
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_workspace_dir_missing_integration() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -641,6 +673,7 @@ async fn test_workspace_dir_missing_integration() {
 // Review patches: API server error 5xx (P2)
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health), NFR11 (no API keys logged)
 #[tokio::test]
 async fn test_api_key_server_error_500() {
     let mut server = mockito::Server::new_async().await;
@@ -668,6 +701,7 @@ async fn test_api_key_server_error_500() {
 // Review patches: Permissions null (P8)
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health)
 #[tokio::test]
 async fn test_workspace_config_permissions_null_integration() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -692,6 +726,7 @@ async fn test_workspace_config_permissions_null_integration() {
 // Review patches: GlobalConfigCheck schema error (P6)
 // ──────────────────────────────────────────────────
 
+// Covers: FR98 (doctor health), FR97 (init wizard)
 #[tokio::test]
 async fn test_global_config_valid_toml_wrong_schema_integration() {
     let tmp = tempfile::TempDir::new().unwrap();

@@ -7,6 +7,7 @@ use rustain::domain::events::AppEvent;
 use tokio::sync::mpsc;
 
 /// AC3: Shutdown event can be sent through the domain event channel.
+// Covers: FR105 (crash safety), NFR24 (signal handling)
 #[tokio::test]
 async fn test_shutdown_event_through_channel() {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -21,6 +22,7 @@ async fn test_shutdown_event_through_channel() {
 }
 
 /// AC3: Multiple events can flow through the channel without blocking.
+// Covers: FR105 (crash safety), NFR24 (signal handling)
 #[tokio::test]
 async fn test_event_channel_unbounded() {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
@@ -43,6 +45,7 @@ async fn test_event_channel_unbounded() {
 }
 
 /// AC3: Crash log path is unique per call (timestamp-based).
+// Covers: FR105 (crash safety), NFR24 (signal handling)
 #[test]
 fn test_crash_log_paths_are_unique() {
     let path1 = rustain::infrastructure::paths::crash_log_path().unwrap();

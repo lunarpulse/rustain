@@ -6,6 +6,7 @@ use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_
 use crate::domain::models::{PermissionMode, StatusState, UsageInfo};
 
 /// Render the status bar with model name, current status, scroll position, and permission mode.
+// Covers: FR38, UX-DR76
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -20,6 +21,7 @@ pub fn render(
     token_usage: Option<&UsageInfo>,
     has_project_context: bool,
     session_title: Option<&str>,
+    multiline_mode: bool,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -80,6 +82,17 @@ pub fn render(
             fg
         }),
     ));
+
+    // ML mode indicator
+    // Covers: UX-DR76
+    if multiline_mode {
+        left_spans.push(Span::styled(
+            format!("{}[ML]", sep),
+            Style::default()
+                .fg(theme.colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
 
     // AC4: Show scroll position indicator when scrolled
     if scroll_offset > 0 && !message_boundaries.is_empty() {

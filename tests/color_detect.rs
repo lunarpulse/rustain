@@ -46,6 +46,7 @@ impl Drop for EnvGuard {
     }
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_detect_truecolor() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -55,6 +56,7 @@ fn test_detect_truecolor() {
     assert_eq!(detect_color_capability(), ColorCapability::TrueColor);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_detect_truecolor_24bit() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -63,6 +65,7 @@ fn test_detect_truecolor_24bit() {
     assert_eq!(detect_color_capability(), ColorCapability::TrueColor);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_detect_256color() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -71,6 +74,7 @@ fn test_detect_256color() {
     assert_eq!(detect_color_capability(), ColorCapability::Color256);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_detect_color16_default() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -78,6 +82,7 @@ fn test_detect_color16_default() {
     assert_eq!(detect_color_capability(), ColorCapability::Color16);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_detect_monochrome() {
     let _lock = ENV_MUTEX.lock().unwrap();
@@ -86,6 +91,7 @@ fn test_detect_monochrome() {
     assert_eq!(detect_color_capability(), ColorCapability::Monochrome);
 }
 
+// Covers: UX-DR5 (color detection and degradation)
 #[test]
 fn test_no_color_takes_priority() {
     let _lock = ENV_MUTEX.lock().unwrap();

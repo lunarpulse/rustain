@@ -71,14 +71,21 @@ pub enum DomainInputEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainKey {
     Enter,
+    ShiftEnter,
+    CtrlEnter,
     Esc,
     Backspace,
+    Delete,
     Up,
     Down,
     Left,
     Right,
+    Home,
+    End,
     Tab,
     CtrlC,
+    CtrlE,
+    CtrlR,
 }
 
 /// Payload for domain-originated events (placeholder for future stories).

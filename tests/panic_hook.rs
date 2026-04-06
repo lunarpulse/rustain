@@ -5,6 +5,7 @@ use tempfile::TempDir;
 
 /// AC3: Crash log format includes all required fields.
 /// Uses the same write logic as the actual panic hook to verify format.
+// Covers: FR105 (crash safety), NFR19 (panic hook)
 #[test]
 fn test_crash_log_format() {
     let temp_dir = TempDir::new().unwrap();
@@ -41,6 +42,7 @@ fn test_crash_log_format() {
 }
 
 /// AC3: Crash log path follows expected pattern crash-<timestamp>.log.
+// Covers: FR105 (crash safety), NFR19 (panic hook)
 #[test]
 fn test_crash_log_path_format() {
     let path = rustain::infrastructure::paths::crash_log_path().unwrap();
@@ -65,6 +67,7 @@ fn test_crash_log_path_format() {
 }
 
 /// AC3: Crash log path is under ~/.rustain/.
+// Covers: FR105 (crash safety), NFR19 (panic hook)
 #[test]
 fn test_crash_log_under_data_dir() {
     let crash_path = rustain::infrastructure::paths::crash_log_path().unwrap();
@@ -77,8 +80,9 @@ fn test_crash_log_under_data_dir() {
     );
 }
 
-/// AC3: Panic hook subprocess test — verify panic actually writes crash log.
+/// AC3: Panic hook subprocess test -- verify panic actually writes crash log.
 /// Spawns a child process that panics and checks for the crash log.
+// Covers: FR105 (crash safety), NFR19 (panic hook)
 #[test]
 fn test_panic_hook_writes_crash_log_via_subprocess() {
     // Verify the hook installation doesn't panic itself
@@ -92,6 +96,7 @@ fn test_panic_hook_writes_crash_log_via_subprocess() {
 }
 
 /// Data directory path ends in .rustain.
+// Covers: FR105 (crash safety)
 #[test]
 fn test_data_dir_path() {
     let data_dir = rustain::infrastructure::paths::data_dir().unwrap();

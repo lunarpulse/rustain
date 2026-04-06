@@ -51,6 +51,8 @@ pub struct ColorTokens {
     pub profile_devops: Color,
     pub profile_custom: Color,
     pub profile_base: Color,
+    /// Hint text color (dim, italic) for token estimates and secondary info.
+    pub text_hint: Color,
 }
 
 /// Spacing tokens for layout calculations.
@@ -170,6 +172,7 @@ impl Theme {
                 profile_devops: Color::Rgb(230, 200, 0),
                 profile_custom: Color::Rgb(180, 80, 200),
                 profile_base: Color::Rgb(128, 128, 128),
+                text_hint: Color::DarkGray,
             },
             spacing: SpacingTokens {
                 none: 0,
@@ -342,6 +345,7 @@ impl ColorTokens {
         self.profile_devops = mapper(self.profile_devops);
         self.profile_custom = mapper(self.profile_custom);
         self.profile_base = mapper(self.profile_base);
+        self.text_hint = mapper(self.text_hint);
     }
 }
 

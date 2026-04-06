@@ -53,6 +53,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
     }
 }
 
+// Covers: FR10 (session persistence), NFR20 (persist on completion)
 /// 6.6: Integration test — save → restart → restore roundtrip.
 /// Simulates what startup.rs does: list_conversations → load most recent.
 #[tokio::test]
@@ -98,6 +99,7 @@ async fn test_save_restart_restore_roundtrip() {
     }
 }
 
+// Covers: FR10 (session persistence), NFR20 (persist on completion), NFR24 (shutdown <5s)
 /// 6.7: Integration test — graceful shutdown persists conversation.
 /// Verifies that a conversation saved during shutdown can be loaded by the next session.
 #[tokio::test]
@@ -138,6 +140,7 @@ async fn test_graceful_shutdown_persists_conversation() {
     assert_eq!(loaded.updated_at, 1700002000);
 }
 
+// Covers: FR10 (session persistence), NFR20 (persist on completion)
 /// 6.8: Storage conformance test for FileSystemStorage.
 /// Validates the StoragePort contract: save, load, list, roundtrip integrity.
 #[tokio::test]

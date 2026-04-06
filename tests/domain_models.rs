@@ -9,6 +9,7 @@ use rustain::domain::models::{
 
 // ── Serde roundtrip tests ───────────────────────────────────────
 
+// Covers: FR1 (streaming), FR2 (content blocks)
 #[test]
 fn test_stream_chunk_text_roundtrip() {
     let chunk = StreamChunk::Text {
@@ -20,6 +21,7 @@ fn test_stream_chunk_text_roundtrip() {
     assert_eq!(format!("{:?}", chunk), format!("{:?}", deserialized));
 }
 
+// Covers: FR1 (streaming), FR2 (content blocks)
 #[test]
 fn test_stream_chunk_tool_use_roundtrip() {
     let chunk = StreamChunk::ToolUse {
@@ -32,6 +34,7 @@ fn test_stream_chunk_tool_use_roundtrip() {
     assert_eq!(format!("{:?}", chunk), format!("{:?}", deserialized));
 }
 
+// Covers: FR1 (streaming)
 #[test]
 fn test_stream_chunk_turn_complete_roundtrip() {
     let chunk = StreamChunk::TurnComplete {
@@ -42,6 +45,7 @@ fn test_stream_chunk_turn_complete_roundtrip() {
     assert_eq!(format!("{:?}", chunk), format!("{:?}", deserialized));
 }
 
+// Covers: FR1 (streaming)
 #[test]
 fn test_stream_chunk_usage_roundtrip() {
     let chunk = StreamChunk::Usage {
@@ -58,6 +62,7 @@ fn test_stream_chunk_usage_roundtrip() {
     assert_eq!(format!("{:?}", chunk), format!("{:?}", deserialized));
 }
 
+// Covers: FR2 (content blocks)
 #[test]
 fn test_content_block_type_roundtrip() {
     for variant in [
@@ -74,6 +79,7 @@ fn test_content_block_type_roundtrip() {
     }
 }
 
+// Covers: FR1 (streaming)
 #[test]
 fn test_stop_reason_camel_case_serialization() {
     let json = serde_json::to_string(&StopReason::EndTurn).unwrap();
@@ -84,6 +90,7 @@ fn test_stop_reason_camel_case_serialization() {
     assert_eq!(json, "\"maxTokens\"");
 }
 
+// Covers: FR2 (content blocks)
 #[test]
 fn test_message_role_roundtrip() {
     let json = serde_json::to_string(&MessageRole::User).unwrap();
@@ -92,6 +99,7 @@ fn test_message_role_roundtrip() {
     assert_eq!(deserialized, MessageRole::User);
 }
 
+// Covers: FR25 (permission modes)
 #[test]
 fn test_permission_mode_roundtrip() {
     let json = serde_json::to_string(&PermissionMode::Normal).unwrap();
@@ -102,6 +110,7 @@ fn test_permission_mode_roundtrip() {
 
 // ── Error conversion chain tests ────────────────────────────────
 
+// Covers: FR14 (retry/backoff)
 #[test]
 fn test_provider_error_converts_to_domain_error() {
     let provider_err = ProviderError::ConnectionFailed("timeout".into());
@@ -110,6 +119,7 @@ fn test_provider_error_converts_to_domain_error() {
     assert_eq!(domain_err.to_string(), "Connection failed: timeout");
 }
 
+// Covers: FR10 (session persistence)
 #[test]
 fn test_storage_error_converts_to_domain_error() {
     let storage_err = StorageError::NotFound("conv_123".into());
@@ -117,6 +127,7 @@ fn test_storage_error_converts_to_domain_error() {
     assert_eq!(domain_err.to_string(), "Not found: conv_123");
 }
 
+// Covers: FR24 (permission prompt)
 #[test]
 fn test_permission_error_converts_to_domain_error() {
     let perm_err = PermissionError::Blocked("rm -rf /".into());
@@ -124,6 +135,7 @@ fn test_permission_error_converts_to_domain_error() {
     assert_eq!(domain_err.to_string(), "Command blocked: rm -rf /");
 }
 
+// Covers: FR29 (tool execution)
 #[test]
 fn test_tool_error_converts_to_domain_error() {
     let tool_err = ToolError::NotFound("nonexistent_tool".into());
@@ -133,12 +145,14 @@ fn test_tool_error_converts_to_domain_error() {
 
 // ── generate_conversation_id tests ──────────────────────────────
 
+// Covers: FR10 (session persistence)
 #[test]
 fn test_generate_conversation_id_is_nonempty() {
     let id = rustain::domain::models::generate_conversation_id();
     assert!(!id.is_empty());
 }
 
+// Covers: FR10 (session persistence)
 #[test]
 fn test_generate_conversation_id_is_unique() {
     let id1 = rustain::domain::models::generate_conversation_id();
@@ -148,6 +162,7 @@ fn test_generate_conversation_id_is_unique() {
 
 // ── Default impl tests ─────────────────────────────────────────
 
+// Covers: FR1 (streaming)
 #[test]
 fn test_streaming_state_default() {
     let state = rustain::domain::models::StreamingState::default();
@@ -158,6 +173,7 @@ fn test_streaming_state_default() {
     assert!(!state.is_streaming);
 }
 
+// Covers: FR10 (session persistence)
 #[test]
 fn test_session_state_default() {
     let state = rustain::domain::models::SessionState::default();

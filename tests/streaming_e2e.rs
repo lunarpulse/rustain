@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use ratatui::Terminal;
+mod common;
+
 use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
@@ -9,8 +11,8 @@ use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
-    ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, StreamingPhase,
-    StreamingState, apply_chunk, generate_conversation_id,
+    apply_chunk, generate_conversation_id, ChatMessage, Conversation, MessageRole, StopReason,
+    StreamChunk, StreamingPhase, StreamingState,
 };
 
 fn make_conversation() -> Conversation {
@@ -27,21 +29,11 @@ fn make_conversation() -> Conversation {
     }
 }
 
-fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-    terminal
-        .backend()
-        .buffer()
-        .clone()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
-        .collect()
-}
-
-/// AC12: E2E integration test validates full message→response flow.
-/// Simulates: launch → render empty state → send message → receive streaming
-/// response → verify response appears in chat pane.
+/// AC12: E2E integration test validates full message->response flow.
+/// Simulates: launch -> render empty state -> send message -> receive streaming
+/// response -> verify response appears in chat pane.
 /// Uses ratatui TestBackend (no real terminal) and domain functions (no real API).
+// Covers: FR1 (streaming), FR14 (retry/backoff)
 #[test]
 fn test_e2e_message_to_streaming_response() {
     let backend = TestBackend::new(80, 24);
@@ -71,7 +63,7 @@ fn test_e2e_message_to_streaming_response() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(
         text.contains("Welcome to Rustain."),
         "Step 1: Expected welcome message"
@@ -111,7 +103,7 @@ fn test_e2e_message_to_streaming_response() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(
         text.contains("You:"),
         "Step 2: Expected user message prefix"
@@ -162,7 +154,7 @@ fn test_e2e_message_to_streaming_response() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(
         text.contains("Rust is a systems programming language."),
         "Step 3: Expected streaming content"
@@ -209,7 +201,7 @@ fn test_e2e_message_to_streaming_response() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(text.contains("You:"), "Step 5: User message visible");
     assert!(
         text.contains("What is Rust?"),

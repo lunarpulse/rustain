@@ -31,6 +31,7 @@ impl PermissionQueue {
         self.queue.pop_front()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
@@ -71,8 +72,169 @@ impl HeightCache {
     }
 
     /// Incremental invalidation: only invalidate the last message (streaming).
+    #[allow(dead_code)]
     pub fn invalidate_last(&mut self, message_index: usize) {
         self.entries.remove(&message_index);
+    }
+}
+
+/// Session-scoped input history buffer for Up/Down navigation and Ctrl+R search.
+/// Bounded to MAX_HISTORY entries. Not persisted across restarts.
+// Covers: UX-DR74 (input history)
+pub struct InputHistory {
+    entries: VecDeque<String>,
+    /// Current position when navigating (None = not navigating).
+    cursor: Option<usize>,
+    /// Saves current input when user starts navigating history.
+    draft: String,
+}
+
+const MAX_HISTORY: usize = 100;
+
+impl InputHistory {
+    pub fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            cursor: None,
+            draft: String::new(),
+        }
+    }
+
+    /// Add entry, evict oldest if at capacity.
+    pub fn push(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        // Suppress consecutive identical entries (shell-history convention, UX-DR74)
+        if self.entries.back() == Some(&text) {
+            return;
+        }
+        self.entries.push_back(text);
+        if self.entries.len() > MAX_HISTORY {
+            self.entries.pop_front();
+        }
+        self.reset_navigation();
+    }
+
+    /// Move cursor up (toward older entries), return entry.
+    /// On first call, saves current_input as draft.
+    pub fn navigate_up(&mut self, current_input: &str) -> Option<&str> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        match self.cursor {
+            None => {
+                // Start navigating from newest entry
+                self.draft = current_input.to_string();
+                let idx = self.entries.len() - 1;
+                self.cursor = Some(idx);
+                Some(&self.entries[idx])
+            }
+            Some(idx) => {
+                if idx > 0 {
+                    let new_idx = idx - 1;
+                    self.cursor = Some(new_idx);
+                    Some(&self.entries[new_idx])
+                } else {
+                    // Already at oldest entry
+                    Some(&self.entries[0])
+                }
+            }
+        }
+    }
+
+    /// Move cursor down (toward newer entries), return entry or None (back to draft).
+    pub fn navigate_down(&mut self) -> Option<&str> {
+        match self.cursor {
+            None => None,
+            Some(idx) => {
+                if idx + 1 < self.entries.len() {
+                    let new_idx = idx + 1;
+                    self.cursor = Some(new_idx);
+                    Some(&self.entries[new_idx])
+                } else {
+                    // Past the newest entry → back to draft
+                    self.cursor = None;
+                    Some(&self.draft)
+                }
+            }
+        }
+    }
+
+    /// Clear cursor, discard draft.
+    pub fn reset_navigation(&mut self) {
+        self.cursor = None;
+        self.draft.clear();
+    }
+
+    /// Case-insensitive substring search, returns (index, entry) pairs.
+    pub fn search(&self, query: &str) -> Vec<(usize, &str)> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let lower_query = query.to_lowercase();
+        self.entries
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, entry)| entry.to_lowercase().contains(&lower_query))
+            .map(|(i, entry)| (i, entry.as_str()))
+            .collect()
+    }
+
+    /// Whether currently navigating history.
+    pub fn is_navigating(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    /// Get the saved draft.
+    #[allow(dead_code)]
+    pub fn draft(&self) -> &str {
+        &self.draft
+    }
+
+    /// Number of entries.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether history is empty.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for InputHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// State for reverse search overlay (Ctrl+R).
+// Covers: UX-DR74 (reverse search)
+pub struct ReverseSearchState {
+    pub active: bool,
+    pub query: String,
+    pub matches: Vec<(usize, String)>,
+    pub selected_match: usize,
+}
+
+impl ReverseSearchState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            matches: Vec::new(),
+            selected_match: 0,
+        }
+    }
+}
+
+impl Default for ReverseSearchState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -124,6 +286,17 @@ pub struct TuiState {
     pub question_response_tx: Option<tokio::sync::oneshot::Sender<String>>,
     /// Whether project context files were loaded (for status bar indicator).
     pub has_project_context: bool,
+    /// Session-scoped input history for Up/Down and Ctrl+R.
+    // Covers: UX-DR74
+    pub input_history: InputHistory,
+    /// Whether multi-line mode is active (toggled by Ctrl+E).
+    // Covers: UX-DR76
+    pub multiline_mode: bool,
+    /// State for reverse search overlay (Ctrl+R).
+    // Covers: UX-DR74
+    pub reverse_search: ReverseSearchState,
+    /// Vertical scroll offset within the input box when lines exceed max height.
+    pub input_scroll_offset: usize,
 }
 
 impl TuiState {
@@ -162,6 +335,10 @@ impl TuiState {
             ask_user_question: None,
             question_response_tx: None,
             has_project_context: false,
+            input_history: InputHistory::new(),
+            multiline_mode: false,
+            reverse_search: ReverseSearchState::new(),
+            input_scroll_offset: 0,
         }
     }
 }

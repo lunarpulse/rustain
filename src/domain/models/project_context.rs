@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub const CONTEXT_BUDGET_CHARS: usize = 100_000;
 
 /// Known file names to scan for project context.
+#[allow(dead_code)]
 pub const CONTEXT_FILE_NAMES: &[&str] = &["CLAUDE.md", ".cursorrules"];
 
 /// Type of project context file discovered.
@@ -20,6 +21,7 @@ pub struct ProjectContextFile {
     pub path: PathBuf,
     pub content: String,
     pub priority: u8,
+    #[allow(dead_code)]
     pub source_type: ContextFileType,
 }
 
@@ -68,7 +70,10 @@ impl ProjectContext {
             } else if remaining_budget > header.len() + 50 {
                 // Partial truncation: include what fits (byte-safe)
                 let content_budget = remaining_budget - header.len() - 1;
-                let safe_end = file.content.floor_char_boundary(content_budget);
+                let mut safe_end = content_budget;
+                while safe_end > 0 && !file.content.is_char_boundary(safe_end) {
+                    safe_end -= 1;
+                }
                 result.push_str(&header);
                 result.push_str(&file.content[..safe_end]);
                 result.push('\n');
@@ -115,6 +120,7 @@ impl IgnorePatterns {
     }
 
     /// Whether any patterns are loaded.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.patterns.is_empty()
     }

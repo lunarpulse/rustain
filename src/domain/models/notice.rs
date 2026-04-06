@@ -61,6 +61,7 @@ pub enum FeedbackAction {
     Retry,
     Compact,
     StartFresh,
+    #[allow(dead_code)]
     Dismiss,
     Custom(String),
 }

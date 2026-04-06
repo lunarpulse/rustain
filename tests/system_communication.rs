@@ -35,6 +35,7 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
 }
 
 /// AC1: Error FeedbackBlock renders with bold red border, error symbol, retry action.
+// Covers: FR14 (retry/backoff), UX-DR81 (feedback blocks)
 #[test]
 fn test_error_feedback_block_in_conversation() {
     let theme = Theme::dark();
@@ -93,6 +94,7 @@ fn test_error_feedback_block_in_conversation() {
 }
 
 /// AC2: Warning FeedbackBlock max 3 lines.
+// Covers: UX-DR81 (feedback blocks)
 #[test]
 fn test_warning_feedback_max_lines() {
     let theme = Theme::dark();
@@ -111,6 +113,7 @@ fn test_warning_feedback_max_lines() {
 }
 
 /// AC4: AskUserQuestion card with double border.
+// Covers: FR32 (ask user question)
 #[test]
 fn test_ask_user_question_card_double_border() {
     let theme = Theme::dark();
@@ -143,6 +146,7 @@ fn test_ask_user_question_card_double_border() {
 }
 
 /// AC5: Flash message appears in status bar and auto-dismisses.
+// Covers: FR38 (status bar)
 #[test]
 fn test_flash_message_expiry_simulation() {
     let tick_ms = 250u64;
@@ -167,6 +171,7 @@ fn test_flash_message_expiry_simulation() {
 }
 
 /// AC7: Token usage display formatting.
+// Covers: FR38 (status bar)
 #[test]
 fn test_token_usage_display_formatting() {
     let usage = UsageInfo {
@@ -187,6 +192,7 @@ fn test_token_usage_display_formatting() {
 }
 
 /// AC1: Exponential backoff: 1s -> 2s -> 4s -> 8s -> 16s.
+// Covers: FR14 (retry/backoff)
 #[test]
 fn test_exponential_backoff_sequence() {
     let expected = [1000, 2000, 4000, 8000, 16000];
@@ -205,6 +211,7 @@ fn test_exponential_backoff_sequence() {
 }
 
 /// AC6: StatusState transitions cover all states.
+// Covers: FR38 (status bar)
 #[test]
 fn test_status_state_complete_lifecycle() {
     let mut status = StatusState::Idle;

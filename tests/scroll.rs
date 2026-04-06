@@ -13,6 +13,7 @@ fn scrollable_state() -> TuiState {
 }
 
 /// AC3: Scroll up (k) disables auto-scroll.
+// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
 fn test_scroll_up_disables_auto_scroll() {
     let mut state = scrollable_state();
@@ -25,6 +26,7 @@ fn test_scroll_up_disables_auto_scroll() {
 }
 
 /// AC3: Jump to bottom (G) enables auto-scroll.
+// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
 fn test_jump_to_bottom_enables_auto_scroll() {
     let mut state = scrollable_state();
@@ -42,6 +44,7 @@ fn test_jump_to_bottom_enables_auto_scroll() {
 }
 
 /// AC3: Scroll down (j) decrements offset from bottom.
+// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
 fn test_scroll_down_decrements_offset() {
     let mut state = scrollable_state();
@@ -59,6 +62,7 @@ fn test_scroll_down_decrements_offset() {
 }
 
 /// AC3: Scroll down to offset 0 re-enables auto-scroll.
+// Covers: FR13 (auto-scroll)
 #[test]
 fn test_scroll_to_bottom_auto_enables_auto_scroll() {
     let mut state = scrollable_state();
@@ -75,6 +79,7 @@ fn test_scroll_to_bottom_auto_enables_auto_scroll() {
 }
 
 /// Scroll down at offset 0 doesn't go negative (clamp).
+// Covers: FR13 (auto-scroll)
 #[test]
 fn test_scroll_down_clamped_at_zero() {
     let mut state = scrollable_state();
@@ -85,6 +90,7 @@ fn test_scroll_down_clamped_at_zero() {
 }
 
 /// Scroll up clamped at max scrollable range.
+// Covers: FR13 (auto-scroll)
 #[test]
 fn test_scroll_up_clamped_at_max() {
     let mut state = TuiState::new(80, 24);
@@ -99,6 +105,7 @@ fn test_scroll_up_clamped_at_max() {
 }
 
 /// AC4: 'q' in Chat focus returns Quit action.
+// Covers: FR22 (vim keybindings)
 #[test]
 fn test_q_in_chat_returns_quit() {
     let mut state = TuiState::new(80, 24);
@@ -109,6 +116,7 @@ fn test_q_in_chat_returns_quit() {
 }
 
 /// AC7: Resize preserves approximate scroll position.
+// Covers: FR13 (auto-scroll)
 #[test]
 fn test_resize_preserves_scroll_position() {
     let mut state = TuiState::new(80, 24);
@@ -132,6 +140,7 @@ fn test_resize_preserves_scroll_position() {
 }
 
 /// AC7: Resize at bottom (auto_scroll=true) stays at bottom.
+// Covers: FR13 (auto-scroll)
 #[test]
 fn test_resize_at_bottom_stays_at_bottom() {
     let mut state = TuiState::new(80, 24);

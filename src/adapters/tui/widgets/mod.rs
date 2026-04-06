@@ -4,5 +4,6 @@ pub mod empty_state;
 pub mod feedback_block;
 pub mod input_box;
 pub mod permission_prompt;
+pub mod reverse_search;
 pub mod status_bar;
 pub mod tool_block;

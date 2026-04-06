@@ -1,6 +1,7 @@
 use rustain::domain::models::UserMessage;
 use rustain::domain::services::turn_queue::TurnQueue;
 
+// Covers: FR16 (multi-line input), FR1 (streaming)
 #[test]
 fn test_turn_queue_enqueue_dequeue() {
     use rustain::domain::models::ImageAttachment;
@@ -39,6 +40,7 @@ fn test_turn_queue_enqueue_dequeue() {
     assert!(queue.is_empty());
 }
 
+// Covers: FR16 (multi-line input)
 #[test]
 fn test_turn_queue_merge_text_only() {
     let mut queue = TurnQueue::default();
@@ -63,6 +65,7 @@ fn test_turn_queue_merge_text_only() {
     assert_eq!(msg.content, "hello\nworld");
 }
 
+// Covers: FR16 (multi-line input)
 #[test]
 fn test_turn_queue_no_merge_with_images() {
     use rustain::domain::models::ImageAttachment;
@@ -89,6 +92,7 @@ fn test_turn_queue_no_merge_with_images() {
     assert_eq!(queue.len(), 2);
 }
 
+// Covers: FR16 (multi-line input)
 #[test]
 fn test_turn_queue_full_returns_error() {
     let mut queue = TurnQueue::default();
@@ -116,6 +120,7 @@ fn test_turn_queue_full_returns_error() {
     assert!(result.is_err());
 }
 
+// Covers: FR16 (multi-line input)
 #[test]
 fn test_turn_queue_merge_respects_threshold() {
     let mut queue = TurnQueue::default();

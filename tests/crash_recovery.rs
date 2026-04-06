@@ -51,8 +51,9 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
     }
 }
 
-/// 7.5: Integration test — crash recovery flow.
+/// 7.5: Integration test -- crash recovery flow.
 /// Save with clean_exit = false (simulating crash), restore, verify recovery should be triggered.
+// Covers: FR105 (crash safety), FR10 (session persistence)
 #[tokio::test]
 async fn test_crash_recovery_detects_unclean_exit() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -78,8 +79,9 @@ async fn test_crash_recovery_detects_unclean_exit() {
     assert!(!clean_exit && !loaded.messages.is_empty());
 }
 
-/// 7.6: Integration test — normal restore flow.
+/// 7.6: Integration test -- normal restore flow.
 /// Save with clean_exit = true (graceful shutdown), restore, verify NO recovery prompt.
+// Covers: FR105 (crash safety), FR10 (session persistence)
 #[tokio::test]
 async fn test_normal_restore_no_recovery() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -107,8 +109,9 @@ async fn test_normal_restore_no_recovery() {
     assert!(clean_exit);
 }
 
-/// 7.7: Integration test — --new flag creates new empty session.
+/// 7.7: Integration test -- --new flag creates new empty session.
 /// Previous session exists, but --new skips restore.
+// Covers: FR10 (session persistence)
 #[tokio::test]
 async fn test_new_flag_skips_restore() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -130,7 +133,8 @@ async fn test_new_flag_skips_restore() {
     assert_eq!(summaries[0].id, "existing");
 }
 
-/// 7.8: Integration test — --session <id> loads specific session.
+/// 7.8: Integration test -- --session <id> loads specific session.
+// Covers: FR10 (session persistence)
 #[tokio::test]
 async fn test_session_flag_loads_specific() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -161,7 +165,8 @@ async fn test_session_flag_loads_specific() {
     assert_eq!(loaded.messages.len(), 4);
 }
 
-/// 7.9: Integration test — --session <bad-id> should fail.
+/// 7.9: Integration test -- --session <bad-id> should fail.
+// Covers: FR10 (session persistence)
 #[tokio::test]
 async fn test_session_flag_bad_id_returns_none() {
     let tmp = tempfile::TempDir::new().unwrap();

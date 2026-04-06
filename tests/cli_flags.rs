@@ -4,6 +4,7 @@ use clap::Parser;
 use rustain::adapters::cli::commands::Cli;
 
 /// 7.4: --new sets new_session flag.
+// Covers: FR10 (session persistence)
 #[test]
 fn test_cli_new_flag() {
     let cli = Cli::parse_from(["rustain", "--new"]);
@@ -12,6 +13,7 @@ fn test_cli_new_flag() {
 }
 
 /// 7.4: --session sets session_id.
+// Covers: FR10 (session persistence)
 #[test]
 fn test_cli_session_flag() {
     let cli = Cli::parse_from(["rustain", "--session", "abc-123"]);
@@ -20,6 +22,7 @@ fn test_cli_session_flag() {
 }
 
 /// Default: no --new, no --session.
+// Covers: FR10 (session persistence)
 #[test]
 fn test_cli_default_flags() {
     let cli = Cli::parse_from(["rustain"]);
@@ -29,6 +32,7 @@ fn test_cli_default_flags() {
 }
 
 /// --log-level still works alongside new flags.
+// Covers: FR10 (session persistence)
 #[test]
 fn test_cli_combined_flags() {
     let cli = Cli::parse_from(["rustain", "--log-level", "debug", "--new"]);

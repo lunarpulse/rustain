@@ -4,6 +4,7 @@ use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
 
 /// AC5: Ctrl+C when not streaming returns CancelOrQuit (event loop maps to quit).
+// Covers: FR3 (abort)
 #[test]
 fn test_ctrl_c_not_streaming_returns_cancel_or_quit() {
     let mut state = TuiState::new(80, 24);
@@ -13,6 +14,7 @@ fn test_ctrl_c_not_streaming_returns_cancel_or_quit() {
 }
 
 /// Ctrl+C from Chat focus also returns CancelOrQuit.
+// Covers: FR3 (abort)
 #[test]
 fn test_ctrl_c_from_chat_returns_cancel_or_quit() {
     let mut state = TuiState::new(80, 24);
@@ -22,6 +24,7 @@ fn test_ctrl_c_from_chat_returns_cancel_or_quit() {
 }
 
 /// AC5: Abort with empty streaming buffer creates no empty message.
+// Covers: FR3 (abort)
 #[test]
 fn test_cancel_or_quit_empty_buffer_no_message() {
     // Simulate the CancelOrQuit logic inline: if buffer is empty, no message should be pushed.
@@ -37,6 +40,7 @@ fn test_cancel_or_quit_empty_buffer_no_message() {
 }
 
 /// Ctrl+C is correctly mapped from crossterm event.
+// Covers: FR3 (abort)
 #[test]
 fn test_ctrl_c_crossterm_mapping() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};

@@ -11,7 +11,7 @@ use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
-use crate::adapters::tui::widgets::{chat_pane, input_box, status_bar};
+use crate::adapters::tui::widgets::{chat_pane, input_box, reverse_search, status_bar};
 
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
@@ -941,13 +941,16 @@ fn render(
         cursor_position,
         focus,
         has_project_context,
+        multiline_mode,
+        input_scroll_offset,
+        ref reverse_search,
         ..
     } = *state;
 
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area, theme) {
+        match layout::compute_layout(area, theme, input_buffer) {
             Some(app_layout) => {
                 let _is_compact = area.width < 80 || area.height < 24;
 
@@ -1053,6 +1056,7 @@ fn render(
                     token_usage.as_ref(),
                     has_project_context,
                     session_title,
+                    multiline_mode,
                 );
                 input_box::render(
                     frame,
@@ -1061,7 +1065,19 @@ fn render(
                     cursor_position,
                     focus,
                     theme,
+                    multiline_mode,
+                    input_scroll_offset,
                 );
+
+                // Render reverse search overlay above input box
+                if reverse_search.active {
+                    reverse_search::render(
+                        frame,
+                        app_layout.input_area,
+                        reverse_search,
+                        theme,
+                    );
+                }
             }
             None => {
                 // Terminal too small

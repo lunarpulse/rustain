@@ -9,6 +9,7 @@ use rustain::domain::models::AppConfig;
 // ──────────────────────────────────────────────────
 
 /// `rustain init` sets command = Some(Command::Init).
+// Covers: FR97 (init wizard)
 #[test]
 fn test_cli_init_subcommand() {
     let cli = Cli::parse_from(["rustain", "init"]);
@@ -20,6 +21,7 @@ fn test_cli_init_subcommand() {
 }
 
 /// Bare `rustain` sets command = None.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_cli_no_subcommand() {
     let cli = Cli::parse_from(["rustain"]);
@@ -29,6 +31,7 @@ fn test_cli_no_subcommand() {
 }
 
 /// Existing --new flag still works in no-subcommand mode.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_cli_new_flag_still_works() {
     let cli = Cli::parse_from(["rustain", "--new"]);
@@ -38,6 +41,7 @@ fn test_cli_new_flag_still_works() {
 }
 
 /// Existing --session flag still works in no-subcommand mode.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_cli_session_flag_still_works() {
     let cli = Cli::parse_from(["rustain", "--session", "abc-123"]);
@@ -47,6 +51,7 @@ fn test_cli_session_flag_still_works() {
 }
 
 /// --log-level works as global flag with init subcommand.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_cli_log_level_with_init() {
     let cli = Cli::parse_from(["rustain", "--log-level", "debug", "init"]);
@@ -60,6 +65,7 @@ fn test_cli_log_level_with_init() {
 
 /// Init helpers: verify create_directories, write_config_toml, write_settings_json
 /// produce valid artifacts. Does not test run_init_with_paths (requires TTY).
+// Covers: FR97 (init wizard)
 #[test]
 fn test_init_helpers_create_valid_artifacts() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -117,6 +123,7 @@ fn test_init_helpers_create_valid_artifacts() {
 
 /// Existing config detection: verify the condition from run_init_with_paths that
 /// triggers the "Configuration already exists. Overwrite?" prompt.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_existing_config_detection_logic() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -162,6 +169,7 @@ fn test_existing_config_detection_logic() {
 // ──────────────────────────────────────────────────
 
 /// TTY rejection: spawn a subprocess to verify exit code 1 when piped.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_tty_rejection_subprocess() {
     let binary = env!("CARGO_BIN_EXE_rustain");
@@ -198,6 +206,7 @@ fn test_tty_rejection_subprocess() {
 // ──────────────────────────────────────────────────
 
 /// Verify that re-init preserves existing settings.json with accumulated permissions.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_reinit_preserves_existing_settings_json() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -238,6 +247,7 @@ fn test_reinit_preserves_existing_settings_json() {
 // ──────────────────────────────────────────────────
 
 /// Verify find_api_key_var is accessible and returns expected types.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_find_api_key_var_returns_static_str() {
     // This test validates the public API surface of find_api_key_var.
@@ -253,6 +263,7 @@ fn test_find_api_key_var_returns_static_str() {
 // ──────────────────────────────────────────────────
 
 /// Serialize AppConfig::default() to TOML, deserialize back, assert equality.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_config_toml_roundtrip() {
     let default = AppConfig::default();
@@ -265,6 +276,7 @@ fn test_config_toml_roundtrip() {
 }
 
 /// Ensure the config.toml written by init can be parsed back to AppConfig.
+// Covers: FR97 (init wizard)
 #[test]
 fn test_init_config_file_roundtrip() {
     let tmp = tempfile::TempDir::new().unwrap();

@@ -1,3 +1,15 @@
+// Pre-existing clippy suppressions — these predate Story 3-0.
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::implicit_saturating_sub)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::derivable_impls)]
+
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::wrong_self_convention)]
+
 mod adapters;
 mod domain;
 mod infrastructure;

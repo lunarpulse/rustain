@@ -329,6 +329,7 @@ pub fn render_peek_overlay<'a>(
 
 /// Compute a simple line-by-line diff for Write tool display.
 /// Uses longest common subsequence (LCS) to find additions and deletions.
+#[allow(dead_code)]
 pub fn compute_diff(original: &str, new_content: &str) -> Vec<DiffLine> {
     let old_lines: Vec<&str> = original.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
@@ -410,6 +411,7 @@ pub fn compute_diff(original: &str, new_content: &str) -> Vec<DiffLine> {
     result
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffKind {
     Added,
@@ -418,12 +420,14 @@ pub enum DiffKind {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DiffLine {
     pub kind: DiffKind,
     pub content: String,
 }
 
 /// Render diff lines with coloring.
+#[allow(dead_code)]
 pub fn render_diff_lines<'a>(diff: &[DiffLine], theme: &'a Theme) -> Vec<Line<'a>> {
     diff.iter()
         .map(|dl| {

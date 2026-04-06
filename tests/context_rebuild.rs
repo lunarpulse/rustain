@@ -15,8 +15,9 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
     }
 }
 
-/// 7.12: Integration test — context rebuild with simulated session expiry.
+/// 7.12: Integration test -- context rebuild with simulated session expiry.
 /// Verifies that build_history_context produces correct context_prefix.
+// Covers: FR15 (history rebuild)
 #[test]
 fn test_context_rebuild_produces_prefix() {
     let messages = vec![
@@ -42,6 +43,7 @@ fn test_context_rebuild_produces_prefix() {
 }
 
 /// Context rebuild strips XML tags from messages.
+// Covers: FR15 (history rebuild)
 #[test]
 fn test_context_rebuild_strips_xml() {
     let messages = vec![
@@ -64,6 +66,7 @@ fn test_context_rebuild_strips_xml() {
 }
 
 /// Context rebuild truncates long messages to 200 chars.
+// Covers: FR15 (history rebuild)
 #[test]
 fn test_context_rebuild_truncates_long_messages() {
     let long_content = "A".repeat(500);
@@ -77,6 +80,7 @@ fn test_context_rebuild_truncates_long_messages() {
 }
 
 /// Context rebuild handles empty message list.
+// Covers: FR15 (history rebuild)
 #[test]
 fn test_context_rebuild_empty_messages() {
     let context = build_history_context(&[]);

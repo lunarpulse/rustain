@@ -45,6 +45,9 @@ pub enum OverlayType {
     WhichKey,
     Help,
     Confirmation(ConfirmationType),
+    /// Reverse search overlay for input history (Ctrl+R).
+    // Covers: UX-DR74
+    ReverseSearch,
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

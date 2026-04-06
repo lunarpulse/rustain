@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
-use ratatui::Terminal;
+mod common;
+
 use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
@@ -25,18 +27,8 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
     }
 }
 
-fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-    terminal
-        .backend()
-        .buffer()
-        .clone()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
-        .collect()
-}
-
-/// AC8: Empty conversation shows welcome screen.
+/// AC8: Empty conversation shows Welcome screen.
+// Covers: FR7 (chat pane rendering)
 #[test]
 fn test_chat_pane_empty_shows_welcome() {
     let backend = TestBackend::new(80, 20);
@@ -64,7 +56,7 @@ fn test_chat_pane_empty_shows_welcome() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(
         text.contains("Welcome to Rustain."),
         "Expected welcome message, got: {}",
@@ -73,6 +65,7 @@ fn test_chat_pane_empty_shows_welcome() {
 }
 
 /// AC9: User message renders with "You:" prefix.
+// Covers: FR7 (chat pane rendering)
 #[test]
 fn test_chat_pane_shows_user_message() {
     let backend = TestBackend::new(80, 20);
@@ -108,7 +101,7 @@ fn test_chat_pane_shows_user_message() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(text.contains("You:"), "Expected 'You:' prefix");
     assert!(
         text.contains("Hello world"),
@@ -117,6 +110,7 @@ fn test_chat_pane_shows_user_message() {
 }
 
 /// Assistant message renders with "Assistant:" prefix.
+// Covers: FR7 (chat pane rendering), FR2 (content blocks)
 #[test]
 fn test_chat_pane_shows_assistant_message() {
     let backend = TestBackend::new(80, 20);
@@ -152,12 +146,13 @@ fn test_chat_pane_shows_assistant_message() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(text.contains("Assistant:"), "Expected 'Assistant:' prefix");
     assert!(text.contains("Hi there"), "Expected message content");
 }
 
 /// AC1: Typing indicator shows when streaming with empty buffer.
+// Covers: FR1 (streaming)
 #[test]
 fn test_chat_pane_typing_indicator() {
     let backend = TestBackend::new(80, 20);
@@ -191,7 +186,7 @@ fn test_chat_pane_typing_indicator() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(
         text.contains("···"),
         "Expected typing indicator '···', got: {}",
@@ -200,6 +195,7 @@ fn test_chat_pane_typing_indicator() {
 }
 
 /// AC2: Streaming with buffer content shows partial text.
+// Covers: FR7 (chat pane rendering), FR1 (streaming), FR2 (content blocks), FR13 (auto-scroll)
 #[test]
 fn test_chat_pane_streaming_text() {
     let backend = TestBackend::new(80, 20);
@@ -233,7 +229,7 @@ fn test_chat_pane_streaming_text() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(text.contains("Assistant:"), "Expected 'Assistant:' prefix");
     assert!(
         text.contains("partial response"),
@@ -242,6 +238,7 @@ fn test_chat_pane_streaming_text() {
 }
 
 /// AC9: User message appears above typing indicator.
+// Covers: FR7 (chat pane rendering), FR1 (streaming), FR2 (content blocks), FR13 (auto-scroll)
 #[test]
 fn test_chat_pane_user_message_before_typing_indicator() {
     let backend = TestBackend::new(80, 20);
@@ -283,7 +280,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(text.contains("You:"), "Expected user message");
     assert!(text.contains("My question"), "Expected user question");
     assert!(text.contains("···"), "Expected typing indicator");
@@ -298,6 +295,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
 }
 
 /// AC10: Error messages display with error styling.
+// Covers: FR7 (chat pane rendering), FR14 (retry/backoff), FR2 (content blocks)
 #[test]
 fn test_chat_pane_error_displays_in_red() {
     let backend = TestBackend::new(80, 20);
@@ -333,7 +331,7 @@ fn test_chat_pane_error_displays_in_red() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(text.contains("Assistant:"), "Expected 'Assistant:' prefix");
     assert!(
         text.contains("Something went wrong"),
@@ -351,6 +349,7 @@ fn test_chat_pane_error_displays_in_red() {
 }
 
 /// AC10: Streaming error displays with error styling.
+// Covers: FR7 (chat pane rendering), FR14 (retry/backoff), FR2 (content blocks)
 #[test]
 fn test_chat_pane_streaming_error() {
     let backend = TestBackend::new(80, 20);
@@ -384,7 +383,7 @@ fn test_chat_pane_streaming_error() {
         })
         .unwrap();
 
-    let text = buffer_text(&terminal);
+    let text = common::buffer_text(&terminal);
     assert!(
         text.contains("API error occurred"),
         "Expected error content"

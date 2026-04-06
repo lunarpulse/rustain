@@ -20,6 +20,7 @@ use rustain::domain::services::history_rebuild::build_history_context;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// E2E: Recovery FeedbackBlock renders correctly on screen after crash detection.
+// Covers: FR10 (session persistence), FR15 (history rebuild)
 #[test]
 fn test_e2e_recovery_prompt_renders() {
     let mut h = TestHarness::new();
@@ -72,6 +73,7 @@ fn test_e2e_recovery_prompt_renders() {
 }
 
 /// E2E: Recovery prompt uses single quotes around title (UX-DR81 compliance).
+// Covers: FR10 (session persistence), FR15 (history rebuild)
 #[test]
 fn test_e2e_recovery_prompt_single_quotes() {
     let msg = format!(
@@ -89,6 +91,7 @@ fn test_e2e_recovery_prompt_single_quotes() {
 }
 
 /// E2E: Pressing Enter at recovery prompt dismisses it and keeps conversation.
+// Covers: FR10 (session persistence), FR15 (history rebuild)
 #[test]
 fn test_e2e_recovery_enter_continues() {
     let mut h = TestHarness::new();
@@ -135,6 +138,7 @@ fn test_e2e_recovery_enter_continues() {
 }
 
 /// E2E: Pressing 'n' at recovery prompt resets conversation.
+// Covers: FR10 (session persistence), FR15 (history rebuild)
 #[test]
 fn test_e2e_recovery_n_starts_fresh() {
     let mut h = TestHarness::new();
@@ -173,7 +177,8 @@ fn test_e2e_recovery_n_starts_fresh() {
 // SESSION MANAGER E2E TESTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// E2E: SessionManager full lifecycle — Empty → Active → Invalidated → Active.
+/// E2E: SessionManager full lifecycle — Empty -> Active -> Invalidated -> Active.
+// Covers: FR10 (session persistence), NFR20 (persist on completion)
 #[test]
 fn test_e2e_session_manager_full_lifecycle() {
     let mut mgr = SessionManager::new(SessionState::Empty);
@@ -205,6 +210,7 @@ fn test_e2e_session_manager_full_lifecycle() {
 }
 
 /// E2E: SessionManager initialized from restored conversation.
+// Covers: FR10 (session persistence), NFR20 (persist on completion)
 #[test]
 fn test_e2e_session_manager_from_restored_conversation() {
     let session_id = "restored-session-id".to_string();
@@ -226,6 +232,7 @@ fn test_e2e_session_manager_from_restored_conversation() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// E2E: Context rebuild produces valid API messages with context_prefix.
+// Covers: FR15 (history rebuild), NFR24 (shutdown)
 #[test]
 fn test_e2e_context_rebuild_api_messages() {
     let mut h = TestHarness::new();
@@ -310,6 +317,7 @@ fn test_e2e_context_rebuild_api_messages() {
 }
 
 /// E2E: Context rebuild strips XML tags from API messages.
+// Covers: FR15 (history rebuild), NFR24 (shutdown)
 #[test]
 fn test_e2e_context_rebuild_strips_xml_in_api() {
     let messages = vec![
@@ -349,6 +357,7 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
 }
 
 /// E2E: Context rebuild handles reversed/nested XML tags without panic (Fix #3).
+// Covers: FR15 (history rebuild), NFR24 (shutdown)
 #[test]
 fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
     let messages = vec![ChatMessage {
@@ -370,6 +379,7 @@ fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
 }
 
 /// E2E: Context rebuild handles nested XML tags.
+// Covers: FR15 (history rebuild), NFR24 (shutdown)
 #[test]
 fn test_e2e_context_rebuild_nested_xml_tags() {
     let messages = vec![ChatMessage {
@@ -392,7 +402,8 @@ fn test_e2e_context_rebuild_nested_xml_tags() {
 // CLEAN_EXIT FLAG E2E TESTS (full save/load/detect cycle)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// E2E: Full crash detection cycle — save in-flight, load, detect crash, save clean.
+/// E2E: Full crash detection cycle -- save in-flight, load, detect crash, save clean.
+// Covers: FR10 (session persistence), NFR20 (persist on completion), NFR24 (shutdown <5s)
 #[tokio::test]
 async fn test_e2e_crash_detection_full_cycle() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -453,6 +464,7 @@ async fn test_e2e_crash_detection_full_cycle() {
 }
 
 /// E2E: Empty conversation after recovery 'n' saved with clean_exit=true (Fix #8).
+// Covers: FR10 (session persistence), NFR20 (persist on completion), NFR24 (shutdown <5s)
 #[tokio::test]
 async fn test_e2e_recovery_n_saves_clean_exit() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -493,6 +505,7 @@ async fn test_e2e_recovery_n_saves_clean_exit() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// E2E: Empty session ID is handled safely (Fix #13).
+// Covers: FR10 (session persistence), NFR20 (persist on completion)
 #[tokio::test]
 async fn test_e2e_empty_session_id_safe() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -514,6 +527,7 @@ async fn test_e2e_empty_session_id_safe() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// E2E: --new and --session conflict is detected by clap.
+// Covers: FR10 (session persistence)
 #[test]
 fn test_e2e_cli_new_session_conflict() {
     use clap::Parser;
@@ -537,6 +551,7 @@ fn test_e2e_cli_new_session_conflict() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// E2E: Background task timeout constant is correctly defined.
+// Covers: NFR24 (shutdown <5s)
 #[test]
 fn test_e2e_background_task_timeout_defined() {
     // This verifies the timeout constant exists and has the expected value.
@@ -551,6 +566,7 @@ fn test_e2e_background_task_timeout_defined() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// E2E: Recovered conversation renders all messages correctly.
+// Covers: FR10 (session persistence), FR15 (history rebuild)
 #[test]
 fn test_e2e_recovered_conversation_renders() {
     let mut h = TestHarness::new();

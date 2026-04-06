@@ -8,7 +8,8 @@ use rustain::adapters::tui::terminal;
 
 /// AC2: terminal::setup() returns a functional Terminal on a real terminal.
 /// AC3: terminal::teardown() restores the terminal cleanly.
-/// Ignored in CI — requires a real terminal (TTY).
+/// Ignored in CI -- requires a real terminal (TTY).
+// Covers: FR105 (crash safety)
 #[test]
 #[ignore]
 fn test_terminal_setup_and_teardown() {
@@ -39,6 +40,7 @@ fn test_terminal_setup_and_teardown() {
 
 /// AC3: restore_terminal_raw() does not panic even when called
 /// outside of raw mode (idempotent safety).
+// Covers: FR105 (crash safety)
 #[test]
 fn test_restore_terminal_raw_is_safe_outside_raw_mode() {
     // Should not panic even if terminal is not in raw mode

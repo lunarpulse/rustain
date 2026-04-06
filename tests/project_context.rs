@@ -12,6 +12,7 @@ use rustain::domain::ports::PersonaPort;
 
 // ── Unit tests: ProjectContext domain types (Task 9) ────────────────────────
 
+// Covers: FR115 (project context)
 #[test]
 fn test_assembled_prompt_concatenates_in_priority_order() {
     let ctx = ProjectContext {
@@ -48,6 +49,7 @@ fn test_assembled_prompt_concatenates_in_priority_order() {
     assert!(parent_pos < sub_pos);
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_assembled_prompt_truncation_removes_lowest_priority() {
     let large = "x".repeat(CONTEXT_BUDGET_CHARS);
@@ -75,12 +77,14 @@ fn test_assembled_prompt_truncation_removes_lowest_priority() {
     assert!(prompt.contains("CONTEXT TRUNCATED"));
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_assembled_prompt_empty_returns_empty_string() {
     let ctx = ProjectContext::empty();
     assert_eq!(ctx.assembled_prompt(), "");
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_ignore_patterns_glob_matching() {
     let patterns = IgnorePatterns::new(vec![
@@ -104,6 +108,7 @@ fn test_ignore_patterns_glob_matching() {
 
 // ── Unit tests: ProjectContextLoader (Task 10) ─────────────────────────────
 
+// Covers: FR115 (project context)
 #[test]
 fn test_loader_finds_claude_md_at_workspace_root() {
     let tmp = TempDir::new().unwrap();
@@ -117,6 +122,7 @@ fn test_loader_finds_claude_md_at_workspace_root() {
     assert_eq!(ctx.files[0].priority, 0);
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_loader_walks_upward_for_parent_claude_md() {
     let tmp = TempDir::new().unwrap();
@@ -142,6 +148,7 @@ fn test_loader_walks_upward_for_parent_claude_md() {
     );
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_loader_finds_cursorrules_alongside_claude_md() {
     let tmp = TempDir::new().unwrap();
@@ -164,6 +171,7 @@ fn test_loader_finds_cursorrules_alongside_claude_md() {
     );
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_loader_claudeignore_excludes_matching_paths() {
     let tmp = TempDir::new().unwrap();
@@ -184,6 +192,7 @@ fn test_loader_claudeignore_excludes_matching_paths() {
     assert!(ctx.files.iter().any(|f| f.content == "should be included"));
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_loader_empty_workspace_returns_empty_context() {
     let tmp = TempDir::new().unwrap();
@@ -194,6 +203,7 @@ fn test_loader_empty_workspace_returns_empty_context() {
     assert_eq!(ctx.total_chars, 0);
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_loader_missing_files_gracefully_handled() {
     let tmp = TempDir::new().unwrap();
@@ -206,6 +216,7 @@ fn test_loader_missing_files_gracefully_handled() {
 
 // ── Integration tests (Task 11) ────────────────────────────────────────────
 
+// Covers: FR115 (project context)
 #[test]
 fn test_full_flow_workspace_with_claude_md() {
     let tmp = TempDir::new().unwrap();
@@ -231,6 +242,7 @@ fn test_full_flow_workspace_with_claude_md() {
     assert!(adapter.has_context());
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_full_flow_empty_workspace_no_crash() {
     let tmp = TempDir::new().unwrap();
@@ -245,6 +257,7 @@ fn test_full_flow_empty_workspace_no_crash() {
     assert!(!adapter.has_context());
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_full_flow_hierarchical_priority() {
     let tmp = TempDir::new().unwrap();
@@ -273,6 +286,7 @@ fn test_full_flow_hierarchical_priority() {
     );
 }
 
+// Covers: FR115 (project context)
 #[test]
 fn test_truncation_with_multibyte_content_stays_within_budget() {
     // CJK characters are 3 bytes each. Budget tracking uses bytes.

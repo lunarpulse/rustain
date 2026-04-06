@@ -101,6 +101,7 @@ fn add_user_message(conv: &mut Conversation, content: &str) {
 
 // ── Test 5.1: apply_chunk sets trigger_title_generation only at 2 messages ──
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_trigger_title_generation_only_at_two_messages() {
     let mut conv = make_conversation();
@@ -167,24 +168,28 @@ fn test_trigger_title_generation_only_at_two_messages() {
 
 // ── Test 5.2: Title post-processing ────────────────────────────
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_post_processing_trims_whitespace() {
     use rustain::infrastructure::runtime::event_loop::post_process_title;
     assert_eq!(post_process_title("  Hello World  "), "Hello World");
 }
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_post_processing_strips_double_quotes() {
     use rustain::infrastructure::runtime::event_loop::post_process_title;
     assert_eq!(post_process_title("\"Quoted Title\""), "Quoted Title");
 }
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_post_processing_strips_single_quotes() {
     use rustain::infrastructure::runtime::event_loop::post_process_title;
     assert_eq!(post_process_title("'Single Quoted'"), "Single Quoted");
 }
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_post_processing_truncates_over_60() {
     use rustain::infrastructure::runtime::event_loop::post_process_title;
@@ -195,6 +200,7 @@ fn test_title_post_processing_truncates_over_60() {
     assert_eq!(result.chars().count(), 60);
 }
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_post_processing_preserves_exact_60() {
     use rustain::infrastructure::runtime::event_loop::post_process_title;
@@ -204,6 +210,7 @@ fn test_title_post_processing_preserves_exact_60() {
 
 // ── Test 5.3: AppEvent::TitleGenerated sets conversation title ──
 
+// Covers: FR9 (auto-title generation)
 #[tokio::test]
 async fn test_title_generated_event_sets_conversation_title() {
     // Verify the event variant can be constructed and pattern-matched
@@ -223,6 +230,7 @@ async fn test_title_generated_event_sets_conversation_title() {
 
 // ── Test 5.4: Full title generation flow via mock provider ─────
 
+// Covers: FR9 (auto-title generation)
 #[tokio::test]
 async fn test_generate_title_via_mock_provider() {
     use futures::StreamExt;
@@ -263,6 +271,7 @@ async fn test_generate_title_via_mock_provider() {
 
 // ── Test 5.5: Title generation failure does not affect conversation ──
 
+// Covers: FR9 (auto-title generation)
 #[tokio::test]
 async fn test_title_generation_failure_silent() {
     let provider = FailingProvider;
@@ -297,6 +306,7 @@ async fn test_title_generation_failure_silent() {
 
 // ── Test 5.6: Restored session with existing title doesn't re-trigger ──
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_no_title_generation_for_subsequent_turns() {
     let mut conv = make_conversation();
@@ -350,6 +360,7 @@ fn test_no_title_generation_for_subsequent_turns() {
 
 // ── Test: Event loop guard skips title gen for non-empty title ──
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_guard_skips_when_title_exists() {
     // This tests the logic: `trigger_title_generation && conversation.title.is_empty()`
@@ -371,6 +382,7 @@ fn test_title_guard_skips_when_title_exists() {
     assert!(!should_generate);
 }
 
+// Covers: FR9 (auto-title generation)
 #[test]
 fn test_title_guard_allows_when_title_empty() {
     let conv = Conversation {

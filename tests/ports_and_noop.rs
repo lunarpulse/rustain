@@ -17,6 +17,7 @@ use rustain::domain::ports::{
     SessionPort, StoragePort, ToolSetPort,
 };
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[tokio::test]
 async fn test_noop_provider_returns_error() {
     let provider = NoOpProvider;
@@ -44,18 +45,21 @@ async fn test_noop_provider_returns_error() {
     }
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[tokio::test]
 async fn test_noop_provider_abort_ok() {
     let provider = NoOpProvider;
     assert!(provider.abort().await.is_ok());
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[test]
 fn test_noop_provider_id() {
     let provider = NoOpProvider;
     assert_eq!(provider.provider_id(), "noop");
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[tokio::test]
 async fn test_noop_storage_operations() {
     let storage = NoOpStorage;
@@ -78,6 +82,7 @@ async fn test_noop_storage_operations() {
     assert!(storage.list_conversations().await.unwrap().is_empty());
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[tokio::test]
 async fn test_noop_security_allows_all() {
     let security = NoOpSecurity;
@@ -102,6 +107,7 @@ async fn test_noop_security_allows_all() {
     security.set_mode(PermissionMode::Yolo); // no-op, doesn't panic
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[tokio::test]
 async fn test_noop_toolset_no_tools() {
     let toolset = NoOpToolSet;
@@ -111,12 +117,14 @@ async fn test_noop_toolset_no_tools() {
     assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[test]
 fn test_noop_persona_empty_prompt() {
     let persona = NoOpPersona;
     assert!(persona.system_prompt(Path::new("/workspace")).is_empty());
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[test]
 fn test_noop_empty_ports_instantiate() {
     // These ports have no methods — just verify they can be instantiated
@@ -128,6 +136,7 @@ fn test_noop_empty_ports_instantiate() {
     let _context: Box<dyn ContextPort> = Box::new(NoOpContext);
 }
 
+// Covers: NFR1 (hexagonal architecture conformance)
 #[test]
 fn test_port_traits_are_object_safe() {
     // Verify all port traits can be used as trait objects (required for ArcSwap<Box<dyn Port>>)

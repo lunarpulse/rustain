@@ -5,6 +5,7 @@ use crate::adapters::tui::theme::Theme;
 /// State for an AskUserQuestion card.
 #[derive(Debug, Clone)]
 pub struct AskUserQuestionState {
+    #[allow(dead_code)]
     pub tool_use_id: String,
     pub question: String,
     pub input_buffer: String,
