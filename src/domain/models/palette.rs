@@ -34,6 +34,9 @@ pub enum PaletteAction {
     SwitchProfile(String),
     /// Open a sidebar panel (stub for future).
     OpenPanel(super::visual::PanelType),
+    /// Show version info as a FeedbackBlock in the chat pane.
+    // Covers: FR109
+    ShowVersion,
     /// No-op — target feature not yet implemented.
     Noop,
 }

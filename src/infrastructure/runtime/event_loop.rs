@@ -15,8 +15,8 @@ use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
-    autocomplete_popup, chat_pane, command_palette as command_palette_widget, input_box,
-    reverse_search, status_bar, which_key_bar,
+    autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
+    input_box, reverse_search, status_bar, which_key_bar,
 };
 
 /// Timeout for background tasks (title generation, session save).
@@ -55,6 +55,18 @@ pub async fn run(
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
+
+    // Cache multiplexer detection once at startup (UX-DR62)
+    state.multiplexer_detected = crate::adapters::tui::help_data::is_multiplexer_session();
+
+    // Load and increment session count for contextual hint fading (UX-DR96)
+    state.session_count = crate::adapters::tui::hints::load_and_increment_session_count();
+    // Compute initial hint
+    state.current_hint = crate::adapters::tui::hints::contextual_hint(
+        &state.focus,
+        state.session_count,
+        state.theme.timing.status_hint_fade_sessions,
+    );
 
     // Set project context indicator based on persona
     state.has_project_context = !persona.system_prompt(&workspace_path).is_empty();
@@ -209,6 +221,15 @@ pub async fn run(
                             }
 
                             let action = handle_input(&mut state, &domain_event);
+
+                            // Update contextual hint whenever focus may have changed (UX-DR93)
+                            if state.needs_redraw {
+                                state.current_hint = crate::adapters::tui::hints::contextual_hint(
+                                    &state.focus,
+                                    state.session_count,
+                                    state.theme.timing.status_hint_fade_sessions,
+                                );
+                            }
 
                             // P4: Only re-populate autocomplete when filter text actually changed
                             if state.autocomplete.active && state.autocomplete.filter_text != last_autocomplete_filter {
@@ -1300,7 +1321,9 @@ fn render(
         ref autocomplete,
         ref command_palette,
         ref which_key,
+        ref help_overlay,
         ref image_indicator,
+        ref current_hint,
         ..
     } = *state;
 
@@ -1414,6 +1437,7 @@ fn render(
                     has_project_context,
                     session_title,
                     multiline_mode,
+                    current_hint.as_deref(),
                 );
                 input_box::render(
                     frame,
@@ -1445,6 +1469,18 @@ fn render(
                 // Render which-key hint bar (bottom of screen)
                 if which_key.active {
                     which_key_bar::render(frame, area, which_key, theme);
+                }
+
+                // Render help overlay (full-screen modal, on top of everything)
+                // Covers: FR108, UX-DR94
+                if help_overlay.active {
+                    help_overlay::render(
+                        frame,
+                        area,
+                        help_overlay,
+                        theme,
+                        state.multiplexer_detected,
+                    );
                 }
             }
             None => {

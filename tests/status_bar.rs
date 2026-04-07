@@ -75,6 +75,7 @@ fn render_status_bar_ml(
                 has_project_context,
                 session_title,
                 multiline_mode,
+                None, // current_hint
             );
         })
         .unwrap();

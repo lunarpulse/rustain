@@ -466,6 +466,49 @@ impl Default for CommandPaletteState {
     }
 }
 
+/// State for the help overlay (? key or Ctrl+X, ?).
+// Covers: FR108, UX-DR94
+pub struct HelpOverlayState {
+    pub active: bool,
+    /// Focus state to restore when the overlay is dismissed.
+    pub prior_focus: FocusState,
+    /// Vertical scroll offset within the overlay content.
+    pub scroll_offset: usize,
+    /// Index of the currently highlighted category (reserved for future navigation).
+    pub selected_category: usize,
+}
+
+impl HelpOverlayState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            prior_focus: FocusState::Input,
+            scroll_offset: 0,
+            selected_category: 0,
+        }
+    }
+
+    /// Open the help overlay, saving `prior` focus for restoration.
+    pub fn open(&mut self, prior: FocusState) {
+        self.active = true;
+        self.prior_focus = prior;
+        self.scroll_offset = 0;
+        self.selected_category = 0;
+    }
+
+    /// Dismiss the overlay; returns the saved prior focus state.
+    pub fn close(&mut self) -> FocusState {
+        self.active = false;
+        self.prior_focus
+    }
+}
+
+impl Default for HelpOverlayState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// State for the which-key hint bar overlay (Ctrl+X).
 // Covers: UX-DR19, UX-DR60
 pub struct WhichKeyState {
@@ -495,10 +538,7 @@ impl WhichKeyState {
         chord_map.insert('u', ChordAction::Noop("Usage/cost — Epic 7".to_string()));
         chord_map.insert('w', ChordAction::Noop("Watch/monitor — future".to_string()));
         chord_map.insert('d', ChordAction::Noop("Dashboard — future".to_string()));
-        chord_map.insert(
-            '?',
-            ChordAction::Noop("Help overlay — Story 3.5".to_string()),
-        );
+        chord_map.insert('?', ChordAction::ShowHelp);
 
         Self {
             active: false,
@@ -628,6 +668,20 @@ pub struct TuiState {
     /// Which-key hint bar state (Ctrl+X).
     // Covers: UX-DR19, UX-DR60
     pub which_key: WhichKeyState,
+    /// Help overlay state (? key or Ctrl+X, ?).
+    // Covers: FR108, UX-DR94
+    pub help_overlay: HelpOverlayState,
+    /// Cached multiplexer detection (tmux/screen) — set once at startup.
+    // Covers: UX-DR62
+    pub multiplexer_detected: bool,
+    /// How many TUI sessions this user has started (loaded from global config).
+    /// Used to fade contextual hints after the first N sessions.
+    // Covers: UX-DR96
+    pub session_count: u32,
+    /// Current contextual status-bar hint for discoverability.
+    /// `None` once session_count > theme.timing.status_hint_fade_sessions.
+    // Covers: UX-DR93
+    pub current_hint: Option<String>,
 }
 
 impl TuiState {
@@ -677,6 +731,10 @@ impl TuiState {
             image_indicator: None,
             command_palette: CommandPaletteState::new(),
             which_key: WhichKeyState::new(),
+            help_overlay: HelpOverlayState::new(),
+            multiplexer_detected: false,
+            session_count: 0,
+            current_hint: None,
         }
     }
 }

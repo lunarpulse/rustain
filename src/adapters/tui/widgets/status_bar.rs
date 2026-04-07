@@ -6,7 +6,7 @@ use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_
 use crate::domain::models::{PermissionMode, StatusState, UsageInfo};
 
 /// Render the status bar with model name, current status, scroll position, and permission mode.
-// Covers: FR38, UX-DR76
+// Covers: FR38, UX-DR76, UX-DR93
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -22,6 +22,7 @@ pub fn render(
     has_project_context: bool,
     session_title: Option<&str>,
     multiline_mode: bool,
+    current_hint: Option<&str>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -103,6 +104,32 @@ pub fn render(
             format!(" │ msg {}/{}", current, total),
             Style::default().fg(fg),
         ));
+    }
+
+    // Contextual hint: right-aligned in remaining space (UX-DR93, UX-DR96)
+    // The hint is the first thing truncated if the terminal is too narrow.
+    if let Some(hint) = current_hint {
+        let left_line = Line::from(left_spans.clone());
+        let left_width = left_line
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>();
+        let bar_width = area.width as usize;
+        let hint_width = hint.chars().count();
+        // Only render hint if it fits in the remaining space (with at least 1 gap)
+        if left_width + 1 + hint_width <= bar_width {
+            let padding = bar_width - left_width - hint_width;
+            let mut spans_with_hint = left_spans;
+            spans_with_hint.push(Span::raw(" ".repeat(padding)));
+            spans_with_hint.push(Span::styled(
+                hint,
+                theme.typography.hint.fg(theme.colors.text_hint),
+            ));
+            let line = Line::from(spans_with_hint);
+            let widget = Paragraph::new(line).style(Style::default().bg(theme.colors.status_bg));
+            return frame.render_widget(widget, area);
+        }
     }
 
     let line = Line::from(left_spans);

@@ -5,6 +5,7 @@ pub mod command_palette;
 
 pub mod empty_state;
 pub mod feedback_block;
+pub mod help_overlay;
 pub mod input_box;
 pub mod permission_prompt;
 pub mod reverse_search;

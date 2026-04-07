@@ -256,6 +256,7 @@ impl TestHarness {
                         has_project_context,
                         None, // session_title
                         multiline_mode,
+                        None, // current_hint
                     );
 
                     input_box::render(

@@ -182,12 +182,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return InputAction::Consumed;
     }
 
+    // Help overlay: handle char keys (j/k/g/G scrolling and ? dismiss)
+    // Covers: FR108, UX-DR94
+    if state.focus == FocusState::Overlay(OverlayType::Help) {
+        return handle_help_overlay_char(state, c);
+    }
+
     // Which-key: single char lookup in chord map
     // Covers: UX-DR19
     if state.which_key.active {
         let chord = state.which_key.lookup_chord(c).cloned();
         if let Some(action) = chord {
-            state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
+            let prior_focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
+            state.focus = prior_focus;
             match action {
                 ChordAction::Noop(msg) => {
                     // Show "Not yet available" feedback
@@ -199,8 +206,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     };
                     state.feedback_blocks.insert(block.id.clone(), block);
                 }
-                ChordAction::ShowHelp | ChordAction::OpenPanel(_) => {
-                    // Stubs for future implementation
+                ChordAction::ShowHelp => {
+                    // Open help overlay
+                    state.help_overlay.open(prior_focus);
+                    state.focus = FocusState::Overlay(OverlayType::Help);
+                }
+                ChordAction::OpenPanel(_) => {
+                    // Stub for future epics
                 }
             }
             state.needs_redraw = true;
@@ -423,6 +435,15 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
                 InputAction::Consumed
             }
+            // ? = toggle help overlay
+            // Covers: FR108, UX-DR94 (AC1: ? opens help from any non-Input focus)
+            '?' => {
+                let prior = state.focus;
+                state.help_overlay.open(prior);
+                state.focus = FocusState::Overlay(OverlayType::Help);
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
             // c = copy focused content to clipboard
             // Covers: FR116, UX-DR68 (AC6, AC7, AC8, AC9)
             'c' => {
@@ -503,6 +524,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             state.needs_redraw = true;
             return InputAction::Consumed;
         }
+    }
+
+    // Help overlay: route all special keys when active
+    // Covers: FR108, UX-DR94
+    if state.focus == FocusState::Overlay(OverlayType::Help) {
+        return handle_help_overlay_key(state, key);
     }
 
     // Command palette overlay handling — intercept keys when palette is active
@@ -1067,6 +1094,77 @@ fn handle_command_palette_key(state: &mut TuiState, key: DomainKey) -> InputActi
     }
 }
 
+/// Handle character keys while the help overlay is active.
+// Covers: FR108, UX-DR94
+fn handle_help_overlay_char(state: &mut TuiState, c: char) -> InputAction {
+    match c {
+        // j / Down → scroll toward bottom (increment offset)
+        'j' => {
+            state.help_overlay.scroll_offset =
+                state.help_overlay.scroll_offset.saturating_add(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // k / Up → scroll toward top (decrement offset)
+        'k' => {
+            state.help_overlay.scroll_offset =
+                state.help_overlay.scroll_offset.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // G → scroll to bottom (large sentinel; render fn clamps to max)
+        'G' => {
+            state.help_overlay.scroll_offset = usize::MAX / 2;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // g → scroll to top
+        'g' => {
+            state.help_overlay.scroll_offset = 0;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // ? → toggle off (dismiss)
+        '?' => {
+            state.focus = state.help_overlay.close();
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+/// Handle special keys while the help overlay is active.
+// Covers: FR108, UX-DR94
+fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    match key {
+        DomainKey::Esc => {
+            state.focus = state.help_overlay.close();
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Down => {
+            state.help_overlay.scroll_offset =
+                state.help_overlay.scroll_offset.saturating_add(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Up => {
+            state.help_overlay.scroll_offset =
+                state.help_overlay.scroll_offset.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // Ctrl+C: pass through to cancel streaming — help overlay is passive, not interactive
+        DomainKey::CtrlC => {
+            state.focus = state.help_overlay.close();
+            state.needs_redraw = true;
+            InputAction::CancelOrQuit
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
 /// Dispatch a palette action to the appropriate handler.
 fn dispatch_palette_action(
     state: &mut TuiState,
@@ -1090,6 +1188,20 @@ fn dispatch_palette_action(
         | PaletteAction::SwitchProfile(_)
         | PaletteAction::OpenPanel(_) => {
             // Stubs for future epics
+            InputAction::Consumed
+        }
+        PaletteAction::ShowVersion => {
+            // Display version info as a FeedbackBlock in the chat pane
+            // Covers: FR109
+            let version = crate::adapters::tui::version_info::version_string();
+            let block = crate::domain::models::FeedbackBlock {
+                id: "version-info".to_string(),
+                level: crate::domain::models::FeedbackLevel::Info,
+                message: version,
+                actions: Vec::new(),
+            };
+            state.feedback_blocks.insert(block.id.clone(), block);
+            state.needs_redraw = true;
             InputAction::Consumed
         }
         PaletteAction::Noop => {

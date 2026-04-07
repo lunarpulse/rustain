@@ -79,6 +79,7 @@ fn render_full_layout(
                 false,
                 None,
                 false, // multiline_mode
+                None,  // current_hint
             );
             input_box::render(
                 frame,
@@ -256,6 +257,7 @@ fn test_permission_prompt_in_full_layout() {
                 false,
                 None,
                 false, // multiline_mode
+                None,  // current_hint
             );
             input_box::render(
                 frame,
@@ -349,6 +351,7 @@ fn test_ask_user_question_in_full_layout() {
                 false,
                 None,
                 false, // multiline_mode
+                None,  // current_hint
             );
             input_box::render(
                 frame,

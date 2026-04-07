@@ -405,6 +405,7 @@ fn test_tui_renders_with_theme_colors() {
                     state.has_project_context,
                     None,
                     state.multiline_mode,
+                    None, // current_hint
                 );
             }
         })

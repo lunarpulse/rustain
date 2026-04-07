@@ -54,6 +54,16 @@ impl PaletteRegistry {
             });
         }
 
+        // Built-in: version info
+        // Covers: FR109
+        self.entries.push(PaletteEntry {
+            name: "version".to_string(),
+            description: "Show rustain version and build info".to_string(),
+            shortcut: None,
+            scope: PaletteScope::All,
+            action: PaletteAction::ShowVersion,
+        });
+
         self.populated_from_discovered = cr_discovered;
     }
 
@@ -352,12 +362,13 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 1);
-        assert_eq!(reg.all_entries()[0].name, "/new");
-        assert_eq!(reg.all_entries()[0].scope, PaletteScope::SlashCommand);
+        // 1 slash command (/new) + 1 built-in (version) = 2
+        assert_eq!(reg.all_entries().len(), 2);
+        assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "version"));
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 1);
+        assert_eq!(reg.all_entries().len(), 2);
     }
 }

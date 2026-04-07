@@ -58,6 +58,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     state.has_project_context,
                     None,
                     state.multiline_mode,
+                    None, // current_hint
                 );
                 input_box::render(
                     frame,

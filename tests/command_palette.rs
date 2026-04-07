@@ -315,11 +315,13 @@ fn test_ctrl_p_opens_palette_from_chat() {
 #[test]
 fn test_ctrl_p_not_from_existing_overlay() {
     let mut state = TuiState::new(80, 24);
+    state.help_overlay.open(FocusState::Chat);
     state.focus = FocusState::Overlay(OverlayType::Help);
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    // Should be ignored (not consumed by Ctrl+P handler since we're in an overlay)
-    assert_ne!(action, InputAction::Consumed);
+    // Help overlay consumes all input — Ctrl+P is swallowed, palette not opened
+    assert_eq!(action, InputAction::Consumed);
+    assert!(!state.command_palette.active);
 }
 
 // ============================================================
