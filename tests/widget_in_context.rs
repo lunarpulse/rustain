@@ -6,10 +6,10 @@ use std::collections::{BTreeMap, HashMap};
 
 mod common;
 
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::prelude::Rect;
 use ratatui::widgets::{Clear, Paragraph};
-use ratatui::Terminal;
 
 use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::HeightCache;

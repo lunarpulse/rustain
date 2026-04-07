@@ -1,4 +1,4 @@
-use crate::adapters::tui::state::{Direction, TuiState};
+use crate::adapters::tui::state::{ChordAction, Direction, TuiState};
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
 use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
@@ -86,6 +86,56 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
+    // Command palette: typing updates filter text
+    // Covers: UX-DR18
+    if state.command_palette.active {
+        // Detect scope prefix on first char
+        if state.command_palette.filter_text.is_empty() {
+            if let Some(scope) =
+                crate::adapters::palette_registry::PaletteRegistry::scope_for_prefix(c)
+            {
+                state.command_palette.current_scope = Some(scope);
+                state.command_palette.filter_text.push(c);
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+        }
+        state.command_palette.filter_text.push(c);
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+
+    // Which-key: single char lookup in chord map
+    // Covers: UX-DR19
+    if state.which_key.active {
+        let chord = state.which_key.lookup_chord(c).cloned();
+        if let Some(action) = chord {
+            state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
+            match action {
+                ChordAction::Noop(msg) => {
+                    // Show "Not yet available" feedback
+                    let block = crate::domain::models::FeedbackBlock {
+                        id: format!("chord-{}", c),
+                        level: crate::domain::models::FeedbackLevel::Info,
+                        message: msg,
+                        actions: Vec::new(),
+                    };
+                    state.feedback_blocks.insert(block.id.clone(), block);
+                }
+                ChordAction::ShowHelp | ChordAction::OpenPanel(_) => {
+                    // Stubs for future implementation
+                }
+            }
+            state.needs_redraw = true;
+            return InputAction::Consumed;
+        } else {
+            // Invalid key: dismiss silently (AC6)
+            state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            return InputAction::Consumed;
+        }
+    }
+
     // Reverse search: typing adds to query
     // Covers: UX-DR74
     if state.reverse_search.active {
@@ -366,6 +416,21 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
     }
 
+    // Command palette overlay handling — intercept keys when palette is active
+    // Covers: UX-DR18
+    if state.command_palette.active {
+        return handle_command_palette_key(state, key);
+    }
+
+    // Which-key overlay handling — any special key dismisses
+    // Covers: UX-DR19
+    if state.which_key.active {
+        // Special keys (non-char) dismiss which-key without action (AC6)
+        state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+
     // Autocomplete overlay handling — intercept keys when autocomplete is active
     // Covers: UX-DR75 (autocomplete)
     if state.autocomplete.active && state.focus == FocusState::Input {
@@ -378,7 +443,8 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
     // Reverse search overlay handling
     // Covers: UX-DR74 (reverse search)
-    if state.reverse_search.active {
+    // P16: Allow Ctrl+P and Ctrl+X to dismiss reverse search and open their overlays (Tier-2).
+    if state.reverse_search.active && !matches!(key, DomainKey::CtrlP | DomainKey::CtrlX) {
         return handle_reverse_search_key(state, key);
     }
 
@@ -425,6 +491,78 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             } else {
                 InputAction::Consumed
             }
+        }
+
+        // Ctrl+P: open command palette (Tier-1 overlays blocked, Tier-2 overlays allowed)
+        // P16: ReverseSearch is Tier-2 — Ctrl+P dismisses it and opens palette.
+        // Covers: UX-DR18
+        DomainKey::CtrlP
+            if !matches!(
+                state.focus,
+                FocusState::Overlay(
+                    OverlayType::CommandPalette
+                        | OverlayType::WhichKey
+                        | OverlayType::ModelSelector
+                        | OverlayType::Help
+                        | OverlayType::ProfileSwitcher
+                        | OverlayType::Confirmation(_)
+                )
+            ) =>
+        {
+            // Dismiss autocomplete if active — only one overlay at a time
+            if state.autocomplete.active {
+                state.autocomplete.dismiss();
+            }
+            // Dismiss reverse search (Tier-2) before opening palette
+            if state.reverse_search.active {
+                state.reverse_search.active = false;
+            }
+            // Determine prior focus for restoration: if coming from ReverseSearch overlay, restore Input
+            let prior_focus = match state.focus {
+                FocusState::Overlay(OverlayType::ReverseSearch) => FocusState::Input,
+                FocusState::Overlay(OverlayType::Autocomplete(_)) => FocusState::Input,
+                other => other,
+            };
+            state.command_palette.open(prior_focus);
+            state.focus = FocusState::Overlay(OverlayType::CommandPalette);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
+        // Ctrl+X: open which-key (Tier-1 overlays blocked, Tier-2 overlays allowed)
+        // P16: ReverseSearch is Tier-2 — Ctrl+X dismisses it and opens which-key.
+        // Covers: UX-DR19, UX-DR60
+        DomainKey::CtrlX
+            if !matches!(
+                state.focus,
+                FocusState::Overlay(
+                    OverlayType::CommandPalette
+                        | OverlayType::WhichKey
+                        | OverlayType::ModelSelector
+                        | OverlayType::Help
+                        | OverlayType::ProfileSwitcher
+                        | OverlayType::Confirmation(_)
+                )
+            ) =>
+        {
+            // Dismiss autocomplete if active — only one overlay at a time
+            if state.autocomplete.active {
+                state.autocomplete.dismiss();
+            }
+            // Dismiss reverse search (Tier-2) before opening which-key
+            if state.reverse_search.active {
+                state.reverse_search.active = false;
+            }
+            // Determine prior focus for restoration
+            let prior_focus = match state.focus {
+                FocusState::Overlay(OverlayType::ReverseSearch) => FocusState::Input,
+                FocusState::Overlay(OverlayType::Autocomplete(_)) => FocusState::Input,
+                other => other,
+            };
+            state.which_key.open(prior_focus);
+            state.focus = FocusState::Overlay(OverlayType::WhichKey);
+            state.needs_redraw = true;
+            InputAction::Consumed
         }
 
         // Ctrl+E: toggle multi-line mode
@@ -487,7 +625,8 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
         // Home: move to start of current line
         DomainKey::Home if state.focus == FocusState::Input => {
-            let (row, _col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let (row, _col) =
+                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
             state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row, 0);
             state.needs_redraw = true;
             InputAction::Consumed
@@ -495,9 +634,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
         // End: move to end of current line
         DomainKey::End if state.focus == FocusState::Input => {
-            let (row, _col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let (row, _col) =
+                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
             let line_len = input_box::line_len_at_row(&state.input_buffer, row);
-            state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row, line_len);
+            state.cursor_position =
+                input_box::row_col_to_cursor(&state.input_buffer, row, line_len);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -506,12 +647,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         // Covers: UX-DR74, UX-DR76
         DomainKey::Up if state.focus == FocusState::Input => {
             let has_multiline_content = state.input_buffer.contains('\n');
-            let (row, col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let (row, col) =
+                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
 
             if has_multiline_content && row > 0 && !state.input_history.is_navigating() {
                 // Move cursor up one line (only if not already navigating history)
                 let target_col = col.min(input_box::line_len_at_row(&state.input_buffer, row - 1));
-                state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row - 1, target_col);
+                state.cursor_position =
+                    input_box::row_col_to_cursor(&state.input_buffer, row - 1, target_col);
                 ensure_cursor_visible(state);
                 state.needs_redraw = true;
             } else if state.input_buffer.is_empty()
@@ -533,13 +676,18 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
         DomainKey::Down if state.focus == FocusState::Input => {
             let has_multiline_content = state.input_buffer.contains('\n');
-            let (row, col) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let (row, col) =
+                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
             let total_lines = input_box::line_count(&state.input_buffer);
 
-            if has_multiline_content && row + 1 < total_lines && !state.input_history.is_navigating() {
+            if has_multiline_content
+                && row + 1 < total_lines
+                && !state.input_history.is_navigating()
+            {
                 // Move cursor down one line (only if not already navigating history)
                 let target_col = col.min(input_box::line_len_at_row(&state.input_buffer, row + 1));
-                state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row + 1, target_col);
+                state.cursor_position =
+                    input_box::row_col_to_cursor(&state.input_buffer, row + 1, target_col);
                 ensure_cursor_visible(state);
                 state.needs_redraw = true;
             } else if state.input_history.is_navigating() {
@@ -611,7 +759,11 @@ fn submit_message(state: &mut TuiState) -> InputAction {
 
     // Check if this is a slash command
     if let Some(after_slash) = text.strip_prefix('/') {
-        let cmd_name = after_slash.split_whitespace().next().unwrap_or("").to_string();
+        let cmd_name = after_slash
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
         if !cmd_name.is_empty() {
             // Check if it's a built-in command
             if cmd_name == "new" {
@@ -744,22 +896,124 @@ fn apply_autocomplete_selection(
         AutocompleteSuggestion::SlashCommand { name, .. } => {
             // Replace everything from trigger to cursor with "/<name>"
             let before: String = state.input_buffer.chars().take(trigger).collect();
-            let after: String = state.input_buffer.chars().skip(state.cursor_position).collect();
+            let after: String = state
+                .input_buffer
+                .chars()
+                .skip(state.cursor_position)
+                .collect();
             state.input_buffer = format!("{}/{}{}", before, name, after);
             state.cursor_position = trigger + 1 + name.chars().count();
         }
         AutocompleteSuggestion::FilePath { path, .. } => {
             // Replace everything from trigger to cursor with "@<path>"
             let before: String = state.input_buffer.chars().take(trigger).collect();
-            let after: String = state.input_buffer.chars().skip(state.cursor_position).collect();
+            let after: String = state
+                .input_buffer
+                .chars()
+                .skip(state.cursor_position)
+                .collect();
             state.input_buffer = format!("{}@{}{}", before, path, after);
             state.cursor_position = trigger + 1 + path.chars().count();
             // Track resolved mention for file context attachment at send time (deduplicate)
             if !state.resolved_mentions.iter().any(|m| m.path == *path) {
-                state.resolved_mentions.push(ResolvedMention {
-                    path: path.clone(),
-                });
+                state
+                    .resolved_mentions
+                    .push(ResolvedMention { path: path.clone() });
             }
+        }
+    }
+}
+
+/// Handle special keys while command palette is active.
+// Covers: UX-DR18
+fn handle_command_palette_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    match key {
+        DomainKey::Up => {
+            state.command_palette.navigate(Direction::Up);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Down => {
+            state.command_palette.navigate(Direction::Down);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Enter => {
+            // Execute selected entry's action
+            let action = state.command_palette.execute_selected();
+            let prev = state.command_palette.dismiss();
+            if let Some(focus) = prev {
+                state.focus = focus;
+            }
+            state.needs_redraw = true;
+            if let Some(palette_action) = action {
+                return dispatch_palette_action(state, palette_action);
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Esc => {
+            state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Backspace => {
+            if !state.command_palette.filter_text.is_empty() {
+                state.command_palette.filter_text.pop();
+                // Reset scope if prefix character was deleted
+                if state.command_palette.filter_text.is_empty() {
+                    state.command_palette.current_scope = None;
+                }
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Tab => InputAction::Consumed, // No-op
+        DomainKey::CtrlC => {
+            let prev = state.command_palette.dismiss();
+            state.focus = prev.unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+/// Dispatch a palette action to the appropriate handler.
+fn dispatch_palette_action(
+    state: &mut TuiState,
+    action: crate::domain::models::palette::PaletteAction,
+) -> InputAction {
+    use crate::domain::models::palette::PaletteAction;
+
+    match action {
+        PaletteAction::ExecuteCommand(name) => InputAction::ExecuteCommand(name),
+        PaletteAction::InsertMention(path) => {
+            // Insert @path at cursor position, return to input focus
+            let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+            let mention = format!("@{}", path);
+            state.input_buffer.insert_str(byte_pos, &mention);
+            state.cursor_position += mention.chars().count();
+            state.focus = FocusState::Input;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PaletteAction::SwitchModel(_)
+        | PaletteAction::SwitchProfile(_)
+        | PaletteAction::OpenPanel(_) => {
+            // Stubs for future epics
+            InputAction::Consumed
+        }
+        PaletteAction::Noop => {
+            // Show "Not yet available" feedback
+            let block = crate::domain::models::FeedbackBlock {
+                id: "palette-noop".to_string(),
+                level: crate::domain::models::FeedbackLevel::Info,
+                message: "Not yet available".to_string(),
+                actions: Vec::new(),
+            };
+            state.feedback_blocks.insert(block.id.clone(), block);
+            state.needs_redraw = true;
+            InputAction::Consumed
         }
     }
 }
@@ -770,7 +1024,11 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
     match key {
         DomainKey::Enter => {
             // Select current match and populate input
-            if let Some(selected) = state.reverse_search.matches.get(state.reverse_search.selected_match) {
+            if let Some(selected) = state
+                .reverse_search
+                .matches
+                .get(state.reverse_search.selected_match)
+            {
                 state.input_buffer = selected.1.clone();
                 state.cursor_position = state.input_buffer.chars().count();
             }
@@ -821,7 +1079,10 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
 fn update_reverse_search_matches(state: &mut TuiState) {
     let old_selected = state.reverse_search.selected_match;
     let results = state.input_history.search(&state.reverse_search.query);
-    state.reverse_search.matches = results.into_iter().map(|(i, s)| (i, s.to_string())).collect();
+    state.reverse_search.matches = results
+        .into_iter()
+        .map(|(i, s)| (i, s.to_string()))
+        .collect();
     let new_len = state.reverse_search.matches.len();
     state.reverse_search.selected_match = old_selected.min(new_len.saturating_sub(1));
 }
@@ -844,9 +1105,17 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
             }
+            // Ctrl+P → command palette
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('p') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlP));
+            }
             // Ctrl+R → reverse search
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('r') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlR));
+            }
+            // Ctrl+X → which-key chords
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('x') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlX));
             }
 
             match code {

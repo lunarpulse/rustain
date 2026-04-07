@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::style::Style;
-use ratatui::Terminal;
 
-use rustain::adapters::tui::app::{handle_input, InputAction};
+use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::{HeightCache, TuiState};
 use rustain::adapters::tui::theme::Theme;
@@ -23,9 +23,9 @@ use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::{ChunkAction, DomainInputEvent, DomainKey};
 use rustain::domain::models::{
-    apply_chunk, generate_conversation_id, ChatMessage, CompletionOptions, Conversation,
-    FeedbackBlock, FocusState, Message, MessageRole, PermissionMode, StatusState, StopReason,
-    StreamChunk, StreamingPhase, StreamingState, ToolCallInfo,
+    ChatMessage, CompletionOptions, Conversation, FeedbackBlock, FocusState, Message, MessageRole,
+    PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
+    ToolCallInfo, apply_chunk, generate_conversation_id,
 };
 use rustain::domain::ports::ProviderPort;
 use rustain::domain::services::message_builder;
@@ -37,10 +37,13 @@ use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 
 /// A mock provider that returns predefined StreamChunk sequences.
 /// Each call to `stream_completion` pops the next sequence from the queue.
+/// Scaffolded for future E2E streaming tests (Story 3-7). Not yet instantiated.
+#[allow(dead_code)]
 pub struct MockProvider {
     responses: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
 }
 
+#[allow(dead_code)]
 impl MockProvider {
     /// Create a MockProvider with a queue of responses.
     /// Each inner Vec<StreamChunk> is returned for one stream_completion call.
@@ -151,6 +154,7 @@ pub struct TestHarness {
     pub state: TuiState,
     pub conversation: Conversation,
     pub streaming: StreamingState,
+    #[allow(dead_code)]
     pub turn_queue: TurnQueue,
     pub height_cache: HeightCache,
     pub tool_block_states: HashMap<String, ToolBlockState>,
@@ -546,7 +550,10 @@ impl TestHarness {
     /// The status bar is always 1 row, positioned at `height - 4`
     /// (layout: chat fills remaining, status = 1 row, input = 3 rows).
     pub fn assert_status_bar_contains(&self, text: &str) {
-        assert!(!text.is_empty(), "assert_status_bar_contains called with empty text — this always passes");
+        assert!(
+            !text.is_empty(),
+            "assert_status_bar_contains called with empty text — this always passes"
+        );
         let buf = self.terminal.backend().buffer().clone();
         let height = buf.area.height;
         let width = buf.area.width as usize;
@@ -621,12 +628,10 @@ fn test_buffer_contains_styled_text_finds_styled_match() {
     let buf = terminal.backend().buffer().clone();
 
     // Should find "ERROR" with error color
-    assert!(buffer_contains_styled_text(&buf, "ERROR", |s| s.fg
-        == Some(theme.colors.error)));
+    assert!(buffer_contains_styled_text(&buf, "ERROR", |s| s.fg == Some(theme.colors.error)));
 
     // Should NOT find "normal" with error color
-    assert!(!buffer_contains_styled_text(&buf, "normal", |s| s.fg
-        == Some(theme.colors.error)));
+    assert!(!buffer_contains_styled_text(&buf, "normal", |s| s.fg == Some(theme.colors.error)));
 }
 
 #[test]
@@ -685,7 +690,7 @@ fn test_e2e_simple_streaming_response() {
     let mut h = TestHarness::new();
 
     // Simulate a complete turn
-    let actions = h.complete_turn(
+    let _actions = h.complete_turn(
         "What is Rust?",
         vec![
             StreamChunk::Text {
@@ -701,7 +706,11 @@ fn test_e2e_simple_streaming_response() {
     h.render();
 
     // Verify conversation state
-    assert_eq!(h.conversation.messages.len(), 2, "Should have user + assistant messages");
+    assert_eq!(
+        h.conversation.messages.len(),
+        2,
+        "Should have user + assistant messages"
+    );
     assert_eq!(h.conversation.messages[0].role, MessageRole::User);
     assert_eq!(h.conversation.messages[1].role, MessageRole::Assistant);
     assert_eq!(
@@ -713,7 +722,10 @@ fn test_e2e_simple_streaming_response() {
     h.assert_screen_contains("You:", "User message prefix visible");
     h.assert_screen_contains("What is Rust?", "User question visible");
     h.assert_screen_contains("Assistant:", "Assistant prefix visible");
-    h.assert_screen_contains("Rust is a systems programming language.", "Response visible");
+    h.assert_screen_contains(
+        "Rust is a systems programming language.",
+        "Response visible",
+    );
     h.assert_screen_not_contains("···", "No typing indicator after completion");
 
     // Verify API messages are valid
@@ -801,7 +813,10 @@ fn test_e2e_error_during_streaming() {
     h.render();
 
     // Error text should be captured in the assistant response
-    assert!(h.conversation.messages.len() >= 1, "At least user message exists");
+    assert!(
+        h.conversation.messages.len() >= 1,
+        "At least user message exists"
+    );
 }
 
 // Covers: FR23 (tool execution), FR29 (tool blocks)
@@ -943,7 +958,10 @@ fn test_e2e_scroll_navigation() {
     h.render();
 
     // Should be at bottom (auto_scroll)
-    assert_eq!(h.state.scroll_offset, 0, "Should be at bottom after messages");
+    assert_eq!(
+        h.state.scroll_offset, 0,
+        "Should be at bottom after messages"
+    );
 
     // Update total_content_height to simulate what event_loop does after render
     // (In production, chat_pane::render returns the height and event_loop stores it)
@@ -952,8 +970,14 @@ fn test_e2e_scroll_navigation() {
     // Switch to chat focus and scroll up
     h.focus_chat();
     let action = h.type_char('k');
-    assert!(matches!(action, InputAction::Consumed), "k should scroll up");
-    assert!(h.state.scroll_offset > 0, "Scroll offset should increase after k");
+    assert!(
+        matches!(action, InputAction::Consumed),
+        "k should scroll up"
+    );
+    assert!(
+        h.state.scroll_offset > 0,
+        "Scroll offset should increase after k"
+    );
 
     // Jump to bottom with G
     h.type_char('G');
@@ -1020,7 +1044,11 @@ fn test_e2e_multi_turn_conversation() {
 
     h.render();
 
-    assert_eq!(h.conversation.messages.len(), 4, "Should have 4 messages (2 turns)");
+    assert_eq!(
+        h.conversation.messages.len(),
+        4,
+        "Should have 4 messages (2 turns)"
+    );
     h.assert_screen_contains("What is 2+2?", "First question visible");
     h.assert_screen_contains("And 3+3?", "Second question visible");
 

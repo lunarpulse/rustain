@@ -9,7 +9,10 @@ use rustain::adapters::command_registry::{CommandRegistry, CommandSource};
 fn test_registry_has_builtin_new() {
     let registry = CommandRegistry::new();
     let all = registry.filter("");
-    assert!(all.iter().any(|c| c.name == "new"), "Missing built-in /new command");
+    assert!(
+        all.iter().any(|c| c.name == "new"),
+        "Missing built-in /new command"
+    );
 }
 
 // Covers: AC6 — built-in commands appear first
@@ -17,14 +20,25 @@ fn test_registry_has_builtin_new() {
 fn test_builtin_commands_listed_first() {
     let mut registry = CommandRegistry::new();
     // Simulate user-defined commands
-    registry.register_user_command("zebra".to_string(), "A custom cmd".to_string(), PathBuf::from(".claude/commands/zebra.md"), None);
-    registry.register_user_command("alpha".to_string(), "Another".to_string(), PathBuf::from(".claude/commands/alpha.md"), None);
+    registry.register_user_command(
+        "zebra".to_string(),
+        "A custom cmd".to_string(),
+        PathBuf::from(".claude/commands/zebra.md"),
+        None,
+    );
+    registry.register_user_command(
+        "alpha".to_string(),
+        "Another".to_string(),
+        PathBuf::from(".claude/commands/alpha.md"),
+        None,
+    );
 
     let all = registry.filter("");
     // First should be built-in
     assert!(matches!(all[0].source, CommandSource::BuiltIn));
     // User-defined should be sorted alphabetically
-    let user_cmds: Vec<&str> = all.iter()
+    let user_cmds: Vec<&str> = all
+        .iter()
         .filter(|c| matches!(c.source, CommandSource::UserDefined { .. }))
         .map(|c| c.name.as_str())
         .collect();
@@ -35,9 +49,24 @@ fn test_builtin_commands_listed_first() {
 #[test]
 fn test_filter_case_insensitive() {
     let mut registry = CommandRegistry::new();
-    registry.register_user_command("deploy-staging".to_string(), "Deploy".to_string(), PathBuf::from("x.md"), None);
-    registry.register_user_command("deploy-prod".to_string(), "Deploy prod".to_string(), PathBuf::from("y.md"), None);
-    registry.register_user_command("run-tests".to_string(), "Tests".to_string(), PathBuf::from("z.md"), None);
+    registry.register_user_command(
+        "deploy-staging".to_string(),
+        "Deploy".to_string(),
+        PathBuf::from("x.md"),
+        None,
+    );
+    registry.register_user_command(
+        "deploy-prod".to_string(),
+        "Deploy prod".to_string(),
+        PathBuf::from("y.md"),
+        None,
+    );
+    registry.register_user_command(
+        "run-tests".to_string(),
+        "Tests".to_string(),
+        PathBuf::from("z.md"),
+        None,
+    );
 
     let filtered = registry.filter("Deploy");
     assert_eq!(filtered.len(), 2);
@@ -75,7 +104,10 @@ fn test_user_command_with_content() {
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].name, "my-cmd");
     assert_eq!(filtered[0].description, "My description");
-    assert_eq!(filtered[0].content.as_deref(), Some("# Instruction\nDo something."));
+    assert_eq!(
+        filtered[0].content.as_deref(),
+        Some("# Instruction\nDo something.")
+    );
 }
 
 // Covers: AC6 — discover_commands reads from directory with frontmatter
@@ -89,19 +121,22 @@ fn test_discover_commands_from_directory() {
     std::fs::write(
         cmd_dir.join("deploy-staging.md"),
         "---\ndescription: Deploy to staging\n---\n# Deploy\nRun deploy script.",
-    ).unwrap();
+    )
+    .unwrap();
 
     // Command without frontmatter (first line as description)
     std::fs::write(
         cmd_dir.join("run-tests.md"),
         "Run all test suites.\n\nMore details here.",
-    ).unwrap();
+    )
+    .unwrap();
 
     let registry = CommandRegistry::discover_commands(tmp.path());
     let all = registry.filter("");
 
     // Should have built-in + 2 discovered
-    let user_cmds: Vec<&str> = all.iter()
+    let user_cmds: Vec<&str> = all
+        .iter()
         .filter(|c| matches!(c.source, CommandSource::UserDefined { .. }))
         .map(|c| c.name.as_str())
         .collect();

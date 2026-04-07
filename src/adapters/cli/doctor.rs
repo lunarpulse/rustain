@@ -38,13 +38,22 @@ pub trait HealthCheck: Send + Sync {
 /// check code required (AC7 extensibility).
 fn build_check_list(terminal_detail: bool) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = vec![
-        Box::new(ApiKeyCheck { key_var_override: None, key_value_override: None, base_url_override: None }),
-        Box::new(ApiEndpointCheck { base_url_override: None }),
+        Box::new(ApiKeyCheck {
+            key_var_override: None,
+            key_value_override: None,
+            base_url_override: None,
+        }),
+        Box::new(ApiEndpointCheck {
+            base_url_override: None,
+        }),
         Box::new(GlobalConfigCheck { config_dir: None }),
         Box::new(WorkspaceDirCheck { workspace: None }),
         Box::new(WorkspaceConfigCheck { workspace: None }),
         Box::new(TerminalCheck),
-        Box::new(SessionStorageCheck { workspace: None, config_dir: None }),
+        Box::new(SessionStorageCheck {
+            workspace: None,
+            config_dir: None,
+        }),
     ];
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
@@ -77,9 +86,9 @@ pub async fn run_doctor(terminal_detail: bool) -> Result<()> {
 pub fn display_results(results: &[CheckResult]) {
     for r in results {
         let icon = match r.status {
-            CheckStatus::Pass => "\u{2713}",    // ✓
+            CheckStatus::Pass => "\u{2713}", // ✓
             CheckStatus::Warning => "!",
-            CheckStatus::Fail => "\u{2717}",    // ✗
+            CheckStatus::Fail => "\u{2717}", // ✗
         };
         println!("{} {}: {}", icon, r.name, r.message);
         if let Some(ref fix) = r.fix {
@@ -91,10 +100,22 @@ pub fn display_results(results: &[CheckResult]) {
         }
     }
 
-    let pass_count = results.iter().filter(|r| r.status == CheckStatus::Pass).count();
-    let warn_count = results.iter().filter(|r| r.status == CheckStatus::Warning).count();
-    let fail_count = results.iter().filter(|r| r.status == CheckStatus::Fail).count();
-    println!("\n{} passed, {} warnings, {} failures", pass_count, warn_count, fail_count);
+    let pass_count = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Pass)
+        .count();
+    let warn_count = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Warning)
+        .count();
+    let fail_count = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Fail)
+        .count();
+    println!(
+        "\n{} passed, {} warnings, {} failures",
+        pass_count, warn_count, fail_count
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -216,8 +237,14 @@ impl HealthCheck for ApiKeyCheck {
                     CheckResult {
                         name: self.name().to_string(),
                         status: CheckStatus::Warning,
-                        message: format!("API server error (HTTP {}). Key found in {}.", status, var_name),
-                        fix: Some("API server may be temporarily unavailable. Try again later.".to_string()),
+                        message: format!(
+                            "API server error (HTTP {}). Key found in {}.",
+                            status, var_name
+                        ),
+                        fix: Some(
+                            "API server may be temporarily unavailable. Try again later."
+                                .to_string(),
+                        ),
                     }
                 } else {
                     // 200, 400, 422, 429, etc. — auth accepted, request rejected = key valid
@@ -339,7 +366,10 @@ impl HealthCheck for GlobalConfigCheck {
                             Err(_) => CheckResult {
                                 name: self.name().to_string(),
                                 status: CheckStatus::Fail,
-                                message: format!("invalid config format ({})", config_path.display()),
+                                message: format!(
+                                    "invalid config format ({})",
+                                    config_path.display()
+                                ),
                                 fix: Some("Run 'rustain init' to regenerate config".to_string()),
                             },
                         }
@@ -501,10 +531,9 @@ impl HealthCheck for TerminalCheck {
     }
 
     async fn run(&self) -> CheckResult {
-        let emulator = utils::env_var_trimmed("TERM_PROGRAM")
-            .unwrap_or_else(|| {
-                utils::env_var_trimmed("TERM").unwrap_or_else(|| "unknown".to_string())
-            });
+        let emulator = utils::env_var_trimmed("TERM_PROGRAM").unwrap_or_else(|| {
+            utils::env_var_trimmed("TERM").unwrap_or_else(|| "unknown".to_string())
+        });
 
         let color = terminal_info::detect_color_capability();
 
@@ -566,7 +595,11 @@ impl HealthCheck for TerminalDetailCheck {
             .unwrap_or(false);
         details.push(format!(
             "Unicode: {}",
-            if has_utf8 { "UTF-8 locale" } else { "non-UTF-8 (may affect rendering)" }
+            if has_utf8 {
+                "UTF-8 locale"
+            } else {
+                "non-UTF-8 (may affect rendering)"
+            }
         ));
 
         // Color env vars
@@ -596,8 +629,7 @@ impl HealthCheck for TerminalDetailCheck {
         details.push(format!("Clipboard: {}", clipboard));
 
         // SSH detection
-        let is_ssh = utils::env_var_is_set("SSH_CLIENT")
-            || utils::env_var_is_set("SSH_TTY");
+        let is_ssh = utils::env_var_is_set("SSH_CLIENT") || utils::env_var_is_set("SSH_TTY");
         if is_ssh {
             details.push("SSH session detected".to_string());
         }
@@ -731,10 +763,11 @@ impl HealthCheck for SessionStorageCheck {
             CheckResult {
                 name: self.name().to_string(),
                 status: CheckStatus::Warning,
-                message: format!("{} saved, {} corrupted ({})", session_count, corrupted, size_display),
-                fix: Some(
-                    "Remove corrupted session files from .claude/sessions/".to_string(),
+                message: format!(
+                    "{} saved, {} corrupted ({})",
+                    session_count, corrupted, size_display
                 ),
+                fix: Some("Remove corrupted session files from .claude/sessions/".to_string()),
             }
         } else {
             CheckResult {
@@ -819,9 +852,18 @@ mod tests {
                 fix: None,
             },
         ];
-        let pass = results.iter().filter(|r| r.status == CheckStatus::Pass).count();
-        let warn = results.iter().filter(|r| r.status == CheckStatus::Warning).count();
-        let fail = results.iter().filter(|r| r.status == CheckStatus::Fail).count();
+        let pass = results
+            .iter()
+            .filter(|r| r.status == CheckStatus::Pass)
+            .count();
+        let warn = results
+            .iter()
+            .filter(|r| r.status == CheckStatus::Warning)
+            .count();
+        let fail = results
+            .iter()
+            .filter(|r| r.status == CheckStatus::Fail)
+            .count();
         assert_eq!(pass, 2);
         assert_eq!(warn, 1);
         assert_eq!(fail, 1);
@@ -942,11 +984,7 @@ mod tests {
         let workspace = tmp.path().to_path_buf();
         let claude_dir = workspace.join(".claude");
         std::fs::create_dir_all(&claude_dir).unwrap();
-        std::fs::write(
-            claude_dir.join("settings.json"),
-            r#"{"permissions":null}"#,
-        )
-        .unwrap();
+        std::fs::write(claude_dir.join("settings.json"), r#"{"permissions":null}"#).unwrap();
 
         let check = WorkspaceConfigCheck {
             workspace: Some(workspace),
@@ -1044,11 +1082,7 @@ mod tests {
             r#"{"id":"good","title":"OK"}"#,
         )
         .unwrap();
-        std::fs::write(
-            sessions_dir.join("bad.meta.json"),
-            "not valid json {{{{",
-        )
-        .unwrap();
+        std::fs::write(sessions_dir.join("bad.meta.json"), "not valid json {{{{").unwrap();
 
         let check = SessionStorageCheck {
             workspace: Some(workspace),

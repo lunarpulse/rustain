@@ -40,7 +40,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ReverseSearchState, theme: 
         )));
     } else {
         let scroll = state.selected_match.saturating_sub(MAX_VISIBLE_MATCHES - 1);
-        for (i, (_idx, entry)) in state.matches.iter().skip(scroll).take(MAX_VISIBLE_MATCHES).enumerate() {
+        for (i, (_idx, entry)) in state
+            .matches
+            .iter()
+            .skip(scroll)
+            .take(MAX_VISIBLE_MATCHES)
+            .enumerate()
+        {
             let display_idx = i + scroll;
             let prefix = if display_idx == state.selected_match {
                 " ▸ "
@@ -95,7 +101,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ReverseSearchState, theme: 
     let prefix_len = "(reverse-search): ".chars().count();
     let query_len = state.query.chars().count();
     let cursor_col = (prefix_len + query_len) as u16 + 1; // +1 for left border
-    let cursor_x = (overlay_area.x + cursor_col).min(overlay_area.x + overlay_area.width.saturating_sub(2));
+    let cursor_x =
+        (overlay_area.x + cursor_col).min(overlay_area.x + overlay_area.width.saturating_sub(2));
     let cursor_y = overlay_area.y + 1; // +1 for top border
     frame.set_cursor_position((cursor_x, cursor_y));
 }

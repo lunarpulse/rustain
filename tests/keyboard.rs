@@ -212,7 +212,10 @@ fn test_block_jump_single_block() {
 fn test_shift_enter_inserts_newline() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('a'));
-    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::ShiftEnter));
+    let action = handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::ShiftEnter),
+    );
     assert_eq!(action, InputAction::Consumed);
     assert_eq!(state.input_buffer, "a\n");
     assert_eq!(state.cursor_position, 2);
@@ -251,7 +254,10 @@ fn test_ctrl_enter_submits_in_multiline_mode() {
     state.multiline_mode = true;
     handle_input(&mut state, &DomainInputEvent::KeyPress('h'));
     handle_input(&mut state, &DomainInputEvent::KeyPress('i'));
-    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlEnter));
+    let action = handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::CtrlEnter),
+    );
     assert_eq!(action, InputAction::SubmitMessage("hi".to_string()));
 }
 
@@ -309,7 +315,10 @@ fn test_backspace_at_line_boundary() {
     state.input_buffer = "abc\ndef".to_string();
     state.cursor_position = 4; // at start of second line (after '\n')
 
-    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Backspace));
+    handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+    );
     assert_eq!(state.input_buffer, "abcdef");
     assert_eq!(state.cursor_position, 3);
 }
@@ -398,7 +407,10 @@ fn test_ctrl_r_activates_reverse_search() {
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlR));
     assert_eq!(action, InputAction::Consumed);
     assert!(state.reverse_search.active);
-    assert_eq!(state.focus, FocusState::Overlay(rustain::domain::models::visual::OverlayType::ReverseSearch));
+    assert_eq!(
+        state.focus,
+        FocusState::Overlay(rustain::domain::models::visual::OverlayType::ReverseSearch)
+    );
 }
 
 // Covers: UX-DR74 — Reverse search: typing filters, Enter selects, Esc cancels
@@ -528,12 +540,10 @@ fn test_up_down_navigates_autocomplete() {
 fn test_tab_selects_autocomplete() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::SlashCommand {
-            name: "new".to_string(),
-            description: "New session".to_string(),
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+        name: "new".to_string(),
+        description: "New session".to_string(),
+    }];
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert!(!state.autocomplete.active);
@@ -545,12 +555,10 @@ fn test_tab_selects_autocomplete() {
 fn test_enter_selects_autocomplete() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::SlashCommand {
-            name: "new".to_string(),
-            description: "New session".to_string(),
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+        name: "new".to_string(),
+        description: "New session".to_string(),
+    }];
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert!(!state.autocomplete.active);
@@ -579,13 +587,19 @@ fn test_backspace_past_trigger_dismisses() {
     assert_eq!(state.input_buffer, "/n");
 
     // Backspace removes 'n', filter becomes empty
-    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Backspace));
+    handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+    );
     // At this point cursor_position == 1 which equals trigger_position + 1
     // So the next backspace will dismiss
     assert_eq!(state.input_buffer, "/");
 
     // Backspace removes '/' and dismisses
-    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Backspace));
+    handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+    );
     assert!(!state.autocomplete.active);
     assert_eq!(state.input_buffer, "");
 }
@@ -595,12 +609,10 @@ fn test_backspace_past_trigger_dismisses() {
 fn test_file_mention_selection() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::FilePath {
-            path: "src/main.rs".to_string(),
-            is_dir: false,
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::FilePath {
+        path: "src/main.rs".to_string(),
+        is_dir: false,
+    }];
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert!(!state.autocomplete.active);
@@ -615,24 +627,20 @@ fn test_multiple_file_mentions() {
     let mut state = TuiState::new(80, 24);
     // First mention
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::FilePath {
-            path: "src/main.rs".to_string(),
-            is_dir: false,
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::FilePath {
+        path: "src/main.rs".to_string(),
+        is_dir: false,
+    }];
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.input_buffer, "@src/main.rs");
 
     // Type space then second mention
     handle_input(&mut state, &DomainInputEvent::KeyPress(' '));
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::FilePath {
-            path: "src/lib.rs".to_string(),
-            is_dir: false,
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::FilePath {
+        path: "src/lib.rs".to_string(),
+        is_dir: false,
+    }];
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.input_buffer, "@src/main.rs @src/lib.rs");
     assert_eq!(state.resolved_mentions.len(), 2);
@@ -644,24 +652,20 @@ fn test_duplicate_file_mention_deduplication() {
     let mut state = TuiState::new(80, 24);
     // First mention of src/main.rs
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::FilePath {
-            path: "src/main.rs".to_string(),
-            is_dir: false,
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::FilePath {
+        path: "src/main.rs".to_string(),
+        is_dir: false,
+    }];
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.resolved_mentions.len(), 1);
 
     // Type space then second mention of the SAME file
     handle_input(&mut state, &DomainInputEvent::KeyPress(' '));
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::FilePath {
-            path: "src/main.rs".to_string(),
-            is_dir: false,
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::FilePath {
+        path: "src/main.rs".to_string(),
+        is_dir: false,
+    }];
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     // Should still be 1 — duplicate not added
     assert_eq!(state.resolved_mentions.len(), 1);
@@ -673,12 +677,10 @@ fn test_duplicate_file_mention_deduplication() {
 fn test_slash_new_submits_execute_command() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::SlashCommand {
-            name: "new".to_string(),
-            description: "New session".to_string(),
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+        name: "new".to_string(),
+        description: "New session".to_string(),
+    }];
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.input_buffer, "/new");
 
@@ -692,12 +694,10 @@ fn test_slash_new_submits_execute_command() {
 fn test_user_command_submits_with_context() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::SlashCommand {
-            name: "deploy-staging".to_string(),
-            description: "Deploy".to_string(),
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+        name: "deploy-staging".to_string(),
+        description: "Deploy".to_string(),
+    }];
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.input_buffer, "/deploy-staging");
 
@@ -742,12 +742,10 @@ fn test_slash_new_command_flow() {
     let mut state = TuiState::new(80, 24);
     // Type /new and select it
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    state.autocomplete.suggestions = vec![
-        AutocompleteSuggestion::SlashCommand {
-            name: "new".to_string(),
-            description: "New session".to_string(),
-        },
-    ];
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+        name: "new".to_string(),
+        description: "New session".to_string(),
+    }];
     // Tab to select
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.input_buffer, "/new");

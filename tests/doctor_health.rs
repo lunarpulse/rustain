@@ -4,7 +4,7 @@ use clap::Parser;
 use rustain::adapters::cli::commands::{Cli, Command};
 use rustain::adapters::cli::doctor::{
     ApiKeyCheck, CheckResult, CheckStatus, GlobalConfigCheck, HealthCheck, SessionStorageCheck,
-    WorkspaceDirCheck, WorkspaceConfigCheck, display_results,
+    WorkspaceConfigCheck, WorkspaceDirCheck, display_results,
 };
 use rustain::domain::models::AppConfig;
 
@@ -159,9 +159,18 @@ fn test_summary_counts_various_combos() {
             fix: None,
         },
     ];
-    let pass = results.iter().filter(|r| r.status == CheckStatus::Pass).count();
-    let warn = results.iter().filter(|r| r.status == CheckStatus::Warning).count();
-    let fail = results.iter().filter(|r| r.status == CheckStatus::Fail).count();
+    let pass = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Pass)
+        .count();
+    let warn = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Warning)
+        .count();
+    let fail = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Fail)
+        .count();
     assert_eq!(pass, 3);
     assert_eq!(warn, 1);
     assert_eq!(fail, 2);
@@ -477,7 +486,10 @@ async fn test_api_key_bearer_auth_token() {
 
     let mock = server
         .mock("POST", "/v1/messages")
-        .match_header("authorization", mockito::Matcher::Regex("Bearer .+".to_string()))
+        .match_header(
+            "authorization",
+            mockito::Matcher::Regex("Bearer .+".to_string()),
+        )
         .with_status(400)
         .create_async()
         .await;
@@ -708,11 +720,7 @@ async fn test_workspace_config_permissions_null_integration() {
     let workspace = tmp.path().to_path_buf();
     let claude_dir = workspace.join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        r#"{"permissions":null}"#,
-    )
-    .unwrap();
+    std::fs::write(claude_dir.join("settings.json"), r#"{"permissions":null}"#).unwrap();
 
     let check = WorkspaceConfigCheck {
         workspace: Some(workspace),

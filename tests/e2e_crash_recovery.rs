@@ -164,7 +164,10 @@ fn test_e2e_recovery_n_starts_fresh() {
     h.state.active_feedback_id = None;
     h.state.focus = FocusState::Input;
 
-    assert!(h.conversation.messages.is_empty(), "Messages should be cleared");
+    assert!(
+        h.conversation.messages.is_empty(),
+        "Messages should be cleared"
+    );
     assert!(h.conversation.title.is_empty(), "Title should be cleared");
     assert_ne!(h.conversation.id, original_id, "ID should be regenerated");
     assert!(
@@ -221,10 +224,7 @@ fn test_e2e_session_manager_from_restored_conversation() {
     });
 
     assert!(!mgr.needs_history_rebuild());
-    assert_eq!(
-        *mgr.state(),
-        SessionState::Active { id: session_id }
-    );
+    assert_eq!(*mgr.state(), SessionState::Active { id: session_id });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -275,8 +275,13 @@ fn test_e2e_context_rebuild_api_messages() {
     });
 
     // Build API messages and attach context_prefix to the new user message
-    let mut messages = rustain::domain::services::message_builder::build_api_messages(&h.conversation);
-    if let Some(last_msg) = messages.iter_mut().rev().find(|m| m.role == MessageRole::User && m.content == "Tell me more") {
+    let mut messages =
+        rustain::domain::services::message_builder::build_api_messages(&h.conversation);
+    if let Some(last_msg) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == MessageRole::User && m.content == "Tell me more")
+    {
         last_msg.context_prefix = Some(context.clone());
     }
 
@@ -303,7 +308,10 @@ fn test_e2e_context_rebuild_api_messages() {
         .iter()
         .filter(|b| b["type"] == "text")
         .collect();
-    assert!(!text_blocks.is_empty(), "User message should have text content");
+    assert!(
+        !text_blocks.is_empty(),
+        "User message should have text content"
+    );
 
     let text = text_blocks[0]["text"].as_str().unwrap();
     assert!(
@@ -344,13 +352,28 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
     let context = build_history_context(&messages);
 
     // XML tags should be stripped
-    assert!(!context.contains("file_context"), "file_context tags should be stripped");
-    assert!(!context.contains("file_content"), "file_content tags should be stripped");
-    assert!(!context.contains("hidden data"), "file_context content should be stripped");
-    assert!(!context.contains("fn main()"), "file_content content should be stripped");
+    assert!(
+        !context.contains("file_context"),
+        "file_context tags should be stripped"
+    );
+    assert!(
+        !context.contains("file_content"),
+        "file_content tags should be stripped"
+    );
+    assert!(
+        !context.contains("hidden data"),
+        "file_context content should be stripped"
+    );
+    assert!(
+        !context.contains("fn main()"),
+        "file_content content should be stripped"
+    );
 
     // Surrounding text should remain
-    assert!(context.contains("Check this"), "Text before XML should remain");
+    assert!(
+        context.contains("Check this"),
+        "Text before XML should remain"
+    );
     assert!(context.contains("please"), "Text after XML should remain");
     assert!(context.contains("I see"), "Text before XML should remain");
     assert!(context.contains("the code"), "Text after XML should remain");
@@ -558,7 +581,11 @@ fn test_e2e_background_task_timeout_defined() {
     // We can't import the const directly (it's in event_loop.rs, not pub),
     // but we verify the behavior via the timeout applied to saves.
     let timeout = std::time::Duration::from_secs(10);
-    assert_eq!(timeout.as_secs(), 10, "BACKGROUND_TASK_TIMEOUT should be 10s");
+    assert_eq!(
+        timeout.as_secs(),
+        10,
+        "BACKGROUND_TASK_TIMEOUT should be 10s"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

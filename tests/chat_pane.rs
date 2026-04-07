@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 mod common;
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;

@@ -5,7 +5,6 @@
 #![allow(clippy::redundant_closure)]
 #![allow(clippy::needless_return)]
 #![allow(clippy::derivable_impls)]
-
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::doc_lazy_continuation)]

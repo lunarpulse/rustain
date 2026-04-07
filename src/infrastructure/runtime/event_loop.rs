@@ -8,12 +8,16 @@ use tokio::sync::mpsc;
 
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
+use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
-use crate::adapters::tui::widgets::{autocomplete_popup, chat_pane, input_box, reverse_search, status_bar};
+use crate::adapters::tui::widgets::{
+    autocomplete_popup, chat_pane, command_palette as command_palette_widget, input_box,
+    reverse_search, status_bar, which_key_bar,
+};
 
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
@@ -22,9 +26,9 @@ use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, SessionManager, SessionState,
-    StatusState, StreamChunk, StreamingState, UserMessage, apply_chunk, generate_conversation_id,
-    next_delay,
+    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, SessionManager,
+    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, apply_chunk,
+    generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::message_builder;
@@ -84,16 +88,18 @@ pub async fn run(
     // Lazy-initialized command registry (NFR10: not scanned at startup)
     let mut command_registry = CommandRegistry::new();
 
+    // Lazy-initialized palette registry (populated on first Ctrl+P)
+    let mut palette_registry = PaletteRegistry::new();
+
     // P4: Cache last filter text to avoid re-scanning on every keystroke
     let mut last_autocomplete_filter = String::new();
+    // P6: Cache last palette filter text to avoid re-filtering on every keystroke
+    let mut last_palette_filter = String::new();
 
     // Initialize SessionManager based on whether we have a restored session
     let mut session_manager = if conversation.session_id.is_some() {
         SessionManager::new(SessionState::Active {
-            id: conversation
-                .session_id
-                .clone()
-                .unwrap_or_default(),
+            id: conversation.session_id.clone().unwrap_or_default(),
         })
     } else {
         SessionManager::new(SessionState::Empty)
@@ -214,6 +220,21 @@ pub async fn run(
                                 );
                             } else if !state.autocomplete.active {
                                 last_autocomplete_filter.clear();
+                            }
+
+                            // Repopulate command palette entries only when filter changes (P6)
+                            if state.command_palette.active
+                                && state.command_palette.filter_text != last_palette_filter
+                            {
+                                last_palette_filter = state.command_palette.filter_text.clone();
+                                populate_palette_entries(
+                                    &mut state,
+                                    &mut command_registry,
+                                    &mut palette_registry,
+                                    &workspace_path,
+                                );
+                            } else if !state.command_palette.active {
+                                last_palette_filter.clear();
                             }
 
                             match action {
@@ -897,6 +918,15 @@ pub async fn run(
                     }
                 }
 
+                // Which-key timeout check: auto-dismiss if expired (AC6)
+                if state.which_key.active && state.which_key.is_timed_out(state.theme.timing.which_key_timeout_ms) {
+                    let prev = state.which_key.dismiss();
+                    if let Some(focus) = prev {
+                        state.focus = focus;
+                    }
+                    state.needs_redraw = true;
+                }
+
                 if state.needs_redraw {
                     match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
                         Ok(()) => state.needs_redraw = false,
@@ -935,7 +965,9 @@ pub async fn run(
                 tracing::error!("Failed to persist session on shutdown: {}", e);
             }
             Err(_) => {
-                tracing::warn!("Session save timed out on shutdown (>2s), proceeding with teardown");
+                tracing::warn!(
+                    "Session save timed out on shutdown (>2s), proceeding with teardown"
+                );
             }
         }
     }
@@ -977,10 +1009,16 @@ fn start_turn(
     // If session manager indicates history rebuild needed, prepend context
     if session_manager.needs_history_rebuild() {
         use crate::domain::services::history_rebuild;
-        let context = history_rebuild::build_history_context(&conversation.messages[..conversation.messages.len().saturating_sub(1)]);
+        let context = history_rebuild::build_history_context(
+            &conversation.messages[..conversation.messages.len().saturating_sub(1)],
+        );
         // Attach context_prefix to the actual user input message (matching `text`),
         // not to a synthetic tool-result message that build_api_messages may have appended.
-        if let Some(target_msg) = messages.iter_mut().rev().find(|m| m.role == MessageRole::User && m.content == text) {
+        if let Some(target_msg) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == MessageRole::User && m.content == text)
+        {
             target_msg.context_prefix = Some(context);
         } else if let Some(last_msg) = messages.last_mut() {
             // Fallback: attach to last message if exact match not found
@@ -992,7 +1030,10 @@ fn start_turn(
         let msg_count = conversation.messages.len().saturating_sub(1);
         let _ = domain_tx.send(AppEvent::SystemNotice(
             crate::domain::models::NoticeLevel::Info,
-            format!("\u{2139}\u{fe0f} Session restarted with your conversation history ({} messages).", msg_count),
+            format!(
+                "\u{2139}\u{fe0f} Session restarted with your conversation history ({} messages).",
+                msg_count
+            ),
         ));
     }
 
@@ -1125,6 +1166,8 @@ fn render(
         input_scroll_offset,
         ref reverse_search,
         ref autocomplete,
+        ref command_palette,
+        ref which_key,
         ..
     } = *state;
 
@@ -1252,22 +1295,22 @@ fn render(
 
                 // Render reverse search overlay above input box
                 if reverse_search.active {
-                    reverse_search::render(
-                        frame,
-                        app_layout.input_area,
-                        reverse_search,
-                        theme,
-                    );
+                    reverse_search::render(frame, app_layout.input_area, reverse_search, theme);
                 }
 
                 // Render autocomplete popup above input box
                 if autocomplete.active {
-                    autocomplete_popup::render(
-                        frame,
-                        app_layout.input_area,
-                        autocomplete,
-                        theme,
-                    );
+                    autocomplete_popup::render(frame, app_layout.input_area, autocomplete, theme);
+                }
+
+                // Render command palette overlay (centered, on top of everything)
+                if command_palette.active {
+                    command_palette_widget::render(frame, area, command_palette, theme);
+                }
+
+                // Render which-key hint bar (bottom of screen)
+                if which_key.active {
+                    which_key_bar::render(frame, area, which_key, theme);
                 }
             }
             None => {
@@ -1323,10 +1366,7 @@ async fn generate_title(
 ) -> Result<String> {
     use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
 
-    let prompt_content = format!(
-        "User: {}\n\nAssistant: {}",
-        user_msg, assistant_msg
-    );
+    let prompt_content = format!("User: {}\n\nAssistant: {}", user_msg, assistant_msg);
     let messages = vec![Message {
         role: MsgRole::User,
         content: prompt_content,
@@ -1429,6 +1469,55 @@ fn populate_autocomplete_suggestions(
     }
 }
 
+/// Populate command palette filtered entries from the registry.
+/// Called after handle_input when palette is active and filter text changes.
+fn populate_palette_entries(
+    state: &mut TuiState,
+    command_registry: &mut CommandRegistry,
+    palette_registry: &mut PaletteRegistry,
+    workspace_path: &std::path::Path,
+) {
+    // Ensure command registry is discovered (lazy-load)
+    if !command_registry.is_discovered() {
+        command_registry.discover_into(workspace_path);
+    }
+
+    // Populate palette from command registry (cached, only rebuilds if discovery state changed)
+    palette_registry.populate_from_command_registry(command_registry);
+
+    // Determine scope from filter prefix
+    let (scope, query) = if let Some(palette_scope) = state.command_palette.current_scope {
+        // Strip prefix character from query
+        let q = if state.command_palette.filter_text.len() > 1 {
+            state
+                .command_palette
+                .filter_text
+                .chars()
+                .skip(1)
+                .collect::<String>()
+        } else {
+            String::new()
+        };
+        (Some(palette_scope), q)
+    } else {
+        (None, state.command_palette.filter_text.clone())
+    };
+
+    // Fuzzy filter entries
+    let filtered = palette_registry.fuzzy_filter(&query, scope);
+    let entries: Vec<_> = filtered.into_iter().cloned().collect();
+    state.command_palette.filtered_entries = entries;
+
+    // Clamp selection and scroll_offset to valid range after filter update
+    let max_idx = state
+        .command_palette
+        .filtered_entries
+        .len()
+        .saturating_sub(1);
+    state.command_palette.selected_index = state.command_palette.selected_index.min(max_idx);
+    state.command_palette.scroll_offset = state.command_palette.scroll_offset.min(max_idx);
+}
+
 /// Resolve file mentions and build context prefix for a message submission.
 /// Reads file contents in the adapter layer (no file I/O in domain).
 /// Errors encountered during file context resolution, for FeedbackBlock display.
@@ -1442,7 +1531,10 @@ fn resolve_file_context(
     mentions: &[crate::adapters::tui::state::ResolvedMention],
     workspace_path: &std::path::Path,
     security: &dyn SecurityPort,
-) -> (Vec<message_builder::ResolvedFileContext>, Vec<FileContextError>) {
+) -> (
+    Vec<message_builder::ResolvedFileContext>,
+    Vec<FileContextError>,
+) {
     use crate::domain::models::FileOperation;
 
     let mut resolved = Vec::new();

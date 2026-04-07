@@ -414,7 +414,11 @@ mod tests {
         let req = AnthropicRequest::from((messages.as_slice(), &options));
 
         // Empty assistant message should be filtered out
-        assert_eq!(req.messages.len(), 1, "Empty message should be filtered out");
+        assert_eq!(
+            req.messages.len(),
+            1,
+            "Empty message should be filtered out"
+        );
         assert_eq!(req.messages[0].role, "user");
 
         // Verify no empty text blocks exist anywhere in the request

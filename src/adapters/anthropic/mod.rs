@@ -360,6 +360,9 @@ mod tests {
         .unwrap();
 
         let debug = format!("{:?}", adapter);
-        assert!(!debug.contains(token), "Bearer token leaked in Debug output");
+        assert!(
+            !debug.contains(token),
+            "Bearer token leaked in Debug output"
+        );
     }
 }

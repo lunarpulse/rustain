@@ -215,7 +215,7 @@ fn test_no_raw_env_var_outside_utils() {
 
     // init.rs exception lines (test backup/restore per Story 2-5)
     let init_rs_suffix = std::path::Path::new("src/adapters/cli/init.rs");
-    let init_rs_allowed_lines: &[usize] = &[276, 277];
+    let init_rs_allowed_lines: &[usize] = &[276, 277, 292, 293];
 
     let mut violations = Vec::new();
 

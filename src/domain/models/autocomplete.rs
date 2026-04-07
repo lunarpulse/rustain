@@ -10,12 +10,6 @@ pub enum AutocompleteKind {
 /// A single autocomplete suggestion item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutocompleteSuggestion {
-    SlashCommand {
-        name: String,
-        description: String,
-    },
-    FilePath {
-        path: String,
-        is_dir: bool,
-    },
+    SlashCommand { name: String, description: String },
+    FilePath { path: String, is_dir: bool },
 }

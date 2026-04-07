@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 mod common;
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
@@ -11,8 +11,8 @@ use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
-    apply_chunk, generate_conversation_id, ChatMessage, Conversation, MessageRole, StopReason,
-    StreamChunk, StreamingPhase, StreamingState,
+    ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, StreamingPhase,
+    StreamingState, apply_chunk, generate_conversation_id,
 };
 
 fn make_conversation() -> Conversation {

@@ -21,7 +21,9 @@ pub async fn run_init_with_paths(
 ) -> Result<()> {
     // AC6: TTY detection — FIRST operation
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("rustain init requires an interactive terminal. Use `rustain init --non-interactive` for CI environments (available in a future release).");
+        anyhow::bail!(
+            "rustain init requires an interactive terminal. Use `rustain init --non-interactive` for CI environments (available in a future release)."
+        );
     }
 
     let config_dir = match config_dir_override {
@@ -67,7 +69,12 @@ pub async fn run_init_with_paths(
 
     // AC4: Summary display
     let sessions_dir = workspace.join(".claude").join("sessions");
-    display_summary(&config_toml_path, &settings_json_path, &sessions_dir, api_key_found);
+    display_summary(
+        &config_toml_path,
+        &settings_json_path,
+        &sessions_dir,
+        api_key_found,
+    );
 
     Ok(())
 }
@@ -112,12 +119,20 @@ fn detect_api_key() -> Result<bool> {
 /// Create required directories.
 pub fn create_directories(config_dir: &std::path::Path, workspace: &std::path::Path) -> Result<()> {
     // config_dir is already created by paths::config_dir() or the override path
-    std::fs::create_dir_all(config_dir)
-        .with_context(|| format!("Failed to create config directory: {}", config_dir.display()))?;
+    std::fs::create_dir_all(config_dir).with_context(|| {
+        format!(
+            "Failed to create config directory: {}",
+            config_dir.display()
+        )
+    })?;
 
     let claude_dir = workspace.join(".claude");
-    std::fs::create_dir_all(&claude_dir)
-        .with_context(|| format!("Failed to create workspace config dir: {}", claude_dir.display()))?;
+    std::fs::create_dir_all(&claude_dir).with_context(|| {
+        format!(
+            "Failed to create workspace config dir: {}",
+            claude_dir.display()
+        )
+    })?;
 
     let sessions_dir = workspace.join(".claude").join("sessions");
     std::fs::create_dir_all(&sessions_dir)
@@ -129,8 +144,8 @@ pub fn create_directories(config_dir: &std::path::Path, workspace: &std::path::P
 /// Write default config.toml from AppConfig::default().
 pub fn write_config_toml(path: &std::path::Path) -> Result<()> {
     let config = AppConfig::default();
-    let toml_content = toml::to_string_pretty(&config)
-        .context("Failed to serialize default config to TOML")?;
+    let toml_content =
+        toml::to_string_pretty(&config).context("Failed to serialize default config to TOML")?;
 
     let content = format!(
         "# Rustain Configuration\n\
@@ -150,8 +165,9 @@ pub fn write_config_toml(path: &std::path::Path) -> Result<()> {
 /// Write default settings.json (CC-compatible format).
 pub fn write_settings_json(path: &std::path::Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create settings directory: {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create settings directory: {}", parent.display())
+        })?;
     }
 
     let settings = serde_json::json!({
@@ -160,8 +176,8 @@ pub fn write_settings_json(path: &std::path::Path) -> Result<()> {
         }
     });
 
-    let content = serde_json::to_string_pretty(&settings)
-        .context("Failed to serialize settings to JSON")?;
+    let content =
+        serde_json::to_string_pretty(&settings).context("Failed to serialize settings to JSON")?;
 
     std::fs::write(path, content)
         .with_context(|| format!("Failed to write settings file: {}", path.display()))?;

@@ -3,8 +3,8 @@
 
 mod common;
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::status_bar;
@@ -24,9 +24,18 @@ fn render_status_bar(
     session_title: Option<&str>,
 ) -> Terminal<TestBackend> {
     render_status_bar_ml(
-        width, model, status, scroll_offset, message_boundaries,
-        total_content_height, viewport_height, permission_mode,
-        token_usage, has_project_context, session_title, false,
+        width,
+        model,
+        status,
+        scroll_offset,
+        message_boundaries,
+        total_content_height,
+        viewport_height,
+        permission_mode,
+        token_usage,
+        has_project_context,
+        session_title,
+        false,
     )
 }
 

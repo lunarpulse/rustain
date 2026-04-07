@@ -3,6 +3,7 @@ pub mod command_registry;
 pub mod file_scanner;
 pub mod filesystem;
 pub mod noop;
+pub mod palette_registry;
 pub mod persona_adapter;
 pub mod project_context_loader;
 pub mod security_adapter;

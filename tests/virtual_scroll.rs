@@ -245,13 +245,17 @@ fn test_virtual_scroll_viewport_culling() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
             total_height = result.total_content_height;
         })
         .unwrap();
 
-    assert!(total_height > 24, "60 messages should exceed viewport height");
+    assert!(
+        total_height > 24,
+        "60 messages should exceed viewport height"
+    );
 
     // Render scrolled to middle (offset = half of max scroll range)
     let max_offset = total_height.saturating_sub(24);
@@ -274,7 +278,8 @@ fn test_virtual_scroll_viewport_culling() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();
@@ -327,7 +332,8 @@ fn test_virtual_scroll_jump_to_bottom() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();
@@ -379,7 +385,8 @@ fn test_virtual_scroll_above_viewport_not_rendered() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
             total_height = result.total_content_height;
         })
@@ -405,7 +412,8 @@ fn test_virtual_scroll_above_viewport_not_rendered() {
                 &theme,
                 &mut cache,
                 &HashMap::<String, ToolBlockState>::new(),
-                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
+                &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
+                ),
             );
         })
         .unwrap();

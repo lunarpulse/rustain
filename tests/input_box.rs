@@ -2,8 +2,8 @@
 //! Dedicated rendering tests for the input box widget.
 //! Tests rendering output via TestBackend, complementing keyboard.rs (state tests).
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::input_box;
@@ -37,7 +37,16 @@ fn render_input_box_ml(
     terminal
         .draw(|frame| {
             let area = frame.area();
-            input_box::render(frame, area, input, cursor_pos, focus, &theme, multiline_mode, input_scroll_offset);
+            input_box::render(
+                frame,
+                area,
+                input,
+                cursor_pos,
+                focus,
+                &theme,
+                multiline_mode,
+                input_scroll_offset,
+            );
         })
         .unwrap();
 
@@ -203,7 +212,10 @@ fn test_input_box_multiline_five_lines() {
 // Covers: FR16, UX-DR76 — max height with scroll (8+ lines)
 #[test]
 fn test_input_box_multiline_max_height_scroll() {
-    let input = (0..10).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+    let input = (0..10)
+        .map(|i| format!("line{}", i))
+        .collect::<Vec<_>>()
+        .join("\n");
     // Area height of 10 = 8 visible lines + 2 borders
     let terminal = render_input_box_ml(40, 10, &input, 0, FocusState::Input, false, 0);
     let text = common::buffer_text(&terminal);
@@ -216,7 +228,10 @@ fn test_input_box_multiline_max_height_scroll() {
 fn test_input_box_ml_indicator_shown() {
     let terminal = render_input_box_ml(40, 3, "", 0, FocusState::Input, true, 0);
     let text = common::buffer_text(&terminal);
-    assert!(text.contains("[ML]"), "ML indicator should show when multiline_mode is active");
+    assert!(
+        text.contains("[ML]"),
+        "ML indicator should show when multiline_mode is active"
+    );
 }
 
 // Covers: UX-DR76 — ML indicator NOT shown when multiline_mode is off
@@ -224,7 +239,10 @@ fn test_input_box_ml_indicator_shown() {
 fn test_input_box_ml_indicator_hidden() {
     let terminal = render_input_box_ml(40, 3, "", 0, FocusState::Input, false, 0);
     let text = common::buffer_text(&terminal);
-    assert!(!text.contains("[ML]"), "ML indicator should not show when multiline_mode is off");
+    assert!(
+        !text.contains("[ML]"),
+        "ML indicator should not show when multiline_mode is off"
+    );
 }
 
 // Covers: UX-DR66 — token estimate shown for long input
@@ -233,7 +251,10 @@ fn test_input_box_token_estimate_shown() {
     let long_text = "a".repeat(600); // > 500 chars
     let terminal = render_input_box_ml(80, 3, &long_text, 600, FocusState::Input, false, 0);
     let text = common::buffer_text(&terminal);
-    assert!(text.contains("tokens"), "Token estimate should display for input > 500 chars");
+    assert!(
+        text.contains("tokens"),
+        "Token estimate should display for input > 500 chars"
+    );
 }
 
 // Covers: UX-DR66 — token estimate NOT shown for short input
@@ -241,7 +262,10 @@ fn test_input_box_token_estimate_shown() {
 fn test_input_box_token_estimate_hidden_short() {
     let terminal = render_input_box_ml(40, 3, "hello", 5, FocusState::Input, false, 0);
     let text = common::buffer_text(&terminal);
-    assert!(!text.contains("tokens"), "Token estimate should not display for short input");
+    assert!(
+        !text.contains("tokens"),
+        "Token estimate should not display for short input"
+    );
 }
 
 // Covers: UX-DR66 — token estimate function
@@ -249,14 +273,22 @@ fn test_input_box_token_estimate_hidden_short() {
 fn test_estimate_tokens_500_chars() {
     let text = "a".repeat(500);
     let tokens = input_box::estimate_tokens(&text);
-    assert!(tokens >= 100 && tokens <= 200, "500 chars should estimate ~125 tokens, got {}", tokens);
+    assert!(
+        tokens >= 100 && tokens <= 200,
+        "500 chars should estimate ~125 tokens, got {}",
+        tokens
+    );
 }
 
 #[test]
 fn test_estimate_tokens_1000_chars() {
     let text = "a".repeat(1000);
     let tokens = input_box::estimate_tokens(&text);
-    assert!(tokens >= 200 && tokens <= 400, "1000 chars should estimate ~250 tokens, got {}", tokens);
+    assert!(
+        tokens >= 200 && tokens <= 400,
+        "1000 chars should estimate ~250 tokens, got {}",
+        tokens
+    );
 }
 
 #[test]
@@ -294,7 +326,13 @@ fn test_input_area_height_multi_line() {
 
 #[test]
 fn test_input_area_height_capped() {
-    let input = (0..20).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+    let input = (0..20)
+        .map(|i| format!("line{}", i))
+        .collect::<Vec<_>>()
+        .join("\n");
     let height = input_box::input_area_height(&input, 80);
-    assert_eq!(height, 10, "Height should be capped at MAX_INPUT_LINES(8) + 2 borders");
+    assert_eq!(
+        height, 10,
+        "Height should be capped at MAX_INPUT_LINES(8) + 2 borders"
+    );
 }

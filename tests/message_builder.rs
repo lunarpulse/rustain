@@ -1,7 +1,7 @@
 use rustain::domain::models::{ChatMessage, Conversation, MessageRole};
 use rustain::domain::services::message_builder::{
-    build_api_messages, build_command_context_prefix, build_file_context_prefix,
-    ResolvedCommandContext, ResolvedFileContext,
+    ResolvedCommandContext, ResolvedFileContext, build_api_messages, build_command_context_prefix,
+    build_file_context_prefix,
 };
 
 fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
@@ -155,8 +155,8 @@ fn test_build_file_context_cdata_escapes_end_sequence() {
 #[test]
 fn test_file_context_with_real_content() {
     // Simulate resolving @Cargo.toml by reading actual file content
-    let cargo_content = std::fs::read_to_string("Cargo.toml")
-        .expect("Cargo.toml should exist in project root");
+    let cargo_content =
+        std::fs::read_to_string("Cargo.toml").expect("Cargo.toml should exist in project root");
 
     let files = vec![ResolvedFileContext {
         path: "Cargo.toml".to_string(),

@@ -24,8 +24,8 @@ pub fn compute_layout(area: Rect, _theme: &Theme, input: &str) -> Option<AppLayo
     let input_height = input_box::input_area_height(input, area.width);
 
     let chunks = Layout::vertical([
-        Constraint::Min(1),              // chat pane (fills remaining)
-        Constraint::Length(1),           // status bar
+        Constraint::Min(1),               // chat pane (fills remaining)
+        Constraint::Length(1),            // status bar
         Constraint::Length(input_height), // input area (dynamic)
     ])
     .split(area);

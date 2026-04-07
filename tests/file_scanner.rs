@@ -100,7 +100,10 @@ fn test_scan_marks_directories() {
     assert!(src.unwrap().is_dir);
     assert!(src.unwrap().relative_path.ends_with('/'));
 
-    let main = results.iter().find(|r| r.relative_path == "main.rs").unwrap();
+    let main = results
+        .iter()
+        .find(|r| r.relative_path == "main.rs")
+        .unwrap();
     assert!(!main.is_dir);
 }
 

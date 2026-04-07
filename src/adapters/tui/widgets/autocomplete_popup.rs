@@ -54,7 +54,12 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
 
     let has_more = state.suggestions.len() > MAX_VISIBLE_ITEMS;
     let title_with_scroll = if has_more {
-        format!("{} [{}/{}]", title.trim(), state.selected_index + 1, state.suggestions.len())
+        format!(
+            "{} [{}/{}]",
+            title.trim(),
+            state.selected_index + 1,
+            state.suggestions.len()
+        )
     } else {
         title.to_string()
     };
@@ -73,7 +78,9 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
         .collect();
 
     let mut list_state = ListState::default();
-    list_state.select(Some(state.selected_index.saturating_sub(state.scroll_offset)));
+    list_state.select(Some(
+        state.selected_index.saturating_sub(state.scroll_offset),
+    ));
 
     let list = List::new(items)
         .block(block)

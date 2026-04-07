@@ -6,6 +6,7 @@ mod conversation;
 mod focus;
 mod message;
 mod notice;
+pub mod palette;
 mod permission;
 pub mod project_context;
 mod session;
@@ -34,6 +35,8 @@ pub use message::{
 pub use notice::{
     FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
 };
+#[allow(unused_imports)]
+pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
 pub use permission::{
     ApprovalDecision, FileOperation, PathAccessType, PermissionMode, PermissionRule,

@@ -74,8 +74,7 @@ fn test_init_helpers_create_valid_artifacts() {
     std::fs::create_dir_all(&workspace).unwrap();
 
     // Call internal functions directly to test the flow without TTY
-    rustain::adapters::cli::init::create_directories(&config_dir, &workspace)
-        .unwrap();
+    rustain::adapters::cli::init::create_directories(&config_dir, &workspace).unwrap();
     let config_toml_path = config_dir.join("config.toml");
     rustain::adapters::cli::init::write_config_toml(&config_toml_path).unwrap();
     let settings_path = workspace.join(".claude").join("settings.json");
@@ -224,7 +223,11 @@ fn test_reinit_preserves_existing_settings_json() {
             "allow": ["Bash(cargo test)", "Read"]
         }
     });
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&accumulated).unwrap()).unwrap();
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&accumulated).unwrap(),
+    )
+    .unwrap();
 
     // Re-init: write config.toml again (simulating overwrite=yes), but settings.json should be skipped
     let config_toml_path = config_dir.join("config.toml");

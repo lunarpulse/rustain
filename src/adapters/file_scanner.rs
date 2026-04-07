@@ -12,7 +12,15 @@ pub struct FileSuggestion {
 pub fn scan_workspace_files(workspace: &Path, prefix: &str, limit: usize) -> Vec<FileSuggestion> {
     let mut results = Vec::new();
     let lower_prefix = prefix.to_lowercase();
-    scan_dir(workspace, workspace, &lower_prefix, limit, 0, 4, &mut results);
+    scan_dir(
+        workspace,
+        workspace,
+        &lower_prefix,
+        limit,
+        0,
+        4,
+        &mut results,
+    );
     results
 }
 

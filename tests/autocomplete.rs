@@ -1,6 +1,6 @@
-use ratatui::prelude::*;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::prelude::*;
 
 use rustain::adapters::tui::state::{AutocompleteState, Direction};
 use rustain::adapters::tui::theme::Theme;

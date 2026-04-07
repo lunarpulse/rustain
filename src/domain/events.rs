@@ -42,10 +42,7 @@ pub enum AppEvent {
         response_tx: tokio::sync::oneshot::Sender<String>,
     },
     /// Crash recovery prompt — display recovery FeedbackBlock on startup.
-    RecoveryPrompt {
-        title: String,
-        token_count: u32,
-    },
+    RecoveryPrompt { title: String, token_count: u32 },
 }
 
 /// Event wrapping a tool execution result.
@@ -86,7 +83,9 @@ pub enum DomainKey {
     ShiftTab,
     CtrlC,
     CtrlE,
+    CtrlP,
     CtrlR,
+    CtrlX,
 }
 
 /// Payload for domain-originated events (placeholder for future stories).

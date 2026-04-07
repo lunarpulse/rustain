@@ -1,5 +1,5 @@
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 pub fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
     terminal

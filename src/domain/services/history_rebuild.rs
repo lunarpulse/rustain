@@ -48,7 +48,10 @@ pub fn build_history_context(messages: &[ChatMessage]) -> String {
         }
     }
 
-    let mut result = format!("Previous conversation context ({} messages):\n", messages.len());
+    let mut result = format!(
+        "Previous conversation context ({} messages):\n",
+        messages.len()
+    );
     result.push_str(&lines.join("\n"));
 
     if let Some(img_ref) = last_image_ref {

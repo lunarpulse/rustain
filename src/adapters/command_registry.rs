@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 pub enum CommandSource {
     BuiltIn,
     #[allow(dead_code)]
-    UserDefined { path: PathBuf },
+    UserDefined {
+        path: PathBuf,
+    },
 }
 
 /// Definition of a slash command.
@@ -193,18 +195,24 @@ fn parse_command_file(path: &Path) -> Option<SlashCommandDef> {
 /// Parse optional YAML frontmatter for `description:` field.
 /// Returns (description, full_content_after_frontmatter).
 fn parse_frontmatter_and_content(content: &str) -> (String, String) {
-    if let Some(after_first) = content.strip_prefix("---\r\n").or_else(|| content.strip_prefix("---\n")) {
+    if let Some(after_first) = content
+        .strip_prefix("---\r\n")
+        .or_else(|| content.strip_prefix("---\n"))
+    {
         if let Some(end_idx) = after_first.find("\n---") {
             let frontmatter = &after_first[..end_idx];
             let body_start = end_idx + 4; // skip "\n---"
-            let body = after_first[body_start..].trim_start_matches(['\n', '\r']).to_string();
+            let body = after_first[body_start..]
+                .trim_start_matches(['\n', '\r'])
+                .to_string();
 
             // Extract description from frontmatter
             let description = frontmatter
                 .lines()
                 .find_map(|line| {
                     let trimmed = line.trim();
-                    trimmed.strip_prefix("description:")
+                    trimmed
+                        .strip_prefix("description:")
                         .map(|rest| rest.trim().to_string())
                 })
                 .unwrap_or_default();

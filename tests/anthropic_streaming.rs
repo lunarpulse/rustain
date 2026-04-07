@@ -338,8 +338,12 @@ data: {\"type\":\"message_stop\"}\n\
         use rustain::adapters::anthropic::AnthropicAdapter;
         use rustain::domain::ports::ProviderPort;
 
-        let adapter =
-            AnthropicAdapter::new(AuthMode::ApiKey("test-key".into()), "claude-sonnet-4-6".into(), None).unwrap();
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey("test-key".into()),
+            "claude-sonnet-4-6".into(),
+            None,
+        )
+        .unwrap();
 
         // Abort with no active task should succeed
         let result = adapter.abort().await;
@@ -724,8 +728,12 @@ data: {\"type\":\"message_stop\"}\n\
         use rustain::domain::errors::ProviderError;
         use rustain::domain::ports::ProviderPort;
 
-        let adapter =
-            AnthropicAdapter::new(AuthMode::ApiKey("test-key".into()), "claude-sonnet-4-6".into(), None).unwrap();
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey("test-key".into()),
+            "claude-sonnet-4-6".into(),
+            None,
+        )
+        .unwrap();
 
         let result = adapter
             .stream_completion(
@@ -769,7 +777,9 @@ data: {\"type\":\"message_stop\"}\n\
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .expect("ANTHROPIC_API_KEY must be set for live test");
 
-        let adapter = AnthropicAdapter::new(AuthMode::ApiKey(api_key), "claude-sonnet-4-6".into(), None).unwrap();
+        let adapter =
+            AnthropicAdapter::new(AuthMode::ApiKey(api_key), "claude-sonnet-4-6".into(), None)
+                .unwrap();
 
         let stream = adapter
             .stream_completion(
@@ -907,7 +917,10 @@ data: {\"type\":\"message_stop\"}\n\
             )
             .await;
 
-        assert!(result.is_ok(), "Request should succeed with BearerToken auth");
+        assert!(
+            result.is_ok(),
+            "Request should succeed with BearerToken auth"
+        );
         mock.assert_async().await;
     }
 

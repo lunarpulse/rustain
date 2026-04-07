@@ -40,10 +40,7 @@ pub fn render(
     if let Some(title) = session_title {
         let display = if title.is_empty() { "Untitled" } else { title };
         left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
-        left_spans.push(Span::styled(
-            display.to_string(),
-            Style::default().fg(fg),
-        ));
+        left_spans.push(Span::styled(display.to_string(), Style::default().fg(fg)));
     }
 
     // Permission mode (second segment)

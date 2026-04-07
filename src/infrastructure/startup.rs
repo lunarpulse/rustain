@@ -69,8 +69,13 @@ pub async fn run() -> Result<()> {
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
-    if let Some(model_override) = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_DEFAULT_SONNET_MODEL") {
-        tracing::info!("Model override from ANTHROPIC_DEFAULT_SONNET_MODEL: {}", model_override);
+    if let Some(model_override) =
+        crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_DEFAULT_SONNET_MODEL")
+    {
+        tracing::info!(
+            "Model override from ANTHROPIC_DEFAULT_SONNET_MODEL: {}",
+            model_override
+        );
         app_config.model = model_override;
     }
 
@@ -104,7 +109,12 @@ pub async fn run() -> Result<()> {
         let paths: Vec<String> = persona_adapter
             .file_paths()
             .iter()
-            .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
         let msg = format!(
             "Project context: {} ({} chars)",
@@ -260,7 +270,9 @@ fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn P
         let api_key = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_API_KEY");
 
         if auth_token.is_some() && api_key.is_some() {
-            tracing::warn!("Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
+            tracing::warn!(
+                "Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)"
+            );
         }
 
         let auth_mode = if let Some(token) = auth_token {

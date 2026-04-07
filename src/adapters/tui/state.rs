@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::time::Instant;
 
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
+use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::{
     ApprovalDecision, FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
 };
@@ -279,7 +281,12 @@ impl AutocompleteState {
 
     /// Open autocomplete with the given kind and trigger position.
     #[allow(dead_code)]
-    pub fn open(&mut self, kind: AutocompleteKind, trigger_position: usize, suggestions: Vec<AutocompleteSuggestion>) {
+    pub fn open(
+        &mut self,
+        kind: AutocompleteKind,
+        trigger_position: usize,
+        suggestions: Vec<AutocompleteSuggestion>,
+    ) {
         self.active = true;
         self.kind = kind;
         self.trigger_position = trigger_position;
@@ -340,6 +347,201 @@ impl AutocompleteState {
 }
 
 impl Default for AutocompleteState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Action dispatched by a which-key chord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChordAction {
+    /// Open a panel (stub for future epics).
+    #[allow(dead_code)]
+    OpenPanel(crate::domain::models::visual::PanelType),
+    /// Show help overlay.
+    #[allow(dead_code)]
+    ShowHelp,
+    /// Not yet implemented — show feedback.
+    Noop(String),
+}
+
+/// State for the command palette overlay (Ctrl+P).
+// Covers: UX-DR18
+pub struct CommandPaletteState {
+    pub active: bool,
+    pub filter_text: String,
+    pub filtered_entries: Vec<PaletteEntry>,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub current_scope: Option<PaletteScope>,
+    /// Previous focus state to restore on dismiss.
+    pub previous_focus: Option<FocusState>,
+}
+
+impl CommandPaletteState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            filter_text: String::new(),
+            filtered_entries: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            current_scope: None,
+            previous_focus: None,
+        }
+    }
+
+    /// Open the command palette, saving the current focus for restoration.
+    pub fn open(&mut self, current_focus: FocusState) {
+        self.active = true;
+        self.filter_text.clear();
+        self.filtered_entries.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.current_scope = None;
+        self.previous_focus = Some(current_focus);
+    }
+
+    /// Dismiss the palette, returning the previous focus to restore.
+    pub fn dismiss(&mut self) -> Option<FocusState> {
+        self.active = false;
+        self.filter_text.clear();
+        self.filtered_entries.clear();
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+        self.current_scope = None;
+        self.previous_focus.take()
+    }
+
+    /// Navigate up or down in the result list (wraps around).
+    pub fn navigate(&mut self, direction: Direction) {
+        if self.filtered_entries.is_empty() {
+            return;
+        }
+        match direction {
+            Direction::Up => {
+                if self.selected_index == 0 {
+                    self.selected_index = self.filtered_entries.len() - 1;
+                } else {
+                    self.selected_index -= 1;
+                }
+            }
+            Direction::Down => {
+                self.selected_index = (self.selected_index + 1) % self.filtered_entries.len();
+            }
+        }
+        // Keep selected item visible
+        let max_visible = 12;
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + max_visible {
+            self.scroll_offset = self.selected_index + 1 - max_visible;
+        }
+    }
+
+    /// Update filter text and refresh filtered entries from the registry.
+    #[allow(dead_code)]
+    pub fn update_filter(&mut self, filter: String, entries: Vec<PaletteEntry>) {
+        self.filter_text = filter;
+        self.filtered_entries = entries;
+        self.selected_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Get the currently selected entry, if any.
+    pub fn selected(&self) -> Option<&PaletteEntry> {
+        self.filtered_entries.get(self.selected_index)
+    }
+
+    /// Execute the selected entry's action. Returns the action if an entry is selected.
+    pub fn execute_selected(&self) -> Option<PaletteAction> {
+        self.selected().map(|entry| entry.action.clone())
+    }
+}
+
+impl Default for CommandPaletteState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// State for the which-key hint bar overlay (Ctrl+X).
+// Covers: UX-DR19, UX-DR60
+pub struct WhichKeyState {
+    pub active: bool,
+    pub started_at: Option<Instant>,
+    /// Previous focus state to restore on dismiss.
+    pub previous_focus: Option<FocusState>,
+    /// Chord map: key → action.
+    pub chord_map: HashMap<char, ChordAction>,
+}
+
+impl WhichKeyState {
+    pub fn new() -> Self {
+        let mut chord_map = HashMap::new();
+        chord_map.insert('p', ChordAction::Noop("Profile panel — Epic 8".to_string()));
+        chord_map.insert(
+            'm',
+            ChordAction::Noop("Model selector — Epic 7".to_string()),
+        );
+        chord_map.insert('a', ChordAction::Noop("Adapter panel — Epic 8".to_string()));
+        chord_map.insert(
+            's',
+            ChordAction::Noop("Subagent panel — Epic 10".to_string()),
+        );
+        chord_map.insert('l', ChordAction::Noop("Log panel — Epic 14".to_string()));
+        chord_map.insert('t', ChordAction::Noop("Task panel — Epic 6".to_string()));
+        chord_map.insert('u', ChordAction::Noop("Usage/cost — Epic 7".to_string()));
+        chord_map.insert('w', ChordAction::Noop("Watch/monitor — future".to_string()));
+        chord_map.insert('d', ChordAction::Noop("Dashboard — future".to_string()));
+        chord_map.insert(
+            '?',
+            ChordAction::Noop("Help overlay — Story 3.5".to_string()),
+        );
+
+        Self {
+            active: false,
+            started_at: None,
+            previous_focus: None,
+            chord_map,
+        }
+    }
+
+    /// Open the which-key hint bar, saving the current focus.
+    pub fn open(&mut self, current_focus: FocusState) {
+        self.active = true;
+        self.started_at = Some(Instant::now());
+        self.previous_focus = Some(current_focus);
+    }
+
+    /// Dismiss the which-key bar, returning the previous focus.
+    pub fn dismiss(&mut self) -> Option<FocusState> {
+        self.active = false;
+        self.started_at = None;
+        self.previous_focus.take()
+    }
+
+    /// Check if the timeout has expired.
+    /// A timeout_ms of 0 is treated as "no timeout" (never expires) to prevent
+    /// accidental immediate expiry when callers pass 0.
+    pub fn is_timed_out(&self, timeout_ms: u64) -> bool {
+        if timeout_ms == 0 {
+            return false;
+        }
+        if let Some(started) = self.started_at {
+            started.elapsed().as_millis() as u64 >= timeout_ms
+        } else {
+            false
+        }
+    }
+
+    /// Look up a chord key. Returns Some(action) for valid keys, None for invalid.
+    pub fn lookup_chord(&self, key: char) -> Option<&ChordAction> {
+        self.chord_map.get(&key.to_ascii_lowercase())
+    }
+}
+
+impl Default for WhichKeyState {
     fn default() -> Self {
         Self::new()
     }
@@ -410,6 +612,12 @@ pub struct TuiState {
     /// Resolved file mentions from autocomplete selections in the current input.
     /// Cleared on submit. Used at send time to attach file context.
     pub resolved_mentions: Vec<ResolvedMention>,
+    /// Command palette state (Ctrl+P).
+    // Covers: UX-DR18
+    pub command_palette: CommandPaletteState,
+    /// Which-key hint bar state (Ctrl+X).
+    // Covers: UX-DR19, UX-DR60
+    pub which_key: WhichKeyState,
 }
 
 impl TuiState {
@@ -454,6 +662,8 @@ impl TuiState {
             input_scroll_offset: 0,
             autocomplete: AutocompleteState::new(),
             resolved_mentions: Vec::new(),
+            command_palette: CommandPaletteState::new(),
+            which_key: WhichKeyState::new(),
         }
     }
 }

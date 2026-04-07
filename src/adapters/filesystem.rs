@@ -37,7 +37,8 @@ impl FileSystemStorage {
     /// Validates that the ID contains only safe characters (alphanumeric, `-`, `_`)
     /// to prevent path traversal attacks from crafted session files.
     fn session_path(&self, id: &str) -> PathBuf {
-        self.sessions_dir.join(format!("{}.meta.json", Self::sanitize_id(id)))
+        self.sessions_dir
+            .join(format!("{}.meta.json", Self::sanitize_id(id)))
     }
 
     /// Sanitize a conversation ID to prevent path traversal.
@@ -60,13 +61,18 @@ impl FileSystemStorage {
 
         let sanitized = Self::sanitize_id(&conv.id);
         let path = self.session_path(&conv.id);
-        let tmp_path = self.sessions_dir.join(format!("{}.meta.json.tmp", sanitized));
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.meta.json.tmp", sanitized));
         tokio::fs::write(&tmp_path, json.as_bytes())
             .await
             .map_err(|e| StorageError::IoError(format!("Failed to write session file: {}", e)))?;
         if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(StorageError::IoError(format!("Failed to rename session file: {}", e)));
+            return Err(StorageError::IoError(format!(
+                "Failed to rename session file: {}",
+                e
+            )));
         }
 
         Ok(())
@@ -111,14 +117,19 @@ impl StoragePort for FileSystemStorage {
 
         // Write atomically: write to temp file, then rename
         let sanitized = Self::sanitize_id(&conv.id);
-        let tmp_path = self.sessions_dir.join(format!("{}.meta.json.tmp", sanitized));
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.meta.json.tmp", sanitized));
         tokio::fs::write(&tmp_path, json.as_bytes())
             .await
             .map_err(|e| StorageError::IoError(format!("Failed to write session file: {}", e)))?;
         if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
             // Clean up temp file on rename failure
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(StorageError::IoError(format!("Failed to rename session file: {}", e)));
+            return Err(StorageError::IoError(format!(
+                "Failed to rename session file: {}",
+                e
+            )));
         }
 
         Ok(())
@@ -130,7 +141,12 @@ impl StoragePort for FileSystemStorage {
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(StorageError::IoError(format!("Failed to read session file: {}", e))),
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read session file: {}",
+                    e
+                )));
+            }
         };
 
         let persisted: PersistedConversation = serde_json::from_str(&content)
@@ -143,7 +159,12 @@ impl StoragePort for FileSystemStorage {
         let mut entries = match tokio::fs::read_dir(&self.sessions_dir).await {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(StorageError::IoError(format!("Failed to read sessions dir: {}", e))),
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read sessions dir: {}",
+                    e
+                )));
+            }
         };
 
         let mut summaries = Vec::new();
@@ -189,8 +210,8 @@ impl StoragePort for FileSystemStorage {
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::{ChatMessage, ForkSource};
 use crate::domain::models::UsageInfo;
+use crate::domain::models::{ChatMessage, ForkSource};
 
 /// CC-compatible on-disk format with camelCase JSON field naming.
 /// All optional fields use `#[serde(default)]` for forward compatibility.
