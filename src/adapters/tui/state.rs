@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
+use crate::domain::models::ImageAttachment;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::{
@@ -612,6 +613,15 @@ pub struct TuiState {
     /// Resolved file mentions from autocomplete selections in the current input.
     /// Cleared on submit. Used at send time to attach file context.
     pub resolved_mentions: Vec<ResolvedMention>,
+    /// Images queued for the next message submission (clipboard paste or file mention).
+    // Covers: FR112
+    pub pending_images: Vec<ImageAttachment>,
+    /// Large image awaiting user confirmation before attachment (AC4).
+    // Covers: FR112
+    pub pending_large_image: Option<ImageAttachment>,
+    /// Visual indicator for attached images shown in the input box.
+    // Covers: FR112
+    pub image_indicator: Option<String>,
     /// Command palette state (Ctrl+P).
     // Covers: UX-DR18
     pub command_palette: CommandPaletteState,
@@ -662,6 +672,9 @@ impl TuiState {
             input_scroll_offset: 0,
             autocomplete: AutocompleteState::new(),
             resolved_mentions: Vec::new(),
+            pending_images: Vec::new(),
+            pending_large_image: None,
+            image_indicator: None,
             command_palette: CommandPaletteState::new(),
             which_key: WhichKeyState::new(),
         }

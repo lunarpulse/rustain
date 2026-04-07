@@ -51,6 +51,8 @@ pub struct AnthropicMessage {
 pub enum AnthropicContent {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -64,6 +66,16 @@ pub enum AnthropicContent {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+}
+
+/// Image source for the Anthropic API image content block.
+// Covers: FR112
+#[derive(Debug, Serialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub media_type: String,
+    pub data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +108,18 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
                         tool_use_id: tr.tool_use_id.clone(),
                         content: tr.content.clone(),
                         is_error: tr.is_error,
+                    });
+                }
+
+                // Add image content blocks (after tool_results, before text)
+                // Covers: FR112 (AC1, AC2)
+                for img in &msg.images {
+                    content.push(AnthropicContent::Image {
+                        source: ImageSource {
+                            source_type: "base64".to_string(),
+                            media_type: img.media_type.clone(),
+                            data: img.data.clone(),
+                        },
                     });
                 }
 
@@ -498,5 +522,118 @@ mod tests {
         let tool_result_content = &json["messages"][2]["content"];
         assert_eq!(tool_result_content[0]["type"], "tool_result");
         assert_eq!(tool_result_content[0]["tool_use_id"], "toolu_123");
+    }
+
+    // ── Image content block tests (Story 3-4, Task 10) ─────────────────
+
+    #[test]
+    fn test_image_content_serialization() {
+        // 10.4: Verify correct JSON structure matching Anthropic API spec
+        use crate::domain::models::ImageAttachment;
+
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "What is in this image?".into(),
+            images: vec![ImageAttachment {
+                media_type: "image/png".into(),
+                data: "iVBORw0KGgo=".into(),
+            }],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+        }];
+        let options = CompletionOptions {
+            model: "claude-sonnet-4-6".into(),
+            max_tokens: 8192,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+
+        let req = AnthropicRequest::from((messages.as_slice(), &options));
+        let json = serde_json::to_value(&req).unwrap();
+
+        let content = &json["messages"][0]["content"];
+        // Image block should be first, text second
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], "iVBORw0KGgo=");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "What is in this image?");
+    }
+
+    #[test]
+    fn test_image_content_ordering() {
+        // 10.5: Images come after tool_results but before text in content array
+        use crate::domain::models::ImageAttachment;
+
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "Describe this".into(),
+            images: vec![
+                ImageAttachment {
+                    media_type: "image/jpeg".into(),
+                    data: "base64data1".into(),
+                },
+                ImageAttachment {
+                    media_type: "image/png".into(),
+                    data: "base64data2".into(),
+                },
+            ],
+            tool_results: vec![ToolResultMessage {
+                tool_use_id: "tool_1".into(),
+                content: "result here".into(),
+                is_error: false,
+            }],
+            tool_uses: vec![],
+            context_prefix: None,
+        }];
+        let options = CompletionOptions {
+            model: "claude-sonnet-4-6".into(),
+            max_tokens: 8192,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+
+        let req = AnthropicRequest::from((messages.as_slice(), &options));
+        let json = serde_json::to_value(&req).unwrap();
+
+        let content = &json["messages"][0]["content"];
+        // Order: tool_result → image → image → text
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(content[2]["type"], "image");
+        assert_eq!(content[2]["source"]["media_type"], "image/png");
+        assert_eq!(content[3]["type"], "text");
+    }
+
+    #[test]
+    fn test_message_without_images_unchanged() {
+        // Regression: Messages without images should still work exactly as before
+        let messages = vec![Message {
+            role: MessageRole::User,
+            content: "hello".into(),
+            images: vec![],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+        }];
+        let options = CompletionOptions {
+            model: "claude-sonnet-4-6".into(),
+            max_tokens: 8192,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+
+        let req = AnthropicRequest::from((messages.as_slice(), &options));
+        let json = serde_json::to_value(&req).unwrap();
+
+        let content = &json["messages"][0]["content"];
+        assert_eq!(content.as_array().unwrap().len(), 1);
+        assert_eq!(content[0]["type"], "text");
     }
 }

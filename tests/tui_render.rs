@@ -68,6 +68,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     &state.theme,
                     state.multiline_mode,
                     state.input_scroll_offset,
+                    None,
                 );
             }
         })

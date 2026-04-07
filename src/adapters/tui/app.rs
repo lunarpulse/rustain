@@ -38,6 +38,25 @@ pub enum InputAction {
         text: String,
         command: Option<String>,
     },
+    /// Copy content to clipboard.
+    // Covers: FR116, UX-DR68
+    CopyToClipboard(String),
+    /// User confirmed attaching a large image.
+    // Covers: FR112 (AC4)
+    ImageConfirmAttach,
+    /// User cancelled attaching a large image.
+    // Covers: FR112 (AC4)
+    ImageConfirmCancel,
+    /// Pasted image format is unsupported — show FeedbackBlock.
+    // Covers: FR112 (AC3)
+    ImageFormatError,
+    /// Pasted image exceeds size threshold — needs user confirmation.
+    // Covers: FR112 (AC4)
+    ImageSizeWarning {
+        media_type: String,
+        data: String,
+        warning: String,
+    },
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -72,6 +91,64 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
         }
         DomainInputEvent::FocusGained | DomainInputEvent::FocusLost => {
             state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainInputEvent::ImagePaste(raw_bytes) => {
+            // Validate and attach image from clipboard paste
+            // Covers: FR112 (AC1)
+            use crate::adapters::tui::image;
+
+            // P1: Reject oversized images before base64 encoding to prevent OOM
+            const MAX_RAW_IMAGE_SIZE: usize = 20 * 1024 * 1024; // 20MB
+            if raw_bytes.len() > MAX_RAW_IMAGE_SIZE {
+                return InputAction::ImageFormatError; // Reuse error path — too large to process
+            }
+
+            match image::detect_image_format(raw_bytes) {
+                Ok(media_type) => {
+                    use base64::Engine;
+                    let data = base64::engine::general_purpose::STANDARD.encode(raw_bytes);
+                    let base64_len = data.len();
+
+                    // Check size threshold
+                    if let Some(warning) = image::validate_image_size(base64_len) {
+                        return InputAction::ImageSizeWarning {
+                            media_type: media_type.to_string(),
+                            data,
+                            warning,
+                        };
+                    }
+
+                    let total_kb = base64_len / 1024;
+                    let attachment = crate::domain::models::ImageAttachment {
+                        media_type: media_type.to_string(),
+                        data,
+                    };
+                    state.pending_images.push(attachment);
+                    state.image_indicator = Some(image::format_image_indicator(
+                        state.pending_images.len(),
+                        state
+                            .pending_images
+                            .iter()
+                            .fold(0usize, |acc, i| acc.saturating_add(i.data.len() / 1024)),
+                    ));
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                Err(_) => {
+                    // Unsupported format — return action for event loop to create FeedbackBlock
+                    InputAction::ImageFormatError
+                }
+            }
+        }
+        DomainInputEvent::Paste(text) => {
+            // Insert text at cursor position (bracketed paste mode)
+            if matches!(state.focus, FocusState::Input) {
+                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                state.input_buffer.insert_str(byte_pos, text);
+                state.cursor_position += text.chars().count();
+                state.needs_redraw = true;
+            }
             InputAction::Consumed
         }
     }
@@ -243,6 +320,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'r' if state.active_feedback_id.is_some() => {
                 return InputAction::FeedbackRetry;
             }
+            // AC4: Large image confirmation
+            'y' if state.pending_large_image.is_some() => {
+                return InputAction::ImageConfirmAttach;
+            }
+            'n' if state.pending_large_image.is_some() => {
+                return InputAction::ImageConfirmCancel;
+            }
             'i' => {
                 state.focus = FocusState::Input;
                 state.needs_redraw = true;
@@ -338,6 +422,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     state.needs_redraw = true;
                 }
                 InputAction::Consumed
+            }
+            // c = copy focused content to clipboard
+            // Covers: FR116, UX-DR68 (AC6, AC7, AC8, AC9)
+            'c' => {
+                return InputAction::CopyToClipboard(String::new());
             }
             // p = peek preview on focused collapsed tool block
             'p' => {
@@ -1142,6 +1231,22 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
                 KeyCode::BackTab => Some(DomainInputEvent::SpecialKey(DomainKey::ShiftTab)),
                 _ => None,
             }
+        }
+        Event::Paste(data) => {
+            // Try to detect base64-encoded image data (common from xclip -o | base64).
+            // If it decodes to valid image magic bytes, treat as image paste.
+            use base64::Engine;
+            let trimmed = data.trim();
+            if !trimmed.is_empty() {
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
+                    if crate::adapters::tui::image::detect_image_format(&decoded).is_ok() {
+                        return Some(DomainInputEvent::ImagePaste(decoded));
+                    }
+                }
+            }
+            // Not an image — treat as text paste
+            tracing::debug!("Paste data is not a recognized base64 image, treating as text");
+            Some(DomainInputEvent::Paste(data.clone()))
         }
         Event::Resize(w, h) => Some(DomainInputEvent::Resize(*w, *h)),
         Event::FocusGained => Some(DomainInputEvent::FocusGained),

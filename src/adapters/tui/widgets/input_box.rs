@@ -37,6 +37,7 @@ pub fn render(
     theme: &Theme,
     multiline_mode: bool,
     input_scroll_offset: usize,
+    image_indicator: Option<&str>,
 ) {
     let is_focused = focus == FocusState::Input;
     let border_style = if is_focused {
@@ -65,9 +66,18 @@ pub fn render(
         .border_style(border_style)
         .title(title);
 
+    // Build bottom border titles: image indicator (left) and token estimate (right)
+    // Covers: FR112 (AC1)
+    if let Some(indicator) = image_indicator {
+        block = block.title_bottom(
+            Line::from(format!(" {} ", indicator))
+                .style(Style::default().fg(theme.colors.fg_muted)),
+        );
+    }
+
     if !token_title.is_empty() {
         block = block.title_bottom(
-            Line::from(token_title).style(
+            Line::from(token_title).right_aligned().style(
                 Style::default()
                     .fg(theme.colors.text_hint)
                     .add_modifier(Modifier::ITALIC),

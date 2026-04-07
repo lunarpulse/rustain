@@ -786,3 +786,216 @@ fn test_slash_new_clears_mentions() {
     // Input buffer should be cleared by submit_message
     assert!(state.input_buffer.is_empty());
 }
+
+// === Story 3-4: Image Attachment & Clipboard Operations ===
+
+// 10.9: 'c' key in Chat focus with focused_tool_id → CopyToClipboard
+#[test]
+fn test_c_key_chat_focus_triggers_copy() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.focused_tool_id = Some("tool_123".to_string());
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
+    assert_eq!(action, InputAction::CopyToClipboard(String::new()));
+}
+
+// 10.10: 'c' key in Chat focus without focused tool → CopyToClipboard (resolved in event loop)
+#[test]
+fn test_c_key_chat_focus_no_tool_triggers_copy() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.focused_tool_id = None;
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
+    assert_eq!(action, InputAction::CopyToClipboard(String::new()));
+}
+
+// 10.3: ImagePaste attaches image and sets indicator
+#[test]
+fn test_image_paste_creates_attachment() {
+    let mut state = TuiState::new(80, 24);
+    // PNG magic bytes
+    let png_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
+
+    let action = handle_input(&mut state, &DomainInputEvent::ImagePaste(png_data));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.pending_images.len(), 1);
+    assert_eq!(state.pending_images[0].media_type, "image/png");
+    assert!(state.image_indicator.is_some());
+    assert!(
+        state
+            .image_indicator
+            .as_ref()
+            .unwrap()
+            .contains("image attached")
+    );
+}
+
+// 10.16: Paste empty data → no crash, no image attached
+#[test]
+fn test_image_paste_empty_data_no_crash() {
+    let mut state = TuiState::new(80, 24);
+    let action = handle_input(&mut state, &DomainInputEvent::ImagePaste(vec![]));
+    // Empty data should fail format detection → ImageFormatError
+    assert_eq!(action, InputAction::ImageFormatError);
+    assert!(state.pending_images.is_empty());
+}
+
+// 10.18: Multiple images attached then indicator updated
+#[test]
+fn test_multiple_images_indicator_updates() {
+    let mut state = TuiState::new(80, 24);
+    let png_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00];
+    let jpeg_data = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x00, 0x00, 0x00];
+
+    handle_input(&mut state, &DomainInputEvent::ImagePaste(png_data));
+    assert_eq!(state.pending_images.len(), 1);
+
+    handle_input(&mut state, &DomainInputEvent::ImagePaste(jpeg_data));
+    assert_eq!(state.pending_images.len(), 2);
+    assert!(
+        state
+            .image_indicator
+            .as_ref()
+            .unwrap()
+            .contains("2 images attached")
+    );
+}
+
+// Unsupported image format → ImageFormatError
+#[test]
+fn test_image_paste_unsupported_format() {
+    let mut state = TuiState::new(80, 24);
+    // BMP magic bytes
+    let bmp_data = vec![0x42, 0x4D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+    let action = handle_input(&mut state, &DomainInputEvent::ImagePaste(bmp_data));
+    assert_eq!(action, InputAction::ImageFormatError);
+    assert!(state.pending_images.is_empty());
+}
+
+// Text paste inserts into input buffer
+#[test]
+fn test_text_paste_inserts_text() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Input;
+    state.input_buffer = "hello ".to_string();
+    state.cursor_position = 6;
+
+    let action = handle_input(&mut state, &DomainInputEvent::Paste("world".to_string()));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.input_buffer, "hello world");
+    assert_eq!(state.cursor_position, 11);
+}
+
+// 10.12: Submit message with pending images → images cleared, indicator cleared
+#[test]
+fn test_submit_clears_pending_images_state() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Input;
+    state.input_buffer = "describe this".to_string();
+    state.cursor_position = 13;
+    state
+        .pending_images
+        .push(rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "base64data".to_string(),
+        });
+    state.image_indicator = Some("[image attached: 1KB]".to_string());
+
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    // Submit should return SubmitMessage
+    assert_eq!(
+        action,
+        InputAction::SubmitMessage("describe this".to_string())
+    );
+    // Note: pending_images are drained in event_loop, not in app.rs
+    // But input_buffer should be cleared
+    assert!(state.input_buffer.is_empty());
+}
+
+// AC4: Large image triggers ImageSizeWarning, then 'y' confirms attachment
+#[test]
+fn test_large_image_confirm_attach() {
+    let mut state = TuiState::new(80, 24);
+    // Simulate a large PNG image (>5MB base64)
+    let mut png_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    png_data.resize(4 * 1024 * 1024, 0); // 4MB raw → ~5.3MB base64 → triggers warning
+
+    let action = handle_input(&mut state, &DomainInputEvent::ImagePaste(png_data));
+    // Should return ImageSizeWarning with the data
+    match action {
+        InputAction::ImageSizeWarning { media_type, data: _, warning } => {
+            assert_eq!(media_type, "image/png");
+            assert!(warning.contains("Large image"));
+        }
+        _ => panic!("Expected ImageSizeWarning, got {:?}", action),
+    }
+}
+
+// AC4: 'y' key in Chat focus with pending_large_image returns ImageConfirmAttach
+#[test]
+fn test_large_image_y_confirms() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
+        media_type: "image/png".to_string(),
+        data: "large_base64_data".to_string(),
+    });
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
+    assert_eq!(action, InputAction::ImageConfirmAttach);
+}
+
+// AC4: 'n' key in Chat focus with pending_large_image returns ImageConfirmCancel
+#[test]
+fn test_large_image_n_cancels() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
+        media_type: "image/png".to_string(),
+        data: "large_base64_data".to_string(),
+    });
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
+    assert_eq!(action, InputAction::ImageConfirmCancel);
+}
+
+// AC4: 'y' key in Chat focus without pending_large_image does NOT trigger confirm
+#[test]
+fn test_y_key_without_pending_image_not_confirm() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    // No pending_large_image
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
+    // Should NOT be ImageConfirmAttach — should be something else (Consumed or other)
+    assert_ne!(action, InputAction::ImageConfirmAttach);
+}
+
+// P1: Oversized image paste (>20MB) is rejected before base64 encoding
+#[test]
+fn test_oversized_image_paste_rejected() {
+    let mut state = TuiState::new(80, 24);
+    // Create data >20MB with PNG magic bytes
+    let mut huge_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    huge_data.resize(21 * 1024 * 1024, 0); // 21MB
+
+    let action = handle_input(&mut state, &DomainInputEvent::ImagePaste(huge_data));
+    assert_eq!(action, InputAction::ImageFormatError);
+    assert!(state.pending_images.is_empty());
+}
+
+// 'c' key in Input focus should type 'c', not copy
+#[test]
+fn test_c_key_input_focus_types_c() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Input;
+    state.input_buffer.clear();
+    state.cursor_position = 0;
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.input_buffer, "c");
+}

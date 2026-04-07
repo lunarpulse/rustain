@@ -267,6 +267,7 @@ impl TestHarness {
                         theme,
                         multiline_mode,
                         input_scroll_offset,
+                        None,
                     );
                 }
             })

@@ -21,6 +21,38 @@ fn render_input_box(
     render_input_box_ml(width, height, input, cursor_pos, focus, false, 0)
 }
 
+fn render_input_box_with_indicator(
+    width: u16,
+    height: u16,
+    input: &str,
+    cursor_pos: usize,
+    focus: FocusState,
+    image_indicator: Option<&str>,
+) -> Terminal<TestBackend> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::dark();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            input_box::render(
+                frame,
+                area,
+                input,
+                cursor_pos,
+                focus,
+                &theme,
+                false,
+                0,
+                image_indicator,
+            );
+        })
+        .unwrap();
+
+    terminal
+}
+
 fn render_input_box_ml(
     width: u16,
     height: u16,
@@ -46,6 +78,7 @@ fn render_input_box_ml(
                 &theme,
                 multiline_mode,
                 input_scroll_offset,
+                None,
             );
         })
         .unwrap();
@@ -334,5 +367,55 @@ fn test_input_area_height_capped() {
     assert_eq!(
         height, 10,
         "Height should be capped at MAX_INPUT_LINES(8) + 2 borders"
+    );
+}
+
+// === Image indicator rendering tests (Story 3-4) ===
+
+// 10.13: Input box with image indicator renders correctly
+#[test]
+fn test_input_box_image_indicator_renders() {
+    let terminal = render_input_box_with_indicator(
+        60,
+        3,
+        "describe this image",
+        19,
+        FocusState::Input,
+        Some("[image attached: 245KB]"),
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(
+        text.contains("image attached"),
+        "Image indicator should appear in rendered input box, got: {:?}",
+        text.trim()
+    );
+}
+
+// 10.13: Input box without image indicator renders normally
+#[test]
+fn test_input_box_no_image_indicator() {
+    let terminal = render_input_box_with_indicator(60, 3, "hello", 5, FocusState::Input, None);
+    let text = common::buffer_text(&terminal);
+    assert!(
+        !text.contains("image attached"),
+        "No indicator should show when None"
+    );
+}
+
+// 10.13: Multiple images indicator
+#[test]
+fn test_input_box_multiple_images_indicator() {
+    let terminal = render_input_box_with_indicator(
+        80,
+        3,
+        "",
+        0,
+        FocusState::Input,
+        Some("[2 images attached: 489KB total]"),
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(
+        text.contains("2 images attached"),
+        "Multiple images indicator should render"
     );
 }

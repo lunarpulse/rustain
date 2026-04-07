@@ -62,6 +62,11 @@ pub enum DomainInputEvent {
     Resize(u16, u16),
     FocusGained,
     FocusLost,
+    /// Raw image bytes pasted from clipboard (already decoded from base64 if applicable).
+    // Covers: FR112
+    ImagePaste(Vec<u8>),
+    /// Plain text pasted from clipboard (bracketed paste mode).
+    Paste(String),
 }
 
 /// Abstract key representation — no crossterm dependency.

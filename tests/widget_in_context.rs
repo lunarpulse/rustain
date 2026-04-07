@@ -89,6 +89,7 @@ fn render_full_layout(
                 &theme,
                 false,
                 0,
+                None,
             );
         })
         .unwrap();
@@ -265,6 +266,7 @@ fn test_permission_prompt_in_full_layout() {
                 &theme,
                 false,
                 0,
+                None,
             );
         })
         .unwrap();
@@ -357,6 +359,7 @@ fn test_ask_user_question_in_full_layout() {
                 &theme,
                 false,
                 0,
+                None,
             );
         })
         .unwrap();

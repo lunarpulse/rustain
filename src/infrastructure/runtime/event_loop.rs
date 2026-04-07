@@ -26,9 +26,9 @@ use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, MessageRole, RetryState, SessionManager,
-    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, apply_chunk,
-    generate_conversation_id, next_delay,
+    FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, RetryState,
+    SessionManager, SessionState, StatusState, StreamChunk, StreamingState, UserMessage,
+    apply_chunk, generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::message_builder;
@@ -240,8 +240,10 @@ pub async fn run(
                             match action {
                                 InputAction::SubmitMessage(text) => {
                                     // Resolve any file mentions from autocomplete selections
+                                    let mut mention_images: Vec<ImageAttachment> = Vec::new();
                                     let send_text = if !state.resolved_mentions.is_empty() {
-                                        let (file_contexts, file_errors) = resolve_file_context(&state.resolved_mentions, &workspace_path, security.as_ref());
+                                        let (file_contexts, file_images, file_errors) = resolve_file_context(&state.resolved_mentions, &workspace_path, security.as_ref());
+                                        mention_images = file_images;
                                         state.resolved_mentions.clear();
                                         // P9: Show FeedbackBlock for each file resolution error
                                         for err in &file_errors {
@@ -263,11 +265,17 @@ pub async fn run(
                                     } else {
                                         text
                                     };
+                                    // Merge pending images (clipboard paste) with mention images (@ file references)
+                                    // Covers: FR112 (AC1, AC2)
+                                    let mut all_images: Vec<ImageAttachment> = state.pending_images.drain(..).collect();
+                                    all_images.extend(mention_images);
+                                    state.image_indicator = None;
+
                                     if streaming.is_streaming {
                                         // Queue message during streaming
                                         let msg = UserMessage {
                                             content: send_text,
-                                            images: vec![],
+                                            images: all_images,
                                         };
                                         if turn_queue.enqueue(msg).is_err() {
                                             state.status_before_flash = Some(state.status.clone());
@@ -280,6 +288,7 @@ pub async fn run(
                                     } else {
                                         start_turn(
                                             &send_text,
+                                            all_images,
                                             &mut conversation,
                                             &mut streaming,
                                             &mut state,
@@ -518,7 +527,7 @@ pub async fn run(
                                     }
 
                                     // Resolve file mentions
-                                    let (file_contexts, file_errors) = resolve_file_context(&state.resolved_mentions, &workspace_path, security.as_ref());
+                                    let (file_contexts, mention_images, file_errors) = resolve_file_context(&state.resolved_mentions, &workspace_path, security.as_ref());
                                     if !file_contexts.is_empty() {
                                         context_prefix.push_str(&message_builder::build_file_context_prefix(&file_contexts));
                                     }
@@ -541,10 +550,16 @@ pub async fn run(
                                         format!("{}{}", context_prefix, text)
                                     };
 
+                                    // Merge pending images with mention images
+                                    // Covers: FR112 (AC1, AC2)
+                                    let mut all_images: Vec<ImageAttachment> = state.pending_images.drain(..).collect();
+                                    all_images.extend(mention_images);
+                                    state.image_indicator = None;
+
                                     if streaming.is_streaming {
                                         let msg = UserMessage {
                                             content: full_text,
-                                            images: vec![],
+                                            images: all_images,
                                         };
                                         if turn_queue.enqueue(msg).is_err() {
                                             state.status_before_flash = Some(state.status.clone());
@@ -557,6 +572,7 @@ pub async fn run(
                                     } else {
                                         start_turn(
                                             &full_text,
+                                            all_images,
                                             &mut conversation,
                                             &mut streaming,
                                             &mut state,
@@ -575,6 +591,107 @@ pub async fn run(
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
                                     }
+                                }
+                                InputAction::CopyToClipboard(mut content) => {
+                                    use crate::adapters::tui::clipboard;
+
+                                    // Resolve content if empty (Chat focus copy)
+                                    // Covers: FR116 (AC6, AC8, AC9)
+                                    if content.is_empty() {
+                                        content = resolve_copy_content(&state, &conversation);
+                                    }
+                                    if content.is_empty() {
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = StatusState::Flash {
+                                            message: "Nothing to copy".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else {
+
+                                    let result = clipboard::copy_to_clipboard(&content);
+                                    let flash_msg = match result {
+                                        clipboard::ClipboardResult::Osc52Success => {
+                                            "Copied to clipboard".to_string()
+                                        }
+                                        clipboard::ClipboardResult::FallbackSuccess(ref path) => {
+                                            format!("Copied to {}", path.display())
+                                        }
+                                        clipboard::ClipboardResult::Failed(ref err) => {
+                                            format!("Copy failed: {}", err)
+                                        }
+                                    };
+                                    state.status_before_flash = Some(state.status.clone());
+                                    state.status = StatusState::Flash {
+                                        message: flash_msg,
+                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                    };
+                                    state.needs_redraw = true;
+                                    } // end else (content not empty)
+                                }
+                                InputAction::ImageFormatError => {
+                                    let fb = FeedbackBlock {
+                                        id: generate_conversation_id(),
+                                        message: "Unsupported image format. Supported: PNG, JPEG, GIF, WebP".to_string(),
+                                        level: FeedbackLevel::Error,
+                                        actions: vec![],
+                                    };
+                                    state.feedback_blocks.insert(fb.id.clone(), fb);
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ImageSizeWarning { media_type, data, warning } => {
+                                    // AC4: Show confirm/cancel FeedbackBlock for large images.
+                                    // Store the image pending user confirmation.
+                                    let attachment = ImageAttachment {
+                                        media_type,
+                                        data,
+                                    };
+                                    state.pending_large_image = Some(attachment);
+                                    let fb = FeedbackBlock {
+                                        id: generate_conversation_id(),
+                                        message: warning,
+                                        level: FeedbackLevel::Warning,
+                                        actions: vec![
+                                            FeedbackAction::Custom("[y] Attach anyway".to_string()),
+                                            FeedbackAction::Custom("[n] Cancel".to_string()),
+                                        ],
+                                    };
+                                    state.active_feedback_id = Some(fb.id.clone());
+                                    state.feedback_blocks.insert(fb.id.clone(), fb);
+                                    state.focus = FocusState::Chat;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ImageConfirmAttach => {
+                                    // AC4: User confirmed attaching the large image
+                                    if let Some(attachment) = state.pending_large_image.take() {
+                                        use crate::adapters::tui::image;
+                                        state.pending_images.push(attachment);
+                                        state.image_indicator = Some(image::format_image_indicator(
+                                            state.pending_images.len(),
+                                            state.pending_images.iter().fold(0usize, |acc, i| acc.saturating_add(i.data.len() / 1024)),
+                                        ));
+                                    }
+                                    // Clear the feedback block
+                                    if let Some(fb_id) = state.active_feedback_id.take() {
+                                        state.feedback_blocks.remove(&fb_id);
+                                    }
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ImageConfirmCancel => {
+                                    // AC4: User cancelled the large image attachment
+                                    state.pending_large_image = None;
+                                    // Clear the feedback block
+                                    if let Some(fb_id) = state.active_feedback_id.take() {
+                                        state.feedback_blocks.remove(&fb_id);
+                                    }
+                                    state.status_before_flash = Some(state.status.clone());
+                                    state.status = StatusState::Flash {
+                                        message: "Image attachment cancelled".to_string(),
+                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                    };
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
@@ -670,6 +787,7 @@ pub async fn run(
                                 if let Some(queued_msg) = turn_queue.dequeue() {
                                     start_turn(
                                         &queued_msg.content,
+                                        queued_msg.images,
                                         &mut conversation,
                                         &mut streaming,
                                         &mut state,
@@ -808,10 +926,11 @@ pub async fn run(
                         state.needs_redraw = true;
                     }
                     AppEvent::RetryMessage(text) => {
-                        // Delayed retry arrived — start the turn now
+                        // Delayed retry arrived — start the turn now (no images on retry)
                         state.status = StatusState::Streaming;
                         start_turn(
                             &text,
+                            vec![],
                             &mut conversation,
                             &mut streaming,
                             &mut state,
@@ -979,6 +1098,7 @@ pub async fn run(
 #[allow(clippy::too_many_arguments)]
 fn start_turn(
     text: &str,
+    images: Vec<ImageAttachment>,
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
     state: &mut TuiState,
@@ -1005,6 +1125,18 @@ fn start_turn(
 
     // Build messages list for provider
     let mut messages = message_builder::build_api_messages(conversation);
+
+    // Attach images to the last user message in the API request
+    // Covers: FR112 (AC1, AC2)
+    if !images.is_empty() {
+        if let Some(last_user_msg) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == MessageRole::User && m.content == text)
+        {
+            last_user_msg.images = images;
+        }
+    }
 
     // If session manager indicates history rebuild needed, prepend context
     if session_manager.needs_history_rebuild() {
@@ -1168,6 +1300,7 @@ fn render(
         ref autocomplete,
         ref command_palette,
         ref which_key,
+        ref image_indicator,
         ..
     } = *state;
 
@@ -1291,6 +1424,7 @@ fn render(
                     theme,
                     multiline_mode,
                     input_scroll_offset,
+                    image_indicator.as_deref(),
                 );
 
                 // Render reverse search overlay above input box
@@ -1527,17 +1661,48 @@ struct FileContextError {
     reason: String,
 }
 
+/// Resolve what content to copy based on current focus state.
+/// Priority: focused tool block output > last assistant message > empty.
+// Covers: FR116 (AC6, AC8, AC9)
+fn resolve_copy_content(state: &TuiState, conversation: &Conversation) -> String {
+    // AC8: If a tool block is focused, copy its output
+    if let Some(ref tool_id) = state.focused_tool_id {
+        // Find the tool result in conversation messages
+        for cm in conversation.messages.iter().rev() {
+            for tc in &cm.tool_calls {
+                if tc.id == *tool_id {
+                    if let Some(ref result) = tc.result {
+                        return result.content.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    // AC9: Copy the last assistant message
+    for cm in conversation.messages.iter().rev() {
+        if cm.role == MessageRole::Assistant && !cm.content.is_empty() {
+            return cm.content.clone();
+        }
+    }
+
+    String::new()
+}
+
 fn resolve_file_context(
     mentions: &[crate::adapters::tui::state::ResolvedMention],
     workspace_path: &std::path::Path,
     security: &dyn SecurityPort,
 ) -> (
     Vec<message_builder::ResolvedFileContext>,
+    Vec<ImageAttachment>,
     Vec<FileContextError>,
 ) {
+    use crate::adapters::tui::image;
     use crate::domain::models::FileOperation;
 
     let mut resolved = Vec::new();
+    let mut images = Vec::new();
     let mut errors = Vec::new();
     for mention in mentions {
         let full_path = workspace_path.join(&mention.path);
@@ -1562,30 +1727,88 @@ fn resolve_file_context(
             continue;
         }
 
-        match std::fs::read_to_string(&canonical) {
-            Ok(content) => {
-                // P2: Limit to ~100KB per file — use floor_char_boundary to avoid UTF-8 panic
-                #[allow(clippy::incompatible_msrv)] // stable since 1.80, MSRV is 1.85
-                let truncated = if content.len() > 100_000 {
-                    let boundary = content.floor_char_boundary(100_000);
-                    content[..boundary].to_string()
-                } else {
-                    content
-                };
-                resolved.push(message_builder::ResolvedFileContext {
-                    path: mention.path.clone(),
-                    content: truncated,
-                });
+        // Check if file is an image by extension
+        // Covers: FR112 (AC2, AC3)
+        let is_image = canonical
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| image::is_image_extension(ext));
+
+        if is_image {
+            // P2: Check file size before reading to prevent OOM on large images
+            const MAX_IMAGE_FILE_SIZE: u64 = 20 * 1024 * 1024; // 20MB
+            match std::fs::metadata(&canonical) {
+                Ok(meta) if meta.len() > MAX_IMAGE_FILE_SIZE => {
+                    errors.push(FileContextError {
+                        path: mention.path.clone(),
+                        reason: format!(
+                            "Image file too large ({:.1}MB). Maximum: 20MB",
+                            meta.len() as f64 / (1024.0 * 1024.0)
+                        ),
+                    });
+                    continue;
+                }
+                Err(_) => {
+                    errors.push(FileContextError {
+                        path: mention.path.clone(),
+                        reason: format!("Could not read file: {}", mention.path),
+                    });
+                    continue;
+                }
+                _ => {} // Size OK, proceed
             }
-            Err(_) => {
-                errors.push(FileContextError {
-                    path: mention.path.clone(),
-                    reason: format!("File not found: {}", mention.path),
-                });
+            // Read as bytes, validate format, base64-encode
+            match std::fs::read(&canonical) {
+                Ok(bytes) => match image::detect_image_format(&bytes) {
+                    Ok(media_type) => {
+                        use base64::Engine;
+                        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        images.push(ImageAttachment {
+                            media_type: media_type.to_string(),
+                            data,
+                        });
+                    }
+                    Err(msg) => {
+                        errors.push(FileContextError {
+                            path: mention.path.clone(),
+                            reason: msg,
+                        });
+                    }
+                },
+                Err(_) => {
+                    errors.push(FileContextError {
+                        path: mention.path.clone(),
+                        reason: format!("Could not read file: {}", mention.path),
+                    });
+                }
+            }
+        } else {
+            // Non-image files: read as text (existing behavior)
+            match std::fs::read_to_string(&canonical) {
+                Ok(content) => {
+                    // P2: Limit to ~100KB per file — use floor_char_boundary to avoid UTF-8 panic
+                    #[allow(clippy::incompatible_msrv)] // stable since 1.80, MSRV is 1.85
+                    let truncated = if content.len() > 100_000 {
+                        let boundary = content.floor_char_boundary(100_000);
+                        content[..boundary].to_string()
+                    } else {
+                        content
+                    };
+                    resolved.push(message_builder::ResolvedFileContext {
+                        path: mention.path.clone(),
+                        content: truncated,
+                    });
+                }
+                Err(_) => {
+                    errors.push(FileContextError {
+                        path: mention.path.clone(),
+                        reason: format!("File not found: {}", mention.path),
+                    });
+                }
             }
         }
     }
-    (resolved, errors)
+    (resolved, images, errors)
 }
 
 /// Resolve a user-defined slash command's content.
@@ -1676,4 +1899,5 @@ mod tests {
         let exact = "A".repeat(500);
         assert_eq!(truncate(&exact, 500), exact);
     }
+
 }
