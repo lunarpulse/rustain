@@ -1,5 +1,6 @@
 pub mod app;
 pub mod clipboard;
+pub mod markdown;
 #[allow(dead_code)]
 pub mod color_detect;
 pub mod help_data;

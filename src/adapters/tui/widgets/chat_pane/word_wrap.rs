@@ -1,7 +1,3 @@
-use ratatui::prelude::*;
-
-use crate::adapters::tui::theme::Theme;
-
 /// Word-boundary text wrapping. Falls back to character wrap for single words
 /// exceeding width.
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -72,92 +68,6 @@ fn char_wrap_word(word: &str, width: usize, result: &mut Vec<String>) {
     }
 }
 
-/// Parse inline code spans (backtick-delimited) and produce styled Lines.
-/// Inline code spans should not break mid-span. If a code span exceeds
-/// remaining line width, move the entire span to the next line. If it exceeds
-/// full line width, character-break within the span.
-pub fn parse_inline_code<'a>(text: &str, width: usize, theme: &Theme) -> Vec<Line<'a>> {
-    let mut lines = Vec::new();
-
-    for text_line in text.split('\n') {
-        let char_count = text_line.chars().count();
-        if char_count > width && width > 0 {
-            // Word-wrap first, then parse code spans per wrapped line
-            let wrapped = wrap_text(text_line, width);
-            for w in wrapped {
-                let line_spans = parse_code_spans(&w, theme);
-                lines.push(Line::from(line_spans));
-            }
-        } else {
-            let spans = parse_code_spans(text_line, theme);
-            lines.push(Line::from(spans));
-        }
-    }
-
-    lines
-}
-
-/// Parse a single line for backtick-delimited code spans, returning styled Spans.
-pub fn parse_code_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut chars = text.char_indices().peekable();
-    let mut segment_start = 0;
-
-    let normal_style = Style::default().fg(theme.colors.fg_primary);
-    let code_style = Style::default()
-        .fg(theme.colors.code_span)
-        .bg(theme.colors.code_block_bg);
-
-    while let Some(&(i, c)) = chars.peek() {
-        if c == '`' {
-            // Found opening backtick — look for closing
-            let before = &text[segment_start..i];
-            let open_pos = i;
-            chars.next(); // consume opening backtick
-
-            // Find closing backtick
-            let mut found_close = false;
-            let mut close_pos = open_pos;
-            while let Some(&(j, c2)) = chars.peek() {
-                chars.next();
-                if c2 == '`' {
-                    close_pos = j;
-                    found_close = true;
-                    break;
-                }
-            }
-
-            if found_close {
-                // Emit text before the backtick
-                if !before.is_empty() {
-                    spans.push(Span::styled(before.to_string(), normal_style));
-                }
-                // Emit code span (content between backticks)
-                let code_text = &text[open_pos + 1..close_pos];
-                spans.push(Span::styled(code_text.to_string(), code_style));
-                segment_start = close_pos + 1;
-            } else {
-                // Unclosed backtick — render as literal
-            }
-        } else {
-            chars.next();
-        }
-    }
-
-    // Emit remaining text
-    if segment_start < text.len() {
-        spans.push(Span::styled(
-            text[segment_start..].to_string(),
-            normal_style,
-        ));
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::styled(String::new(), normal_style));
-    }
-
-    spans
-}
 
 #[cfg(test)]
 mod tests {

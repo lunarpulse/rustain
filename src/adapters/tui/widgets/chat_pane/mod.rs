@@ -15,7 +15,8 @@ use crate::domain::models::{
 };
 
 use super::empty_state;
-use word_wrap::{parse_inline_code, wrap_text};
+use word_wrap::wrap_text;
+use crate::adapters::tui::markdown;
 
 /// Result of rendering the chat pane, including boundary data for navigation.
 pub struct RenderResult {
@@ -41,19 +42,14 @@ fn compute_message_height(
         let wrapped = wrap_text(content, width);
         wrapped.len()
     } else {
-        // Count lines that parse_inline_code would produce
-        let mut count = 0;
-        for text_line in content.split('\n') {
-            let char_count = text_line.chars().count();
-            if char_count > width && width > 0 {
-                let wrapped = wrap_text(text_line, width);
-                count += wrapped.len();
-            } else {
-                count += 1;
-            }
-        }
-        count
+        // Use the markdown pipeline — same code path as render_message() — to
+        // guarantee the height invariant required by virtual scrolling (AC6).
+        markdown::compute_height(content, width)
     };
+    // Cancelled messages append " [interrupted]" as a separate line.
+    // compute_height() receives raw content without the suffix, so check if
+    // the suffix would push the last rendered line over width. Since
+    // render_message() appends it as its own Line, we always add 1.
     let interrupted_line = if is_cancelled { 1 } else { 0 };
     1 + content_height + interrupted_line // role line + content + optional [interrupted]
 }
@@ -94,7 +90,7 @@ fn render_message<'a>(
             )));
         }
     } else {
-        let parsed_lines = parse_inline_code(&msg.content, width, theme);
+        let parsed_lines = markdown::render(&msg.content, width, theme);
         lines.extend(parsed_lines);
     }
 
@@ -212,16 +208,7 @@ pub fn render(
             1 + if has_error {
                 wrap_text(&streaming.current_text_buffer, width).len()
             } else {
-                let mut count = 0;
-                for text_line in streaming.current_text_buffer.split('\n') {
-                    let cc = text_line.chars().count();
-                    if cc > width && width > 0 {
-                        count += wrap_text(text_line, width).len();
-                    } else {
-                        count += 1;
-                    }
-                }
-                count
+                markdown::compute_height(&streaming.current_text_buffer, width)
             }
         };
 
@@ -529,7 +516,7 @@ fn render_streaming<'a>(streaming: &StreamingState, width: usize, theme: &Theme)
                 )));
             }
         } else {
-            let parsed_lines = parse_inline_code(&streaming.current_text_buffer, width, theme);
+            let parsed_lines = markdown::render(&streaming.current_text_buffer, width, theme);
             lines.extend(parsed_lines);
         }
     }
