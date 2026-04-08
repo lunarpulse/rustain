@@ -60,11 +60,9 @@ fn test_e2e_markdown_bold_renders() {
 
     // Verify bold text has BOLD modifier applied
     let buffer = h.terminal.backend().buffer().clone();
-    let found_bold = e2e_harness::buffer_contains_styled_text(
-        &buffer,
-        "bold text",
-        |style| style.add_modifier.contains(Modifier::BOLD),
-    );
+    let found_bold = e2e_harness::buffer_contains_styled_text(&buffer, "bold text", |style| {
+        style.add_modifier.contains(Modifier::BOLD)
+    });
     assert!(
         found_bold,
         "Expected 'bold text' to have BOLD modifier applied"
@@ -397,16 +395,13 @@ fn test_e2e_markdown_full_pipeline() {
     let buffer = h.terminal.backend().buffer().clone();
 
     // Bold should have BOLD modifier
-    let bold_styled = e2e_harness::buffer_contains_styled_text(
-        &buffer,
-        "bold",
-        |style| style.add_modifier.contains(Modifier::BOLD),
-    );
+    let bold_styled = e2e_harness::buffer_contains_styled_text(&buffer, "bold", |style| {
+        style.add_modifier.contains(Modifier::BOLD)
+    });
     assert!(bold_styled, "'bold' should have BOLD modifier");
 
     // Code should have background color
-    let code_styled = e2e_harness::buffer_contains_styled_text(&buffer, "code", |style| {
-        style.bg.is_some()
-    });
+    let code_styled =
+        e2e_harness::buffer_contains_styled_text(&buffer, "code", |style| style.bg.is_some());
     assert!(code_styled, "'code' should have background color");
 }

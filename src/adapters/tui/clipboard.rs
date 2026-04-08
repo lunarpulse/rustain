@@ -67,8 +67,7 @@ pub fn write_osc52(content: &str) -> io::Result<()> {
 /// Write content to the fallback clipboard file.
 /// Creates ~/.rustain/clipboard.txt with 0o600 permissions.
 pub fn write_fallback(content: &str) -> io::Result<PathBuf> {
-    let data_dir = crate::infrastructure::paths::data_dir()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let data_dir = crate::infrastructure::paths::data_dir().map_err(io::Error::other)?;
     fs::create_dir_all(&data_dir)?;
     let path = data_dir.join("clipboard.txt");
     fs::write(&path, content)?;
@@ -126,7 +125,10 @@ mod tests {
         match result {
             Ok(path) => {
                 assert!(path.exists());
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "clipboard test content");
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    "clipboard test content"
+                );
                 // Verify permissions on Unix
                 #[cfg(unix)]
                 {
@@ -137,7 +139,10 @@ mod tests {
             }
             Err(e) => {
                 // In CI/sandboxed environments, data_dir may not be available
-                eprintln!("write_fallback returned error (may be expected in CI): {}", e);
+                eprintln!(
+                    "write_fallback returned error (may be expected in CI): {}",
+                    e
+                );
             }
         }
     }

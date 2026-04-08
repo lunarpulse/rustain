@@ -213,10 +213,6 @@ fn test_no_raw_env_var_outside_utils() {
 
     let allowed_files: &[&str] = &["src/infrastructure/utils.rs"];
 
-    // init.rs exception lines (test backup/restore per Story 2-5)
-    let init_rs_suffix = std::path::Path::new("src/adapters/cli/init.rs");
-    let init_rs_allowed_lines: &[usize] = &[276, 277, 292, 293];
-
     let mut violations = Vec::new();
 
     for file in &files {
@@ -237,8 +233,9 @@ fn test_no_raw_env_var_outside_utils() {
             }
 
             if trimmed.contains("env::var(") {
-                // Special exception: init.rs specific lines
-                if file.ends_with(init_rs_suffix) && init_rs_allowed_lines.contains(&line_num) {
+                // Lines tagged with // CONFORMANCE_EXCEPTION are explicitly allowed.
+                // This is a content-based exception — robust to line renumbering (DF-053).
+                if line.contains("// CONFORMANCE_EXCEPTION") {
                     continue;
                 }
                 violations.push(format!(

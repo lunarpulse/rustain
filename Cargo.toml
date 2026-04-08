@@ -69,6 +69,7 @@ tokio-test = "0.4"
 tempfile = "3.0"
 pretty_assertions = "1"
 mockito = "1"
+serial_test = "3"
 
 [features]
 default = ["anthropic"]

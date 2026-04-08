@@ -4,8 +4,10 @@ use crate::domain::models::visual::OverlayType;
 /// Returns a contextual status-bar hint for the given focus state, or `None` when
 /// hints have faded (session_count > fade_threshold) or the focus has no hint.
 ///
-/// When `is_vscode` is `true` and focus is Input, the VS Code keybinding hint takes
-/// priority over the generic help tip (UX-DR93, AC#4).
+/// Control flow: first checks `session_count > fade_threshold` (fast exit), then
+/// dispatches on `focus`. For `FocusState::Input`, `is_vscode` selects whether the
+/// VS Code keybinding hint or the generic help tip is shown (UX-DR93, AC#4).
+/// The `is_vscode` value is read from `TuiState.is_vscode` by the caller (AC9, 3-6a-D2).
 // Covers: UX-DR93, UX-DR96, Sprint Change Proposal 2026-04-08
 pub fn contextual_hint(
     focus: &FocusState,
@@ -21,14 +23,15 @@ pub fn contextual_hint(
         FocusState::Input => {
             if is_vscode {
                 // VS Code terminal: show keybinding alternatives as the primary hint (AC#4, AC#5)
-                Some("VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode".to_string())
+                Some(
+                    "VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode"
+                        .to_string(),
+                )
             } else {
                 Some("Tip: Press ? for help, Ctrl+P for commands".to_string())
             }
         }
-        FocusState::Chat => {
-            Some("Tip: j/k to scroll, i to type, ? for help".to_string())
-        }
+        FocusState::Chat => Some("Tip: j/k to scroll, i to type, ? for help".to_string()),
         FocusState::Overlay(OverlayType::WhichKey) => {
             Some("Tip: Press a key to execute, Esc to cancel".to_string())
         }
@@ -131,16 +134,19 @@ mod tests {
 
     #[test]
     fn test_hint_whichkey_focus() {
-        let hint =
-            contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5, false);
+        let hint = contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Esc"));
     }
 
     #[test]
     fn test_hint_command_palette_focus() {
-        let hint =
-            contextual_hint(&FocusState::Overlay(OverlayType::CommandPalette), 1, 5, false);
+        let hint = contextual_hint(
+            &FocusState::Overlay(OverlayType::CommandPalette),
+            1,
+            5,
+            false,
+        );
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("filter"));
     }
@@ -152,7 +158,10 @@ mod tests {
         let hint = contextual_hint(&FocusState::Input, 1, 5, true);
         assert!(hint.is_some());
         let text = hint.unwrap();
-        assert!(text.contains("Alt+Enter"), "Expected Alt+Enter in hint: {text}");
+        assert!(
+            text.contains("Alt+Enter"),
+            "Expected Alt+Enter in hint: {text}"
+        );
         assert!(text.contains("Alt+M"), "Expected Alt+M in hint: {text}");
     }
 

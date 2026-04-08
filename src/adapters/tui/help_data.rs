@@ -1,4 +1,4 @@
-/// Static keybinding data and multiplexer conflict information for the help overlay.
+// Static keybinding data and multiplexer conflict information for the help overlay.
 // Covers: FR108, UX-DR94, UX-DR62
 
 use std::sync::LazyLock;
@@ -77,8 +77,8 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
-                    key: "Alt+Enter (VS Code)",
-                    description: "New line — alternative when Shift+Enter is intercepted",
+                    key: "Alt+Enter",
+                    description: "Insert newline (alternative when Shift+Enter is intercepted)",
                     available: true,
                 },
                 HelpBinding {
@@ -87,8 +87,8 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
-                    key: "Alt+M (VS Code)",
-                    description: "Toggle multi-line mode — alternative when Ctrl+E is intercepted",
+                    key: "Alt+M",
+                    description: "Toggle multi-line mode (alternative when Ctrl+E is intercepted)",
                     available: true,
                 },
                 HelpBinding {

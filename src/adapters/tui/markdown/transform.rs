@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 
+use super::RenderOptions;
 use super::parse::{InlineSpan, MarkdownBlock};
 use crate::adapters::tui::theme::Theme;
 
@@ -8,6 +9,7 @@ use crate::adapters::tui::theme::Theme;
 pub enum StyledBlock {
     Paragraph(Vec<StyledSpan>),
     Heading {
+        #[allow(dead_code)] // reserved for size-based heading styling in Epic 15
         level: u8,
         spans: Vec<StyledSpan>,
     },
@@ -20,6 +22,7 @@ pub enum StyledBlock {
         content: String,
     },
     ThematicBreak,
+    #[allow(dead_code)] // blank-line spacing variant — never constructed yet; reserved for Epic 15
     BlankLine,
 }
 
@@ -37,10 +40,33 @@ pub struct StyledSpan {
     pub style: Style,
 }
 
+/// Strip unclosed inline markers from a plain-text span (AC3, DF-078).
+///
+/// Removes literal `~~`, `**`, `*`, and `` ` `` characters that pulldown-cmark
+/// left as unmatched `Text` events (i.e., they appear inside `InlineSpan::Plain`
+/// rather than producing `Bold`/`Italic`/`Code` variants).
+///
+/// Longer markers are processed first (`~~` then `**` then `*`) to avoid
+/// false matches. This is applied only when `RenderOptions::strip_unclosed_markers`
+/// is true — streaming mode leaves markers intact so the model can close them.
+pub fn strip_unclosed_markers(s: String) -> String {
+    // Fast path: no markers present
+    if !s.contains('~') && !s.contains('*') && !s.contains('`') {
+        return s;
+    }
+    s.replace("~~", "")
+        .replace("**", "")
+        .replace(['*', '`'], "")
+}
+
 /// Transform `MarkdownBlock` list into `StyledBlock` list, applying theme styles.
 ///
 /// HTML tags are stripped from `InlineSpan::Plain` content only (never from Code spans).
-pub fn transform(blocks: Vec<MarkdownBlock>, theme: &Theme) -> Vec<StyledBlock> {
+pub fn transform(
+    blocks: Vec<MarkdownBlock>,
+    theme: &Theme,
+    opts: &RenderOptions,
+) -> Vec<StyledBlock> {
     let normal_style = Style::default().fg(theme.colors.fg_primary);
     let bold_style = Style::default()
         .fg(theme.colors.fg_primary)
@@ -58,18 +84,31 @@ pub fn transform(blocks: Vec<MarkdownBlock>, theme: &Theme) -> Vec<StyledBlock> 
         .fg(theme.colors.fg_primary)
         .add_modifier(Modifier::BOLD);
 
+    let strip_markers = opts.strip_unclosed_markers;
     let mut styled: Vec<StyledBlock> = Vec::new();
 
     for block in blocks {
         match block {
             MarkdownBlock::Paragraph(spans) => {
-                let styled_spans = map_spans(spans, normal_style, bold_style, italic_style, bold_italic_style, code_style);
+                let styled_spans = map_spans(
+                    spans,
+                    normal_style,
+                    bold_style,
+                    italic_style,
+                    bold_italic_style,
+                    code_style,
+                    strip_markers,
+                );
                 styled.push(StyledBlock::Paragraph(styled_spans));
             }
             MarkdownBlock::Heading { level, spans } => {
                 // All headings H1-H4 → BOLD only for Story 3-6
-                let styled_spans = map_spans_with_base(spans, heading_style, code_style);
-                styled.push(StyledBlock::Heading { level, spans: styled_spans });
+                let styled_spans =
+                    map_spans_with_base(spans, heading_style, code_style, strip_markers);
+                styled.push(StyledBlock::Heading {
+                    level,
+                    spans: styled_spans,
+                });
             }
             MarkdownBlock::List { ordered, items } => {
                 let styled_items = items
@@ -82,6 +121,7 @@ pub fn transform(blocks: Vec<MarkdownBlock>, theme: &Theme) -> Vec<StyledBlock> 
                             italic_style,
                             bold_italic_style,
                             code_style,
+                            strip_markers,
                         ),
                         depth: item.depth,
                     })
@@ -105,6 +145,10 @@ pub fn transform(blocks: Vec<MarkdownBlock>, theme: &Theme) -> Vec<StyledBlock> 
 }
 
 /// Map `InlineSpan` list to `StyledSpan` list with per-variant styles.
+///
+/// When `strip_markers` is true, unclosed inline markers are stripped from
+/// `Plain` spans (they remain as-is in `Bold`/`Italic`/`Code` since those
+/// variants only appear when the parser matched a properly-closed marker).
 fn map_spans(
     spans: Vec<InlineSpan>,
     normal: Style,
@@ -112,14 +156,23 @@ fn map_spans(
     italic: Style,
     bold_italic: Style,
     code: Style,
+    strip_markers: bool,
 ) -> Vec<StyledSpan> {
     spans
         .into_iter()
         .map(|span| match span {
-            InlineSpan::Plain(s) => StyledSpan {
-                content: strip_html(s),
-                style: normal,
-            },
+            InlineSpan::Plain(s) => {
+                let s = strip_html(s);
+                let content = if strip_markers {
+                    strip_unclosed_markers(s)
+                } else {
+                    s
+                };
+                StyledSpan {
+                    content,
+                    style: normal,
+                }
+            }
             InlineSpan::Bold(s) => StyledSpan {
                 content: strip_html(s),
                 style: bold,
@@ -133,7 +186,7 @@ fn map_spans(
                 style: bold_italic,
             },
             InlineSpan::Code(s) => StyledSpan {
-                // Do NOT strip HTML from code spans
+                // Do NOT strip HTML or markers from code spans
                 content: s,
                 style: code,
             },
@@ -143,20 +196,31 @@ fn map_spans(
 
 /// Map spans inside headings: all inline variants get the `base` style (BOLD),
 /// except `Code` which keeps code styling.
-fn map_spans_with_base(spans: Vec<InlineSpan>, base: Style, code: Style) -> Vec<StyledSpan> {
+fn map_spans_with_base(
+    spans: Vec<InlineSpan>,
+    base: Style,
+    code: Style,
+    strip_markers: bool,
+) -> Vec<StyledSpan> {
     spans
         .into_iter()
         .map(|span| match span {
-            InlineSpan::Plain(s) => StyledSpan {
-                content: strip_html(s),
-                style: base,
-            },
-            InlineSpan::Bold(s) | InlineSpan::Italic(s) | InlineSpan::BoldItalic(s) => {
+            InlineSpan::Plain(s) => {
+                let s = strip_html(s);
+                let content = if strip_markers {
+                    strip_unclosed_markers(s)
+                } else {
+                    s
+                };
                 StyledSpan {
-                    content: strip_html(s),
+                    content,
                     style: base,
                 }
             }
+            InlineSpan::Bold(s) | InlineSpan::Italic(s) | InlineSpan::BoldItalic(s) => StyledSpan {
+                content: strip_html(s),
+                style: base,
+            },
             InlineSpan::Code(s) => StyledSpan {
                 content: s,
                 style: code,
@@ -289,7 +353,7 @@ mod tests {
         let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Plain(
             "hello".to_owned(),
         )])];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::Paragraph(spans) = &styled[0] {
             assert_eq!(spans[0].content, "hello");
             assert!(spans[0].style.fg.is_some());
@@ -303,7 +367,7 @@ mod tests {
         let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Bold(
             "bold".to_owned(),
         )])];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::Paragraph(spans) = &styled[0] {
             assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
         }
@@ -316,7 +380,7 @@ mod tests {
         let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Italic(
             "italic".to_owned(),
         )])];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::Paragraph(spans) = &styled[0] {
             assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
         }
@@ -329,7 +393,7 @@ mod tests {
         let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::BoldItalic(
             "bi".to_owned(),
         )])];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::Paragraph(spans) = &styled[0] {
             let m = spans[0].style.add_modifier;
             assert!(m.contains(Modifier::BOLD) && m.contains(Modifier::ITALIC));
@@ -343,7 +407,7 @@ mod tests {
         let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Code(
             "vec![]".to_owned(),
         )])];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::Paragraph(spans) = &styled[0] {
             // Code span has a background color set
             assert!(spans[0].style.bg.is_some());
@@ -357,7 +421,7 @@ mod tests {
         let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Code(
             "Vec<String>".to_owned(),
         )])];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::Paragraph(spans) = &styled[0] {
             // Code content must NOT be HTML-stripped
             assert_eq!(spans[0].content, "Vec<String>");
@@ -373,7 +437,7 @@ mod tests {
                 level,
                 spans: vec![InlineSpan::Plain("Title".to_owned())],
             }];
-            let styled = transform(blocks, &theme);
+            let styled = transform(blocks, &theme, &super::RenderOptions::default());
             if let StyledBlock::Heading { spans, .. } = &styled[0] {
                 assert!(
                     spans[0].style.add_modifier.contains(Modifier::BOLD),
@@ -406,12 +470,123 @@ mod tests {
             language: Some("rust".to_owned()),
             content: "let v: Vec<String> = vec![]; let b = i < n;".to_owned(),
         }];
-        let styled = transform(blocks, &theme);
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
         if let StyledBlock::CodeBlock { content, .. } = &styled[0] {
             assert!(content.contains("Vec<String>"));
             assert!(content.contains("i < n"));
         } else {
             panic!("Expected CodeBlock");
+        }
+    }
+
+    // ── AC3: Unclosed inline marker stripping ─────────────────────────────────
+
+    #[test]
+    fn test_strip_unclosed_markers_double_star() {
+        assert_eq!(
+            strip_unclosed_markers("**unclosed bold".to_owned()),
+            "unclosed bold"
+        );
+    }
+
+    #[test]
+    fn test_strip_unclosed_markers_single_star() {
+        assert_eq!(
+            strip_unclosed_markers("*unclosed italic".to_owned()),
+            "unclosed italic"
+        );
+    }
+
+    #[test]
+    fn test_strip_unclosed_markers_backtick() {
+        assert_eq!(
+            strip_unclosed_markers("`unclosed code".to_owned()),
+            "unclosed code"
+        );
+    }
+
+    #[test]
+    fn test_strip_unclosed_markers_tilde() {
+        assert_eq!(
+            strip_unclosed_markers("~~unclosed strike".to_owned()),
+            "unclosed strike"
+        );
+    }
+
+    #[test]
+    fn test_strip_unclosed_markers_no_markers() {
+        // Fast path — no allocation
+        let s = "plain text with no markers".to_owned();
+        assert_eq!(strip_unclosed_markers(s.clone()), s);
+    }
+
+    #[test]
+    fn test_strip_markers_applied_in_completed_mode() {
+        // In completed mode, Plain spans with unclosed markers are stripped.
+        let theme = make_theme();
+        use super::super::parse::InlineSpan;
+        let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Plain(
+            "**unclosed bold".to_owned(),
+        )])];
+        let styled = transform(blocks, &theme, &super::RenderOptions::completed());
+        if let StyledBlock::Paragraph(spans) = &styled[0] {
+            assert_eq!(spans[0].content, "unclosed bold");
+        } else {
+            panic!("Expected Paragraph");
+        }
+    }
+
+    #[test]
+    fn test_strip_markers_not_applied_in_streaming_mode() {
+        // In streaming mode (default), Plain spans are left untouched.
+        let theme = make_theme();
+        use super::super::parse::InlineSpan;
+        let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Plain(
+            "**unclosed bold".to_owned(),
+        )])];
+        let styled = transform(blocks, &theme, &super::RenderOptions::default());
+        if let StyledBlock::Paragraph(spans) = &styled[0] {
+            assert_eq!(spans[0].content, "**unclosed bold");
+        } else {
+            panic!("Expected Paragraph");
+        }
+    }
+
+    #[test]
+    fn test_strip_markers_not_applied_to_code_span() {
+        // Code spans are never stripped regardless of mode.
+        let theme = make_theme();
+        use super::super::parse::InlineSpan;
+        let blocks = vec![MarkdownBlock::Paragraph(vec![InlineSpan::Code(
+            "**still here**".to_owned(),
+        )])];
+        let styled = transform(blocks, &theme, &super::RenderOptions::completed());
+        if let StyledBlock::Paragraph(spans) = &styled[0] {
+            assert_eq!(spans[0].content, "**still here**");
+        } else {
+            panic!("Expected Paragraph");
+        }
+    }
+
+    /// Mixed closed and unclosed markers: closed markers become styled variants and are
+    /// preserved; unclosed markers remain in Plain spans and are stripped (AC3, DF-078).
+    #[test]
+    fn test_strip_markers_mixed_closed_and_unclosed() {
+        let theme = make_theme();
+        use super::super::parse::InlineSpan;
+        // "**closed** and **unclosed" should render as "closed" (bold) + " and unclosed" (plain)
+        let blocks = vec![MarkdownBlock::Paragraph(vec![
+            InlineSpan::Bold("closed".to_owned()),
+            InlineSpan::Plain(" and **unclosed".to_owned()),
+        ])];
+        let styled = transform(blocks, &theme, &super::RenderOptions::completed());
+        if let StyledBlock::Paragraph(spans) = &styled[0] {
+            assert_eq!(spans.len(), 2);
+            assert_eq!(spans[0].content, "closed"); // Bold preserved
+            assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+            assert_eq!(spans[1].content, " and unclosed"); // Unclosed ** stripped
+        } else {
+            panic!("Expected Paragraph");
         }
     }
 }

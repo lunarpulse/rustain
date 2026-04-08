@@ -419,3 +419,51 @@ fn test_input_box_multiple_images_indicator() {
         "Multiple images indicator should render"
     );
 }
+
+// === Wide character (AC5: DF-052, DF-060) ===
+
+// Covers: DF-052 — emoji cursor display column uses Unicode display width, not char count
+#[test]
+fn test_cursor_to_row_col_emoji_display_width() {
+    // "hello 😀" has 7 chars: h(0) e(1) l(2) l(3) o(4) ' '(5) 😀(6)
+    // 😀 is a wide char (display width 2), so cursor after it is display col 8, not 7
+    assert_eq!(input_box::cursor_to_row_col("hello \u{1F600}", 7), (0, 8));
+    // Cursor at the emoji itself (i=6) → display col 6 (before emoji is consumed)
+    assert_eq!(input_box::cursor_to_row_col("hello \u{1F600}", 6), (0, 6));
+}
+
+// Covers: DF-052 — CJK cursor positions use display width
+#[test]
+fn test_cursor_to_row_col_cjk_display_width() {
+    // "你好界" = 3 CJK chars, each display width 2
+    assert_eq!(input_box::cursor_to_row_col("你好界", 0), (0, 0));
+    assert_eq!(input_box::cursor_to_row_col("你好界", 1), (0, 2));
+    assert_eq!(input_box::cursor_to_row_col("你好界", 2), (0, 4));
+    assert_eq!(input_box::cursor_to_row_col("你好界", 3), (0, 6));
+}
+
+// Covers: DF-060 — CJK input wraps at display width, not char count
+#[test]
+fn test_input_area_height_cjk_wraps_at_display_width() {
+    // "你好世界" = 4 CJK chars × display width 2 = 8 display cols
+    // area_width=6 → inner_width=4 → ceil(8/4) = 2 visual rows → 2+2 borders = 4
+    assert_eq!(input_box::input_area_height("你好世界", 6), 4);
+}
+
+// Covers: DF-060 — single CJK line that fits without wrapping
+#[test]
+fn test_input_area_height_cjk_no_wrap() {
+    // "你好" = 2 CJK chars × 2 = 4 display cols, area_width=10 → inner_width=8 → 1 row → 3
+    assert_eq!(input_box::input_area_height("你好", 10), 3);
+}
+
+// Covers: DF-060 — emoji in input wraps correctly
+#[test]
+fn test_input_area_height_emoji_wraps() {
+    // "😀😀😀" = 3 emoji × display width 2 = 6 display cols
+    // area_width=6 → inner_width=4 → ceil(6/4) = 2 visual rows → 4
+    assert_eq!(
+        input_box::input_area_height("\u{1F600}\u{1F600}\u{1F600}", 6),
+        4
+    );
+}

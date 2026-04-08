@@ -1,12 +1,12 @@
 pub mod app;
 pub mod clipboard;
-pub mod markdown;
 #[allow(dead_code)]
 pub mod color_detect;
 pub mod help_data;
 pub mod hints;
 pub mod image;
 pub mod layout;
+pub mod markdown;
 pub mod state;
 pub mod terminal;
 #[allow(dead_code)]

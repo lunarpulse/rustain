@@ -90,8 +90,7 @@ pub fn parse(input: &str) -> Vec<MarkdownBlock> {
                     let raw = std::mem::take(&mut text_buf);
                     // pulldown-cmark appends a trailing newline; strip it
                     let content = raw.trim_end_matches('\n').to_owned();
-                    let language = if let Some(BlockCtx::CodeBlock { language }) = ctx_stack.pop()
-                    {
+                    let language = if let Some(BlockCtx::CodeBlock { language }) = ctx_stack.pop() {
                         language
                     } else {
                         None
@@ -305,9 +304,7 @@ mod tests {
     fn test_bold_italic_span() {
         let blocks = parse("***bold italic***");
         if let MarkdownBlock::Paragraph(spans) = &blocks[0] {
-            assert!(spans
-                .iter()
-                .any(|s| matches!(s, InlineSpan::BoldItalic(_))));
+            assert!(spans.iter().any(|s| matches!(s, InlineSpan::BoldItalic(_))));
         } else {
             panic!("Expected Paragraph");
         }
@@ -370,9 +367,11 @@ mod tests {
     #[test]
     fn test_thematic_break() {
         let blocks = parse("---\n");
-        assert!(blocks
-            .iter()
-            .any(|b| matches!(b, MarkdownBlock::ThematicBreak)));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, MarkdownBlock::ThematicBreak))
+        );
     }
 
     #[test]
@@ -384,11 +383,7 @@ mod tests {
         for block in &blocks {
             if let MarkdownBlock::List { items, .. } = block {
                 for item in items {
-                    assert!(
-                        item.depth <= 1,
-                        "depth {} exceeds cap of 1",
-                        item.depth
-                    );
+                    assert!(item.depth <= 1, "depth {} exceeds cap of 1", item.depth);
                 }
             }
         }
@@ -410,7 +405,10 @@ mod tests {
         // receives events without End(Paragraph), the EOF flush catches it.
         // Test via the public API: bare text without trailing newline.
         let blocks = parse("hello world");
-        assert!(!blocks.is_empty(), "EOF flush should capture trailing content");
+        assert!(
+            !blocks.is_empty(),
+            "EOF flush should capture trailing content"
+        );
         if let MarkdownBlock::Paragraph(spans) = &blocks[0] {
             assert_eq!(spans[0], plain("hello world"));
         }
@@ -425,10 +423,13 @@ mod tests {
         let last = blocks.last().unwrap();
         match last {
             MarkdownBlock::Paragraph(spans) => {
-                let text: String = spans.iter().map(|s| match s {
-                    InlineSpan::Plain(t) => t.as_str(),
-                    _ => "",
-                }).collect();
+                let text: String = spans
+                    .iter()
+                    .map(|s| match s {
+                        InlineSpan::Plain(t) => t.as_str(),
+                        _ => "",
+                    })
+                    .collect();
                 assert!(text.contains("trailing text"));
             }
             _ => panic!("Expected trailing Paragraph, got {:?}", last),
@@ -496,7 +497,10 @@ mod tests {
                 .iter()
                 .filter(|s| matches!(s, InlineSpan::Plain(t) if t == "\n"))
                 .count();
-            assert_eq!(newline_count, 2, "Expected 2 newline spans for 3 lines, got: {spans:?}");
+            assert_eq!(
+                newline_count, 2,
+                "Expected 2 newline spans for 3 lines, got: {spans:?}"
+            );
         } else {
             panic!("Expected Paragraph");
         }
@@ -535,10 +539,8 @@ mod tests {
             hard_blocks.len(),
             "Soft and hard break should produce same block count"
         );
-        if let (
-            MarkdownBlock::Paragraph(soft_spans),
-            MarkdownBlock::Paragraph(hard_spans),
-        ) = (&soft_blocks[0], &hard_blocks[0])
+        if let (MarkdownBlock::Paragraph(soft_spans), MarkdownBlock::Paragraph(hard_spans)) =
+            (&soft_blocks[0], &hard_blocks[0])
         {
             assert_eq!(
                 soft_spans, hard_spans,
@@ -555,9 +557,18 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         if let MarkdownBlock::CodeBlock { content, .. } = &blocks[0] {
             // Content must be verbatim — all newlines preserved as-is
-            assert!(content.contains("key: value"), "YAML key missing: {content}");
-            assert!(content.contains("nested:"), "YAML nested key missing: {content}");
-            assert!(content.contains("  - item"), "YAML list item missing: {content}");
+            assert!(
+                content.contains("key: value"),
+                "YAML key missing: {content}"
+            );
+            assert!(
+                content.contains("nested:"),
+                "YAML nested key missing: {content}"
+            );
+            assert!(
+                content.contains("  - item"),
+                "YAML list item missing: {content}"
+            );
         } else {
             panic!("Expected CodeBlock, got: {blocks:?}");
         }

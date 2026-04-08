@@ -6,8 +6,7 @@ use crate::adapters::tui::state::HelpOverlayState;
 use crate::adapters::tui::theme::Theme;
 
 /// Prose introduction shown at the top of the help overlay.
-const INTRO: &str =
-    "Rustain is a composable AI agent platform. Navigate with j/k, type with i, \
+const INTRO: &str = "Rustain is a composable AI agent platform. Navigate with j/k, type with i, \
      search with Ctrl+P, extend with Ctrl+X chords. Press ? or Esc to close.";
 
 /// Render the help overlay as a large centered popup.
@@ -26,13 +25,13 @@ pub fn render(
     let overlay_area = centered_area(area, 80, 90);
 
     // Dim the background behind the overlay
-    let bg_block = Block::default()
-        .style(Style::default().bg(Color::Black));
+    let bg_block = Block::default().style(Style::default().bg(Color::Black));
     frame.render_widget(Clear, overlay_area);
     frame.render_widget(bg_block, overlay_area);
 
     // Build the content lines
-    let content_lines = build_content_lines(theme, tmux_detected, state.scroll_offset, overlay_area);
+    let content_lines =
+        build_content_lines(theme, tmux_detected, state.scroll_offset, overlay_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -46,13 +45,11 @@ pub fn render(
             Style::default().fg(theme.colors.fg_muted),
         ));
 
-    let para = Paragraph::new(content_lines)
-        .block(block)
-        .style(
-            Style::default()
-                .fg(theme.colors.fg_primary)
-                .bg(theme.colors.bg_secondary),
-        );
+    let para = Paragraph::new(content_lines).block(block).style(
+        Style::default()
+            .fg(theme.colors.fg_primary)
+            .bg(theme.colors.bg_secondary),
+    );
 
     frame.render_widget(para, overlay_area);
 }

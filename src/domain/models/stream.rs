@@ -76,6 +76,7 @@ pub enum StreamingPhase {
 pub struct StreamingState {
     pub phase: StreamingPhase,
     pub current_text_buffer: String,
+    pub thinking_buffer: String,
     pub current_blocks: Vec<super::content::ContentBlockType>,
     pub active_tool_calls: std::collections::HashMap<String, super::tools::ToolCallInfo>,
     pub is_streaming: bool,
@@ -86,6 +87,7 @@ impl Default for StreamingState {
         Self {
             phase: StreamingPhase::Idle,
             current_text_buffer: String::new(),
+            thinking_buffer: String::new(),
             current_blocks: Vec::new(),
             active_tool_calls: std::collections::HashMap::new(),
             is_streaming: false,
@@ -112,10 +114,18 @@ pub fn apply_chunk(
         }
 
         StreamChunk::Thinking { content, .. } => {
-            // Thinking text goes to blocks but not to the main text buffer
-            streaming.current_blocks.push(ContentBlockType::Thinking);
+            streaming.thinking_buffer.push_str(&content);
+            // Replace previous Thinking block instead of appending to avoid
+            // unbounded duplication and O(N²) memory growth (DF-082, DF-083)
+            let new_block = ContentBlockType::Thinking(streaming.thinking_buffer.clone());
+            if let Some(idx) = streaming.current_blocks.iter().rposition(|b| {
+                matches!(b, ContentBlockType::Thinking(_))
+            }) {
+                streaming.current_blocks[idx] = new_block;
+            } else {
+                streaming.current_blocks.push(new_block);
+            }
             streaming.phase = StreamingPhase::InThinking;
-            let _ = content; // content used by rendering layer in future stories
             ChunkAction::NeedsRedraw
         }
 
@@ -428,7 +438,49 @@ mod tests {
 
         assert_eq!(action, ChunkAction::NeedsRedraw);
         assert_eq!(streaming.phase, StreamingPhase::InThinking);
-        assert_eq!(streaming.current_blocks, vec![ContentBlockType::Thinking]);
+        assert_eq!(streaming.thinking_buffer, "Let me think...");
+        assert_eq!(
+            streaming.current_blocks,
+            vec![ContentBlockType::Thinking("Let me think...".to_owned())]
+        );
+    }
+
+    // Covers: AC4 (DF-025) — thinking text accumulated across chunks
+    #[test]
+    fn test_apply_chunk_thinking_accumulates_text() {
+        let mut conv = make_conversation();
+        let mut streaming = make_streaming();
+
+        apply_chunk(
+            &mut conv,
+            &mut streaming,
+            StreamChunk::Thinking {
+                content: "First chunk. ".into(),
+                parent_tool_use_id: None,
+            },
+            1000,
+        );
+        apply_chunk(
+            &mut conv,
+            &mut streaming,
+            StreamChunk::Thinking {
+                content: "Second chunk.".into(),
+                parent_tool_use_id: None,
+            },
+            1000,
+        );
+
+        assert_eq!(streaming.thinking_buffer, "First chunk. Second chunk.");
+        // Thinking blocks are replaced, not appended — only one Thinking block exists
+        // This prevents O(N²) memory growth and unbounded duplication (DF-082, DF-083)
+        let thinking_blocks: Vec<_> = streaming.current_blocks.iter().filter(|b| {
+            matches!(b, ContentBlockType::Thinking(_))
+        }).collect();
+        assert_eq!(thinking_blocks.len(), 1, "Should have exactly one Thinking block");
+        assert_eq!(
+            thinking_blocks[0],
+            &ContentBlockType::Thinking("First chunk. Second chunk.".to_owned())
+        );
     }
 
     #[test]

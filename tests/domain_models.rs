@@ -71,7 +71,7 @@ fn test_content_block_type_roundtrip() {
         ContentBlockType::ToolResult,
         ContentBlockType::PermissionPrompt,
         ContentBlockType::Error,
-        ContentBlockType::Thinking,
+        ContentBlockType::Thinking("test".to_owned()),
     ] {
         let json = serde_json::to_string(&variant).unwrap();
         let deserialized: ContentBlockType = serde_json::from_str(&json).unwrap();

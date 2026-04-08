@@ -3,6 +3,7 @@
 // Covers: FR112 (image attachment)
 
 /// Supported image media types.
+#[allow(dead_code)] // used for validation in future story; defined here for discoverability
 pub const SUPPORTED_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
 /// Size threshold for large image warning (5MB in base64-encoded bytes).

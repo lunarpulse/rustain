@@ -549,8 +549,13 @@ pub fn buffer_contains_styled_text(
 impl TestHarness {
     /// Assert that the status bar row contains `text`.
     ///
-    /// The status bar is always 1 row, positioned at `height - 4`
-    /// (layout: chat fills remaining, status = 1 row, input = 3 rows).
+    /// The status bar is positioned at `height - MIN_INPUT_HEIGHT - 1` (one row above the
+    /// input area). This formula is valid when the input buffer is empty, which is the
+    /// standard harness initial state. Tests that fill the input buffer before checking
+    /// the status bar must account for any extra input rows.
+    ///
+    /// A runtime check validates the computed row contains non-whitespace content; if it
+    /// does not, the layout may have changed and this offset needs revisiting.
     pub fn assert_status_bar_contains(&self, text: &str) {
         assert!(
             !text.is_empty(),
@@ -559,8 +564,8 @@ impl TestHarness {
         let buf = self.terminal.backend().buffer().clone();
         let height = buf.area.height;
         let width = buf.area.width as usize;
-        // Status bar sits at row (height - 4): 3 rows for input area + 1 for status bar itself
-        let status_row = height.saturating_sub(4);
+        // Status bar sits at height - MIN_INPUT_HEIGHT - 1 (= height - 4 for empty input).
+        let status_row = height.saturating_sub(layout::MIN_INPUT_HEIGHT + 1);
 
         let row_start = status_row as usize * width;
         let row_end = (row_start + width).min(buf.content().len());
@@ -568,6 +573,17 @@ impl TestHarness {
             .iter()
             .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
             .collect();
+
+        // Validate: the status bar row must contain non-whitespace content.
+        // If this assertion fires, the layout changed and the row offset needs updating.
+        assert!(
+            !row_text.trim().is_empty(),
+            "assert_status_bar_contains: status row {} is blank — layout may have changed \
+             (terminal {}x{}). Recheck MIN_INPUT_HEIGHT offset.",
+            status_row,
+            buf.area.width,
+            height,
+        );
 
         assert!(
             row_text.contains(text),

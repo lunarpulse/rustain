@@ -15,7 +15,7 @@ pub enum ContentBlockType {
     Feedback,
 
     // v0.5
-    Thinking,
+    Thinking(String),
     PlanCard,
     PlanDeviation,
     SubagentStatus,

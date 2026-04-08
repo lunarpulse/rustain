@@ -40,7 +40,9 @@ pub fn is_vscode_terminal() -> bool {
     env_var_trimmed("TERM_PROGRAM")
         .map(|p| p.eq_ignore_ascii_case("vscode"))
         .unwrap_or(false)
-        || env_var_is_set("VSCODE_CWD")
+        || env_var_trimmed("VSCODE_CWD")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
 }
 
 /// Normalize a base URL by trimming whitespace and removing trailing slashes.
@@ -292,14 +294,14 @@ mod tests {
     //
     // These tests mutate TERM_PROGRAM and VSCODE_CWD — global env vars shared
     // with the actual dev environment (which may be VS Code) and with sibling
-    // test threads. A Mutex serialises all these tests so they don't race.
+    // test threads. #[serial] from serial_test serialises all these tests so
+    // they don't race. Covers: AC13 (env var test isolation).
 
-    use std::sync::Mutex;
-    static VSCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_is_vscode_terminal_via_term_program() {
-        let _g = VSCODE_ENV_LOCK.lock().unwrap();
         let saved_tp = std::env::var("TERM_PROGRAM").ok();
         let saved_cwd = std::env::var("VSCODE_CWD").ok();
 
@@ -320,8 +322,8 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_is_vscode_terminal_term_program_case_insensitive() {
-        let _g = VSCODE_ENV_LOCK.lock().unwrap();
         let saved_tp = std::env::var("TERM_PROGRAM").ok();
         let saved_cwd = std::env::var("VSCODE_CWD").ok();
 
@@ -341,8 +343,8 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_is_vscode_terminal_via_vscode_cwd() {
-        let _g = VSCODE_ENV_LOCK.lock().unwrap();
         let saved_tp = std::env::var("TERM_PROGRAM").ok();
         let saved_cwd = std::env::var("VSCODE_CWD").ok();
 
@@ -362,8 +364,8 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_is_not_vscode_terminal_unset() {
-        let _g = VSCODE_ENV_LOCK.lock().unwrap();
         let saved_tp = std::env::var("TERM_PROGRAM").ok();
         let saved_cwd = std::env::var("VSCODE_CWD").ok();
 
@@ -383,8 +385,8 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_is_not_vscode_terminal_other_program() {
-        let _g = VSCODE_ENV_LOCK.lock().unwrap();
         let saved_tp = std::env::var("TERM_PROGRAM").ok();
         let saved_cwd = std::env::var("VSCODE_CWD").ok();
 
@@ -401,5 +403,30 @@ mod tests {
             None => unsafe { remove_env("VSCODE_CWD") },
         }
         assert!(!result);
+    }
+
+    // Covers: AC9 (3-6a-D2) — empty VSCODE_CWD should not trigger VS Code detection
+    #[test]
+    #[serial]
+    fn test_is_vscode_terminal_empty_vscode_cwd_not_detected() {
+        let saved_tp = std::env::var("TERM_PROGRAM").ok();
+        let saved_cwd = std::env::var("VSCODE_CWD").ok();
+
+        unsafe { remove_env("TERM_PROGRAM") };
+        unsafe { set_env("VSCODE_CWD", "") };
+        let result = is_vscode_terminal();
+
+        match saved_tp {
+            Some(v) => unsafe { set_env("TERM_PROGRAM", &v) },
+            None => unsafe { remove_env("TERM_PROGRAM") },
+        }
+        match saved_cwd {
+            Some(v) => unsafe { set_env("VSCODE_CWD", &v) },
+            None => unsafe { remove_env("VSCODE_CWD") },
+        }
+        assert!(
+            !result,
+            "Empty VSCODE_CWD should not trigger VS Code detection"
+        );
     }
 }

@@ -674,6 +674,9 @@ pub struct TuiState {
     /// Cached multiplexer detection (tmux/screen) — set once at startup.
     // Covers: UX-DR62
     pub multiplexer_detected: bool,
+    /// Whether the terminal is VS Code's integrated terminal — set once at startup.
+    // Covers: Sprint Change Proposal 2026-04-08, AC#4, AC9 (3-6a-D2)
+    pub is_vscode: bool,
     /// How many TUI sessions this user has started (loaded from global config).
     /// Used to fade contextual hints after the first N sessions.
     // Covers: UX-DR96
@@ -733,6 +736,7 @@ impl TuiState {
             which_key: WhichKeyState::new(),
             help_overlay: HelpOverlayState::new(),
             multiplexer_detected: false,
+            is_vscode: false,
             session_count: 0,
             current_hint: None,
         }

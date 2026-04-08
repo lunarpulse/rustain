@@ -17,10 +17,8 @@ mod tests {
     fn test_highlight_is_identity() {
         let theme = Theme::dark();
         // Build a minimal block list
-        let input: Vec<StyledBlock> = vec![
-            StyledBlock::Paragraph(vec![]),
-            StyledBlock::ThematicBreak,
-        ];
+        let input: Vec<StyledBlock> =
+            vec![StyledBlock::Paragraph(vec![]), StyledBlock::ThematicBreak];
         // Measure length before and after (can't compare by value without PartialEq,
         // but we can verify the same number of blocks come back)
         let input_len = input.len();

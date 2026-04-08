@@ -958,7 +958,11 @@ fn test_large_image_confirm_attach() {
     let action = handle_input(&mut state, &DomainInputEvent::ImagePaste(png_data));
     // Should return ImageSizeWarning with the data
     match action {
-        InputAction::ImageSizeWarning { media_type, data: _, warning } => {
+        InputAction::ImageSizeWarning {
+            media_type,
+            data: _,
+            warning,
+        } => {
             assert_eq!(media_type, "image/png");
             assert!(warning.contains("Large image"));
         }
@@ -1110,19 +1114,177 @@ fn test_alt_enter_behaves_like_shift_enter() {
 fn test_alt_m_behaves_like_ctrl_e() {
     // Ctrl+E baseline
     let mut state1 = TuiState::new(80, 24);
-    handle_input(
-        &mut state1,
-        &DomainInputEvent::SpecialKey(DomainKey::CtrlE),
-    );
+    handle_input(&mut state1, &DomainInputEvent::SpecialKey(DomainKey::CtrlE));
     let mode_after_ctrl_e = state1.multiline_mode;
 
     // Alt+M should produce the same result
     let mut state2 = TuiState::new(80, 24);
-    handle_input(
-        &mut state2,
-        &DomainInputEvent::SpecialKey(DomainKey::AltM),
-    );
+    handle_input(&mut state2, &DomainInputEvent::SpecialKey(DomainKey::AltM));
     let mode_after_alt_m = state2.multiline_mode;
 
     assert_eq!(mode_after_ctrl_e, mode_after_alt_m);
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC11 (negative focus-state tests)
+/// Alt+Enter in Chat focus is ignored — does not insert newline into buffer.
+#[test]
+fn test_alt_enter_ignored_in_chat_focus() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    let initial_buffer = state.input_buffer.clone();
+
+    let action = handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
+    );
+    // Alt+Enter in Chat focus should be ignored (not handled)
+    assert_eq!(action, InputAction::Ignored, "Alt+Enter in Chat should be Ignored");
+    assert_eq!(
+        state.input_buffer, initial_buffer,
+        "Alt+Enter in Chat should not modify buffer"
+    );
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC11 (negative focus-state tests)
+/// Alt+M in Chat focus is ignored — does not toggle multi-line mode.
+#[test]
+fn test_alt_m_ignored_in_chat_focus() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    let initial_mode = state.multiline_mode;
+
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
+    assert_eq!(
+        state.multiline_mode, initial_mode,
+        "Alt+M in Chat should not toggle multiline mode"
+    );
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC11 (negative focus-state tests)
+/// ShiftEnter in Chat focus is ignored — does not insert newline into buffer.
+#[test]
+fn test_shift_enter_ignored_in_chat_focus() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    let initial_buffer = state.input_buffer.clone();
+
+    handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::ShiftEnter),
+    );
+    assert_eq!(
+        state.input_buffer, initial_buffer,
+        "ShiftEnter in Chat should not modify buffer"
+    );
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC11 (negative focus-state tests)
+/// Ctrl+E in Chat focus is ignored — does not toggle multi-line mode.
+#[test]
+fn test_ctrl_e_ignored_in_chat_focus() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    let initial_mode = state.multiline_mode;
+
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlE));
+    assert_eq!(
+        state.multiline_mode, initial_mode,
+        "Ctrl+E in Chat should not toggle multiline mode"
+    );
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC10 (crossterm conversion)
+/// Alt+Enter crossterm key event converts to DomainKey::AltEnter.
+#[test]
+fn test_crossterm_alt_enter_converts_to_domain_alt_enter() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use rustain::adapters::tui::app::convert_crossterm_event;
+
+    let event = Event::Key(KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: KeyModifiers::ALT,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    });
+
+    let domain_event = convert_crossterm_event(&event);
+    assert!(
+        domain_event.is_some(),
+        "Alt+Enter should produce a domain event"
+    );
+    match domain_event.unwrap() {
+        DomainInputEvent::SpecialKey(DomainKey::AltEnter) => {} // expected
+        other => panic!("Expected AltEnter, got {:?}", other),
+    }
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC10 (crossterm conversion)
+/// Alt+M crossterm key event converts to DomainKey::AltM.
+#[test]
+fn test_crossterm_alt_m_converts_to_domain_alt_m() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+    use rustain::adapters::tui::app::convert_crossterm_event;
+
+    let event = Event::Key(KeyEvent {
+        code: KeyCode::Char('m'),
+        modifiers: KeyModifiers::ALT,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    });
+
+    let domain_event = convert_crossterm_event(&event);
+    assert!(
+        domain_event.is_some(),
+        "Alt+M should produce a domain event"
+    );
+    match domain_event.unwrap() {
+        DomainInputEvent::SpecialKey(DomainKey::AltM) => {} // expected
+        other => panic!("Expected AltM, got {:?}", other),
+    }
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC12 (keybinding + autocomplete interaction)
+/// Alt+Enter while autocomplete is active dismisses the popup AND inserts newline.
+#[test]
+fn test_alt_enter_dismisses_autocomplete_and_inserts_newline() {
+    let mut state = TuiState::new(80, 24);
+    // Activate autocomplete via '/'
+    handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+    assert!(state.autocomplete.active);
+
+    // Alt+Enter: autocomplete dismissed, newline inserted
+    handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
+    );
+    assert!(
+        !state.autocomplete.active,
+        "Alt+Enter should dismiss autocomplete"
+    );
+    assert!(
+        state.input_buffer.contains('\n'),
+        "Alt+Enter should insert a newline after dismissing autocomplete"
+    );
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC12 (keybinding + autocomplete interaction)
+/// Alt+M while autocomplete is active dismisses the popup AND toggles multi-line mode.
+#[test]
+fn test_alt_m_dismisses_autocomplete_and_toggles_multiline() {
+    let mut state = TuiState::new(80, 24);
+    let initial_mode = state.multiline_mode;
+    // Activate autocomplete via '/'
+    handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+    assert!(state.autocomplete.active);
+
+    // Alt+M: autocomplete dismissed, multiline toggled
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
+    assert!(
+        !state.autocomplete.active,
+        "Alt+M should dismiss autocomplete"
+    );
+    assert_ne!(
+        state.multiline_mode, initial_mode,
+        "Alt+M should toggle multi-line mode after dismissing autocomplete"
+    );
 }

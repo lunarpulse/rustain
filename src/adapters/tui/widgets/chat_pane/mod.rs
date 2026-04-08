@@ -15,8 +15,8 @@ use crate::domain::models::{
 };
 
 use super::empty_state;
-use word_wrap::wrap_text;
 use crate::adapters::tui::markdown;
+use word_wrap::wrap_text;
 
 /// Result of rendering the chat pane, including boundary data for navigation.
 pub struct RenderResult {
@@ -44,7 +44,7 @@ fn compute_message_height(
     } else {
         // Use the markdown pipeline — same code path as render_message() — to
         // guarantee the height invariant required by virtual scrolling (AC6).
-        markdown::compute_height(content, width)
+        markdown::compute_height(content, width, &markdown::RenderOptions::completed())
     };
     // Cancelled messages append " [interrupted]" as a separate line.
     // compute_height() receives raw content without the suffix, so check if
@@ -90,7 +90,12 @@ fn render_message<'a>(
             )));
         }
     } else {
-        let parsed_lines = markdown::render(&msg.content, width, theme);
+        let parsed_lines = markdown::render(
+            &msg.content,
+            width,
+            theme,
+            &markdown::RenderOptions::completed(),
+        );
         lines.extend(parsed_lines);
     }
 
@@ -178,10 +183,18 @@ pub fn render(
             block_boundaries.push(cumulative_offset + h);
         }
 
-        // Use height cache for all messages (including those with tool calls).
-        // Cache is invalidated on collapse/expand toggle via height_cache.invalidate_all().
+        // Use height cache. If the cached value diverges from the freshly computed
+        // value (e.g., a tool result with an error arrived and changed the height),
+        // invalidate the whole cache so subsequent messages stay in sync (AC2, DF-061).
         if let Some(cached) = height_cache.get(i) {
-            h = cached;
+            if cached == h {
+                h = cached; // Cache hit — values agree, no divergence.
+            } else {
+                // Stale entry detected: height changed without an explicit invalidation.
+                // Invalidate all to keep block_boundaries coherent for downstream messages.
+                height_cache.invalidate_all();
+                height_cache.set(i, h);
+            }
         } else {
             height_cache.set(i, h);
         }
@@ -208,7 +221,11 @@ pub fn render(
             1 + if has_error {
                 wrap_text(&streaming.current_text_buffer, width).len()
             } else {
-                markdown::compute_height(&streaming.current_text_buffer, width)
+                markdown::compute_height(
+                    &streaming.current_text_buffer,
+                    width,
+                    &markdown::RenderOptions::default(),
+                )
             }
         };
 
@@ -225,7 +242,20 @@ pub fn render(
         0
     };
 
-    let mut total_content_height = cumulative_offset;
+    // Pre-compute feedback block contribution so visible_start/visible_end include them.
+    // Without this, auto_scroll viewport is computed before feedback heights are known,
+    // causing feedback blocks to be silently dropped from the render (AC1, DF-079).
+    let feedback_pre_height: usize = if !feedback_blocks.is_empty() {
+        let pre_spacing = if cumulative_offset > 0 { spacing } else { 0 };
+        let fb_heights: usize = feedback_blocks
+            .values()
+            .map(|fb| feedback_block::render_feedback_lines(fb, area.width, theme).len())
+            .sum();
+        pre_spacing + fb_heights
+    } else {
+        0
+    };
+    let mut total_content_height = cumulative_offset + feedback_pre_height;
 
     // Phase 2: Determine visible range using offset-from-bottom model
     let effective_offset = if auto_scroll {
@@ -516,7 +546,12 @@ fn render_streaming<'a>(streaming: &StreamingState, width: usize, theme: &Theme)
                 )));
             }
         } else {
-            let parsed_lines = markdown::render(&streaming.current_text_buffer, width, theme);
+            let parsed_lines = markdown::render(
+                &streaming.current_text_buffer,
+                width,
+                theme,
+                &markdown::RenderOptions::default(),
+            );
             lines.extend(parsed_lines);
         }
     }

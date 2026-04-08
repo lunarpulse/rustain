@@ -1,5 +1,6 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::FocusState;
@@ -9,12 +10,21 @@ pub const MAX_INPUT_LINES: usize = 8;
 
 /// Compute the number of display rows needed for the input area (including borders).
 /// Returns at least 3 (1 line + 2 border rows), up to MAX_INPUT_LINES + 2.
+///
+/// Uses Unicode display width for line wrapping so CJK/emoji input that occupies
+/// more terminal columns than its scalar count computes the correct row count (DF-060).
 // Covers: FR16, UX-DR76
 pub fn input_area_height(input: &str, area_width: u16) -> u16 {
-    let _ = area_width; // area_width reserved for future wide-char wrapping (DF-060)
-    let line_count: usize = input.split('\n').count();
-    let visible = line_count.clamp(1, MAX_INPUT_LINES);
-    (visible as u16) + 2 // +2 for top and bottom borders
+    let inner_width = (area_width as usize).saturating_sub(2).max(1);
+    let visual_rows: usize = input
+        .split('\n')
+        .map(|line| {
+            let w = UnicodeWidthStr::width(line);
+            if w == 0 { 1 } else { w.div_ceil(inner_width) }
+        })
+        .sum();
+    let visible = visual_rows.clamp(1, MAX_INPUT_LINES);
+    (visible as u16) + 2
 }
 
 /// Estimate token count from text using character/word heuristic.
@@ -131,6 +141,9 @@ pub fn render(
 }
 
 /// Convert a char-index cursor position to (row, col) within multi-line text.
+///
+/// `col` is the **display column** (Unicode display width), not the Unicode scalar
+/// count. This makes cursor placement correct for CJK and emoji (DF-052).
 pub fn cursor_to_row_col(text: &str, cursor_pos: usize) -> (usize, usize) {
     let mut row = 0;
     let mut col = 0;
@@ -142,18 +155,21 @@ pub fn cursor_to_row_col(text: &str, cursor_pos: usize) -> (usize, usize) {
             row += 1;
             col = 0;
         } else {
-            col += 1;
+            col += UnicodeWidthChar::width(c).unwrap_or(1);
         }
     }
     (row, col)
 }
 
-/// Convert a (row, col) position to a char-index within multi-line text.
+/// Convert a (row, display-col) position to a char-index within multi-line text.
+///
+/// `target_col` is a **display column** to match `cursor_to_row_col`. Wide chars
+/// may cause `col` to jump past `target_col`; the function returns at `col >= target_col`.
 pub fn row_col_to_cursor(text: &str, target_row: usize, target_col: usize) -> usize {
     let mut row = 0;
     let mut col = 0;
     for (i, c) in text.chars().enumerate() {
-        if row == target_row && col == target_col {
+        if row == target_row && col >= target_col {
             return i;
         }
         if c == '\n' {
@@ -164,18 +180,20 @@ pub fn row_col_to_cursor(text: &str, target_row: usize, target_col: usize) -> us
             row += 1;
             col = 0;
         } else {
-            col += 1;
+            col += UnicodeWidthChar::width(c).unwrap_or(1);
         }
     }
     // Past the end — return text length in chars
     text.chars().count()
 }
 
-/// Get the length of a specific row in the text (in chars, excluding newline).
+/// Get the display-column length of a specific row in the text (excluding newline).
+///
+/// Returns Unicode display width — consistent with `cursor_to_row_col` column values.
 pub fn line_len_at_row(text: &str, target_row: usize) -> usize {
     text.split('\n')
         .nth(target_row)
-        .map(|line| line.chars().count())
+        .map(|line| UnicodeWidthStr::width(line))
         .unwrap_or(0)
 }
 

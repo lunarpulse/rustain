@@ -59,8 +59,8 @@ pub async fn run(
     // Cache multiplexer detection once at startup (UX-DR62)
     state.multiplexer_detected = crate::adapters::tui::help_data::is_multiplexer_session();
 
-    // Cache VS Code terminal detection once at startup (Sprint Change Proposal 2026-04-08, AC#4)
-    let is_vscode = crate::infrastructure::utils::is_vscode_terminal();
+    // Cache VS Code terminal detection once at startup (Sprint Change Proposal 2026-04-08, AC#4, AC9)
+    state.is_vscode = crate::infrastructure::utils::is_vscode_terminal();
 
     // Load and increment session count for contextual hint fading (UX-DR96)
     state.session_count = crate::adapters::tui::hints::load_and_increment_session_count();
@@ -69,7 +69,7 @@ pub async fn run(
         &state.focus,
         state.session_count,
         state.theme.timing.status_hint_fade_sessions,
-        is_vscode,
+        state.is_vscode,
     );
 
     // Set project context indicator based on persona
@@ -232,7 +232,7 @@ pub async fn run(
                                     &state.focus,
                                     state.session_count,
                                     state.theme.timing.status_hint_fade_sessions,
-                                    is_vscode,
+                                    state.is_vscode,
                                 );
                             }
 
@@ -1945,5 +1945,4 @@ mod tests {
         let exact = "A".repeat(500);
         assert_eq!(truncate(&exact, 500), exact);
     }
-
 }

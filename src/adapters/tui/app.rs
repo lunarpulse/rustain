@@ -119,7 +119,7 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
                         };
                     }
 
-                    let total_kb = base64_len / 1024;
+                    let _total_kb = base64_len / 1024;
                     let attachment = crate::domain::models::ImageAttachment {
                         media_type: media_type.to_string(),
                         data,
@@ -1120,15 +1120,13 @@ fn handle_help_overlay_char(state: &mut TuiState, c: char) -> InputAction {
     match c {
         // j / Down → scroll toward bottom (increment offset)
         'j' => {
-            state.help_overlay.scroll_offset =
-                state.help_overlay.scroll_offset.saturating_add(1);
+            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_add(1);
             state.needs_redraw = true;
             InputAction::Consumed
         }
         // k / Up → scroll toward top (decrement offset)
         'k' => {
-            state.help_overlay.scroll_offset =
-                state.help_overlay.scroll_offset.saturating_sub(1);
+            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_sub(1);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1164,14 +1162,12 @@ fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction 
             InputAction::Consumed
         }
         DomainKey::Down => {
-            state.help_overlay.scroll_offset =
-                state.help_overlay.scroll_offset.saturating_add(1);
+            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_add(1);
             state.needs_redraw = true;
             InputAction::Consumed
         }
         DomainKey::Up => {
-            state.help_overlay.scroll_offset =
-                state.help_overlay.scroll_offset.saturating_sub(1);
+            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_sub(1);
             state.needs_redraw = true;
             InputAction::Consumed
         }

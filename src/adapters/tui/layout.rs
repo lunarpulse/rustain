@@ -3,6 +3,12 @@ use ratatui::prelude::*;
 use super::theme::Theme;
 use super::widgets::input_box;
 
+/// Minimum input area height (1 content line + 2 border rows) for an empty input buffer.
+/// Tests that need to locate the status bar row use this constant via:
+///   `status_row = terminal_height - MIN_INPUT_HEIGHT - 1`
+#[allow(dead_code)] // used from tests/e2e_harness.rs; not referenced in the binary
+pub const MIN_INPUT_HEIGHT: u16 = 3;
+
 /// Layout regions for the TUI frame.
 pub struct AppLayout {
     pub chat_pane: Rect,

@@ -289,8 +289,8 @@ mod tests {
     #[test]
     fn test_find_api_key_var_prefers_auth_token() {
         // Save originals
-        let orig_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
-        let orig_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        let orig_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
+        let orig_key = std::env::var("ANTHROPIC_API_KEY").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
 
         // SAFETY: Test-only env manipulation. Tests using env vars must run
         // with --test-threads=1 or accept potential flakiness.

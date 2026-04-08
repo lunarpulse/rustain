@@ -10,9 +10,6 @@ pub enum SessionState {
     Active {
         id: SessionId,
     },
-    Confirmed {
-        id: SessionId,
-    },
     Invalidated {
         previous_id: Option<SessionId>,
         needs_history_rebuild: bool,

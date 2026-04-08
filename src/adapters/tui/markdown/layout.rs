@@ -95,7 +95,11 @@ fn render_list_items(
         let wrapped = wrap_spans(item.spans.clone(), content_width);
 
         for (i, wrapped_line) in wrapped.into_iter().enumerate() {
-            let lead = if i == 0 { prefix.clone() } else { hanging.clone() };
+            let lead = if i == 0 {
+                prefix.clone()
+            } else {
+                hanging.clone()
+            };
             let mut spans: Vec<Span<'static>> = vec![Span::raw(lead)];
             spans.extend(wrapped_line.spans);
             lines.push(Line::from(spans));
@@ -157,9 +161,10 @@ fn render_code_block(
 
     // ── Footer ────────────────────────────────────────────────────────────────
     let footer_inner = "─".repeat(inner_width);
-    let footer = Line::from(vec![
-        Span::styled(format!("└{}┘", footer_inner), border_style),
-    ]);
+    let footer = Line::from(vec![Span::styled(
+        format!("└{}┘", footer_inner),
+        border_style,
+    )]);
     lines.push(footer);
 }
 
@@ -184,10 +189,7 @@ fn build_code_header(language: Option<&str>, width: usize, border_style: Style) 
         "─".repeat(inner_width)
     };
 
-    Line::from(Span::styled(
-        format!("┌{}┐", header_inner),
-        border_style,
-    ))
+    Line::from(Span::styled(format!("┌{}┐", header_inner), border_style))
 }
 
 /// Clip a string to at most `max_display_width` display columns.
@@ -220,6 +222,7 @@ fn display_width(s: &str) -> usize {
 /// - Words are separated by a single space (inter-word spaces are normalized).
 /// - Spans are kept atomic when possible (never broken mid-span if avoidable).
 /// - Uses `unicode-width` for display column calculations (fixes DF-062 for CJK).
+#[allow(unused_assignments)] // current_width reset in flush_line! macro is read on the next iteration
 pub fn wrap_spans(spans: Vec<StyledSpan>, width: usize) -> Vec<Line<'static>> {
     if width == 0 || spans.is_empty() {
         return vec![Line::from("")];
@@ -356,7 +359,11 @@ mod tests {
     #[test]
     fn test_zero_width_returns_empty() {
         let t = theme();
-        let result = layout(vec![StyledBlock::Paragraph(vec![plain_span("hello")])], 0, &t);
+        let result = layout(
+            vec![StyledBlock::Paragraph(vec![plain_span("hello")])],
+            0,
+            &t,
+        );
         assert!(result.is_empty());
     }
 
@@ -370,7 +377,11 @@ mod tests {
         );
         // 1 content line + 1 blank line
         assert_eq!(result.len(), 2);
-        assert!(result[1].spans.is_empty() || result[1].spans[0].content.is_empty() || result[1].spans[0].content == "");
+        assert!(
+            result[1].spans.is_empty()
+                || result[1].spans[0].content.is_empty()
+                || result[1].spans[0].content == ""
+        );
     }
 
     #[test]
@@ -450,7 +461,11 @@ mod tests {
         );
         // Content line should have clip indicator
         let content_line = &result[1];
-        let text: String = content_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text: String = content_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(text.contains(CLIP_INDICATOR));
     }
 
@@ -460,12 +475,10 @@ mod tests {
         let result = layout(
             vec![StyledBlock::List {
                 ordered: false,
-                items: vec![
-                    crate::adapters::tui::markdown::transform::StyledListItem {
-                        spans: vec![plain_span("item one")],
-                        depth: 0,
-                    },
-                ],
+                items: vec![crate::adapters::tui::markdown::transform::StyledListItem {
+                    spans: vec![plain_span("item one")],
+                    depth: 0,
+                }],
             }],
             40,
             &t,
@@ -581,12 +594,10 @@ mod tests {
         let result = layout(
             vec![StyledBlock::List {
                 ordered: false,
-                items: vec![
-                    crate::adapters::tui::markdown::transform::StyledListItem {
-                        spans: vec![plain_span(long_text.trim())],
-                        depth: 0,
-                    },
-                ],
+                items: vec![crate::adapters::tui::markdown::transform::StyledListItem {
+                    spans: vec![plain_span(long_text.trim())],
+                    depth: 0,
+                }],
             }],
             20,
             &t,

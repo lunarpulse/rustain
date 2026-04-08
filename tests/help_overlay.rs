@@ -1,4 +1,4 @@
-use rustain::adapters::tui::app::{handle_input, InputAction};
+use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::help_data;
 use rustain::adapters::tui::hints;
 use rustain::adapters::tui::state::{HelpOverlayState, TuiState};
@@ -121,10 +121,7 @@ fn test_question_mark_opens_help_from_chat() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
 
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Help)
-    );
+    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Help));
     assert!(state.help_overlay.active);
 }
 
@@ -252,19 +249,13 @@ fn test_ctrl_x_question_chord_opens_help() {
     state.focus = FocusState::Input;
 
     // Open which-key
-    handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::CtrlX),
-    );
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert!(state.which_key.active);
 
     // Press ?
     handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
     assert!(state.help_overlay.active);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Help)
-    );
+    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Help));
 }
 
 // ============================================================
@@ -277,16 +268,10 @@ fn test_arrow_key_scrolling_in_help_overlay() {
     state.help_overlay.open(FocusState::Chat);
     state.focus = FocusState::Overlay(OverlayType::Help);
 
-    handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::Down),
-    );
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Down));
     assert_eq!(state.help_overlay.scroll_offset, 1);
 
-    handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::Up),
-    );
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Up));
     assert_eq!(state.help_overlay.scroll_offset, 0);
 }
 
@@ -313,10 +298,7 @@ fn test_version_palette_action_produces_feedback() {
     state.command_palette.selected_index = 0;
 
     // Press Enter to execute
-    let action = handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::Enter),
-    );
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::Consumed);
     // version-info feedback block should exist
     assert!(state.feedback_blocks.contains_key("version-info"));
@@ -516,10 +498,7 @@ fn test_question_mark_ignored_during_which_key() {
     state.focus = FocusState::Input;
 
     // Open which-key
-    handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::CtrlX),
-    );
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert!(state.which_key.active);
 
     // Press ? — should execute chord (ShowHelp), dismissing which-key
@@ -534,10 +513,7 @@ fn test_ctrl_p_blocked_from_help_overlay() {
     state.help_overlay.open(FocusState::Chat);
     state.focus = FocusState::Overlay(OverlayType::Help);
 
-    let action = handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::CtrlP),
-    );
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     // Help overlay consumes all input — Ctrl+P is swallowed, not passed through
     assert_eq!(action, InputAction::Consumed);
     assert!(!state.command_palette.active);
@@ -553,10 +529,7 @@ fn test_ctrl_c_passes_through_help_overlay() {
     state.help_overlay.open(FocusState::Chat);
     state.focus = FocusState::Overlay(OverlayType::Help);
 
-    let action = handle_input(
-        &mut state,
-        &DomainInputEvent::SpecialKey(DomainKey::CtrlC),
-    );
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlC));
     // Ctrl+C should close overlay and signal cancel
     assert_eq!(action, InputAction::CancelOrQuit);
     assert!(!state.help_overlay.active);

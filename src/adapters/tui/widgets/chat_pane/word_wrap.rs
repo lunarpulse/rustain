@@ -68,7 +68,6 @@ fn char_wrap_word(word: &str, width: usize, result: &mut Vec<String>) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
