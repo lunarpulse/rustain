@@ -599,6 +599,21 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        // Alt+Enter: insert newline (VS Code terminal alternative to Shift+Enter)
+        // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#1
+        DomainKey::AltEnter if state.focus == FocusState::Input => {
+            insert_newline(state);
+            InputAction::Consumed
+        }
+
+        // Alt+M: toggle multi-line mode (VS Code terminal alternative to Ctrl+E)
+        // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#2
+        DomainKey::AltM if state.focus == FocusState::Input => {
+            state.multiline_mode = !state.multiline_mode;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
         // Ctrl+Enter: submit in multiline mode
         // Covers: UX-DR76
         DomainKey::CtrlEnter if state.focus == FocusState::Input => {
@@ -883,6 +898,11 @@ fn submit_message(state: &mut TuiState) -> InputAction {
         if !cmd_name.is_empty() {
             // Check if it's a built-in command
             if cmd_name == "new" {
+                return InputAction::ExecuteCommand(cmd_name);
+            }
+            // /ml: toggle multi-line mode (AC#3)
+            // Covers: Sprint Change Proposal 2026-04-08
+            if cmd_name == "ml" {
                 return InputAction::ExecuteCommand(cmd_name);
             }
             // User-defined command: submit with command context
@@ -1306,6 +1326,11 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
             }
+            // Alt+M → toggle multi-line mode (VS Code terminal alternative to Ctrl+E)
+            // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment
+            if *modifiers == KeyModifiers::ALT && *code == KeyCode::Char('m') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::AltM));
+            }
             // Ctrl+P → command palette
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('p') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlP));
@@ -1324,6 +1349,10 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
                 KeyCode::Enter => {
                     if modifiers.contains(KeyModifiers::SHIFT) {
                         Some(DomainInputEvent::SpecialKey(DomainKey::ShiftEnter))
+                    } else if modifiers.contains(KeyModifiers::ALT) {
+                        // Alt+Enter: VS Code terminal alternative to Shift+Enter
+                        // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment
+                        Some(DomainInputEvent::SpecialKey(DomainKey::AltEnter))
                     } else if modifiers.contains(KeyModifiers::CONTROL) {
                         Some(DomainInputEvent::SpecialKey(DomainKey::CtrlEnter))
                     } else {

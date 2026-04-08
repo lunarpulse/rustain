@@ -167,7 +167,16 @@ pub fn parse(input: &str) -> Vec<MarkdownBlock> {
                 inline_buf.push(InlineSpan::Code(code.to_string()));
             }
             Event::SoftBreak => {
-                text_buf.push(' ');
+                // Treat soft breaks as hard line breaks so that single `\n` in
+                // user input (and copy-pasted markdown/YAML/HTML) preserves line
+                // structure visually. CommonMark soft-break-as-space is correct
+                // for flowing prose but wrong for a TUI chat input context.
+                // Anthropic API responses use `\n\n` for paragraphs and rarely
+                // emit single `\n`, so this has negligible impact on assistant
+                // message rendering.
+                // Covers: DF-SoftBreak (discovered Story 3-6a)
+                flush_text!();
+                inline_buf.push(InlineSpan::Plain("\n".to_string()));
             }
             Event::HardBreak => {
                 flush_text!();
@@ -451,6 +460,106 @@ mod tests {
             assert!(content.contains("Vec<String>"));
         } else {
             panic!("Expected CodeBlock");
+        }
+    }
+
+    // ── SoftBreak-as-hard-newline tests (DF-SoftBreak) ───────────────────────
+
+    /// Single \n inside a paragraph parses to a \n InlineSpan, not a space.
+    /// Covers: DF-SoftBreak
+    #[test]
+    fn test_soft_break_emits_newline_span() {
+        let blocks = parse("line one\nline two");
+        assert_eq!(blocks.len(), 1, "Expected 1 paragraph");
+        if let MarkdownBlock::Paragraph(spans) = &blocks[0] {
+            // Must contain a Plain("\n") span between the two lines
+            let has_newline = spans
+                .iter()
+                .any(|s| matches!(s, InlineSpan::Plain(t) if t == "\n"));
+            assert!(
+                has_newline,
+                "Expected InlineSpan::Plain(\"\\n\") for soft break, got: {spans:?}"
+            );
+        } else {
+            panic!("Expected Paragraph, got: {blocks:?}");
+        }
+    }
+
+    /// Multi-line input produces a \n span between every adjacent line.
+    /// Covers: DF-SoftBreak (3-line case)
+    #[test]
+    fn test_soft_break_three_lines_all_newlines() {
+        let blocks = parse("alpha\nbeta\ngamma");
+        assert_eq!(blocks.len(), 1);
+        if let MarkdownBlock::Paragraph(spans) = &blocks[0] {
+            let newline_count = spans
+                .iter()
+                .filter(|s| matches!(s, InlineSpan::Plain(t) if t == "\n"))
+                .count();
+            assert_eq!(newline_count, 2, "Expected 2 newline spans for 3 lines, got: {spans:?}");
+        } else {
+            panic!("Expected Paragraph");
+        }
+    }
+
+    /// Inline formatting (bold, code) survives across soft-break lines.
+    /// Covers: DF-SoftBreak (markdown content preserved)
+    #[test]
+    fn test_soft_break_preserves_inline_formatting() {
+        let blocks = parse("**bold**\nnormal line");
+        assert_eq!(blocks.len(), 1);
+        if let MarkdownBlock::Paragraph(spans) = &blocks[0] {
+            let has_bold = spans.iter().any(|s| matches!(s, InlineSpan::Bold(_)));
+            let has_newline = spans
+                .iter()
+                .any(|s| matches!(s, InlineSpan::Plain(t) if t == "\n"));
+            assert!(has_bold, "Bold span should survive soft break: {spans:?}");
+            assert!(has_newline, "Newline span should follow bold: {spans:?}");
+        } else {
+            panic!("Expected Paragraph");
+        }
+    }
+
+    /// SoftBreak and HardBreak produce the same output — both emit Plain("\n").
+    /// Covers: DF-SoftBreak (parity with HardBreak)
+    #[test]
+    fn test_soft_break_matches_hard_break_output() {
+        // Single \n (soft break in CommonMark)
+        let soft_blocks = parse("line one\nline two");
+        // Two spaces + \n (hard break in CommonMark)
+        let hard_blocks = parse("line one  \nline two");
+
+        // Both should produce the same Paragraph structure
+        assert_eq!(
+            soft_blocks.len(),
+            hard_blocks.len(),
+            "Soft and hard break should produce same block count"
+        );
+        if let (
+            MarkdownBlock::Paragraph(soft_spans),
+            MarkdownBlock::Paragraph(hard_spans),
+        ) = (&soft_blocks[0], &hard_blocks[0])
+        {
+            assert_eq!(
+                soft_spans, hard_spans,
+                "Soft break and hard break should produce identical spans"
+            );
+        }
+    }
+
+    /// Code blocks are unaffected — their content is not parsed for inline events.
+    /// Covers: DF-SoftBreak (code block isolation)
+    #[test]
+    fn test_soft_break_does_not_affect_code_blocks() {
+        let blocks = parse("```yaml\nkey: value\nnested:\n  - item\n```\n");
+        assert_eq!(blocks.len(), 1);
+        if let MarkdownBlock::CodeBlock { content, .. } = &blocks[0] {
+            // Content must be verbatim — all newlines preserved as-is
+            assert!(content.contains("key: value"), "YAML key missing: {content}");
+            assert!(content.contains("nested:"), "YAML nested key missing: {content}");
+            assert!(content.contains("  - item"), "YAML list item missing: {content}");
+        } else {
+            panic!("Expected CodeBlock, got: {blocks:?}");
         }
     }
 }

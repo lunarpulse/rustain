@@ -29,6 +29,20 @@ pub fn env_var_is_set(name: &str) -> bool {
     env_var_trimmed(name).is_some()
 }
 
+/// Detect whether the process is running inside a VS Code integrated terminal.
+///
+/// VS Code sets `TERM_PROGRAM=vscode` or `VSCODE_CWD` when running in its
+/// integrated terminal. Either variable being present indicates VS Code context.
+///
+/// Used to decide whether to show Alt+Enter / Alt+M keybinding hints (UX-DR93).
+// Covers: Sprint Change Proposal 2026-04-08, AC#4
+pub fn is_vscode_terminal() -> bool {
+    env_var_trimmed("TERM_PROGRAM")
+        .map(|p| p.eq_ignore_ascii_case("vscode"))
+        .unwrap_or(false)
+        || env_var_is_set("VSCODE_CWD")
+}
+
 /// Normalize a base URL by trimming whitespace and removing trailing slashes.
 ///
 /// This prevents double-slash issues when paths are appended:
@@ -272,5 +286,120 @@ mod tests {
         assert_eq!(sanitize_id("session-01"), Ok("session-01"));
         assert_eq!(sanitize_id("abc"), Ok("abc"));
         assert_eq!(sanitize_id("A"), Ok("A"));
+    }
+
+    // ── is_vscode_terminal ─────────────────────────────────────────────
+    //
+    // These tests mutate TERM_PROGRAM and VSCODE_CWD — global env vars shared
+    // with the actual dev environment (which may be VS Code) and with sibling
+    // test threads. A Mutex serialises all these tests so they don't race.
+
+    use std::sync::Mutex;
+    static VSCODE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_is_vscode_terminal_via_term_program() {
+        let _g = VSCODE_ENV_LOCK.lock().unwrap();
+        let saved_tp = std::env::var("TERM_PROGRAM").ok();
+        let saved_cwd = std::env::var("VSCODE_CWD").ok();
+
+        unsafe { set_env("TERM_PROGRAM", "vscode") };
+        unsafe { remove_env("VSCODE_CWD") };
+        let result = is_vscode_terminal();
+
+        // Restore
+        match saved_tp {
+            Some(v) => unsafe { set_env("TERM_PROGRAM", &v) },
+            None => unsafe { remove_env("TERM_PROGRAM") },
+        }
+        match saved_cwd {
+            Some(v) => unsafe { set_env("VSCODE_CWD", &v) },
+            None => unsafe { remove_env("VSCODE_CWD") },
+        }
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_vscode_terminal_term_program_case_insensitive() {
+        let _g = VSCODE_ENV_LOCK.lock().unwrap();
+        let saved_tp = std::env::var("TERM_PROGRAM").ok();
+        let saved_cwd = std::env::var("VSCODE_CWD").ok();
+
+        unsafe { set_env("TERM_PROGRAM", "VSCODE") };
+        unsafe { remove_env("VSCODE_CWD") };
+        let result = is_vscode_terminal();
+
+        match saved_tp {
+            Some(v) => unsafe { set_env("TERM_PROGRAM", &v) },
+            None => unsafe { remove_env("TERM_PROGRAM") },
+        }
+        match saved_cwd {
+            Some(v) => unsafe { set_env("VSCODE_CWD", &v) },
+            None => unsafe { remove_env("VSCODE_CWD") },
+        }
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_vscode_terminal_via_vscode_cwd() {
+        let _g = VSCODE_ENV_LOCK.lock().unwrap();
+        let saved_tp = std::env::var("TERM_PROGRAM").ok();
+        let saved_cwd = std::env::var("VSCODE_CWD").ok();
+
+        unsafe { remove_env("TERM_PROGRAM") };
+        unsafe { set_env("VSCODE_CWD", "/home/user/project") };
+        let result = is_vscode_terminal();
+
+        match saved_tp {
+            Some(v) => unsafe { set_env("TERM_PROGRAM", &v) },
+            None => unsafe { remove_env("TERM_PROGRAM") },
+        }
+        match saved_cwd {
+            Some(v) => unsafe { set_env("VSCODE_CWD", &v) },
+            None => unsafe { remove_env("VSCODE_CWD") },
+        }
+        assert!(result);
+    }
+
+    #[test]
+    fn test_is_not_vscode_terminal_unset() {
+        let _g = VSCODE_ENV_LOCK.lock().unwrap();
+        let saved_tp = std::env::var("TERM_PROGRAM").ok();
+        let saved_cwd = std::env::var("VSCODE_CWD").ok();
+
+        unsafe { remove_env("TERM_PROGRAM") };
+        unsafe { remove_env("VSCODE_CWD") };
+        let result = is_vscode_terminal();
+
+        match saved_tp {
+            Some(v) => unsafe { set_env("TERM_PROGRAM", &v) },
+            None => unsafe { remove_env("TERM_PROGRAM") },
+        }
+        match saved_cwd {
+            Some(v) => unsafe { set_env("VSCODE_CWD", &v) },
+            None => unsafe { remove_env("VSCODE_CWD") },
+        }
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_is_not_vscode_terminal_other_program() {
+        let _g = VSCODE_ENV_LOCK.lock().unwrap();
+        let saved_tp = std::env::var("TERM_PROGRAM").ok();
+        let saved_cwd = std::env::var("VSCODE_CWD").ok();
+
+        unsafe { set_env("TERM_PROGRAM", "iTerm.app") };
+        unsafe { remove_env("VSCODE_CWD") };
+        let result = is_vscode_terminal();
+
+        match saved_tp {
+            Some(v) => unsafe { set_env("TERM_PROGRAM", &v) },
+            None => unsafe { remove_env("TERM_PROGRAM") },
+        }
+        match saved_cwd {
+            Some(v) => unsafe { set_env("VSCODE_CWD", &v) },
+            None => unsafe { remove_env("VSCODE_CWD") },
+        }
+        assert!(!result);
     }
 }

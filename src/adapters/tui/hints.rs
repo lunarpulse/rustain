@@ -3,11 +3,15 @@ use crate::domain::models::visual::OverlayType;
 
 /// Returns a contextual status-bar hint for the given focus state, or `None` when
 /// hints have faded (session_count > fade_threshold) or the focus has no hint.
-// Covers: UX-DR93, UX-DR96
+///
+/// When `is_vscode` is `true` and focus is Input, the VS Code keybinding hint takes
+/// priority over the generic help tip (UX-DR93, AC#4).
+// Covers: UX-DR93, UX-DR96, Sprint Change Proposal 2026-04-08
 pub fn contextual_hint(
     focus: &FocusState,
     session_count: u32,
     fade_threshold: u32,
+    is_vscode: bool,
 ) -> Option<String> {
     if session_count > fade_threshold {
         return None;
@@ -15,7 +19,12 @@ pub fn contextual_hint(
 
     match focus {
         FocusState::Input => {
-            Some("Tip: Press ? for help, Ctrl+P for commands".to_string())
+            if is_vscode {
+                // VS Code terminal: show keybinding alternatives as the primary hint (AC#4, AC#5)
+                Some("VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode".to_string())
+            } else {
+                Some("Tip: Press ? for help, Ctrl+P for commands".to_string())
+            }
         }
         FocusState::Chat => {
             Some("Tip: j/k to scroll, i to type, ? for help".to_string())
@@ -90,40 +99,40 @@ mod tests {
 
     #[test]
     fn test_hint_input_focus() {
-        let hint = contextual_hint(&FocusState::Input, 1, 5);
+        let hint = contextual_hint(&FocusState::Input, 1, 5, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains('?'));
     }
 
     #[test]
     fn test_hint_chat_focus() {
-        let hint = contextual_hint(&FocusState::Chat, 1, 5);
+        let hint = contextual_hint(&FocusState::Chat, 1, 5, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("j/k"));
     }
 
     #[test]
     fn test_hint_fades_when_session_exceeds_threshold() {
-        let hint = contextual_hint(&FocusState::Input, 6, 5);
+        let hint = contextual_hint(&FocusState::Input, 6, 5, false);
         assert!(hint.is_none());
     }
 
     #[test]
     fn test_hint_at_exact_threshold_shows() {
-        let hint = contextual_hint(&FocusState::Input, 5, 5);
+        let hint = contextual_hint(&FocusState::Input, 5, 5, false);
         assert!(hint.is_some());
     }
 
     #[test]
     fn test_hint_above_threshold_hidden() {
-        let hint = contextual_hint(&FocusState::Input, 6, 5);
+        let hint = contextual_hint(&FocusState::Input, 6, 5, false);
         assert!(hint.is_none());
     }
 
     #[test]
     fn test_hint_whichkey_focus() {
         let hint =
-            contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5);
+            contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Esc"));
     }
@@ -131,9 +140,41 @@ mod tests {
     #[test]
     fn test_hint_command_palette_focus() {
         let hint =
-            contextual_hint(&FocusState::Overlay(OverlayType::CommandPalette), 1, 5);
+            contextual_hint(&FocusState::Overlay(OverlayType::CommandPalette), 1, 5, false);
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("filter"));
+    }
+
+    // ── VS Code hints (Sprint Change Proposal 2026-04-08, AC#4, AC#5) ─────
+
+    #[test]
+    fn test_hint_vscode_input_focus_shows_alt_bindings() {
+        let hint = contextual_hint(&FocusState::Input, 1, 5, true);
+        assert!(hint.is_some());
+        let text = hint.unwrap();
+        assert!(text.contains("Alt+Enter"), "Expected Alt+Enter in hint: {text}");
+        assert!(text.contains("Alt+M"), "Expected Alt+M in hint: {text}");
+    }
+
+    #[test]
+    fn test_hint_vscode_fades_after_threshold() {
+        // AC#5: hint disappears after 5 sessions
+        let hint = contextual_hint(&FocusState::Input, 6, 5, true);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn test_hint_vscode_shows_at_exact_threshold() {
+        let hint = contextual_hint(&FocusState::Input, 5, 5, true);
+        assert!(hint.is_some());
+    }
+
+    #[test]
+    fn test_hint_vscode_chat_focus_shows_generic_hint() {
+        // VS Code flag only affects Input focus; Chat focus shows generic hint
+        let hint = contextual_hint(&FocusState::Chat, 1, 5, true);
+        assert!(hint.is_some());
+        assert!(hint.unwrap().contains("j/k"));
     }
 
     // ── parse_session_count ──────────────────────────────────────────────────

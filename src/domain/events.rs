@@ -75,6 +75,12 @@ pub enum DomainKey {
     Enter,
     ShiftEnter,
     CtrlEnter,
+    /// Alt+Enter: insert newline (VS Code terminal alternative to Shift+Enter).
+    // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment
+    AltEnter,
+    /// Alt+M: toggle multi-line mode (VS Code terminal alternative to Ctrl+E).
+    // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment
+    AltM,
     Esc,
     Backspace,
     Delete,

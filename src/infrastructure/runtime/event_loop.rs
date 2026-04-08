@@ -59,6 +59,9 @@ pub async fn run(
     // Cache multiplexer detection once at startup (UX-DR62)
     state.multiplexer_detected = crate::adapters::tui::help_data::is_multiplexer_session();
 
+    // Cache VS Code terminal detection once at startup (Sprint Change Proposal 2026-04-08, AC#4)
+    let is_vscode = crate::infrastructure::utils::is_vscode_terminal();
+
     // Load and increment session count for contextual hint fading (UX-DR96)
     state.session_count = crate::adapters::tui::hints::load_and_increment_session_count();
     // Compute initial hint
@@ -66,6 +69,7 @@ pub async fn run(
         &state.focus,
         state.session_count,
         state.theme.timing.status_hint_fade_sessions,
+        is_vscode,
     );
 
     // Set project context indicator based on persona
@@ -228,6 +232,7 @@ pub async fn run(
                                     &state.focus,
                                     state.session_count,
                                     state.theme.timing.status_hint_fade_sessions,
+                                    is_vscode,
                                 );
                             }
 
@@ -471,7 +476,12 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::ExecuteCommand(cmd) => {
-                                    if cmd == "new" {
+                                    if cmd == "ml" {
+                                        // /ml command: toggle multi-line mode (AC#3)
+                                        // Covers: Sprint Change Proposal 2026-04-08
+                                        state.multiline_mode = !state.multiline_mode;
+                                        state.needs_redraw = true;
+                                    } else if cmd == "new" {
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
                                         if !conversation.messages.is_empty() {

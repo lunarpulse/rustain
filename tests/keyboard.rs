@@ -787,6 +787,38 @@ fn test_slash_new_clears_mentions() {
     assert!(state.input_buffer.is_empty());
 }
 
+// === Story 3-6a: /ml slash command (Sprint Change Proposal 2026-04-08, AC#3) ===
+
+// Covers: Sprint Change Proposal 2026-04-08, AC#3
+/// /ml submitted directly returns ExecuteCommand("ml").
+#[test]
+fn test_slash_ml_returns_execute_command() {
+    let mut state = TuiState::new(80, 24);
+    state.input_buffer = "/ml".to_string();
+    state.cursor_position = 3;
+
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert_eq!(action, InputAction::ExecuteCommand("ml".to_string()));
+    assert!(state.input_buffer.is_empty());
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC#3
+/// /ml via autocomplete selection also returns ExecuteCommand("ml").
+#[test]
+fn test_slash_ml_via_autocomplete_returns_execute_command() {
+    let mut state = TuiState::new(80, 24);
+    handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+    state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+        name: "ml".to_string(),
+        description: "Toggle multi-line mode".to_string(),
+    }];
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
+    assert_eq!(state.input_buffer, "/ml");
+
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert_eq!(action, InputAction::ExecuteCommand("ml".to_string()));
+}
+
 // === Story 3-4: Image Attachment & Clipboard Operations ===
 
 // 10.9: 'c' key in Chat focus with focused_tool_id → CopyToClipboard
@@ -998,4 +1030,99 @@ fn test_c_key_input_focus_types_c() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
     assert_eq!(action, InputAction::Consumed);
     assert_eq!(state.input_buffer, "c");
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#1
+/// Alt+Enter inserts a newline at cursor position (VS Code alternative to Shift+Enter).
+#[test]
+fn test_alt_enter_inserts_newline() {
+    let mut state = TuiState::new(80, 24);
+    handle_input(&mut state, &DomainInputEvent::KeyPress('a'));
+    let action = handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
+    );
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.input_buffer, "a\n");
+    assert_eq!(state.cursor_position, 2);
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#1
+/// Alt+Enter inserts newline even when multi-line mode is off (always inserts).
+#[test]
+fn test_alt_enter_inserts_newline_without_multiline_mode() {
+    let mut state = TuiState::new(80, 24);
+    assert!(!state.multiline_mode);
+    handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
+
+    let action = handle_input(
+        &mut state,
+        &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
+    );
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.input_buffer, "x\n");
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#2
+/// Alt+M toggles multi-line mode (VS Code alternative to Ctrl+E).
+#[test]
+fn test_alt_m_toggles_multiline_mode() {
+    let mut state = TuiState::new(80, 24);
+    assert!(!state.multiline_mode);
+
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
+    assert_eq!(action, InputAction::Consumed);
+    assert!(state.multiline_mode);
+
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
+    assert_eq!(action, InputAction::Consumed);
+    assert!(!state.multiline_mode);
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC#7 (backward compatibility)
+/// Alt+Enter works identically to Shift+Enter — inserts newline.
+#[test]
+fn test_alt_enter_behaves_like_shift_enter() {
+    // Shift+Enter baseline
+    let mut state1 = TuiState::new(80, 24);
+    handle_input(&mut state1, &DomainInputEvent::KeyPress('h'));
+    handle_input(
+        &mut state1,
+        &DomainInputEvent::SpecialKey(DomainKey::ShiftEnter),
+    );
+    let buffer_shift = state1.input_buffer.clone();
+
+    // Alt+Enter should produce the same result
+    let mut state2 = TuiState::new(80, 24);
+    handle_input(&mut state2, &DomainInputEvent::KeyPress('h'));
+    handle_input(
+        &mut state2,
+        &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
+    );
+    let buffer_alt = state2.input_buffer.clone();
+
+    assert_eq!(buffer_shift, buffer_alt);
+}
+
+// Covers: Sprint Change Proposal 2026-04-08, AC#7 (backward compatibility)
+/// Alt+M behaves identically to Ctrl+E — toggles multi-line mode.
+#[test]
+fn test_alt_m_behaves_like_ctrl_e() {
+    // Ctrl+E baseline
+    let mut state1 = TuiState::new(80, 24);
+    handle_input(
+        &mut state1,
+        &DomainInputEvent::SpecialKey(DomainKey::CtrlE),
+    );
+    let mode_after_ctrl_e = state1.multiline_mode;
+
+    // Alt+M should produce the same result
+    let mut state2 = TuiState::new(80, 24);
+    handle_input(
+        &mut state2,
+        &DomainInputEvent::SpecialKey(DomainKey::AltM),
+    );
+    let mode_after_alt_m = state2.multiline_mode;
+
+    assert_eq!(mode_after_ctrl_e, mode_after_alt_m);
 }

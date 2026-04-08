@@ -106,8 +106,10 @@ fn test_e2e_help_overlay_closes_with_esc() {
 /// Covers: AC1 — Help overlay shows keybinding categories
 #[test]
 fn test_e2e_help_overlay_shows_categories() {
-    // Use larger terminal to fit all categories without scrolling
-    let mut h = TestHarness::with_size(100, 50);
+    // Use larger terminal to fit all categories without scrolling.
+    // Height was increased from 50→65 to accommodate new Alt+Enter/Alt+M/ml entries
+    // added in Story 3-6a to the INPUT section.
+    let mut h = TestHarness::with_size(100, 65);
     
     h.press_key(DomainKey::Esc);
     h.type_char('?');
@@ -388,17 +390,17 @@ fn test_e2e_contextual_hint_per_focus() {
     use rustain::adapters::tui::hints::contextual_hint;
     
     // Test Input focus hint
-    let hint = contextual_hint(&FocusState::Input, 1, 5);
+    let hint = contextual_hint(&FocusState::Input, 1, 5, false);
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("? for help"));
-    
+
     // Test Chat focus hint
-    let hint = contextual_hint(&FocusState::Chat, 1, 5);
+    let hint = contextual_hint(&FocusState::Chat, 1, 5, false);
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("j/k"));
-    
+
     // Test above threshold
-    let hint = contextual_hint(&FocusState::Input, 6, 5);
+    let hint = contextual_hint(&FocusState::Input, 6, 5, false);
     assert!(hint.is_none());
 }
 
