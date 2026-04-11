@@ -226,7 +226,8 @@ fn test_switch_tabs_clears_thinking_buffer() {
     // Now back at tab 1, switch back to 0:
     tm.switch_to_prev();
     assert!(
-        tm.active_tab().streaming.thinking_buffer.is_empty() || true /* buffer cleared on departure not arrival */
+        tm.active_tab().streaming.thinking_buffer.is_empty(),
+        "thinking buffer should be cleared on departure"
     );
 }
 

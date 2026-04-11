@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::domain::errors::TurnQueueError;
 use crate::domain::models::UserMessage;
 
+#[derive(Clone)]
 pub struct TurnQueue {
     pending: VecDeque<UserMessage>,
     max_pending: usize,

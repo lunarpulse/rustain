@@ -5,6 +5,7 @@ use crate::domain::models::conversation::{Conversation, generate_conversation_id
 use crate::domain::models::notice::FeedbackBlock;
 use crate::domain::models::session::{SessionManager, SessionState};
 use crate::domain::models::stream::StreamingState;
+use crate::domain::services::turn_queue::TurnQueue;
 
 /// Unique identifier for a tab (TUI concept, not persisted).
 pub type TabId = u64;
@@ -34,6 +35,8 @@ pub struct TabState {
     pub total_content_height: usize,
     /// Pending anchor message index for resize scroll preservation.
     pub pending_anchor: Option<usize>,
+    /// Pending user messages queued between turns.
+    pub turn_queue: TurnQueue,
 }
 
 impl TabState {
@@ -66,6 +69,7 @@ impl TabState {
             active_feedback_id: None,
             total_content_height: 0,
             pending_anchor: None,
+            turn_queue: TurnQueue::default(),
         }
     }
 
@@ -86,6 +90,7 @@ impl TabState {
             active_feedback_id: None,
             total_content_height: 0,
             pending_anchor: None,
+            turn_queue: TurnQueue::default(),
         }
     }
 
@@ -162,16 +167,11 @@ impl TabManager {
             self.tabs.push(new_tab);
             self.active_tab_index = 0;
         } else {
-            // Adjust active_tab_index: prefer the tab before the closed one
-            self.active_tab_index = if pos == 0 {
-                0
-            } else {
-                pos.min(self.tabs.len() - 1).saturating_sub(0)
-            };
+            // Adjust active_tab_index: prefer next tab, fall back to previous
+            self.active_tab_index = pos.min(self.tabs.len() - 1);
             if pos <= self.active_tab_index && self.active_tab_index > 0 {
-                self.active_tab_index = self.active_tab_index.saturating_sub(1);
+                self.active_tab_index -= 1;
             }
-            self.active_tab_index = self.active_tab_index.min(self.tabs.len() - 1);
         }
 
         Some(conversation)

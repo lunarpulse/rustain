@@ -729,15 +729,51 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::NewTab => {
-                                    // Save current tab state back to TabManager
-                                    save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
-                                    // Abort any active streaming on this tab
+                                    // Abort any active streaming on this tab before saving,
+                                    // so the saved state reflects the abort (is_streaming = false,
+                                    // partial response finalized). Without this, Tab 1 is saved
+                                    // with is_streaming = true but no task producing chunks → stuck.
                                     if streaming.is_streaming {
+                                        // Finalize active tool calls with [aborted]
+                                        for (_, tc) in streaming.active_tool_calls.iter_mut() {
+                                            if tc.result.is_none() {
+                                                tc.result = Some(crate::domain::models::ToolResultInfo {
+                                                    content: "[aborted]".to_string(),
+                                                    is_error: true,
+                                                });
+                                                tc.completed_at_ms = Some(now_unix() as u64 * 1000);
+                                            }
+                                        }
+                                        // Preserve partial response as a finalized message
+                                        if !streaming.current_text_buffer.is_empty()
+                                            || !streaming.active_tool_calls.is_empty()
+                                        {
+                                            let content = std::mem::take(&mut streaming.current_text_buffer);
+                                            conversation.messages.push(ChatMessage {
+                                                id: generate_conversation_id(),
+                                                role: MessageRole::Assistant,
+                                                content,
+                                                content_blocks: std::mem::take(&mut streaming.current_blocks),
+                                                tool_calls: streaming.active_tool_calls.drain().map(|(_, v)| v).collect(),
+                                                created_at: now_unix(),
+                                                token_count: None,
+                                                stop_reason: Some(crate::domain::models::StopReason::Cancelled),
+                                            });
+                                        }
+                                        // Abort the streaming task
                                         if let Some(handle) = _active_turn.take() {
                                             handle.abort();
                                         }
+                                        // Reset streaming state
+                                        streaming.is_streaming = false;
+                                        streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                                        streaming.current_blocks.clear();
+                                        streaming.active_tool_calls.clear();
                                         while turn_queue.dequeue().is_some() {}
                                     }
+                                    // Save current tab state back to TabManager (after abort,
+                                    // so stored state has is_streaming = false)
+                                    save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                     // Persist current conversation if it has messages
                                     if !conversation.messages.is_empty() {
                                         conversation.updated_at = now_unix();
@@ -759,8 +795,8 @@ pub async fn run(
                                     }
                                     // Create new tab in TabManager (switches active to the new tab)
                                     tab_manager.create_tab();
-                                    // Load new tab state into proxies
-                                    load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                    // Load new tab state into proxies (fresh tab, never has queued messages)
+                                    let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                     state.input_buffer.clear();
                                     state.cursor_position = 0;
                                     state.input_scroll_offset = 0;
@@ -780,7 +816,7 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     } else {
                                         // Save current tab state
-                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         let tab_id = tab_manager.active_tab_id();
                                         // Abort active streaming on this tab
                                         if streaming.is_streaming {
@@ -811,7 +847,12 @@ pub async fn run(
                                         // Close the tab (TabManager adjusts active index)
                                         tab_manager.close_tab(tab_id);
                                         // Load the new active tab into proxies
-                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        if should_drain {
+                                            if let Some(queued_msg) = turn_queue.dequeue() {
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                            }
+                                        }
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
@@ -823,17 +864,27 @@ pub async fn run(
                                 }
                                 InputAction::SwitchToNextTab => {
                                     if tab_manager.tab_count() > 1 {
-                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_next();
-                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        if should_drain {
+                                            if let Some(queued_msg) = turn_queue.dequeue() {
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                            }
+                                        }
                                         state.needs_redraw = true;
                                     }
                                 }
                                 InputAction::SwitchToPrevTab => {
                                     if tab_manager.tab_count() > 1 {
-                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_prev();
-                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        if should_drain {
+                                            if let Some(queued_msg) = turn_queue.dequeue() {
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                            }
+                                        }
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -843,9 +894,14 @@ pub async fn run(
                                         && n <= tab_manager.tab_count()
                                         && n - 1 != tab_manager.active_tab_index()
                                     {
-                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_index(n);
-                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        if should_drain {
+                                            if let Some(queued_msg) = turn_queue.dequeue() {
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                            }
+                                        }
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -1159,6 +1215,55 @@ pub async fn run(
                         }
                         state.needs_redraw = true;
                     }
+                    AppEvent::PermissionRequestForConv {
+                        conversation_id,
+                        tool_name,
+                        tool_input,
+                        response_tx,
+                    } => {
+                        // Route permission request to the correct tab
+                        if conversation_id == conversation.id {
+                            // For active tab, display immediately
+                            use crate::adapters::tui::state::PendingPermission;
+                            let new_pending = PendingPermission {
+                                tool_name,
+                                tool_input,
+                                response_tx,
+                            };
+                            if state.pending_permission.is_some() {
+                                state.permission_queue.push(new_pending);
+                            } else {
+                                state.pending_permission = Some(new_pending);
+                                state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                    ConfirmationType::Permission,
+                                ));
+                            }
+                            state.needs_redraw = true;
+                        } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
+                            // For background tab, store in tab state for later display
+                            use crate::adapters::tui::state::PendingPermission;
+                            let new_pending = PendingPermission {
+                                tool_name,
+                                tool_input,
+                                response_tx,
+                            };
+                            // Note: TabState doesn't have pending_permission field yet
+                            // For now, we queue it in the global state but mark it with conversation_id
+                            // TODO: Add pending_permission to TabState in future refactor
+                            tracing::warn!("Permission request for background tab {} queued", conversation_id);
+                            // For now, treat as active tab (temporary until full multi-tab permission state)
+                            if state.pending_permission.is_some() {
+                                state.permission_queue.push(new_pending);
+                            } else {
+                                state.pending_permission = Some(new_pending);
+                                state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                    ConfirmationType::Permission,
+                                ));
+                            }
+                            state.needs_redraw = true;
+                        }
+                        // Silently drop if conversation not found (tab closed)
+                    }
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
                         let mode_str = match mode {
@@ -1239,24 +1344,46 @@ pub async fn run(
                         }
                     }
                     AppEvent::AskUserQuestion {
+                        conversation_id,
                         tool_use_id,
                         question,
                         response_tx,
-                        ..
                     } => {
-                        use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-                        state.ask_user_question = Some(AskUserQuestionState {
-                            tool_use_id,
-                            question,
-                            input_buffer: String::new(),
-                            cursor_position: 0,
-                            submitted_answer: None,
-                        });
-                        state.question_response_tx = Some(response_tx);
-                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                            ConfirmationType::Question,
-                        ));
-                        state.needs_redraw = true;
+                        // Only display question if it belongs to the active tab
+                        if conversation_id == conversation.id {
+                            use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
+                            state.ask_user_question = Some(AskUserQuestionState {
+                                tool_use_id,
+                                question,
+                                input_buffer: String::new(),
+                                cursor_position: 0,
+                                submitted_answer: None,
+                            });
+                            state.question_response_tx = Some(response_tx);
+                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                ConfirmationType::Question,
+                            ));
+                            state.needs_redraw = true;
+                        } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
+                            // Background tab: store for later (when tab becomes active)
+                            // TODO: Add ask_user_question state to TabState for proper routing
+                            tracing::warn!("AskUserQuestion for background tab {} - storing for later", conversation_id);
+                            // For now, show it immediately (temporary until full per-tab state)
+                            use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
+                            state.ask_user_question = Some(AskUserQuestionState {
+                                tool_use_id,
+                                question,
+                                input_buffer: String::new(),
+                                cursor_position: 0,
+                                submitted_answer: None,
+                            });
+                            state.question_response_tx = Some(response_tx);
+                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                ConfirmationType::Question,
+                            ));
+                            state.needs_redraw = true;
+                        }
+                        // Silently drop if conversation not found (tab closed)
                     }
                     AppEvent::RecoveryPrompt { title, token_count, .. } => {
                         let msg = format!(
@@ -1380,6 +1507,7 @@ fn save_active_tab(
     streaming: &StreamingState,
     session_manager: &SessionManager,
     state: &TuiState,
+    turn_queue: &TurnQueue,
 ) {
     let tab = tab_manager.active_tab_mut();
     tab.conversation = conversation.clone();
@@ -1394,20 +1522,25 @@ fn save_active_tab(
     tab.active_feedback_id = state.active_feedback_id.clone();
     tab.total_content_height = state.total_content_height;
     tab.pending_anchor = state.pending_anchor;
+    tab.turn_queue = turn_queue.clone();
 }
 
 /// Load the new active tab's state from TabManager into the proxy variables.
+/// Returns `true` if the tab is idle and has queued messages ready to send
+/// (e.g. a turn completed in the background while the tab was inactive).
 fn load_active_tab(
     tab_manager: &TabManager,
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
     session_manager: &mut SessionManager,
     state: &mut TuiState,
-) {
+    turn_queue: &mut TurnQueue,
+) -> bool {
     let tab = tab_manager.active_tab();
     *conversation = tab.conversation.clone();
     *streaming = tab.streaming.clone();
     *session_manager = tab.session.clone();
+    *turn_queue = tab.turn_queue.clone();
     state.scroll_offset = tab.scroll_offset;
     // If the tab is not actively streaming, snap to bottom so the user always lands
     // at the latest content (complete response or empty tab). If still streaming,
@@ -1440,6 +1573,9 @@ fn load_active_tab(
     };
     // Clear any retry state that belonged to the previous tab
     state.retry_state = None;
+    // Signal caller if queued messages should be drained: the tab's turn completed
+    // in the background but auto-send (line 948) only runs in the active-tab path.
+    !tab.streaming.is_streaming && !tab.turn_queue.is_empty()
 }
 
 /// Start a new turn: add user message, spawn provider streaming task.
