@@ -2,7 +2,7 @@
 use async_trait::async_trait;
 
 use crate::domain::errors::StorageError;
-use crate::domain::models::{Conversation, ConversationSummary};
+use crate::domain::models::{Conversation, ConversationSummary, SessionMeta};
 
 /// Persistence for conversations and settings.
 ///
@@ -13,8 +13,21 @@ pub trait StoragePort: Send + Sync {
     async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError>;
     async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError>;
 
-    // v0.5+: async fn delete_conversation(&self, id: &str) -> Result<(), StorageError> { unimplemented!() }
-    // v0.5+: async fn save_settings(&self, settings: &Settings) -> Result<(), StorageError> { unimplemented!() }
-    // v0.5+: async fn load_settings(&self) -> Result<Settings, StorageError> { unimplemented!() }
-    // v0.5+: async fn search_conversations(&self, query: &str) -> Result<Vec<SearchResult>, StorageError> { unimplemented!() }
+    /// Delete a conversation and its metadata.
+    /// Default implementation returns NotSupported error.
+    async fn delete_conversation(&self, _id: &str) -> Result<(), StorageError> {
+        Err(StorageError::NotSupported("delete_conversation".to_string()))
+    }
+
+    /// Save session metadata sidecar file.
+    /// Default implementation returns NotSupported error.
+    async fn save_session_meta(&self, _id: &str, _meta: &SessionMeta) -> Result<(), StorageError> {
+        Err(StorageError::NotSupported("save_session_meta".to_string()))
+    }
+
+    /// Load session metadata sidecar file.
+    /// Default implementation returns NotSupported error.
+    async fn load_session_meta(&self, _id: &str) -> Result<Option<SessionMeta>, StorageError> {
+        Err(StorageError::NotSupported("load_session_meta".to_string()))
+    }
 }

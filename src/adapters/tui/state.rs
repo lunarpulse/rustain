@@ -497,7 +497,7 @@ impl HelpOverlayState {
     /// Dismiss the overlay; returns the saved prior focus state.
     pub fn close(&mut self) -> FocusState {
         self.active = false;
-        self.prior_focus
+        self.prior_focus.clone()
     }
 }
 
@@ -683,6 +683,20 @@ pub struct TuiState {
     /// `None` once session_count > theme.timing.status_hint_fade_sessions.
     // Covers: UX-DR93
     pub current_hint: Option<String>,
+    /// Whether the history sidebar is visible.
+    // Covers: FR107, UX-DR20
+    pub sidebar_visible: bool,
+    /// Which sidebar panel is active (History, Tasks, etc.).
+    // Covers: FR107, UX-DR20
+    pub sidebar_panel: Option<crate::domain::models::visual::PanelType>,
+    /// Selected index in the sidebar list.
+    pub sidebar_selected: usize,
+    /// Total number of entries in the sidebar (kept in sync by event loop).
+    pub sidebar_entry_count: usize,
+    /// Scroll offset for the sidebar list.
+    pub sidebar_scroll_offset: usize,
+    /// Pending delete confirmation target. None = no pending confirmation.
+    pub pending_delete: Option<crate::domain::models::visual::DeleteConfirmTarget>,
 }
 
 impl TuiState {
@@ -737,6 +751,12 @@ impl TuiState {
             is_vscode: false,
             session_count: 0,
             current_hint: None,
+            sidebar_visible: false,
+            sidebar_panel: None,
+            sidebar_selected: 0,
+            sidebar_entry_count: 0,
+            sidebar_scroll_offset: 0,
+            pending_delete: None,
         }
     }
 }

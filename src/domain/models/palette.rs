@@ -41,6 +41,9 @@ pub enum PaletteAction {
     NewTab,
     /// Close the active tab.
     CloseTab,
+    /// Delete all conversations (with confirmation).
+    // Covers: AC5 (bulk delete), P9
+    DeleteAllConversations,
     /// No-op — target feature not yet implemented.
     Noop,
 }

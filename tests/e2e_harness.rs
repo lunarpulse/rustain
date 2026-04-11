@@ -227,7 +227,7 @@ impl TestHarness {
         self.terminal
             .draw(|frame| {
                 let area = frame.area();
-                if let Some(app_layout) = layout::compute_layout(area, theme, input_buffer, 1) {
+                if let Some(app_layout) = layout::compute_layout(area, theme, input_buffer, 1, false) {
                     chat_pane::render(
                         frame,
                         app_layout.chat_pane,

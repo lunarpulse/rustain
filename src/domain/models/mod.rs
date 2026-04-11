@@ -10,6 +10,7 @@ pub mod palette;
 mod permission;
 pub mod project_context;
 mod session;
+pub mod session_meta;
 mod stream;
 pub mod tab;
 mod tools;
@@ -45,6 +46,8 @@ pub use permission::{
 };
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};
+#[allow(unused_imports)]
+pub use session_meta::{SessionMeta, extract_title_from_first_message, now_unix, shorten_text};
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};
 #[allow(unused_imports)]

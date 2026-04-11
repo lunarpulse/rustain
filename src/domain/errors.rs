@@ -107,6 +107,9 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     IoError(String),
 
+    #[error("Operation not supported: {0}")]
+    NotSupported(String),
+
     #[error("{0}")]
     Other(String),
 }

@@ -51,7 +51,7 @@ fn render_full_layout(
         .draw(|frame| {
             let area = frame.area();
             let app_layout =
-                layout::compute_layout(area, &theme, "", 1).expect("layout must compute for 80x24");
+                layout::compute_layout(area, &theme, "", 1, false).expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
                 app_layout.chat_pane,
@@ -215,7 +215,7 @@ fn test_permission_prompt_in_full_layout() {
         .draw(|frame| {
             let area = frame.area();
             let app_layout =
-                layout::compute_layout(area, &theme, "", 1).expect("layout must compute for 80x24");
+                layout::compute_layout(area, &theme, "", 1, false).expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
                 app_layout.chat_pane,
@@ -308,7 +308,7 @@ fn test_ask_user_question_in_full_layout() {
         .draw(|frame| {
             let area = frame.area();
             let app_layout =
-                layout::compute_layout(area, &theme, "", 1).expect("layout must compute for 80x24");
+                layout::compute_layout(area, &theme, "", 1, false).expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
                 app_layout.chat_pane,

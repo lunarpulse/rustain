@@ -120,6 +120,7 @@ pub enum DomainKey {
     ShiftTab,
     CtrlC,
     CtrlE,
+    CtrlH,
     CtrlP,
     CtrlR,
     CtrlT,

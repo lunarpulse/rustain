@@ -48,6 +48,22 @@ pub enum InputAction {
     SwitchToPrevTab,
     /// Switch directly to a tab by 1-based index (number keys 1-9 in Chat focus).
     SwitchToTab(usize),
+    /// Toggle the history sidebar (Ctrl+H).
+    // Covers: FR107, UX-DR20
+    ToggleSidebar,
+    /// Open the selected conversation from sidebar.
+    // Covers: FR107, AC4
+    OpenSidebarConversation,
+    /// Delete the selected conversation from sidebar (shows confirmation overlay).
+    // Covers: FR113, AC5
+    DeleteSidebarConversation,
+    /// Delete all conversations (via command palette).
+    // Covers: AC5 (bulk), P9
+    DeleteAllConversations,
+    /// User confirmed pending delete (pressed 'y').
+    ConfirmDelete,
+    /// User cancelled pending delete (pressed 'n' or Esc).
+    CancelDelete,
     /// Copy content to clipboard.
     // Covers: FR116, UX-DR68
     CopyToClipboard(String),
@@ -96,6 +112,14 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
             state.terminal_width = *w;
             state.terminal_height = *h;
             state.height_cache.invalidate_all();
+            // P11: Reset sidebar if terminal shrinks below minimum width
+            if *w < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
+                state.sidebar_visible = false;
+                state.sidebar_panel = None;
+                if matches!(state.focus, FocusState::Sidebar { .. }) {
+                    state.focus = FocusState::Chat;
+                }
+            }
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -204,7 +228,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         let chord = state.which_key.lookup_chord(c).cloned();
         if let Some(action) = chord {
             let prior_focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
-            state.focus = prior_focus;
+            state.focus = prior_focus.clone();
             match action {
                 ChordAction::Noop(msg) => {
                     // Show "Not yet available" feedback
@@ -448,7 +472,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             // ? = toggle help overlay
             // Covers: FR108, UX-DR94 (AC1: ? opens help from any non-Input focus)
             '?' => {
-                let prior = state.focus;
+                let prior = state.focus.clone();
                 state.help_overlay.open(prior);
                 state.focus = FocusState::Overlay(OverlayType::Help);
                 state.needs_redraw = true;
@@ -477,11 +501,63 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             }
             _ => InputAction::Ignored,
         },
-        FocusState::Sidebar { .. } | FocusState::Overlay(_) => InputAction::Ignored,
+        FocusState::Sidebar { panel: _panel, selected: _selected } => {
+            match c {
+                'j' => {
+                    // Move selection down (clamped to entry count)
+                    if state.sidebar_entry_count > 0 {
+                        let max = state.sidebar_entry_count - 1;
+                        if state.sidebar_selected < max {
+                            state.sidebar_selected += 1;
+                            state.focus = FocusState::Sidebar {
+                                panel: crate::domain::models::visual::PanelType::History,
+                                selected: state.sidebar_selected,
+                            };
+                            state.needs_redraw = true;
+                        }
+                    }
+                    InputAction::Consumed
+                }
+                'k' => {
+                    // Move selection up
+                    if state.sidebar_selected > 0 {
+                        state.sidebar_selected -= 1;
+                        state.focus = FocusState::Sidebar {
+                            panel: crate::domain::models::visual::PanelType::History,
+                            selected: state.sidebar_selected,
+                        };
+                        state.needs_redraw = true;
+                    }
+                    InputAction::Consumed
+                }
+                'd' => {
+                    // Delete selected conversation — shows confirmation overlay
+                    InputAction::DeleteSidebarConversation
+                }
+                'q' => InputAction::Quit,
+                _ => InputAction::Ignored,
+            }
+        }
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(_))) => {
+            match c {
+                'y' | 'Y' => InputAction::ConfirmDelete,
+                'n' | 'N' => InputAction::CancelDelete,
+                _ => InputAction::Consumed,
+            }
+        }
+        FocusState::Overlay(_) => InputAction::Ignored,
     }
 }
 
 fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    // Delete confirmation: Esc → Cancel
+    if matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(_)))) {
+        return match key {
+            DomainKey::Esc => InputAction::CancelDelete,
+            _ => InputAction::Consumed,
+        };
+    }
+
     // Permission prompt: Esc → Deny
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match key {
@@ -601,7 +677,9 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             state.focus = match state.focus {
                 FocusState::Input => FocusState::Chat,
                 FocusState::Chat => FocusState::Input,
-                FocusState::Sidebar { .. } | FocusState::Overlay(_) => FocusState::Input,
+                // AC11: Esc from Sidebar → Chat
+                FocusState::Sidebar { .. } => FocusState::Chat,
+                FocusState::Overlay(_) => FocusState::Input,
             };
             state.needs_redraw = true;
             InputAction::Consumed
@@ -664,10 +742,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 state.reverse_search.active = false;
             }
             // Determine prior focus for restoration: if coming from ReverseSearch overlay, restore Input
-            let prior_focus = match state.focus {
+            let prior_focus = match &state.focus {
                 FocusState::Overlay(OverlayType::ReverseSearch) => FocusState::Input,
                 FocusState::Overlay(OverlayType::Autocomplete(_)) => FocusState::Input,
-                other => other,
+                other => other.clone(),
             };
             state.command_palette.open(prior_focus);
             state.focus = FocusState::Overlay(OverlayType::CommandPalette);
@@ -700,10 +778,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 state.reverse_search.active = false;
             }
             // Determine prior focus for restoration
-            let prior_focus = match state.focus {
+            let prior_focus = match &state.focus {
                 FocusState::Overlay(OverlayType::ReverseSearch) => FocusState::Input,
                 FocusState::Overlay(OverlayType::Autocomplete(_)) => FocusState::Input,
-                other => other,
+                other => other.clone(),
             };
             state.which_key.open(prior_focus);
             state.focus = FocusState::Overlay(OverlayType::WhichKey);
@@ -849,6 +927,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { .. }) => {
+            // Open selected conversation — event loop resolves ID from session_index
+            InputAction::OpenSidebarConversation
+        }
+
         DomainKey::Enter if state.focus == FocusState::Chat => {
             // Toggle collapse/expand on focused tool block
             if let Some(ref tool_id) = state.focused_tool_id {
@@ -878,9 +961,26 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
 
         DomainKey::CtrlC => InputAction::CancelOrQuit,
+        DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
-        // Tab switching — only when focus is not Input (so typing is unaffected)
+        // Tab/focus cycling (AC11):
+        // - Chat + sidebar visible → Sidebar
+        // - Chat + no sidebar → SwitchToNextTab (existing behavior)
+        // - Sidebar → Input
+        DomainKey::Tab if state.focus == FocusState::Chat && state.sidebar_visible => {
+            state.focus = FocusState::Sidebar {
+                panel: crate::domain::models::visual::PanelType::History,
+                selected: state.sidebar_selected,
+            };
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
         DomainKey::Tab if state.focus == FocusState::Chat => InputAction::SwitchToNextTab,
+        DomainKey::Tab if matches!(state.focus, FocusState::Sidebar { .. }) => {
+            state.focus = FocusState::Input;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
         DomainKey::ShiftTab if state.focus != FocusState::Input => InputAction::SwitchToPrevTab,
         _ => InputAction::Ignored,
     }
@@ -1241,6 +1341,7 @@ fn dispatch_palette_action(
         }
         PaletteAction::NewTab => InputAction::NewTab,
         PaletteAction::CloseTab => InputAction::CloseTab,
+        PaletteAction::DeleteAllConversations => InputAction::DeleteAllConversations,
         PaletteAction::Noop => {
             // Show "Not yet available" feedback
             let block = crate::domain::models::FeedbackBlock {
@@ -1342,6 +1443,11 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             // Ctrl+E → toggle multi-line mode
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
+            }
+            // Ctrl+H → toggle history sidebar
+            // Covers: FR107, UX-DR20
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('h') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlH));
             }
             // Alt+M → toggle multi-line mode (VS Code terminal alternative to Ctrl+E)
             // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment

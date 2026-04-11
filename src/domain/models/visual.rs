@@ -29,15 +29,28 @@ pub enum PanelType {
     Adapters,
 }
 
+/// Target of a delete confirmation dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeleteConfirmTarget {
+    /// Delete a single conversation by ID with its title for display.
+    Single { id: String, title: String },
+    /// Delete all conversations with the count for display.
+    Bulk { count: usize },
+}
+
 /// Types of confirmation dialogs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Note: Not Copy because DeleteConfirmation contains String data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfirmationType {
     Permission,
     Question,
+    /// Delete confirmation for sidebar conversations (AC5, AC6).
+    DeleteConfirmation(DeleteConfirmTarget),
 }
 
 /// Overlay types for modal focus targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Note: Not Copy because Confirmation contains non-Copy data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayType {
     CommandPalette,
     ModelSelector,

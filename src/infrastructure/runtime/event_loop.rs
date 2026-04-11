@@ -16,15 +16,16 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, reverse_search, status_bar, which_key_bar,
+    input_box, reverse_search, sidebar, status_bar, which_key_bar,
 };
+use crate::domain::services::session_index::SessionIndex;
 
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::tab::TabManager;
-use crate::domain::models::visual::{ConfirmationType, OverlayType};
+use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
     FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, RetryState,
@@ -105,6 +106,19 @@ pub async fn run(
     // Lazy-initialized palette registry (populated on first Ctrl+P)
     let mut palette_registry = PaletteRegistry::new();
 
+    // P2/AC9: Build SessionIndex at startup from persisted session metadata
+    let mut session_index = match storage.list_conversations().await {
+        Ok(summaries) => SessionIndex::build(summaries),
+        Err(e) => {
+            tracing::warn!("Failed to build session index at startup: {}", e);
+            SessionIndex::new()
+        }
+    };
+    // Mark the active conversation as open and active in the index
+    session_index.set_open(&conversation.id, true);
+    session_index.set_active(Some(&conversation.id));
+    state.sidebar_entry_count = session_index.len();
+
     // P4: Cache last filter text to avoid re-scanning on every keystroke
     let mut last_autocomplete_filter = String::new();
     // P6: Cache last palette filter text to avoid re-filtering on every keystroke
@@ -145,6 +159,7 @@ pub async fn run(
         tab_manager.tab_count(),
         tab_manager.active_tab_index(),
         Some(&tab_manager),
+        &session_index,
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
@@ -191,8 +206,8 @@ pub async fn run(
                                         conversation.title = String::new();
                                         conversation.id = generate_conversation_id();
                                         conversation.session_id = Some(generate_conversation_id());
-                                        conversation.created_at = now_unix();
-                                        conversation.updated_at = now_unix();
+                                        conversation.created_at = crate::domain::models::session_meta::now_unix();
+                                        conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                         conversation.last_response_at = None;
                                         conversation.usage = None;
                                         state.focus = FocusState::Input;
@@ -328,7 +343,7 @@ pub async fn run(
                                             &mut session_manager,
                                         );
                                         // Force immediate render for typing indicator
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -355,7 +370,7 @@ pub async fn run(
                                                     content: "[aborted]".to_string(),
                                                     is_error: true,
                                                 });
-                                                tc.completed_at_ms = Some(now_unix() as u64 * 1000);
+                                                tc.completed_at_ms = Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);
                                             }
                                         }
 
@@ -370,7 +385,7 @@ pub async fn run(
                                                 content,
                                                 content_blocks: std::mem::take(&mut streaming.current_blocks),
                                                 tool_calls: streaming.active_tool_calls.drain().map(|(_, v)| v).collect(),
-                                                created_at: now_unix(),
+                                                created_at: crate::domain::models::session_meta::now_unix(),
                                                 token_count: None,
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
                                             });
@@ -489,7 +504,7 @@ pub async fn run(
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
                                         if !conversation.messages.is_empty() {
-                                            conversation.updated_at = now_unix();
+                                            conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                             if let Some(prev) = _pending_save.take() {
                                                 let _ = prev.await;
                                             }
@@ -511,8 +526,8 @@ pub async fn run(
                                             id: generate_conversation_id(),
                                             title: String::new(),
                                             messages: Vec::new(),
-                                            created_at: now_unix(),
-                                            updated_at: now_unix(),
+                                            created_at: crate::domain::models::session_meta::now_unix(),
+                                            updated_at: crate::domain::models::session_meta::now_unix(),
                                             last_response_at: None,
                                             session_id: Some(generate_conversation_id()),
                                             usage: None,
@@ -621,7 +636,7 @@ pub async fn run(
                                             &workspace_path,
                                             &mut session_manager,
                                         );
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -741,7 +756,7 @@ pub async fn run(
                                                     content: "[aborted]".to_string(),
                                                     is_error: true,
                                                 });
-                                                tc.completed_at_ms = Some(now_unix() as u64 * 1000);
+                                                tc.completed_at_ms = Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);
                                             }
                                         }
                                         // Preserve partial response as a finalized message
@@ -755,7 +770,7 @@ pub async fn run(
                                                 content,
                                                 content_blocks: std::mem::take(&mut streaming.current_blocks),
                                                 tool_calls: streaming.active_tool_calls.drain().map(|(_, v)| v).collect(),
-                                                created_at: now_unix(),
+                                                created_at: crate::domain::models::session_meta::now_unix(),
                                                 token_count: None,
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
                                             });
@@ -776,7 +791,7 @@ pub async fn run(
                                     save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                     // Persist current conversation if it has messages
                                     if !conversation.messages.is_empty() {
-                                        conversation.updated_at = now_unix();
+                                        conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                         let fs_ref = fs_storage.clone();
                                         let conv_clone = conversation.clone();
                                         if let Some(prev) = _pending_save.take() {
@@ -797,6 +812,10 @@ pub async fn run(
                                     tab_manager.create_tab();
                                     // Load new tab state into proxies (fresh tab, never has queued messages)
                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                    // Update sidebar: mark new conversation open/active
+                                    session_index.set_open(&conversation.id, true);
+                                    session_index.set_active(Some(&conversation.id));
+                                    state.sidebar_entry_count = session_index.len();
                                     state.input_buffer.clear();
                                     state.cursor_position = 0;
                                     state.input_scroll_offset = 0;
@@ -817,6 +836,7 @@ pub async fn run(
                                     } else {
                                         // Save current tab state
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                        let closing_conv_id = conversation.id.clone();
                                         let tab_id = tab_manager.active_tab_id();
                                         // Abort active streaming on this tab
                                         if streaming.is_streaming {
@@ -827,7 +847,7 @@ pub async fn run(
                                         }
                                         // Persist conversation if it has messages
                                         if !conversation.messages.is_empty() {
-                                            conversation.updated_at = now_unix();
+                                            conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                             let fs_ref = fs_storage.clone();
                                             let conv_clone = conversation.clone();
                                             if let Some(prev) = _pending_save.take() {
@@ -853,6 +873,9 @@ pub async fn run(
                                                 start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
                                             }
                                         }
+                                        // Update sidebar: mark closed tab as no longer open
+                                        session_index.set_open(&closing_conv_id, false);
+                                        session_index.set_active(Some(&conversation.id));
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
@@ -872,6 +895,7 @@ pub async fn run(
                                                 start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
                                             }
                                         }
+                                        session_index.set_active(Some(&conversation.id));
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -885,6 +909,7 @@ pub async fn run(
                                                 start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
                                             }
                                         }
+                                        session_index.set_active(Some(&conversation.id));
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -902,8 +927,274 @@ pub async fn run(
                                                 start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
                                             }
                                         }
+                                        session_index.set_active(Some(&conversation.id));
                                         state.needs_redraw = true;
                                     }
+                                }
+                                InputAction::ToggleSidebar => {
+                                    // P10: Don't toggle sidebar when an overlay is active
+                                    if matches!(state.focus, FocusState::Overlay(_)) {
+                                        // Ignore — overlay has focus priority
+                                    } else if state.terminal_width >= layout::SIDEBAR_MIN_WIDTH {
+                                        state.sidebar_visible = !state.sidebar_visible;
+                                        if state.sidebar_visible {
+                                            state.sidebar_panel = Some(crate::domain::models::visual::PanelType::History);
+                                            state.focus = FocusState::Sidebar { 
+                                                panel: crate::domain::models::visual::PanelType::History, 
+                                                selected: state.sidebar_selected 
+                                            };
+                                        } else {
+                                            state.sidebar_panel = None;
+                                            state.focus = FocusState::Chat;
+                                        }
+                                        state.needs_redraw = true;
+                                    } else {
+                                        // Terminal too narrow - show info message
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = crate::domain::models::StatusState::Flash {
+                                            message: "Terminal too narrow for sidebar. Use Ctrl+P to search history.".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::OpenSidebarConversation => {
+                                    // Resolve conversation ID from sidebar selection
+                                    let resolved_id = session_index.entries()
+                                        .get(state.sidebar_selected)
+                                        .map(|e| e.conversation_id.clone());
+                                    if let Some(conv_id) = resolved_id {
+                                        // Check if already open in a tab
+                                        if conv_id == conversation.id {
+                                            // Already active — just switch focus
+                                            state.focus = FocusState::Chat;
+                                            state.needs_redraw = true;
+                                        } else if tab_manager.find_by_conversation(&conv_id).is_some() {
+                                            // Open in another tab — switch to it
+                                            save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                            if let Some(idx) = tab_manager.tabs().iter().position(|t| t.conversation.id == conv_id) {
+                                                tab_manager.switch_to_index(idx + 1); // 1-based
+                                                let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                if should_drain {
+                                                    if let Some(queued_msg) = turn_queue.dequeue() {
+                                                        start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                    }
+                                                }
+                                                session_index.set_active(Some(&conv_id));
+                                            }
+                                            state.focus = FocusState::Chat;
+                                            state.needs_redraw = true;
+                                        } else {
+                                            // Not open — load from storage into a new tab
+                                            match storage.load_conversation(&conv_id).await {
+                                                Ok(Some(loaded_conv)) => {
+                                                    // Save current tab state first
+                                                    save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                                    // Create new tab and load the conversation into it
+                                                    tab_manager.create_tab();
+                                                    let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                    // Overwrite the fresh conversation with the loaded one
+                                                    conversation = loaded_conv;
+                                                    // Save loaded conversation back into TabManager so it's not lost on tab switch
+                                                    save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                                    // Update session_index
+                                                    session_index.set_open(&conv_id, true);
+                                                    session_index.set_active(Some(&conv_id));
+                                                    state.focus = FocusState::Chat;
+                                                    state.needs_redraw = true;
+                                                }
+                                                Ok(None) => {
+                                                    tracing::warn!("Sidebar: conversation {} not found in storage", conv_id);
+                                                    session_index.remove(&conv_id);
+                                                    state.sidebar_entry_count = session_index.len();
+                                                    // Clamp sidebar selection after removal
+                                                    if state.sidebar_entry_count > 0 {
+                                                        state.sidebar_selected = state.sidebar_selected.min(state.sidebar_entry_count - 1);
+                                                    } else {
+                                                        state.sidebar_selected = 0;
+                                                    }
+                                                    state.needs_redraw = true;
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("Failed to load conversation {}: {}", conv_id, e);
+                                                    state.status_before_flash = Some(state.status.clone());
+                                                    state.status = StatusState::Flash {
+                                                        message: format!("Failed to load conversation: {}", e),
+                                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                                    };
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                InputAction::DeleteSidebarConversation => {
+                                    // Resolve conversation ID from sidebar selection
+                                    if let Some(entry) = session_index.entries().get(state.sidebar_selected) {
+                                        let conv_id = entry.conversation_id.clone();
+                                        let title = entry.title.clone();
+                                        
+                                        // Don't delete the active conversation if it's the only tab
+                                        if conv_id == conversation.id && tab_manager.tab_count() == 1 {
+                                            state.status = StatusState::Flash {
+                                                message: "Cannot delete the only open conversation".to_string(),
+                                                remaining_ms: state.theme.timing.status_flash_ms,
+                                            };
+                                        } else {
+                                            // Show confirmation prompt (AC5)
+                                            let display_title = if title.is_empty() { "Untitled".to_string() } else { title };
+                                            state.pending_delete = Some(DeleteConfirmTarget::Single { 
+                                                id: conv_id.clone(), 
+                                                title: display_title.clone() 
+                                            });
+                                            state.status = StatusState::Flash {
+                                                message: format!("Delete \"{}\"? This cannot be undone. [y/n]", display_title),
+                                                remaining_ms: 30_000, // Long timeout for confirmation
+                                            };
+                                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                                ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Single { 
+                                                    id: conv_id.clone(), 
+                                                    title: display_title 
+                                                })
+                                            ));
+                                        }
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::DeleteAllConversations => {
+                                    // Show confirmation prompt (AC6)
+                                    let count = session_index.len();
+                                    if count == 0 {
+                                        state.status = StatusState::Flash {
+                                            message: "No conversations to delete".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                    } else {
+                                        state.pending_delete = Some(DeleteConfirmTarget::Bulk { count });
+                                        state.status = StatusState::Flash {
+                                            message: format!("Delete {} conversations? [y/n]", count),
+                                            remaining_ms: 30_000,
+                                        };
+                                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                            ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Bulk { count })
+                                        ));
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ConfirmDelete => {
+                                    // Execute the pending delete
+                                    if let Some(target) = state.pending_delete.take() {
+                                        match target {
+                                            DeleteConfirmTarget::Single { id: conv_id, .. } => {
+                                                // Single conversation delete
+                                                if conv_id == conversation.id {
+                                                    let tab_id = tab_manager.active_tab_id();
+                                                    if streaming.is_streaming {
+                                                        if let Some(handle) = _active_turn.take() {
+                                                            handle.abort();
+                                                        }
+                                                        while turn_queue.dequeue().is_some() {}
+                                                    }
+                                                    tab_manager.close_tab(tab_id);
+                                                    let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                    if should_drain {
+                                                        if let Some(queued_msg) = turn_queue.dequeue() {
+                                                            start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                        }
+                                                    }
+                                                    session_index.set_active(Some(&conversation.id));
+                                                } else if let Some(tab) = tab_manager.tabs().iter().find(|t| t.conversation.id == conv_id) {
+                                                    let tab_id = tab.id;
+                                                    tab_manager.close_tab(tab_id);
+                                                }
+                                                let fs_ref = fs_storage.clone();
+                                                let del_id = conv_id.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(e) = fs_ref.delete_conversation(&del_id).await {
+                                                        tracing::error!("Failed to delete conversation {}: {}", del_id, e);
+                                                    }
+                                                });
+                                                session_index.remove(&conv_id);
+                                                state.sidebar_entry_count = session_index.len();
+                                                if state.sidebar_entry_count > 0 {
+                                                    state.sidebar_selected = state.sidebar_selected.min(state.sidebar_entry_count - 1);
+                                                } else {
+                                                    state.sidebar_selected = 0;
+                                                }
+                                                // U1: Clear status bar immediately after successful delete
+                                                state.status = StatusState::Idle;
+                                            }
+                                            DeleteConfirmTarget::Bulk { .. } => {
+                                                // Delete all conversations - F16: Fix race by clearing index BEFORE spawning task
+                                                if streaming.is_streaming {
+                                                    if let Some(handle) = _active_turn.take() {
+                                                        handle.abort();
+                                                    }
+                                                    streaming.is_streaming = false;
+                                                    streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                                                    streaming.current_blocks.clear();
+                                                    streaming.active_tool_calls.clear();
+                                                    while turn_queue.dequeue().is_some() {}
+                                                }
+                                                // F16: Collect IDs and clear index atomically BEFORE spawning background task
+                                                let conv_ids: Vec<String> = session_index.entries().iter()
+                                                    .map(|e| e.conversation_id.clone())
+                                                    .collect();
+                                                // Clear the index immediately to prevent race with new conversations
+                                                session_index.clear();
+                                                state.sidebar_entry_count = 0;
+                                                state.sidebar_selected = 0;
+                                                // F14: Reset sidebar_scroll_offset during DeleteAll
+                                                state.sidebar_scroll_offset = 0;
+                                                
+                                                let fs_ref = fs_storage.clone();
+                                                tokio::spawn(async move {
+                                                    for id in conv_ids {
+                                                        if let Err(e) = fs_ref.delete_conversation(&id).await {
+                                                            tracing::error!("Failed to delete conversation {}: {}", id, e);
+                                                        }
+                                                    }
+                                                });
+                                                
+                                                while tab_manager.tab_count() > 1 {
+                                                    let tab_id = tab_manager.tabs().last().map(|t| t.id).unwrap();
+                                                    tab_manager.close_tab(tab_id);
+                                                }
+                                                conversation.messages.clear();
+                                                conversation.title = String::new();
+                                                conversation.id = generate_conversation_id();
+                                                conversation.session_id = Some(generate_conversation_id());
+                                                conversation.created_at = crate::domain::models::session_meta::now_unix();
+                                                conversation.updated_at = crate::domain::models::session_meta::now_unix();
+                                                conversation.last_response_at = None;
+                                                conversation.usage = None;
+                                                conversation.fork_source = None;
+                                                save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                                // U1: Clear status bar immediately after successful delete
+                                                state.status = StatusState::Flash {
+                                                    message: "All conversations deleted".to_string(),
+                                                    remaining_ms: state.theme.timing.status_flash_ms,
+                                                };
+                                            }
+                                        }
+                                    }
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CancelDelete => {
+                                    // Cancel the pending delete - U1: Clear status bar immediately
+                                    state.pending_delete = None;
+                                    // U1: Clear status bar immediately on cancel (don't restore previous status)
+                                    state.status = StatusState::Idle;
+                                    state.focus = if state.sidebar_visible {
+                                        FocusState::Sidebar {
+                                            panel: crate::domain::models::visual::PanelType::History,
+                                            selected: state.sidebar_selected,
+                                        }
+                                    } else {
+                                        FocusState::Input
+                                    };
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
@@ -927,7 +1218,7 @@ pub async fn run(
                                 &mut conversation,
                                 &mut streaming,
                                 chunk,
-                                now_unix(),
+                                crate::domain::models::session_meta::now_unix(),
                             );
                             match action {
                                 ChunkAction::NeedsRedraw => {
@@ -943,9 +1234,17 @@ pub async fn run(
                                     state.needs_redraw = true;
                                     _active_turn = None;
 
+                                    // Update sidebar index on turn complete
+                                    session_index.touch(
+                                        &conversation.id,
+                                        if conversation.title.is_empty() { None } else { Some(conversation.title.clone()) },
+                                        Some(conversation.messages.len()),
+                                    );
+                                    state.sidebar_entry_count = session_index.len();
+
                                     // Persist conversation on turn complete
                                     if persist {
-                                        let now = now_unix();
+                                        let now = crate::domain::models::session_meta::now_unix();
                                         conversation.updated_at = now;
                                         conversation.last_response_at = Some(now);
                                         if let Some(prev) = _pending_save.take() {
@@ -1018,7 +1317,7 @@ pub async fn run(
                                             &workspace_path,
                                             &mut session_manager,
                                         );
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -1039,13 +1338,13 @@ pub async fn run(
                                 &mut tab.conversation,
                                 &mut tab.streaming,
                                 chunk,
-                                now_unix(),
+                                crate::domain::models::session_meta::now_unix(),
                             );
                             match action {
                                 ChunkAction::TurnComplete { persist, trigger_title_generation } => {
                                     // apply_chunk already set tab.streaming.is_streaming = false
                                     if persist {
-                                        let now = now_unix();
+                                        let now = crate::domain::models::session_meta::now_unix();
                                         tab.conversation.updated_at = now;
                                         tab.conversation.last_response_at = Some(now);
                                         if let Some(prev) = _pending_save.take() {
@@ -1296,12 +1595,14 @@ pub async fn run(
                             &workspace_path,
                             &mut session_manager,
                         );
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                         }
                     }
                     AppEvent::TitleGenerated { conversation_id, title } => {
+                        // Update sidebar index with new title and reorder to front
+                        session_index.touch(&conversation_id, Some(title.clone()), None);
                         if conversation_id == conversation.id {
                             // Active tab
                             conversation.title = title;
@@ -1440,7 +1741,7 @@ pub async fn run(
                 }
 
                 if state.needs_redraw {
-                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
+                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                         Ok(()) => state.needs_redraw = false,
                         Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                     }
@@ -1463,7 +1764,7 @@ pub async fn run(
 
     // Persist active tab on shutdown with clean_exit = true (graceful shutdown)
     if !conversation.messages.is_empty() {
-        conversation.updated_at = now_unix();
+        conversation.updated_at = crate::domain::models::session_meta::now_unix();
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fs_storage.save_conversation_with_exit(&conversation, true),
@@ -1488,7 +1789,7 @@ pub async fn run(
     for tab in tab_manager.tabs() {
         if tab.conversation.id != active_conv_id && !tab.conversation.messages.is_empty() {
             let mut bg_conv = tab.conversation.clone();
-            bg_conv.updated_at = now_unix();
+            bg_conv.updated_at = crate::domain::models::session_meta::now_unix();
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 fs_storage.save_conversation_with_exit(&bg_conv, true),
@@ -1603,7 +1904,7 @@ fn start_turn(
         content: text.to_string(),
         content_blocks: vec![],
         tool_calls: vec![],
-        created_at: now_unix(),
+        created_at: crate::domain::models::session_meta::now_unix(),
         token_count: None,
         stop_reason: None,
     });
@@ -1686,13 +1987,6 @@ fn start_turn(
     state.needs_redraw = true;
 }
 
-/// Get current unix timestamp in seconds.
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
 
 /// Handle a render failure: abort active turn, reset streaming, attempt terminal recovery.
 fn handle_render_error(
@@ -1760,6 +2054,7 @@ fn render(
     tab_count: usize,
     active_tab_index: usize,
     tab_manager_for_bar: Option<&crate::domain::models::tab::TabManager>,
+    session_index: &SessionIndex,
 ) -> Result<()> {
     let scroll_offset = state.scroll_offset;
     let auto_scroll = state.auto_scroll;
@@ -1783,7 +2078,7 @@ fn render(
         ref token_usage,
         ref input_buffer,
         cursor_position,
-        focus,
+        ref focus,
         has_project_context,
         multiline_mode,
         input_scroll_offset,
@@ -1794,13 +2089,14 @@ fn render(
         ref help_overlay,
         ref image_indicator,
         ref current_hint,
+        sidebar_visible,
         ..
     } = *state;
 
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area, theme, input_buffer, tab_count) {
+        match layout::compute_layout(area, theme, input_buffer, tab_count, sidebar_visible) {
             Some(app_layout) => {
                 let _is_compact = area.width < 80 || area.height < 24;
 
@@ -1812,6 +2108,23 @@ fn render(
                         active_tab_index,
                         tab_bar_area,
                         frame.buffer_mut(),
+                        theme,
+                    );
+                }
+
+                // P1/AC1: Render sidebar when visible
+                if let Some(sidebar_area) = app_layout.sidebar {
+                    let active_conv_id = if let Some(tm) = tab_manager_for_bar {
+                        Some(tm.active_tab().conversation.id.as_str())
+                    } else {
+                        None
+                    };
+                    sidebar::render_history_panel(
+                        sidebar_area,
+                        frame.buffer_mut(),
+                        session_index.entries(),
+                        state.sidebar_selected,
+                        active_conv_id,
                         theme,
                     );
                 }
@@ -1926,7 +2239,7 @@ fn render(
                     app_layout.input_area,
                     input_buffer,
                     cursor_position,
-                    focus,
+                    focus.clone(),
                     theme,
                     multiline_mode,
                     input_scroll_offset,

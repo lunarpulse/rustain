@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 
 use crate::domain::errors::StorageError;
-use crate::domain::models::{Conversation, ConversationSummary};
+use crate::domain::models::{Conversation, ConversationSummary, SessionMeta};
 use crate::domain::ports::StoragePort;
 
 /// Filesystem-backed storage for conversations.
@@ -39,6 +39,12 @@ impl FileSystemStorage {
     fn session_path(&self, id: &str) -> PathBuf {
         self.sessions_dir
             .join(format!("{}.meta.json", Self::sanitize_id(id)))
+    }
+
+    /// Build the file path for a session metadata sidecar file.
+    fn session_meta_path(&self, id: &str) -> PathBuf {
+        self.sessions_dir
+            .join(format!("{}.session.json", Self::sanitize_id(id)))
     }
 
     /// Sanitize a conversation ID to prevent path traversal.
@@ -75,6 +81,12 @@ impl FileSystemStorage {
             )));
         }
 
+        // Also update the lightweight SessionMeta sidecar (best-effort)
+        let meta = crate::domain::models::session_meta::SessionMeta::from_conversation(conv);
+        if let Err(e) = self.save_session_meta(&conv.id, &meta).await {
+            tracing::warn!("Failed to write session meta sidecar during save_with_exit: {}", e);
+        }
+
         Ok(())
     }
 
@@ -109,6 +121,7 @@ impl StoragePort for FileSystemStorage {
     async fn save_conversation(&self, conv: &Conversation) -> Result<(), StorageError> {
         self.ensure_dir().await?;
 
+        // Save the full conversation
         let persisted = PersistedConversation::from_conversation(conv);
         let json = serde_json::to_string_pretty(&persisted)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
@@ -130,6 +143,12 @@ impl StoragePort for FileSystemStorage {
                 "Failed to rename session file: {}",
                 e
             )));
+        }
+
+        // Also save/update the SessionMeta sidecar for fast listing
+        let meta = SessionMeta::from_conversation(conv);
+        if let Err(e) = self.save_session_meta(&conv.id, &meta).await {
+            tracing::warn!("Failed to write session meta sidecar for {}: {}", conv.id, e);
         }
 
         Ok(())
@@ -179,6 +198,40 @@ impl StoragePort for FileSystemStorage {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.ends_with(".meta.json") && !n.ends_with(".meta.json.tmp"))
             {
+                // Try to read from SessionMeta sidecar first (fast path)
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_suffix(".meta"))
+                    .unwrap_or("");
+                
+                if !id.is_empty() {
+                    let meta_path = self.session_meta_path(id);
+                    match tokio::fs::read_to_string(&meta_path).await {
+                        Ok(content) => {
+                            match serde_json::from_str::<SessionMeta>(&content) {
+                                Ok(meta) => {
+                                    summaries.push(ConversationSummary {
+                                        id: id.to_string(),
+                                        title: meta.title,
+                                        created_at: meta.created_at,
+                                        updated_at: meta.updated_at,
+                                        message_count: meta.message_count,
+                                    });
+                                    continue; // Successfully read from sidecar, skip full deserialization
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Corrupted session meta sidecar for {}: {}", id, e);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Sidecar not found or invalid, fall through to full deserialization
+                        }
+                    }
+                }
+
+                // Fallback: read from full conversation file (backward compat)
                 match tokio::fs::read_to_string(&path).await {
                     Ok(content) => {
                         if let Ok(persisted) =
@@ -203,6 +256,85 @@ impl StoragePort for FileSystemStorage {
         // Sort by updatedAt desc (most recent first)
         summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(summaries)
+    }
+
+    async fn delete_conversation(&self, id: &str) -> Result<(), StorageError> {
+        // Delete main conversation file
+        let path = self.session_path(id);
+        let meta_path = self.session_meta_path(id);
+
+        let mut errors = Vec::new();
+
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already deleted, continue to delete sidecar
+            }
+            Err(e) => errors.push(format!("Failed to delete session file: {}", e)),
+        }
+
+        match tokio::fs::remove_file(&meta_path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Sidecar may not exist, that's ok
+            }
+            Err(e) => errors.push(format!("Failed to delete session meta file: {}", e)),
+        }
+
+        if !errors.is_empty() {
+            return Err(StorageError::IoError(errors.join("; ")));
+        }
+
+        tracing::debug!("Deleted conversation {}", id);
+        Ok(())
+    }
+
+    async fn save_session_meta(&self, id: &str, meta: &SessionMeta) -> Result<(), StorageError> {
+        self.ensure_dir().await?;
+        
+        let path = self.session_meta_path(id);
+        let json = serde_json::to_string_pretty(meta)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        
+        // Atomic write: write to temp file, then rename
+        let sanitized = Self::sanitize_id(id);
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.session.json.tmp", sanitized));
+        
+        tokio::fs::write(&tmp_path, json.as_bytes())
+            .await
+            .map_err(|e| StorageError::IoError(format!("Failed to write session meta file: {}", e)))?;
+        
+        if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StorageError::IoError(format!(
+                "Failed to rename session meta file: {}",
+                e
+            )));
+        }
+        
+        Ok(())
+    }
+
+    async fn load_session_meta(&self, id: &str) -> Result<Option<SessionMeta>, StorageError> {
+        let path = self.session_meta_path(id);
+        
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read session meta file: {}",
+                    e
+                )));
+            }
+        };
+        
+        let meta: SessionMeta = serde_json::from_str(&content)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        
+        Ok(Some(meta))
     }
 }
 
@@ -465,5 +597,130 @@ mod tests {
             !clean_exit,
             "old sessions without clean_exit should default to false (trigger recovery)"
         );
+    }
+
+    // SessionMeta sidecar tests
+    #[tokio::test]
+    async fn test_save_conversation_creates_session_meta() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv = make_test_conversation();
+
+        storage.save_conversation(&conv).await.unwrap();
+
+        // Both files should exist
+        assert!(tmp.path().join("sessions/test-conv-123.meta.json").exists());
+        assert!(tmp.path().join("sessions/test-conv-123.session.json").exists());
+
+        // SessionMeta should have correct data
+        let meta = storage.load_session_meta("test-conv-123").await.unwrap().expect("meta should exist");
+        assert_eq!(meta.title, conv.title);
+        assert_eq!(meta.message_count, conv.messages.len());
+    }
+
+    #[tokio::test]
+    async fn test_load_session_meta_nonexistent() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        let result = storage.load_session_meta("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_conversation_removes_both_files() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv = make_test_conversation();
+
+        // Save the conversation
+        storage.save_conversation(&conv).await.unwrap();
+        
+        // Verify both files exist
+        assert!(tmp.path().join("sessions/test-conv-123.meta.json").exists());
+        assert!(tmp.path().join("sessions/test-conv-123.session.json").exists());
+
+        // Delete the conversation
+        storage.delete_conversation("test-conv-123").await.unwrap();
+
+        // Both files should be gone
+        assert!(!tmp.path().join("sessions/test-conv-123.meta.json").exists());
+        assert!(!tmp.path().join("sessions/test-conv-123.session.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        // Deleting a non-existent conversation should succeed
+        storage.delete_conversation("nonexistent").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_uses_session_meta_when_available() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        // Save a conversation (creates both files)
+        let conv = make_test_conversation();
+        storage.save_conversation(&conv).await.unwrap();
+
+        // List should read from SessionMeta (fast path)
+        let summaries = storage.list_conversations().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, conv.id);
+        assert_eq!(summaries[0].title, conv.title);
+        assert_eq!(summaries[0].message_count, conv.messages.len());
+    }
+
+    #[tokio::test]
+    async fn test_list_fallback_to_full_deserialization() {
+        let tmp = TempDir::new().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // Create only the full conversation file (simulate old session without sidecar)
+        let json = r#"{
+            "id": "old-session",
+            "title": "Old Session Title",
+            "messages": [{"id":"msg1","role":"user","content":"Hello","contentBlocks":[],"toolCalls":[],"createdAt":1700000000,"tokenCount":null}],
+            "createdAt": 1700000000,
+            "updatedAt": 1700000100
+        }"#;
+        std::fs::write(sessions_dir.join("old-session.meta.json"), json).unwrap();
+
+        let storage = FileSystemStorage::new(sessions_dir);
+        let summaries = storage.list_conversations().await.unwrap();
+        
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "old-session");
+        assert_eq!(summaries[0].title, "Old Session Title");
+        assert_eq!(summaries[0].message_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_session_meta_save_and_load_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        
+        let meta = SessionMeta {
+            version: 1,
+            title: "Test Session".to_string(),
+            created_at: 1700000000,
+            updated_at: 1700000100,
+            message_count: 5,
+            bookmarks: vec![1, 3],
+        };
+
+        storage.save_session_meta("test-id", &meta).await.unwrap();
+        
+        let loaded = storage.load_session_meta("test-id").await.unwrap().expect("should load");
+        assert_eq!(loaded.version, meta.version);
+        assert_eq!(loaded.title, meta.title);
+        assert_eq!(loaded.created_at, meta.created_at);
+        assert_eq!(loaded.updated_at, meta.updated_at);
+        assert_eq!(loaded.message_count, meta.message_count);
+        assert_eq!(loaded.bookmarks, meta.bookmarks);
     }
 }
