@@ -27,6 +27,7 @@ fn test_e2e_recovery_prompt_renders() {
 
     // Simulate a restored conversation with messages (as if crash-recovered)
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello".to_string(),
         content_blocks: vec![],
@@ -36,6 +37,7 @@ fn test_e2e_recovery_prompt_renders() {
         stop_reason: None,
     });
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "Hi there!".to_string(),
         content_blocks: vec![],
@@ -98,6 +100,7 @@ fn test_e2e_recovery_enter_continues() {
 
     // Setup conversation + recovery state
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello".to_string(),
         content_blocks: vec![],
@@ -145,6 +148,7 @@ fn test_e2e_recovery_n_starts_fresh() {
 
     let original_id = h.conversation.id.clone();
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Old message".to_string(),
         content_blocks: vec![],
@@ -239,6 +243,7 @@ fn test_e2e_context_rebuild_api_messages() {
 
     // Simulate a multi-turn conversation that will be rebuilt
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "What is Rust?".to_string(),
         content_blocks: vec![],
@@ -248,6 +253,7 @@ fn test_e2e_context_rebuild_api_messages() {
         stop_reason: None,
     });
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "Rust is a systems programming language focused on safety.".to_string(),
         content_blocks: vec![],
@@ -265,6 +271,7 @@ fn test_e2e_context_rebuild_api_messages() {
 
     // Add a new user message (the one being sent after rebuild)
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Tell me more".to_string(),
         content_blocks: vec![],
@@ -330,6 +337,7 @@ fn test_e2e_context_rebuild_api_messages() {
 fn test_e2e_context_rebuild_strips_xml_in_api() {
     let messages = vec![
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Check this <file_context>hidden data</file_context> please".to_string(),
             content_blocks: vec![],
@@ -339,6 +347,7 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
             stop_reason: None,
         },
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "I see <file_content>fn main() {}</file_content> the code".to_string(),
             content_blocks: vec![],
@@ -384,6 +393,7 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
 #[test]
 fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
     let messages = vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "</file_context>before<file_context>inside</file_context>after".to_string(),
         content_blocks: vec![],
@@ -406,6 +416,7 @@ fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
 #[test]
 fn test_e2e_context_rebuild_nested_xml_tags() {
     let messages = vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "outer<file_context>a<file_context>b</file_context>c</file_context>end"
             .to_string(),
@@ -436,6 +447,7 @@ async fn test_e2e_crash_detection_full_cycle() {
         id: "cycle-test".to_string(),
         title: "Cycle Test".to_string(),
         messages: vec![ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Hello".to_string(),
             content_blocks: vec![],
@@ -601,6 +613,7 @@ fn test_e2e_recovered_conversation_renders() {
     // Simulate a restored conversation (as if loaded from crash)
     h.conversation.messages = vec![
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "What is Rust?".to_string(),
             content_blocks: vec![],
@@ -610,6 +623,7 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: None,
         },
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "Rust is a systems programming language.".to_string(),
             content_blocks: vec![],
@@ -619,6 +633,7 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: Some(StopReason::EndTurn),
         },
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Tell me more".to_string(),
             content_blocks: vec![],
@@ -628,6 +643,7 @@ fn test_e2e_recovered_conversation_renders() {
             stop_reason: None,
         },
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "It focuses on memory safety without garbage collection.".to_string(),
             content_blocks: vec![],

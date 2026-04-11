@@ -49,6 +49,7 @@ fn test_error_feedback_block_in_conversation() {
     feedback_blocks.insert("fb-1".to_string(), fb);
 
     let conversation = make_conversation(vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello".to_string(),
         content_blocks: vec![],

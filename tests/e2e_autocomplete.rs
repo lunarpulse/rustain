@@ -88,7 +88,7 @@ fn test_e2e_slash_command_navigation() {
     // Down arrow navigates
     let action = h.press_key(DomainKey::Down);
     assert!(matches!(action, InputAction::Consumed));
-    
+
     // Up arrow navigates back
     let action = h.press_key(DomainKey::Up);
     assert!(matches!(action, InputAction::Consumed));
@@ -250,15 +250,18 @@ fn test_e2e_new_command_creates_fresh_session() {
     h.focus_input();
 
     // Add some conversation
-    h.conversation.messages.push(rustain::domain::models::ChatMessage {
-        role: rustain::domain::models::MessageRole::User,
-        content: "Hello".to_string(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: 0,
-        token_count: None,
-        stop_reason: None,
-    });
+    h.conversation
+        .messages
+        .push(rustain::domain::models::ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
+            role: rustain::domain::models::MessageRole::User,
+            content: "Hello".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+        });
 
     let original_id = h.conversation.id.clone();
 

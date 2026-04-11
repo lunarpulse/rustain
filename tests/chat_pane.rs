@@ -74,6 +74,7 @@ fn test_chat_pane_shows_user_message() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello world".to_string(),
         content_blocks: vec![],
@@ -119,6 +120,7 @@ fn test_chat_pane_shows_assistant_message() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "Hi there".to_string(),
         content_blocks: vec![],
@@ -249,6 +251,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "My question".to_string(),
         content_blocks: vec![],
@@ -307,6 +310,7 @@ fn test_chat_pane_error_displays_in_red() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "Something went wrong".to_string(),
         content_blocks: vec![ContentBlockType::Error],
@@ -422,6 +426,7 @@ fn test_feedback_block_visible_with_auto_scroll() {
 
     let messages: Vec<ChatMessage> = (1..=3)
         .map(|i| ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: format!("User message {}", i),
             content_blocks: vec![],
@@ -500,7 +505,9 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
     };
+    let msg_id = rustain::domain::models::generate_conversation_id();
     let conversation = make_conversation(vec![ChatMessage {
+        id: msg_id.clone(),
         role: MessageRole::User,
         content: "Hello".to_string(),
         content_blocks: vec![],
@@ -537,7 +544,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         })
         .unwrap();
 
-    let collapsed_cache = height_cache.get(0);
+    let collapsed_cache = height_cache.get(&msg_id);
     let collapsed_bounds = collapsed_boundaries.into_inner();
     // text 3 + collapsed tool 1 = 4
     assert_eq!(
@@ -584,7 +591,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         })
         .unwrap();
 
-    let expanded_cache = height_cache.get(0);
+    let expanded_cache = height_cache.get(&msg_id);
     let expanded_bounds = expanded_boundaries.into_inner();
     // text 3 + expanded tool (3 + 3 output lines) = 3 + 6 = 9
     assert_eq!(

@@ -137,6 +137,7 @@ data: {\"type\":\"message_stop\"}\n\
 
         // Add user message
         conv.messages.push(ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "What is 2+2?".into(),
             content_blocks: vec![],
@@ -265,6 +266,7 @@ data: {\"type\":\"message_stop\"}\n\
 
         let mut conv = make_conversation();
         conv.messages.push(ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Hi".into(),
             content_blocks: vec![],
@@ -595,6 +597,7 @@ data: {\"type\":\"message_stop\"}\n\
         // Feed through apply_chunk and verify conversation state
         let mut conv = make_conversation();
         conv.messages.push(ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Hello".into(),
             content_blocks: vec![],
@@ -681,6 +684,7 @@ data: {\"type\":\"message_stop\"}\n\
             tx,
             Arc::new(rustain::adapters::noop::NoOpSecurity),
             Arc::new(rustain::adapters::noop::NoOpToolSet),
+            "test-conv-id".to_string(),
         )
         .await;
 
@@ -697,9 +701,15 @@ data: {\"type\":\"message_stop\"}\n\
             events.len()
         );
 
-        let has_error = events
-            .iter()
-            .any(|e| matches!(e, AppEvent::ProviderChunk(StreamChunk::Error { .. })));
+        let has_error = events.iter().any(|e| {
+            matches!(
+                e,
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::Error { .. },
+                    ..
+                }
+            )
+        });
         assert!(
             has_error,
             "Expected synthetic Error chunk on stream disconnect"
@@ -708,9 +718,12 @@ data: {\"type\":\"message_stop\"}\n\
         let has_turn_complete = events.iter().any(|e| {
             matches!(
                 e,
-                AppEvent::ProviderChunk(StreamChunk::TurnComplete {
-                    stop_reason: StopReason::Cancelled
-                })
+                AppEvent::ProviderChunk {
+                    chunk: StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled
+                    },
+                    ..
+                }
             )
         });
         assert!(

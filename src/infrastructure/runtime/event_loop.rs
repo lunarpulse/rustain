@@ -23,6 +23,7 @@ use crate::adapters::tui::widgets::{
 /// Separate from shutdown persist timeout (2s) which is more critical.
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 use crate::domain::events::{AppEvent, ChunkAction};
+use crate::domain::models::tab::TabManager;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
@@ -80,24 +81,21 @@ pub async fn run(
         state.theme.timing.tick_interval_ms,
     ));
 
-    // Conversation and streaming state for MVP single-tab
-    let mut conversation = restored_conversation.unwrap_or_else(|| Conversation {
-        id: generate_conversation_id(),
-        title: String::new(),
-        messages: Vec::new(),
-        created_at: now_unix(),
-        updated_at: now_unix(),
-        last_response_at: None,
-        session_id: None,
-        usage: None,
-        fork_source: None,
-    });
-    // Ensure session_id is set (new conversations don't have one yet)
-    if conversation.session_id.is_none() {
-        conversation.session_id = Some(generate_conversation_id());
+    // Tab manager — owns all per-tab state; standalone proxies stay in sync with the active tab
+    let mut tab_manager = if let Some(conv) = restored_conversation {
+        TabManager::with_conversation(conv)
+    } else {
+        TabManager::new()
+    };
+    // Ensure session_id is set on the active tab's conversation
+    if tab_manager.active_tab().conversation.session_id.is_none() {
+        let sid = generate_conversation_id();
+        tab_manager.active_tab_mut().conversation.session_id = Some(sid);
     }
 
-    let mut streaming = StreamingState::default();
+    // Active-tab proxies — always reflect the current tab; synced on every tab switch
+    let mut conversation = tab_manager.active_tab().conversation.clone();
+    let mut streaming = tab_manager.active_tab().streaming.clone();
     let mut turn_queue = TurnQueue::default();
     let mut _pending_save: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -112,14 +110,8 @@ pub async fn run(
     // P6: Cache last palette filter text to avoid re-filtering on every keystroke
     let mut last_palette_filter = String::new();
 
-    // Initialize SessionManager based on whether we have a restored session
-    let mut session_manager = if conversation.session_id.is_some() {
-        SessionManager::new(SessionState::Active {
-            id: conversation.session_id.clone().unwrap_or_default(),
-        })
-    } else {
-        SessionManager::new(SessionState::Empty)
-    };
+    // Initialize SessionManager from the active tab
+    let mut session_manager = tab_manager.active_tab().session.clone();
 
     // Mark session as in-flight (clean_exit = false) for crash detection
     if !conversation.messages.is_empty() {
@@ -135,7 +127,11 @@ pub async fn run(
 
     // Send recovery prompt if crash detected (before first render)
     if let Some((title, token_count)) = recovery_prompt {
-        let _ = domain_tx.send(AppEvent::RecoveryPrompt { title, token_count });
+        let _ = domain_tx.send(AppEvent::RecoveryPrompt {
+            conversation_id: conversation.id.clone(),
+            title,
+            token_count,
+        });
     }
 
     // Render first frame immediately
@@ -146,6 +142,9 @@ pub async fn run(
         &streaming,
         &config.model,
         security.as_ref(),
+        tab_manager.tab_count(),
+        tab_manager.active_tab_index(),
+        Some(&tab_manager),
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
@@ -329,7 +328,7 @@ pub async fn run(
                                             &mut session_manager,
                                         );
                                         // Force immediate render for typing indicator
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -366,6 +365,7 @@ pub async fn run(
                                         {
                                             let content = std::mem::take(&mut streaming.current_text_buffer);
                                             conversation.messages.push(ChatMessage {
+                                                id: generate_conversation_id(),
                                                 role: MessageRole::Assistant,
                                                 content,
                                                 content_blocks: std::mem::take(&mut streaming.current_blocks),
@@ -460,9 +460,13 @@ pub async fn run(
                                             let delay_duration = std::time::Duration::from_millis(delay);
                                             let tx = domain_tx.clone();
                                             let retry_text = text;
+                                            let retry_conv_id = conversation.id.clone();
                                             tokio::spawn(async move {
                                                 tokio::time::sleep(delay_duration).await;
-                                                let _ = tx.send(AppEvent::RetryMessage(retry_text));
+                                                let _ = tx.send(AppEvent::RetryMessage {
+                                                    conversation_id: retry_conv_id,
+                                                    content: retry_text,
+                                                });
                                             });
                                         }
                                     }
@@ -617,7 +621,7 @@ pub async fn run(
                                             &workspace_path,
                                             &mut session_manager,
                                         );
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -724,6 +728,127 @@ pub async fn run(
                                     state.focus = FocusState::Input;
                                     state.needs_redraw = true;
                                 }
+                                InputAction::NewTab => {
+                                    // Save current tab state back to TabManager
+                                    save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                    // Abort any active streaming on this tab
+                                    if streaming.is_streaming {
+                                        if let Some(handle) = _active_turn.take() {
+                                            handle.abort();
+                                        }
+                                        while turn_queue.dequeue().is_some() {}
+                                    }
+                                    // Persist current conversation if it has messages
+                                    if !conversation.messages.is_empty() {
+                                        conversation.updated_at = now_unix();
+                                        let fs_ref = fs_storage.clone();
+                                        let conv_clone = conversation.clone();
+                                        if let Some(prev) = _pending_save.take() {
+                                            let _ = prev.await;
+                                        }
+                                        _pending_save = Some(tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                BACKGROUND_TASK_TIMEOUT,
+                                                fs_ref.save_conversation_with_exit(&conv_clone, true),
+                                            ).await {
+                                                Ok(Ok(())) => {}
+                                                Ok(Err(e)) => tracing::error!("Failed to save before new tab: {}", e),
+                                                Err(_) => tracing::warn!("Tab save timed out"),
+                                            }
+                                        }));
+                                    }
+                                    // Create new tab in TabManager (switches active to the new tab)
+                                    tab_manager.create_tab();
+                                    // Load new tab state into proxies
+                                    load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                    state.input_buffer.clear();
+                                    state.cursor_position = 0;
+                                    state.input_scroll_offset = 0;
+                                    state.autocomplete.dismiss();
+                                    state.resolved_mentions.clear();
+                                    state.focus = FocusState::Input;
+                                    state.status = StatusState::Idle;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CloseTab => {
+                                    if tab_manager.tab_count() == 1 {
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = StatusState::Flash {
+                                            message: "Only one tab open".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else {
+                                        // Save current tab state
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        let tab_id = tab_manager.active_tab_id();
+                                        // Abort active streaming on this tab
+                                        if streaming.is_streaming {
+                                            if let Some(handle) = _active_turn.take() {
+                                                handle.abort();
+                                            }
+                                            while turn_queue.dequeue().is_some() {}
+                                        }
+                                        // Persist conversation if it has messages
+                                        if !conversation.messages.is_empty() {
+                                            conversation.updated_at = now_unix();
+                                            let fs_ref = fs_storage.clone();
+                                            let conv_clone = conversation.clone();
+                                            if let Some(prev) = _pending_save.take() {
+                                                let _ = prev.await;
+                                            }
+                                            _pending_save = Some(tokio::spawn(async move {
+                                                match tokio::time::timeout(
+                                                    BACKGROUND_TASK_TIMEOUT,
+                                                    fs_ref.save_conversation_with_exit(&conv_clone, true),
+                                                ).await {
+                                                    Ok(Ok(())) => {}
+                                                    Ok(Err(e)) => tracing::error!("Failed to save before close tab: {}", e),
+                                                    Err(_) => tracing::warn!("Close-tab save timed out"),
+                                                }
+                                            }));
+                                        }
+                                        // Close the tab (TabManager adjusts active index)
+                                        tab_manager.close_tab(tab_id);
+                                        // Load the new active tab into proxies
+                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        state.input_buffer.clear();
+                                        state.cursor_position = 0;
+                                        state.input_scroll_offset = 0;
+                                        state.autocomplete.dismiss();
+                                        state.resolved_mentions.clear();
+                                        state.focus = FocusState::Input;
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::SwitchToNextTab => {
+                                    if tab_manager.tab_count() > 1 {
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        tab_manager.switch_to_next();
+                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::SwitchToPrevTab => {
+                                    if tab_manager.tab_count() > 1 {
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        tab_manager.switch_to_prev();
+                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::SwitchToTab(n) => {
+                                    if tab_manager.tab_count() > 1
+                                        && n >= 1
+                                        && n <= tab_manager.tab_count()
+                                        && n - 1 != tab_manager.active_tab_index()
+                                    {
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state);
+                                        tab_manager.switch_to_index(n);
+                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state);
+                                        state.needs_redraw = true;
+                                    }
+                                }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
                         }
@@ -739,187 +864,278 @@ pub async fn run(
             Some(event) = domain_events_rx.recv() => {
                 match event {
                     AppEvent::Shutdown => break,
-                    AppEvent::ProviderChunk(chunk) => {
-                        let action = apply_chunk(
-                            &mut conversation,
-                            &mut streaming,
-                            chunk,
-                            now_unix(),
-                        );
-                        match action {
-                            ChunkAction::NeedsRedraw => {
-                                state.needs_redraw = true;
-                            }
-                            ChunkAction::TurnComplete { persist, trigger_title_generation } => {
-                                state.status = StatusState::Idle;
-                                // Sync token usage from conversation to TUI state
-                                state.token_usage = conversation.usage.clone();
-                                // Clear stale feedback/retry state on successful turn
-                                state.active_feedback_id = None;
-                                state.retry_state = None;
-                                state.needs_redraw = true;
-                                _active_turn = None;
+                    AppEvent::ProviderChunk { conversation_id, chunk } => {
+                        if conversation_id == conversation.id {
+                            // Active tab — apply chunk to proxy variables as normal
+                            let action = apply_chunk(
+                                &mut conversation,
+                                &mut streaming,
+                                chunk,
+                                now_unix(),
+                            );
+                            match action {
+                                ChunkAction::NeedsRedraw => {
+                                    state.needs_redraw = true;
+                                }
+                                ChunkAction::TurnComplete { persist, trigger_title_generation } => {
+                                    state.status = StatusState::Idle;
+                                    // Sync token usage from conversation to TUI state
+                                    state.token_usage = conversation.usage.clone();
+                                    // Clear stale feedback/retry state on successful turn
+                                    state.active_feedback_id = None;
+                                    state.retry_state = None;
+                                    state.needs_redraw = true;
+                                    _active_turn = None;
 
-                                // Persist conversation on turn complete
-                                if persist {
-                                    let now = now_unix();
-                                    conversation.updated_at = now;
-                                    conversation.last_response_at = Some(now);
-                                    // Await any previous in-flight save before starting a new one
-                                    if let Some(prev) = _pending_save.take() {
-                                        let _ = prev.await;
-                                    }
-                                    let storage_ref = storage.clone();
-                                    let conv_clone = conversation.clone();
-                                    _pending_save = Some(tokio::spawn(async move {
-                                        match tokio::time::timeout(
-                                            BACKGROUND_TASK_TIMEOUT,
-                                            storage_ref.save_conversation(&conv_clone),
-                                        ).await {
-                                            Ok(Ok(())) => {}
-                                            Ok(Err(e)) => {
-                                                tracing::error!("Failed to persist session: {}", e);
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!("Background task 'session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
-                                            }
+                                    // Persist conversation on turn complete
+                                    if persist {
+                                        let now = now_unix();
+                                        conversation.updated_at = now;
+                                        conversation.last_response_at = Some(now);
+                                        if let Some(prev) = _pending_save.take() {
+                                            let _ = prev.await;
                                         }
-                                    }));
-                                }
+                                        let storage_ref = storage.clone();
+                                        let conv_clone = conversation.clone();
+                                        _pending_save = Some(tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                BACKGROUND_TASK_TIMEOUT,
+                                                storage_ref.save_conversation(&conv_clone),
+                                            ).await {
+                                                Ok(Ok(())) => {}
+                                                Ok(Err(e)) => {
+                                                    tracing::error!("Failed to persist session: {}", e);
+                                                }
+                                                Err(_) => {
+                                                    tracing::warn!("Background task 'session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
+                                                }
+                                            }
+                                        }));
+                                    }
 
-                                // Spawn background title generation (AC1, AC3, AC5)
-                                if trigger_title_generation && conversation.title.is_empty()
-                                    && conversation.messages.len() >= 2
-                                {
-                                    let provider_ref = provider.clone();
-                                    let event_tx_ref = domain_tx.clone();
-                                    let model = config.model.clone();
-                                    let user_msg = conversation.messages[0].content.clone();
-                                    let assistant_msg = truncate(&conversation.messages[1].content, 500);
-                                    tokio::spawn(async move {
-                                        match tokio::time::timeout(
-                                            BACKGROUND_TASK_TIMEOUT,
-                                            generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
-                                        ).await {
-                                            Ok(Ok(title)) => {
-                                                let _ = event_tx_ref.send(AppEvent::TitleGenerated { title });
+                                    // Spawn background title generation (AC1, AC3, AC5)
+                                    if trigger_title_generation && conversation.title.is_empty()
+                                        && conversation.messages.len() >= 2
+                                    {
+                                        let provider_ref = provider.clone();
+                                        let event_tx_ref = domain_tx.clone();
+                                        let model = config.model.clone();
+                                        let user_msg = conversation.messages[0].content.clone();
+                                        let assistant_msg = truncate(&conversation.messages[1].content, 500);
+                                        let title_conv_id = conversation.id.clone();
+                                        tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                BACKGROUND_TASK_TIMEOUT,
+                                                generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
+                                            ).await {
+                                                Ok(Ok(title)) => {
+                                                    let _ = event_tx_ref.send(AppEvent::TitleGenerated {
+                                                        conversation_id: title_conv_id,
+                                                        title,
+                                                    });
+                                                }
+                                                Ok(Err(e)) => {
+                                                    tracing::warn!("Title generation failed: {}", e);
+                                                }
+                                                Err(_) => {
+                                                    tracing::warn!("Background task 'title_generation' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
+                                                }
                                             }
-                                            Ok(Err(e)) => {
-                                                tracing::warn!("Title generation failed: {}", e);
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!("Background task 'title_generation' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
-                                            }
+                                        });
+                                    }
+
+                                    // Auto-send queued messages
+                                    if let Some(queued_msg) = turn_queue.dequeue() {
+                                        start_turn(
+                                            &queued_msg.content,
+                                            queued_msg.images,
+                                            &mut conversation,
+                                            &mut streaming,
+                                            &mut state,
+                                            &mut _active_turn,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                            &security,
+                                            &tools,
+                                            &persona,
+                                            &workspace_path,
+                                            &mut session_manager,
+                                        );
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
+                                            Ok(()) => state.needs_redraw = false,
+                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
-                                    });
-                                }
-
-                                // Auto-send queued messages
-                                if let Some(queued_msg) = turn_queue.dequeue() {
-                                    start_turn(
-                                        &queued_msg.content,
-                                        queued_msg.images,
-                                        &mut conversation,
-                                        &mut streaming,
-                                        &mut state,
-                                        &mut _active_turn,
-                                        &provider,
-                                        config,
-                                        &domain_tx,
-                                        &security,
-                                        &tools,
-                                        &persona,
-                                        &workspace_path,
-                                        &mut session_manager,
-                                    );
-                                    // Force immediate render for typing indicator
-                                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
-                                        Ok(()) => state.needs_redraw = false,
-                                        Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                     }
                                 }
+                                ChunkAction::TurnContinuing => {
+                                    state.status = StatusState::Executing {
+                                        tool_name: "tools".to_string(),
+                                        elapsed_ms: 0,
+                                    };
+                                    state.needs_redraw = true;
+                                }
+                                ChunkAction::None => {}
                             }
-                            ChunkAction::TurnContinuing => {
-                                // Tool execution loop is handled inside run_turn.
-                                // The streaming stays active — tool results will arrive as
-                                // ProviderChunk(ToolResult) followed by more streaming.
-                                state.status = StatusState::Executing {
-                                    tool_name: "tools".to_string(),
-                                    elapsed_ms: 0,
-                                };
-                                state.needs_redraw = true;
+                        } else if let Some(tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
+                            // Background tab — route chunk directly to its stored state
+                            let action = apply_chunk(
+                                &mut tab.conversation,
+                                &mut tab.streaming,
+                                chunk,
+                                now_unix(),
+                            );
+                            match action {
+                                ChunkAction::TurnComplete { persist, trigger_title_generation } => {
+                                    // apply_chunk already set tab.streaming.is_streaming = false
+                                    if persist {
+                                        let now = now_unix();
+                                        tab.conversation.updated_at = now;
+                                        tab.conversation.last_response_at = Some(now);
+                                        if let Some(prev) = _pending_save.take() {
+                                            let _ = prev.await;
+                                        }
+                                        let storage_ref = storage.clone();
+                                        let conv_clone = tab.conversation.clone();
+                                        _pending_save = Some(tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                BACKGROUND_TASK_TIMEOUT,
+                                                storage_ref.save_conversation(&conv_clone),
+                                            ).await {
+                                                Ok(Ok(())) => {}
+                                                Ok(Err(e)) => tracing::error!("Failed to persist background tab: {}", e),
+                                                Err(_) => tracing::warn!("Background tab save timed out"),
+                                            }
+                                        }));
+                                    }
+                                    if trigger_title_generation && tab.conversation.title.is_empty()
+                                        && tab.conversation.messages.len() >= 2
+                                    {
+                                        let provider_ref = provider.clone();
+                                        let event_tx_ref = domain_tx.clone();
+                                        let model = config.model.clone();
+                                        let user_msg = tab.conversation.messages[0].content.clone();
+                                        let assistant_msg = truncate(&tab.conversation.messages[1].content, 500);
+                                        let title_conv_id = tab.conversation.id.clone();
+                                        tokio::spawn(async move {
+                                            match tokio::time::timeout(
+                                                BACKGROUND_TASK_TIMEOUT,
+                                                generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
+                                            ).await {
+                                                Ok(Ok(title)) => {
+                                                    let _ = event_tx_ref.send(AppEvent::TitleGenerated {
+                                                        conversation_id: title_conv_id,
+                                                        title,
+                                                    });
+                                                }
+                                                Ok(Err(e)) => tracing::warn!("Background title gen failed: {}", e),
+                                                Err(_) => tracing::warn!("Background title gen timed out"),
+                                            }
+                                        });
+                                    }
+                                    // Redraw tab bar — background tab may have gained a title
+                                    state.needs_redraw = true;
+                                }
+                                // NeedsRedraw/TurnContinuing/None for background tab:
+                                // user isn't viewing it, no UI update needed
+                                _ => {}
                             }
-                            ChunkAction::None => {}
                         }
                     }
-                    AppEvent::SystemNotice(level, msg) => {
-                        // Detect session expiry from provider authentication errors.
-                        // Use tightened matches to avoid false positives (e.g., "401" in line numbers).
-                        if matches!(level, crate::domain::models::NoticeLevel::Error)
-                            && (msg.contains("Authentication failed")
-                                || msg.contains("HTTP 401")
-                                || msg.contains("status: 401")
-                                || msg.to_lowercase().contains("session expired"))
-                        {
-                            session_manager.mark_invalidated(
-                                conversation.session_id.clone(),
-                            );
-                            tracing::info!("Session invalidated due to auth error, will rebuild on next message");
-                        }
+                    AppEvent::SystemNotice { conversation_id: notice_conv_id, level, message: msg } => {
+                        // Route by conversation_id: None = global (always active tab),
+                        // Some(id) = only affects that conversation's tab.
+                        let is_active_tab = notice_conv_id.as_deref()
+                            .map_or(true, |id| id == conversation.id);
 
-                        // Only reset streaming state for Error/Warning notices.
-                        // Info notices are informational and must NOT abort active streaming turns
-                        // (e.g., session rebuild sends Info after spawning a new turn).
-                        if !matches!(level, crate::domain::models::NoticeLevel::Info) {
-                            streaming.is_streaming = false;
-                            streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                            // Preserve partial response text (NFR21) — do NOT clear current_text_buffer
-                            // Only clear blocks tracking and tool calls
-                            streaming.current_blocks.clear();
-                            streaming.active_tool_calls.clear();
-                            // Abort the active turn task if running
-                            if let Some(handle) = _active_turn.take() {
-                                handle.abort();
+                        if is_active_tab {
+                            // Detect session expiry from provider authentication errors.
+                            if matches!(level, crate::domain::models::NoticeLevel::Error)
+                                && (msg.contains("Authentication failed")
+                                    || msg.contains("HTTP 401")
+                                    || msg.contains("status: 401")
+                                    || msg.to_lowercase().contains("session expired"))
+                            {
+                                session_manager.mark_invalidated(
+                                    conversation.session_id.clone(),
+                                );
+                                tracing::info!("Session invalidated due to auth error, will rebuild on next message");
                             }
-                        }
 
-                        // Create FeedbackBlock for errors and warnings; flash for info
-                        match level {
-                            crate::domain::models::NoticeLevel::Error => {
-                                static FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-                                let fb_id = format!("fb-{}", FB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                                let fb = FeedbackBlock {
-                                    id: fb_id.clone(),
-                                    level: FeedbackLevel::Error,
-                                    message: msg,
-                                    actions: vec![FeedbackAction::Retry],
-                                };
-                                state.feedback_blocks.insert(fb_id.clone(), fb);
-                                state.active_feedback_id = Some(fb_id);
-                                state.status = StatusState::Idle;
-                                state.focus = FocusState::Chat; // Switch to chat so [r] works
+                            // Only reset streaming state for Error/Warning notices.
+                            if !matches!(level, crate::domain::models::NoticeLevel::Info) {
+                                streaming.is_streaming = false;
+                                streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                                streaming.current_blocks.clear();
+                                streaming.active_tool_calls.clear();
+                                // Only abort _active_turn when it belongs to this tab
+                                if let Some(handle) = _active_turn.take() {
+                                    handle.abort();
+                                }
                             }
-                            crate::domain::models::NoticeLevel::Warning => {
-                                static WFB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-                                let fb_id = format!("wfb-{}", WFB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                                let fb = FeedbackBlock {
-                                    id: fb_id.clone(),
-                                    level: FeedbackLevel::Warning,
-                                    message: msg,
-                                    actions: vec![FeedbackAction::Compact],
-                                };
-                                state.feedback_blocks.insert(fb_id, fb);
-                                // Don't change focus — warning is informational, not blocking
+
+                            // Create FeedbackBlock for errors and warnings; flash for info
+                            match level {
+                                crate::domain::models::NoticeLevel::Error => {
+                                    static FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                                    let fb_id = format!("fb-{}", FB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                                    let fb = FeedbackBlock {
+                                        id: fb_id.clone(),
+                                        level: FeedbackLevel::Error,
+                                        message: msg,
+                                        actions: vec![FeedbackAction::Retry],
+                                    };
+                                    state.feedback_blocks.insert(fb_id.clone(), fb);
+                                    state.active_feedback_id = Some(fb_id);
+                                    state.status = StatusState::Idle;
+                                    state.focus = FocusState::Chat;
+                                }
+                                crate::domain::models::NoticeLevel::Warning => {
+                                    static WFB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                                    let fb_id = format!("wfb-{}", WFB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                                    let fb = FeedbackBlock {
+                                        id: fb_id.clone(),
+                                        level: FeedbackLevel::Warning,
+                                        message: msg,
+                                        actions: vec![FeedbackAction::Compact],
+                                    };
+                                    state.feedback_blocks.insert(fb_id, fb);
+                                }
+                                _ => {
+                                    state.status_before_flash = Some(state.status.clone());
+                                    state.status = StatusState::Flash {
+                                        message: msg,
+                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                    };
+                                }
                             }
-                            _ => {
-                                state.status_before_flash = Some(state.status.clone());
-                                state.status = StatusState::Flash {
-                                    message: msg,
-                                    remaining_ms: state.theme.timing.status_flash_ms,
-                                };
+                            state.needs_redraw = true;
+                        } else if let Some(id) = notice_conv_id {
+                            // Background tab error — apply to its stored state in TabManager
+                            if let Some(tab) = tab_manager.find_by_conversation_mut(&id) {
+                                if !matches!(level, crate::domain::models::NoticeLevel::Info) {
+                                    tab.streaming.is_streaming = false;
+                                    tab.streaming.phase = crate::domain::models::StreamingPhase::Idle;
+                                    tab.streaming.current_blocks.clear();
+                                    tab.streaming.active_tool_calls.clear();
+                                }
+                                if matches!(level, crate::domain::models::NoticeLevel::Error) {
+                                    static BG_FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+                                    let fb_id = format!("bgfb-{}", BG_FB_COUNTER.fetch_add(1, Ordering::Relaxed));
+                                    let fb = FeedbackBlock {
+                                        id: fb_id.clone(),
+                                        level: FeedbackLevel::Error,
+                                        message: msg,
+                                        actions: vec![FeedbackAction::Retry],
+                                    };
+                                    tab.feedback_blocks.insert(fb_id.clone(), fb);
+                                    tab.active_feedback_id = Some(fb_id);
+                                    tab.streaming.is_streaming = false;
+                                }
+                                // Redraw so tab bar can reflect the state change
+                                state.needs_redraw = true;
                             }
                         }
-                        state.needs_redraw = true;
                     }
                     AppEvent::PermissionRequest {
                         tool_name,
@@ -956,7 +1172,7 @@ pub async fn run(
                         };
                         state.needs_redraw = true;
                     }
-                    AppEvent::RetryMessage(text) => {
+                    AppEvent::RetryMessage { content: text, .. } => {
                         // Delayed retry arrived — start the turn now (no images on retry)
                         state.status = StatusState::Streaming;
                         start_turn(
@@ -975,39 +1191,58 @@ pub async fn run(
                             &workspace_path,
                             &mut session_manager,
                         );
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                         }
                     }
-                    AppEvent::TitleGenerated { title } => {
-                        conversation.title = title;
-                        state.needs_redraw = true;
-                        // Persist the updated title
-                        if let Some(prev) = _pending_save.take() {
-                            let _ = prev.await;
-                        }
-                        let storage_ref = storage.clone();
-                        let conv_clone = conversation.clone();
-                        _pending_save = Some(tokio::spawn(async move {
-                            match tokio::time::timeout(
-                                BACKGROUND_TASK_TIMEOUT,
-                                storage_ref.save_conversation(&conv_clone),
-                            ).await {
-                                Ok(Ok(())) => {}
-                                Ok(Err(e)) => {
-                                    tracing::error!("Failed to persist title: {}", e);
-                                }
-                                Err(_) => {
-                                    tracing::warn!("Background task 'title_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs());
-                                }
+                    AppEvent::TitleGenerated { conversation_id, title } => {
+                        if conversation_id == conversation.id {
+                            // Active tab
+                            conversation.title = title;
+                            state.needs_redraw = true;
+                            if let Some(prev) = _pending_save.take() {
+                                let _ = prev.await;
                             }
-                        }));
+                            let storage_ref = storage.clone();
+                            let conv_clone = conversation.clone();
+                            _pending_save = Some(tokio::spawn(async move {
+                                match tokio::time::timeout(
+                                    BACKGROUND_TASK_TIMEOUT,
+                                    storage_ref.save_conversation(&conv_clone),
+                                ).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => tracing::error!("Failed to persist title: {}", e),
+                                    Err(_) => tracing::warn!("Background task 'title_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs()),
+                                }
+                            }));
+                        } else if let Some(tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
+                            // Background tab — update its stored conversation title
+                            tab.conversation.title = title;
+                            if let Some(prev) = _pending_save.take() {
+                                let _ = prev.await;
+                            }
+                            let storage_ref = storage.clone();
+                            let conv_clone = tab.conversation.clone();
+                            _pending_save = Some(tokio::spawn(async move {
+                                match tokio::time::timeout(
+                                    BACKGROUND_TASK_TIMEOUT,
+                                    storage_ref.save_conversation(&conv_clone),
+                                ).await {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(e)) => tracing::error!("Failed to persist background tab title: {}", e),
+                                    Err(_) => tracing::warn!("Background tab title save timed out"),
+                                }
+                            }));
+                            // Redraw tab bar to show the new title
+                            state.needs_redraw = true;
+                        }
                     }
                     AppEvent::AskUserQuestion {
                         tool_use_id,
                         question,
                         response_tx,
+                        ..
                     } => {
                         use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
                         state.ask_user_question = Some(AskUserQuestionState {
@@ -1023,7 +1258,7 @@ pub async fn run(
                         ));
                         state.needs_redraw = true;
                     }
-                    AppEvent::RecoveryPrompt { title, token_count } => {
+                    AppEvent::RecoveryPrompt { title, token_count, .. } => {
                         let msg = format!(
                             "\u{2139} Recovered: '{}' (partial response, {} tokens). [Enter/y] continue [n] new",
                             title, token_count,
@@ -1078,7 +1313,7 @@ pub async fn run(
                 }
 
                 if state.needs_redraw {
-                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref()) {
+                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager)) {
                         Ok(()) => state.needs_redraw = false,
                         Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                     }
@@ -1099,7 +1334,7 @@ pub async fn run(
         let _ = prev.await;
     }
 
-    // Persist conversation before shutdown with clean_exit = true (graceful shutdown)
+    // Persist active tab on shutdown with clean_exit = true (graceful shutdown)
     if !conversation.messages.is_empty() {
         conversation.updated_at = now_unix();
         match tokio::time::timeout(
@@ -1121,8 +1356,90 @@ pub async fn run(
             }
         }
     }
+    // Persist all background (non-active) tabs on shutdown
+    let active_conv_id = conversation.id.clone();
+    for tab in tab_manager.tabs() {
+        if tab.conversation.id != active_conv_id && !tab.conversation.messages.is_empty() {
+            let mut bg_conv = tab.conversation.clone();
+            bg_conv.updated_at = now_unix();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                fs_storage.save_conversation_with_exit(&bg_conv, true),
+            )
+            .await;
+        }
+    }
 
     Ok(())
+}
+
+/// Save the active-tab proxy state into TabManager before switching tabs.
+fn save_active_tab(
+    tab_manager: &mut TabManager,
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    session_manager: &SessionManager,
+    state: &TuiState,
+) {
+    let tab = tab_manager.active_tab_mut();
+    tab.conversation = conversation.clone();
+    tab.streaming = streaming.clone();
+    tab.session = session_manager.clone();
+    tab.scroll_offset = state.scroll_offset;
+    tab.auto_scroll = state.auto_scroll;
+    tab.block_boundaries = state.block_boundaries.clone();
+    tab.message_boundaries = state.message_boundaries.clone();
+    tab.focused_tool_id = state.focused_tool_id.clone();
+    tab.feedback_blocks = state.feedback_blocks.clone();
+    tab.active_feedback_id = state.active_feedback_id.clone();
+    tab.total_content_height = state.total_content_height;
+    tab.pending_anchor = state.pending_anchor;
+}
+
+/// Load the new active tab's state from TabManager into the proxy variables.
+fn load_active_tab(
+    tab_manager: &TabManager,
+    conversation: &mut Conversation,
+    streaming: &mut StreamingState,
+    session_manager: &mut SessionManager,
+    state: &mut TuiState,
+) {
+    let tab = tab_manager.active_tab();
+    *conversation = tab.conversation.clone();
+    *streaming = tab.streaming.clone();
+    *session_manager = tab.session.clone();
+    state.scroll_offset = tab.scroll_offset;
+    // If the tab is not actively streaming, snap to bottom so the user always lands
+    // at the latest content (complete response or empty tab). If still streaming,
+    // preserve the user's scroll position (they may have scrolled up intentionally).
+    state.auto_scroll = if !tab.streaming.is_streaming {
+        true
+    } else {
+        tab.auto_scroll
+    };
+    state.block_boundaries = tab.block_boundaries.clone();
+    state.message_boundaries = tab.message_boundaries.clone();
+    state.focused_tool_id = tab.focused_tool_id.clone();
+    state.feedback_blocks = tab.feedback_blocks.clone();
+    state.active_feedback_id = tab.active_feedback_id.clone();
+    state.total_content_height = tab.total_content_height;
+    state.pending_anchor = tab.pending_anchor;
+    // Reset per-tab renderer caches — rebuilt on next render
+    state.height_cache.invalidate_all();
+    state.tool_block_states.clear();
+    // Sync token usage from the loaded conversation
+    state.token_usage = tab.conversation.usage.clone();
+    // Infer status from loaded streaming state so the status bar reflects the tab being entered.
+    // Without this, a stale "Streaming" status from the departing tab persists on screen
+    // even after the background turn completed (the background TurnComplete handler intentionally
+    // does not touch state.status because it belongs to a different tab).
+    state.status = if tab.streaming.is_streaming {
+        StatusState::Streaming
+    } else {
+        StatusState::Idle
+    };
+    // Clear any retry state that belonged to the previous tab
+    state.retry_state = None;
 }
 
 /// Start a new turn: add user message, spawn provider streaming task.
@@ -1145,6 +1462,7 @@ fn start_turn(
 ) {
     // Add user ChatMessage to conversation
     conversation.messages.push(ChatMessage {
+        id: generate_conversation_id(),
         role: MessageRole::User,
         content: text.to_string(),
         content_blocks: vec![],
@@ -1191,13 +1509,14 @@ fn start_turn(
         conversation.session_id = Some(new_session_id.clone());
         session_manager.mark_active(new_session_id);
         let msg_count = conversation.messages.len().saturating_sub(1);
-        let _ = domain_tx.send(AppEvent::SystemNotice(
-            crate::domain::models::NoticeLevel::Info,
-            format!(
+        let _ = domain_tx.send(AppEvent::SystemNotice {
+            conversation_id: Some(conversation.id.clone()),
+            level: crate::domain::models::NoticeLevel::Info,
+            message: format!(
                 "\u{2139}\u{fe0f} Session restarted with your conversation history ({} messages).",
                 msg_count
             ),
-        ));
+        });
     }
 
     let tool_defs = tools.available_tools();
@@ -1223,6 +1542,7 @@ fn start_turn(
         domain_tx.clone(),
         security.clone(),
         tools.clone(),
+        conversation.id.clone(),
     ));
     *active_turn = Some(handle);
 
@@ -1293,6 +1613,7 @@ fn advance_permission_queue(state: &mut TuiState) {
 }
 
 /// Render the full TUI frame.
+#[allow(clippy::too_many_arguments)]
 fn render(
     terminal: &mut Tui,
     state: &mut TuiState,
@@ -1300,6 +1621,9 @@ fn render(
     streaming: &StreamingState,
     model: &str,
     security: &dyn SecurityPort,
+    tab_count: usize,
+    active_tab_index: usize,
+    tab_manager_for_bar: Option<&crate::domain::models::tab::TabManager>,
 ) -> Result<()> {
     let scroll_offset = state.scroll_offset;
     let auto_scroll = state.auto_scroll;
@@ -1340,9 +1664,21 @@ fn render(
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area, theme, input_buffer) {
+        match layout::compute_layout(area, theme, input_buffer, tab_count) {
             Some(app_layout) => {
                 let _is_compact = area.width < 80 || area.height < 24;
+
+                // Render tab bar if present
+                if let (Some(tab_bar_area), Some(tm)) = (app_layout.tab_bar, tab_manager_for_bar) {
+                    use crate::adapters::tui::widgets::tab_bar;
+                    tab_bar::render_tab_bar(
+                        tm,
+                        active_tab_index,
+                        tab_bar_area,
+                        frame.buffer_mut(),
+                        theme,
+                    );
+                }
 
                 let result = chat_pane::render(
                     frame,

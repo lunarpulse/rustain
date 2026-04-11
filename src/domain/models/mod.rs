@@ -2,7 +2,7 @@ pub mod autocomplete;
 mod completion;
 mod config;
 mod content;
-mod conversation;
+pub mod conversation;
 mod focus;
 mod message;
 mod notice;
@@ -11,6 +11,7 @@ mod permission;
 pub mod project_context;
 mod session;
 mod stream;
+pub mod tab;
 mod tools;
 mod usage;
 #[allow(dead_code)]
@@ -26,6 +27,7 @@ pub use content::ContentBlockType;
 #[allow(unused_imports)]
 pub use conversation::{
     ChatMessage, Conversation, ConversationSummary, ForkSource, generate_conversation_id,
+    generate_message_id,
 };
 pub use focus::FocusState;
 #[allow(unused_imports)]
@@ -45,6 +47,8 @@ pub use permission::{
 pub use session::{SessionId, SessionManager, SessionState};
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};
+#[allow(unused_imports)]
+pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]

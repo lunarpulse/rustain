@@ -208,75 +208,12 @@ impl StoragePort for FileSystemStorage {
 
 // ── PersistedConversation serde wrapper ────────────────────────────
 
-use serde::{Deserialize, Serialize};
-
-use crate::domain::models::UsageInfo;
-use crate::domain::models::{ChatMessage, ForkSource};
-
-/// CC-compatible on-disk format with camelCase JSON field naming.
-/// All optional fields use `#[serde(default)]` for forward compatibility.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedConversation {
-    pub id: String,
-    pub title: String,
-    pub messages: Vec<ChatMessage>,
-    pub created_at: i64,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub fork_source: Option<ForkSource>,
-    #[serde(default)]
-    pub updated_at: Option<i64>,
-    #[serde(default)]
-    pub last_response_at: Option<i64>,
-    #[serde(default)]
-    pub usage: Option<UsageInfo>,
-    /// Crash detection flag: `false` while session is in-flight, `true` after graceful shutdown.
-    /// Defaults to `false` for forward compat (old files trigger recovery prompt — safe default).
-    #[serde(default)]
-    pub clean_exit: bool,
-}
-
-impl PersistedConversation {
-    fn from_conversation(conv: &Conversation) -> Self {
-        Self::from_conversation_with_exit(conv, false)
-    }
-
-    fn from_conversation_with_exit(conv: &Conversation, clean_exit: bool) -> Self {
-        Self {
-            id: conv.id.clone(),
-            title: conv.title.clone(),
-            messages: conv.messages.clone(),
-            created_at: conv.created_at,
-            session_id: conv.session_id.clone(),
-            fork_source: conv.fork_source.clone(),
-            updated_at: Some(conv.updated_at),
-            last_response_at: conv.last_response_at,
-            usage: conv.usage.clone(),
-            clean_exit,
-        }
-    }
-
-    fn to_conversation(self) -> Conversation {
-        Conversation {
-            id: self.id,
-            title: self.title,
-            messages: self.messages,
-            created_at: self.created_at,
-            updated_at: self.updated_at.unwrap_or(self.created_at),
-            last_response_at: self.last_response_at,
-            session_id: self.session_id,
-            usage: self.usage,
-            fork_source: self.fork_source,
-        }
-    }
-}
+use crate::domain::models::conversation::PersistedConversation;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{ChatMessage, MessageRole, StopReason};
+    use crate::domain::models::{ChatMessage, MessageRole, StopReason, UsageInfo};
     use tempfile::TempDir;
 
     fn make_test_conversation() -> Conversation {
@@ -285,6 +222,7 @@ mod tests {
             title: "Test Conversation".to_string(),
             messages: vec![
                 ChatMessage {
+                    id: "msg-test-001".to_string(),
                     role: MessageRole::User,
                     content: "Hello".to_string(),
                     content_blocks: vec![],
@@ -294,6 +232,7 @@ mod tests {
                     stop_reason: None,
                 },
                 ChatMessage {
+                    id: "msg-test-002".to_string(),
                     role: MessageRole::Assistant,
                     content: "Hi there!".to_string(),
                     content_blocks: vec![],

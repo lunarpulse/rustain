@@ -38,7 +38,7 @@ fn test_e2e_palette_shows_input_and_results() {
 
     // Palette should be active
     assert!(h.state.command_palette.active);
-    
+
     // Should have filtered entries available
     h.render();
     // Main UI still renders normally when palette is open
@@ -313,7 +313,7 @@ fn test_e2e_palette_empty_entries() {
 
     // Should not panic with empty entries
     assert!(h.state.command_palette.filtered_entries.is_empty());
-    
+
     h.render();
     // Main UI still renders
     h.assert_screen_contains("Welcome to Rustain", "Main UI visible");

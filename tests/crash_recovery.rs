@@ -15,6 +15,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             MessageRole::Assistant
         };
         messages.push(ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role,
             content: format!("Message {}", i),
             content_blocks: vec![],

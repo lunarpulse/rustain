@@ -246,7 +246,7 @@ impl SecurityAdapter {
                                 // to prevent symlink escape via TOCTOU race (DF-086)
                                 if !resolved.starts_with(&canon_parent) {
                                     return Err(PermissionError::WorkspaceViolation(
-                                        "Path traversal detected via symlink".to_string()
+                                        "Path traversal detected via symlink".to_string(),
                                     ));
                                 }
                                 resolved
@@ -292,7 +292,7 @@ impl SecurityAdapter {
             Ok(PathAccessType::Workspace)
         } else {
             Err(PermissionError::WorkspaceViolation(
-                "Path outside workspace".to_string()
+                "Path outside workspace".to_string(),
             ))
         }
     }
@@ -510,17 +510,17 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         let adapter = SecurityAdapter::new(tmp.path().to_path_buf(), tx);
-        
+
         // Create a valid parent directory
         let parent = tmp.path().join("parent");
         std::fs::create_dir(&parent).unwrap();
-        
+
         // Attempt to access a file that escapes the parent via ".."
         // This simulates what would happen if a symlink was swapped between
         // canonicalize and join operations.
         let path = parent.join("..").join("..").join("etc").join("passwd");
         let result = adapter.check_workspace_access(&path, FileOperation::Write);
-        
+
         // Should fail because the resolved path escapes the workspace
         assert!(
             result.is_err(),

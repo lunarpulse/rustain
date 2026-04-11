@@ -131,7 +131,7 @@ pub async fn run() -> Result<()> {
             persona_adapter.total_chars(),
         );
         tracing::info!("{}", msg);
-        let _ = domain_tx.send(AppEvent::SystemNotice(NoticeLevel::Info, msg));
+        let _ = domain_tx.send(AppEvent::SystemNotice { conversation_id: None, level: NoticeLevel::Info, message: msg });
 
         if persona_adapter.is_truncated() {
             let warn_msg = format!(
@@ -139,7 +139,7 @@ pub async fn run() -> Result<()> {
                 crate::domain::models::project_context::CONTEXT_BUDGET_CHARS,
             );
             tracing::warn!("{}", warn_msg);
-            let _ = domain_tx.send(AppEvent::SystemNotice(NoticeLevel::Warning, warn_msg));
+            let _ = domain_tx.send(AppEvent::SystemNotice { conversation_id: None, level: NoticeLevel::Warning, message: warn_msg });
         }
     }
 
@@ -150,10 +150,11 @@ pub async fn run() -> Result<()> {
     let storage = FileSystemStorage::new(sessions_dir);
     if let Err(e) = storage.ensure_dir().await {
         tracing::warn!("Failed to create sessions directory: {}", e);
-        let _ = domain_tx.send(AppEvent::SystemNotice(
-            NoticeLevel::Warning,
-            format!("Session persistence unavailable: {}", e),
-        ));
+        let _ = domain_tx.send(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: format!("Session persistence unavailable: {}", e),
+        });
     }
 
     // Session restoration: --new skips restore, --session <id> loads specific session

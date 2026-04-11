@@ -104,6 +104,7 @@ mod tests {
 
     fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         ChatMessage {
+            id: crate::domain::models::generate_message_id(),
             role,
             content: content.to_string(),
             content_blocks: vec![],

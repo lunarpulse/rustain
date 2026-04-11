@@ -30,7 +30,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) = layout::compute_layout(area, &state.theme, &state.input_buffer) {
+            if let Some(app_layout) = layout::compute_layout(area, &state.theme, &state.input_buffer, 1) {
                 chat_pane::render(
                     frame,
                     app_layout.chat_pane,
@@ -135,7 +135,7 @@ fn test_tui_too_small_terminal() {
     let theme = rustain::adapters::tui::theme::Theme::dark();
     let area = ratatui::prelude::Rect::new(0, 0, 50, 12);
     assert!(
-        layout::compute_layout(area, &theme, "").is_none(),
+        layout::compute_layout(area, &theme, "", 1).is_none(),
         "Expected None for terminal too small"
     );
 }

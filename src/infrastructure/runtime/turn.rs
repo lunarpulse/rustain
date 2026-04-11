@@ -31,6 +31,7 @@ pub async fn run_turn(
     event_tx: mpsc::UnboundedSender<AppEvent>,
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
+    conversation_id: String,
 ) {
     let mut iteration = 0;
     loop {
@@ -40,15 +41,21 @@ pub async fn run_turn(
                 "Tool execution loop exceeded {} iterations — terminating",
                 MAX_TOOL_ITERATIONS
             );
-            let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::Error {
-                content: format!(
-                    "Tool execution loop exceeded {} iterations",
-                    MAX_TOOL_ITERATIONS
-                ),
-            }));
-            let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
-                stop_reason: StopReason::Cancelled,
-            }));
+            let _ = event_tx.send(AppEvent::ProviderChunk {
+                conversation_id: conversation_id.clone(),
+                chunk: StreamChunk::Error {
+                    content: format!(
+                        "Tool execution loop exceeded {} iterations",
+                        MAX_TOOL_ITERATIONS
+                    ),
+                },
+            });
+            let _ = event_tx.send(AppEvent::ProviderChunk {
+                conversation_id: conversation_id.clone(),
+                chunk: StreamChunk::TurnComplete {
+                    stop_reason: StopReason::Cancelled,
+                },
+            });
             return;
         }
         match provider
@@ -83,18 +90,27 @@ pub async fn run_turn(
                         }
                         _ => {}
                     }
-                    let _ = event_tx.send(AppEvent::ProviderChunk(chunk));
+                    let _ = event_tx.send(AppEvent::ProviderChunk {
+                        conversation_id: conversation_id.clone(),
+                        chunk,
+                    });
                 }
 
                 // Safety: synthesize TurnComplete if stream ended without one
                 if !received_turn_complete {
                     tracing::warn!("Provider stream ended without TurnComplete — synthesizing end");
-                    let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::Error {
-                        content: "Stream disconnected unexpectedly".to_string(),
-                    }));
-                    let _ = event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
-                        stop_reason: StopReason::Cancelled,
-                    }));
+                    let _ = event_tx.send(AppEvent::ProviderChunk {
+                        conversation_id: conversation_id.clone(),
+                        chunk: StreamChunk::Error {
+                            content: "Stream disconnected unexpectedly".to_string(),
+                        },
+                    });
+                    let _ = event_tx.send(AppEvent::ProviderChunk {
+                        conversation_id: conversation_id.clone(),
+                        chunk: StreamChunk::TurnComplete {
+                            stop_reason: StopReason::Cancelled,
+                        },
+                    });
                     return;
                 }
 
@@ -105,10 +121,12 @@ pub async fn run_turn(
                             tracing::warn!(
                                 "TurnComplete(ToolUse) but no tool calls collected — synthesizing EndTurn"
                             );
-                            let _ =
-                                event_tx.send(AppEvent::ProviderChunk(StreamChunk::TurnComplete {
+                            let _ = event_tx.send(AppEvent::ProviderChunk {
+                                conversation_id: conversation_id.clone(),
+                                chunk: StreamChunk::TurnComplete {
                                     stop_reason: StopReason::EndTurn,
-                                }));
+                                },
+                            });
                             return;
                         }
 
@@ -145,6 +163,7 @@ pub async fn run_turn(
                                     .to_string();
                                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                                 let _ = event_tx.send(AppEvent::AskUserQuestion {
+                                    conversation_id: conversation_id.clone(),
                                     tool_use_id: tc.id.clone(),
                                     question,
                                     response_tx: resp_tx,
@@ -154,11 +173,12 @@ pub async fn run_turn(
                                     Ok(a) => a,
                                     Err(_) => {
                                         // Channel dropped — user cancelled
-                                        let _ = event_tx.send(AppEvent::ProviderChunk(
-                                            StreamChunk::TurnComplete {
+                                        let _ = event_tx.send(AppEvent::ProviderChunk {
+                                            conversation_id: conversation_id.clone(),
+                                            chunk: StreamChunk::TurnComplete {
                                                 stop_reason: StopReason::Cancelled,
                                             },
-                                        ));
+                                        });
                                         return;
                                     }
                                 };
@@ -167,13 +187,14 @@ pub async fn run_turn(
                                     content: answer.clone(),
                                     is_error: false,
                                 };
-                                let _ = event_tx.send(AppEvent::ProviderChunk(
-                                    StreamChunk::ToolResult {
+                                let _ = event_tx.send(AppEvent::ProviderChunk {
+                                    conversation_id: conversation_id.clone(),
+                                    chunk: StreamChunk::ToolResult {
                                         id: result.tool_use_id.clone(),
                                         content: result.content.clone(),
                                         is_error: result.is_error,
                                     },
-                                ));
+                                });
                                 tool_result_messages.push(ToolResultMessage {
                                     tool_use_id: result.tool_use_id,
                                     content: result.content,
@@ -209,22 +230,25 @@ pub async fn run_turn(
                                 }
                                 PermissionDecision::Cancel => {
                                     // User cancelled — stop the turn
-                                    let _ = event_tx.send(AppEvent::ProviderChunk(
-                                        StreamChunk::TurnComplete {
+                                    let _ = event_tx.send(AppEvent::ProviderChunk {
+                                        conversation_id: conversation_id.clone(),
+                                        chunk: StreamChunk::TurnComplete {
                                             stop_reason: StopReason::Cancelled,
                                         },
-                                    ));
+                                    });
                                     return;
                                 }
                             };
 
                             // Send ToolResult chunk so apply_chunk processes it
-                            let _ =
-                                event_tx.send(AppEvent::ProviderChunk(StreamChunk::ToolResult {
+                            let _ = event_tx.send(AppEvent::ProviderChunk {
+                                conversation_id: conversation_id.clone(),
+                                chunk: StreamChunk::ToolResult {
                                     id: result.tool_use_id.clone(),
                                     content: result.content.clone(),
                                     is_error: result.is_error,
-                                }));
+                                },
+                            });
 
                             tool_result_messages.push(ToolResultMessage {
                                 tool_use_id: result.tool_use_id,
@@ -256,7 +280,11 @@ pub async fn run_turn(
                 }
             }
             Err(e) => {
-                let _ = event_tx.send(AppEvent::SystemNotice(NoticeLevel::Error, format!("{e}")));
+                let _ = event_tx.send(AppEvent::SystemNotice {
+                    conversation_id: Some(conversation_id.clone()),
+                    level: NoticeLevel::Error,
+                    message: format!("{e}"),
+                });
                 return;
             }
         }

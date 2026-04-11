@@ -71,6 +71,7 @@ fn test_e2e_message_to_streaming_response() {
 
     // Step 2: User sends a message
     conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "What is Rust?".to_string(),
         content_blocks: vec![],

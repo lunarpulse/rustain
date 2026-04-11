@@ -89,6 +89,7 @@ fn make_conversation() -> Conversation {
 
 fn add_user_message(conv: &mut Conversation, content: &str) {
     conv.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: content.to_string(),
         content_blocks: vec![],
@@ -215,10 +216,11 @@ fn test_title_post_processing_preserves_exact_60() {
 async fn test_title_generated_event_sets_conversation_title() {
     // Verify the event variant can be constructed and pattern-matched
     let event = AppEvent::TitleGenerated {
+        conversation_id: "test-conv".to_string(),
         title: "My Chat Title".to_string(),
     };
 
-    if let AppEvent::TitleGenerated { title } = event {
+    if let AppEvent::TitleGenerated { title, .. } = event {
         let mut conv = make_conversation();
         assert!(conv.title.is_empty());
         conv.title = title;
@@ -314,6 +316,7 @@ fn test_no_title_generation_for_subsequent_turns() {
     conv.title = "Existing Title".to_string();
     add_user_message(&mut conv, "First message");
     conv.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "First response".to_string(),
         content_blocks: vec![],

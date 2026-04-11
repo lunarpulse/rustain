@@ -1138,7 +1138,11 @@ fn test_alt_enter_ignored_in_chat_focus() {
         &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
     );
     // Alt+Enter in Chat focus should be ignored (not handled)
-    assert_eq!(action, InputAction::Ignored, "Alt+Enter in Chat should be Ignored");
+    assert_eq!(
+        action,
+        InputAction::Ignored,
+        "Alt+Enter in Chat should be Ignored"
+    );
     assert_eq!(
         state.input_buffer, initial_buffer,
         "Alt+Enter in Chat should not modify buffer"

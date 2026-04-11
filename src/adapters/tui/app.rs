@@ -38,6 +38,16 @@ pub enum InputAction {
         text: String,
         command: Option<String>,
     },
+    /// Create a new tab (Ctrl+T or palette).
+    NewTab,
+    /// Close the active tab (palette).
+    CloseTab,
+    /// Switch to the next tab (Tab key when focus is Chat).
+    SwitchToNextTab,
+    /// Switch to the previous tab (Shift+Tab when focus is not Input).
+    SwitchToPrevTab,
+    /// Switch directly to a tab by 1-based index (number keys 1-9 in Chat focus).
+    SwitchToTab(usize),
     /// Copy content to clipboard.
     // Covers: FR116, UX-DR68
     CopyToClipboard(String),
@@ -460,6 +470,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
                 InputAction::Consumed
             }
+            // 1-9 = direct tab switch (AC2: number key direct switch)
+            '1'..='9' => {
+                let n = (c as u8 - b'0') as usize;
+                InputAction::SwitchToTab(n)
+            }
             _ => InputAction::Ignored,
         },
         FocusState::Sidebar { .. } | FocusState::Overlay(_) => InputAction::Ignored,
@@ -863,6 +878,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
 
         DomainKey::CtrlC => InputAction::CancelOrQuit,
+        DomainKey::CtrlT => InputAction::NewTab,
+        // Tab switching — only when focus is not Input (so typing is unaffected)
+        DomainKey::Tab if state.focus == FocusState::Chat => InputAction::SwitchToNextTab,
+        DomainKey::ShiftTab if state.focus != FocusState::Input => InputAction::SwitchToPrevTab,
         _ => InputAction::Ignored,
     }
 }
@@ -1220,6 +1239,8 @@ fn dispatch_palette_action(
             state.needs_redraw = true;
             InputAction::Consumed
         }
+        PaletteAction::NewTab => InputAction::NewTab,
+        PaletteAction::CloseTab => InputAction::CloseTab,
         PaletteAction::Noop => {
             // Show "Not yet available" feedback
             let block = crate::domain::models::FeedbackBlock {
@@ -1338,6 +1359,10 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             // Ctrl+X → which-key chords
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('x') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+            }
+            // Ctrl+T → new tab
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('t') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlT));
             }
 
             match code {

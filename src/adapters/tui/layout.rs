@@ -14,31 +14,59 @@ pub struct AppLayout {
     pub chat_pane: Rect,
     pub status_bar: Rect,
     pub input_area: Rect,
+    /// Tab bar row (shown when tab_count > 1 AND width >= 80).
+    pub tab_bar: Option<Rect>,
 }
 
-/// Compute the three-region layout based on terminal size.
+/// Compute the layout based on terminal size and tab count.
 /// Input area height is dynamic based on content (multi-line support).
-/// - >=80x24: full layout
-/// - 60x16 to 80x24: compact layout (same regions, minimal status)
+/// - >=80x24: full layout (with optional tab bar when tab_count > 1)
+/// - 60x16 to 80x24: compact layout (same regions, minimal status, no tab bar)
 /// - <60x16: returns None (terminal too small)
 // Covers: FR16, UX-DR76
-pub fn compute_layout(area: Rect, _theme: &Theme, input: &str) -> Option<AppLayout> {
+pub fn compute_layout(
+    area: Rect,
+    _theme: &Theme,
+    input: &str,
+    tab_count: usize,
+) -> Option<AppLayout> {
     if area.width < 60 || area.height < 16 {
         return None;
     }
 
     let input_height = input_box::input_area_height(input, area.width);
 
-    let chunks = Layout::vertical([
-        Constraint::Min(1),               // chat pane (fills remaining)
-        Constraint::Length(1),            // status bar
-        Constraint::Length(input_height), // input area (dynamic)
-    ])
-    .split(area);
+    // Show tab bar when multiple tabs are open and terminal is wide enough
+    let show_tab_bar = tab_count > 1 && area.width >= 80;
 
-    Some(AppLayout {
-        chat_pane: chunks[0],
-        status_bar: chunks[1],
-        input_area: chunks[2],
-    })
+    if show_tab_bar {
+        let chunks = Layout::vertical([
+            Constraint::Length(1),            // tab bar
+            Constraint::Min(1),               // chat pane (fills remaining)
+            Constraint::Length(1),            // status bar
+            Constraint::Length(input_height), // input area (dynamic)
+        ])
+        .split(area);
+
+        Some(AppLayout {
+            tab_bar: Some(chunks[0]),
+            chat_pane: chunks[1],
+            status_bar: chunks[2],
+            input_area: chunks[3],
+        })
+    } else {
+        let chunks = Layout::vertical([
+            Constraint::Min(1),               // chat pane (fills remaining)
+            Constraint::Length(1),            // status bar
+            Constraint::Length(input_height), // input area (dynamic)
+        ])
+        .split(area);
+
+        Some(AppLayout {
+            tab_bar: None,
+            chat_pane: chunks[0],
+            status_bar: chunks[1],
+            input_area: chunks[2],
+        })
+    }
 }

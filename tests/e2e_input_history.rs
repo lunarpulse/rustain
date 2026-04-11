@@ -182,7 +182,7 @@ fn test_e2e_reverse_search_filters() {
 
     // Set query (filters history matches)
     h.state.reverse_search.query = "Apple".to_string();
-    
+
     // Query should be set and match entries
     assert_eq!(h.state.reverse_search.query, "Apple");
     // Matches should contain Apple-related entries
@@ -220,7 +220,7 @@ fn test_e2e_token_estimate_shows_for_long_input() {
 
     // Verify long text is in input
     assert_eq!(h.state.input_buffer.len(), 600);
-    
+
     // Token estimate heuristic: ~600 chars / ~4 chars per token = ~150 tokens
     let estimate = h.state.input_buffer.len() / 4;
     assert!(estimate >= 150);
@@ -269,7 +269,7 @@ fn test_e2e_history_session_scoped() {
 
     // Add message to history
     h.state.input_history.push("Session message".to_string());
-    
+
     // Verify history has entry via navigation
     let result = h.state.input_history.navigate_up("");
     assert!(result.is_some());

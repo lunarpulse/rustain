@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::content::ContentBlockType;
-use super::conversation::{ChatMessage, Conversation};
+use super::conversation::{ChatMessage, Conversation, generate_message_id};
 use super::message::MessageRole;
 use super::usage::UsageInfo;
 use crate::domain::events::ChunkAction;
@@ -95,6 +95,13 @@ impl Default for StreamingState {
     }
 }
 
+impl StreamingState {
+    /// Clear the thinking buffer (called on tab switch to avoid stale state).
+    pub fn reset_thinking_buffer(&mut self) {
+        self.thinking_buffer.clear();
+    }
+}
+
 /// Pure domain function: processes a streaming chunk, mutates conversation/streaming state,
 /// and returns a `ChunkAction` telling the event loop what to do next.
 ///
@@ -118,9 +125,11 @@ pub fn apply_chunk(
             // Replace previous Thinking block instead of appending to avoid
             // unbounded duplication and O(N²) memory growth (DF-082, DF-083)
             let new_block = ContentBlockType::Thinking(streaming.thinking_buffer.clone());
-            if let Some(idx) = streaming.current_blocks.iter().rposition(|b| {
-                matches!(b, ContentBlockType::Thinking(_))
-            }) {
+            if let Some(idx) = streaming
+                .current_blocks
+                .iter()
+                .rposition(|b| matches!(b, ContentBlockType::Thinking(_)))
+            {
                 streaming.current_blocks[idx] = new_block;
             } else {
                 streaming.current_blocks.push(new_block);
@@ -153,6 +162,7 @@ pub fn apply_chunk(
             }
             StopReason::EndTurn | StopReason::MaxTokens | StopReason::Cancelled => {
                 let message = ChatMessage {
+                    id: generate_message_id(),
                     role: MessageRole::Assistant,
                     content: std::mem::take(&mut streaming.current_text_buffer),
                     content_blocks: std::mem::take(&mut streaming.current_blocks),
@@ -293,6 +303,7 @@ mod tests {
 
         // Simulate user message already in conversation
         conv.messages.push(ChatMessage {
+            id: generate_message_id(),
             role: MessageRole::User,
             content: "Hi".into(),
             content_blocks: vec![],
@@ -473,10 +484,16 @@ mod tests {
         assert_eq!(streaming.thinking_buffer, "First chunk. Second chunk.");
         // Thinking blocks are replaced, not appended — only one Thinking block exists
         // This prevents O(N²) memory growth and unbounded duplication (DF-082, DF-083)
-        let thinking_blocks: Vec<_> = streaming.current_blocks.iter().filter(|b| {
-            matches!(b, ContentBlockType::Thinking(_))
-        }).collect();
-        assert_eq!(thinking_blocks.len(), 1, "Should have exactly one Thinking block");
+        let thinking_blocks: Vec<_> = streaming
+            .current_blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlockType::Thinking(_)))
+            .collect();
+        assert_eq!(
+            thinking_blocks.len(),
+            1,
+            "Should have exactly one Thinking block"
+        );
         assert_eq!(
             thinking_blocks[0],
             &ContentBlockType::Thinking("First chunk. Second chunk.".to_owned())
@@ -658,6 +675,7 @@ mod tests {
 
         // Now add user + assistant (messages.len() will be 3 after) -> no title gen
         conv.messages.push(ChatMessage {
+            id: generate_message_id(),
             role: MessageRole::User,
             content: "follow up".into(),
             content_blocks: vec![],

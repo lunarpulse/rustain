@@ -388,7 +388,7 @@ fn test_tui_renders_with_theme_colors() {
         .draw(|frame| {
             let area = frame.area();
             if let Some(app_layout) =
-                layout::compute_layout(area, &state.theme, &state.input_buffer)
+                layout::compute_layout(area, &state.theme, &state.input_buffer, 1)
             {
                 status_bar::render(
                     frame,

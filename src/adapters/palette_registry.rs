@@ -64,6 +64,22 @@ impl PaletteRegistry {
             action: PaletteAction::ShowVersion,
         });
 
+        // Built-in: tab management
+        self.entries.push(PaletteEntry {
+            name: "new tab".to_string(),
+            description: "Open a new conversation tab".to_string(),
+            shortcut: Some("Ctrl+T".to_string()),
+            scope: PaletteScope::All,
+            action: PaletteAction::NewTab,
+        });
+        self.entries.push(PaletteEntry {
+            name: "close tab".to_string(),
+            description: "Close the current conversation tab".to_string(),
+            shortcut: None,
+            scope: PaletteScope::All,
+            action: PaletteAction::CloseTab,
+        });
+
         self.populated_from_discovered = cr_discovered;
     }
 
@@ -362,13 +378,15 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 1 slash command (/new) + 1 built-in (version) = 2
-        assert_eq!(reg.all_entries().len(), 2);
+        // 1 slash command (/new) + 3 built-ins (version, new tab, close tab) = 4
+        assert_eq!(reg.all_entries().len(), 4);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "new tab"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "close tab"));
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 2);
+        assert_eq!(reg.all_entries().len(), 4);
     }
 }

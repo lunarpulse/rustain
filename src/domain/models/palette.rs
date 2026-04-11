@@ -37,6 +37,10 @@ pub enum PaletteAction {
     /// Show version info as a FeedbackBlock in the chat pane.
     // Covers: FR109
     ShowVersion,
+    /// Create a new tab.
+    NewTab,
+    /// Close the active tab.
+    CloseTab,
     /// No-op — target feature not yet implemented.
     Noop,
 }

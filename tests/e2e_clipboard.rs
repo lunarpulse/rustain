@@ -25,10 +25,12 @@ fn test_e2e_image_paste_shows_indicator() {
     h.focus_input();
 
     // Simulate image paste via pending_images
-    h.state.pending_images.push(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "base64data".to_string(),
-    });
+    h.state
+        .pending_images
+        .push(rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "base64data".to_string(),
+        });
 
     h.render();
 
@@ -55,15 +57,18 @@ fn test_e2e_image_in_api_request() {
     let mut h = TestHarness::new();
 
     // Setup conversation with user message
-    h.conversation.messages.push(rustain::domain::models::ChatMessage {
-        role: MessageRole::User,
-        content: "See this image".to_string(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: 0,
-        token_count: None,
-        stop_reason: None,
-    });
+    h.conversation
+        .messages
+        .push(rustain::domain::models::ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::User,
+            content: "See this image".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+        });
 
     // Build API messages
     let api_msgs = h.build_api_messages();
@@ -120,7 +125,7 @@ fn test_e2e_image_unsupported_format_validation() {
     assert!(!validate_image_format("test.svg"));
     assert!(!validate_image_format("test.bmp"));
     assert!(!validate_image_format("test.tiff"));
-    
+
     // Valid formats
     assert!(validate_image_format("test.png"));
     assert!(validate_image_format("test.jpg"));
@@ -186,15 +191,18 @@ fn test_e2e_image_reference_stored() {
     let mut h = TestHarness::new();
 
     // Simulate image in message
-    h.conversation.messages.push(rustain::domain::models::ChatMessage {
-        role: MessageRole::User,
-        content: "Image attached".to_string(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: 0,
-        token_count: None,
-        stop_reason: None,
-    });
+    h.conversation
+        .messages
+        .push(rustain::domain::models::ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::User,
+            content: "Image attached".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+        });
 
     // Message exists
     assert!(!h.conversation.messages.is_empty());
@@ -214,15 +222,18 @@ fn test_e2e_copy_key_in_chat_focus() {
     assert!(matches!(h.state.focus, FocusState::Chat));
 
     // Add assistant message
-    h.conversation.messages.push(rustain::domain::models::ChatMessage {
-        role: MessageRole::Assistant,
-        content: "Copy this text".to_string(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: 0,
-        token_count: None,
-        stop_reason: None,
-    });
+    h.conversation
+        .messages
+        .push(rustain::domain::models::ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::Assistant,
+            content: "Copy this text".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+        });
 
     // Press 'c' - action depends on implementation
     // In actual app, this would copy focused content
@@ -248,15 +259,18 @@ fn test_e2e_status_bar_shows_state() {
 fn test_e2e_copy_assistant_message() {
     let mut h = TestHarness::new();
 
-    h.conversation.messages.push(rustain::domain::models::ChatMessage {
-        role: MessageRole::Assistant,
-        content: "Full message content".to_string(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: 0,
-        token_count: None,
-        stop_reason: None,
-    });
+    h.conversation
+        .messages
+        .push(rustain::domain::models::ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::Assistant,
+            content: "Full message content".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+        });
 
     // Verify message content available for copy
     assert_eq!(h.conversation.messages[0].content, "Full message content");
@@ -324,10 +338,12 @@ fn test_e2e_image_cleared_on_new_session() {
     h.focus_input();
 
     // Setup pending images
-    h.state.pending_images.push(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "base64data".to_string(),
-    });
+    h.state
+        .pending_images
+        .push(rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "base64data".to_string(),
+        });
 
     // Clear for new session
     h.state.pending_images.clear();
@@ -341,14 +357,18 @@ fn test_e2e_multiple_images_single_message() {
     let mut h = TestHarness::new();
 
     // Multiple pending images
-    h.state.pending_images.push(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "base64data1".to_string(),
-    });
-    h.state.pending_images.push(rustain::domain::models::ImageAttachment {
-        media_type: "image/jpeg".to_string(),
-        data: "base64data2".to_string(),
-    });
+    h.state
+        .pending_images
+        .push(rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "base64data1".to_string(),
+        });
+    h.state
+        .pending_images
+        .push(rustain::domain::models::ImageAttachment {
+            media_type: "image/jpeg".to_string(),
+            data: "base64data2".to_string(),
+        });
 
     assert_eq!(h.state.pending_images.len(), 2);
 }

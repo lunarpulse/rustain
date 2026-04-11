@@ -51,7 +51,7 @@ fn render_full_layout(
         .draw(|frame| {
             let area = frame.area();
             let app_layout =
-                layout::compute_layout(area, &theme, "").expect("layout must compute for 80x24");
+                layout::compute_layout(area, &theme, "", 1).expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
                 app_layout.chat_pane,
@@ -103,6 +103,7 @@ fn render_full_layout(
 fn test_tool_block_in_full_layout() {
     let conversation = make_conversation(vec![
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Read my file".to_string(),
             content_blocks: vec![],
@@ -112,6 +113,7 @@ fn test_tool_block_in_full_layout() {
             stop_reason: None,
         },
         ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "Reading file.".to_string(),
             content_blocks: vec![],
@@ -165,6 +167,7 @@ fn test_tool_block_in_full_layout() {
 #[test]
 fn test_feedback_block_in_full_layout() {
     let conversation = make_conversation(vec![ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello".to_string(),
         content_blocks: vec![],
@@ -212,7 +215,7 @@ fn test_permission_prompt_in_full_layout() {
         .draw(|frame| {
             let area = frame.area();
             let app_layout =
-                layout::compute_layout(area, &theme, "").expect("layout must compute for 80x24");
+                layout::compute_layout(area, &theme, "", 1).expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
                 app_layout.chat_pane,
@@ -305,7 +308,7 @@ fn test_ask_user_question_in_full_layout() {
         .draw(|frame| {
             let area = frame.area();
             let app_layout =
-                layout::compute_layout(area, &theme, "").expect("layout must compute for 80x24");
+                layout::compute_layout(area, &theme, "", 1).expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
                 app_layout.chat_pane,

@@ -183,20 +183,20 @@ pub fn render(
             block_boundaries.push(cumulative_offset + h);
         }
 
-        // Use height cache. If the cached value diverges from the freshly computed
-        // value (e.g., a tool result with an error arrived and changed the height),
+        // Use height cache keyed by message ID. If the cached value diverges from the freshly
+        // computed value (e.g., a tool result with an error arrived and changed the height),
         // invalidate the whole cache so subsequent messages stay in sync (AC2, DF-061).
-        if let Some(cached) = height_cache.get(i) {
+        if let Some(cached) = height_cache.get(&msg.id) {
             if cached == h {
                 h = cached; // Cache hit — values agree, no divergence.
             } else {
                 // Stale entry detected: height changed without an explicit invalidation.
                 // Invalidate all to keep block_boundaries coherent for downstream messages.
                 height_cache.invalidate_all();
-                height_cache.set(i, h);
+                height_cache.set(msg.id.clone(), h);
             }
         } else {
-            height_cache.set(i, h);
+            height_cache.set(msg.id.clone(), h);
         }
 
         message_heights.push(h);

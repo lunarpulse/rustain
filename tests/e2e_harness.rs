@@ -227,7 +227,7 @@ impl TestHarness {
         self.terminal
             .draw(|frame| {
                 let area = frame.area();
-                if let Some(app_layout) = layout::compute_layout(area, theme, input_buffer) {
+                if let Some(app_layout) = layout::compute_layout(area, theme, input_buffer, 1) {
                     chat_pane::render(
                         frame,
                         app_layout.chat_pane,
@@ -378,6 +378,7 @@ impl TestHarness {
             .as_secs() as i64;
 
         self.conversation.messages.push(ChatMessage {
+            id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: text.to_string(),
             content_blocks: vec![],
@@ -924,6 +925,7 @@ fn test_e2e_api_messages_valid_after_tool_use() {
         .map(|(_, v)| v)
         .collect();
     h.conversation.messages.push(ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content,
         content_blocks: blocks,

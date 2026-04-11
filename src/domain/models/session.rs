@@ -18,7 +18,7 @@ pub enum SessionState {
 
 /// Owned, mutable state machine for session lifecycle management.
 /// Single-threaded — not behind `Arc`. Lives in the event loop.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SessionManager {
     state: SessionState,
 }

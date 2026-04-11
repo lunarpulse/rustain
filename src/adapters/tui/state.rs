@@ -48,26 +48,24 @@ pub enum Direction {
     Down,
 }
 
-/// Cache of rendered line heights for each message/block at current terminal width.
-/// Key: (message_index, block_index). Value: rendered line count.
-/// block_index 0 = role line + spacing, block_index 1+ = content blocks.
-/// For simplicity in MVP, we cache per-message (block_index always 0).
+/// Cache of rendered line heights for each message, keyed by message ID (not index).
+/// Value: rendered line count.
 #[derive(Debug, Default)]
 pub struct HeightCache {
-    entries: HashMap<usize, usize>,
+    entries: HashMap<String, usize>,
     /// Terminal width at which heights were computed.
     pub cached_width: u16,
 }
 
 impl HeightCache {
-    /// Get cached height for a message index.
-    pub fn get(&self, message_index: usize) -> Option<usize> {
-        self.entries.get(&message_index).copied()
+    /// Get cached height for a message ID.
+    pub fn get(&self, message_id: &str) -> Option<usize> {
+        self.entries.get(message_id).copied()
     }
 
-    /// Set cached height for a message index.
-    pub fn set(&mut self, message_index: usize, height: usize) {
-        self.entries.insert(message_index, height);
+    /// Set cached height for a message ID.
+    pub fn set(&mut self, message_id: String, height: usize) {
+        self.entries.insert(message_id, height);
     }
 
     /// Full invalidation (e.g., on resize).
@@ -75,10 +73,10 @@ impl HeightCache {
         self.entries.clear();
     }
 
-    /// Incremental invalidation: only invalidate the last message (streaming).
+    /// Incremental invalidation: only invalidate the given message ID (streaming).
     #[allow(dead_code)]
-    pub fn invalidate_last(&mut self, message_index: usize) {
-        self.entries.remove(&message_index);
+    pub fn invalidate_last(&mut self, message_id: &str) {
+        self.entries.remove(message_id);
     }
 }
 

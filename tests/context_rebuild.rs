@@ -5,6 +5,7 @@ use rustain::domain::services::history_rebuild::build_history_context;
 
 fn make_message(role: MessageRole, content: &str) -> ChatMessage {
     ChatMessage {
+        id: rustain::domain::models::generate_conversation_id(),
         role,
         content: content.to_string(),
         content_blocks: vec![],
