@@ -1,4 +1,5 @@
 pub mod autocomplete;
+pub mod checkpoint;
 mod completion;
 mod config;
 mod content;
@@ -20,6 +21,8 @@ pub mod visual;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
+#[allow(unused_imports)]
+pub use checkpoint::CheckpointId;
 #[allow(unused_imports)]
 pub use completion::CompletionOptions;
 pub use config::AppConfig;

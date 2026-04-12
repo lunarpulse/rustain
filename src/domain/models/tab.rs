@@ -152,6 +152,17 @@ impl TabManager {
         id
     }
 
+    /// Create a new tab with a pre-existing conversation (for fork, open-from-sidebar, etc.).
+    /// Returns the new tab's ID.
+    pub fn create_tab_with_conversation(&mut self, conversation: Conversation) -> TabId {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let tab = TabState::from_conversation(id, conversation);
+        self.tabs.push(tab);
+        self.active_tab_index = self.tabs.len() - 1;
+        id
+    }
+
     /// Close a tab by ID. Returns the closed tab's conversation for history storage.
     /// If closing the last tab, creates a new empty tab automatically.
     /// Returns None if the tab ID was not found.

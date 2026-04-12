@@ -55,29 +55,43 @@ fn compute_message_height(
 }
 
 /// Render a single message into Line objects.
+///
+/// `is_fork_point`: if true, prepend a `🔀` fork marker to the role indicator.
+/// Used for the last message in forked conversations (AC3, Story 4-3a).
 fn render_message<'a>(
     msg: &crate::domain::models::ChatMessage,
     width: usize,
     theme: &Theme,
+    is_fork_point: bool,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
 
-    // Role indicator
-    let role_line = match msg.role {
-        MessageRole::User => Line::from(Span::styled(
-            "You:",
-            Style::default()
-                .fg(theme.colors.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        MessageRole::Assistant => Line::from(Span::styled(
-            "Assistant:",
-            Style::default()
-                .fg(theme.colors.fg_secondary)
-                .add_modifier(Modifier::BOLD),
-        )),
+    // Role indicator (with optional fork marker)
+    let role_label = match msg.role {
+        MessageRole::User => {
+            if is_fork_point {
+                "🔀 You:".to_string()
+            } else {
+                "You:".to_string()
+            }
+        }
+        MessageRole::Assistant => {
+            if is_fork_point {
+                "🔀 Assistant:".to_string()
+            } else {
+                "Assistant:".to_string()
+            }
+        }
     };
+    let role_color = match msg.role {
+        MessageRole::User => theme.colors.accent,
+        MessageRole::Assistant => theme.colors.fg_secondary,
+    };
+    let role_line = Line::from(Span::styled(
+        role_label,
+        Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+    ));
     lines.push(role_line);
 
     // Content
@@ -301,7 +315,11 @@ pub fn render(
 
         if msg_end > visible_start && line_offset < visible_end {
             // This message is (at least partially) visible — render it
-            let msg_lines = render_message(msg, width, theme);
+            // Fork point marker: last message of a forked conversation (AC3, Story 4-3a).
+            // Only the forked conversation gets the marker (not the original).
+            let is_fork_point = conversation.fork_source.is_some()
+                && i == conversation.messages.len().saturating_sub(1);
+            let msg_lines = render_message(msg, width, theme, is_fork_point);
             for (j, line) in msg_lines.into_iter().enumerate() {
                 let abs_line = line_offset + j;
                 if abs_line >= visible_start && abs_line < visible_end {

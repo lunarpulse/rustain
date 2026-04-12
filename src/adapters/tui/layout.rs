@@ -57,7 +57,7 @@ pub fn compute_layout(
     if sidebar_width > 0 {
         // Split horizontally: main content | sidebar
         let main_chunks = Layout::horizontal([
-            Constraint::Min(1),               // main content area
+            Constraint::Min(1),                // main content area
             Constraint::Length(sidebar_width), // sidebar
         ])
         .split(area);

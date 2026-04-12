@@ -1,5 +1,5 @@
 //! In-memory session index for the sidebar.
-//! 
+//!
 //! The `SessionIndex` maintains a sorted list of `SessionSummary` entries
 //! and provides O(1) access by conversation ID via a HashMap index.
 //! It lives in the single-threaded event loop (no Arc/Mutex needed).
@@ -47,9 +47,7 @@ impl SessionSummary {
     }
 
     /// Create from a ConversationSummary (from StoragePort).
-    pub fn from_conversation_summary(
-        summary: &crate::domain::models::ConversationSummary,
-    ) -> Self {
+    pub fn from_conversation_summary(summary: &crate::domain::models::ConversationSummary) -> Self {
         Self {
             conversation_id: summary.id.clone(),
             title: summary.title.clone(),
@@ -133,7 +131,7 @@ impl SessionIndex {
         if let Some(existing_idx) = self.id_index.get(conversation_id).copied() {
             // Entry exists - remove it and re-insert at front
             let mut entry = self.entries.remove(existing_idx);
-            
+
             // Update fields
             entry.updated_at = now;
             if let Some(t) = title {
@@ -145,7 +143,7 @@ impl SessionIndex {
 
             // Insert at front
             self.entries.insert(0, entry);
-            
+
             // Rebuild index
             self.rebuild_id_index();
             false
@@ -160,7 +158,7 @@ impl SessionIndex {
                 message_count.unwrap_or(0),
             );
             self.entries.insert(0, new_entry);
-            
+
             // Rebuild index
             self.rebuild_id_index();
             true
@@ -181,7 +179,7 @@ impl SessionIndex {
         for entry in &mut self.entries {
             entry.is_active = false;
         }
-        
+
         // Set the new active one
         if let Some(id) = conversation_id {
             if let Some(entry) = self.get_mut(id) {
@@ -267,7 +265,7 @@ mod tests {
             make_summary("c", 2000),
         ];
         let index = SessionIndex::build(summaries);
-        
+
         assert_eq!(index.len(), 3);
         let entries = index.entries();
         assert_eq!(entries[0].conversation_id, "b"); // Most recent
@@ -277,15 +275,12 @@ mod tests {
 
     #[test]
     fn test_touch_moves_to_front() {
-        let summaries = vec![
-            make_summary("a", 1000),
-            make_summary("b", 3000),
-        ];
+        let summaries = vec![make_summary("a", 1000), make_summary("b", 3000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         // Touch "a" - it should move to front
         index.touch("a", None, Some(10));
-        
+
         let entries = index.entries();
         assert_eq!(entries[0].conversation_id, "a");
         assert_eq!(entries[0].message_count, 10);
@@ -296,10 +291,10 @@ mod tests {
     fn test_touch_creates_new_entry() {
         let summaries = vec![make_summary("a", 1000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         // Touch a non-existent ID
         let created = index.touch("new", Some("New Title".to_string()), Some(3));
-        
+
         assert!(created);
         assert_eq!(index.len(), 2);
         let entries = index.entries();
@@ -312,28 +307,25 @@ mod tests {
     fn test_set_open() {
         let summaries = vec![make_summary("a", 1000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         index.set_open("a", true);
-        
+
         let entry = index.get("a").unwrap();
         assert!(entry.is_open);
     }
 
     #[test]
     fn test_set_active() {
-        let summaries = vec![
-            make_summary("a", 1000),
-            make_summary("b", 2000),
-        ];
+        let summaries = vec![make_summary("a", 1000), make_summary("b", 2000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         index.set_active(Some("a"));
-        
+
         let entry_a = index.get("a").unwrap();
         let entry_b = index.get("b").unwrap();
         assert!(entry_a.is_active);
         assert!(!entry_b.is_active);
-        
+
         // Switch active
         index.set_active(Some("b"));
         let entry_a = index.get("a").unwrap();
@@ -346,27 +338,24 @@ mod tests {
     fn test_set_active_none() {
         let summaries = vec![make_summary("a", 1000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         index.set_open("a", true);
         index.set_active(Some("a"));
-        
+
         // Clear active
         index.set_active(None);
-        
+
         let entry = index.get("a").unwrap();
         assert!(!entry.is_active);
     }
 
     #[test]
     fn test_remove() {
-        let summaries = vec![
-            make_summary("a", 1000),
-            make_summary("b", 2000),
-        ];
+        let summaries = vec![make_summary("a", 1000), make_summary("b", 2000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         let removed = index.remove("a");
-        
+
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().conversation_id, "a");
         assert_eq!(index.len(), 1);
@@ -378,9 +367,9 @@ mod tests {
     fn test_remove_nonexistent() {
         let summaries = vec![make_summary("a", 1000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         let removed = index.remove("nonexistent");
-        
+
         assert!(removed.is_none());
         assert_eq!(index.len(), 1);
     }
@@ -389,11 +378,11 @@ mod tests {
     fn test_get_by_id() {
         let summaries = vec![make_summary("a", 1000)];
         let index = SessionIndex::build(summaries);
-        
+
         let entry = index.get("a");
         assert!(entry.is_some());
         assert_eq!(entry.unwrap().conversation_id, "a");
-        
+
         let missing = index.get("nonexistent");
         assert!(missing.is_none());
     }
@@ -402,9 +391,9 @@ mod tests {
     fn test_clear() {
         let summaries = vec![make_summary("a", 1000)];
         let mut index = SessionIndex::build(summaries);
-        
+
         index.clear();
-        
+
         assert!(index.is_empty());
         assert_eq!(index.len(), 0);
     }

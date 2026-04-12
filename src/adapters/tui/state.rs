@@ -697,6 +697,9 @@ pub struct TuiState {
     pub sidebar_scroll_offset: usize,
     /// Pending delete confirmation target. None = no pending confirmation.
     pub pending_delete: Option<crate::domain::models::visual::DeleteConfirmTarget>,
+    /// Message index selected for fork (set when user presses `f`, cleared on confirm/cancel).
+    /// Story 4-3a, AC1.
+    pub pending_fork_index: Option<usize>,
 }
 
 impl TuiState {
@@ -757,6 +760,7 @@ impl TuiState {
             sidebar_entry_count: 0,
             sidebar_scroll_offset: 0,
             pending_delete: None,
+            pending_fork_index: None,
         }
     }
 }

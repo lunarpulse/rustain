@@ -180,10 +180,7 @@ mod tests {
             extract_title_from_first_message("Hello world"),
             "Hello world"
         );
-        assert_eq!(
-            extract_title_from_first_message("  Trimmed  "),
-            "Trimmed"
-        );
+        assert_eq!(extract_title_from_first_message("  Trimmed  "), "Trimmed");
     }
 
     #[test]
@@ -225,7 +222,7 @@ mod tests {
     #[test]
     fn test_session_meta_from_conversation() {
         use super::super::conversation::Conversation;
-        
+
         let conv = Conversation {
             id: "test-id".to_string(),
             title: "Test Title".to_string(),
@@ -251,9 +248,9 @@ mod tests {
         // Manually set the timestamp so we can test the change
         meta.updated_at = 1700000000;
         let original_updated = meta.updated_at;
-        
+
         meta.touch(10);
-        
+
         assert_eq!(meta.message_count, 10);
         assert!(meta.updated_at >= original_updated);
     }
@@ -264,9 +261,9 @@ mod tests {
         // Manually set the timestamp so we can test the change
         meta.updated_at = 1700000000;
         let original_updated = meta.updated_at;
-        
+
         meta.set_title("New Title".to_string());
-        
+
         assert_eq!(meta.title, "New Title");
         assert!(meta.updated_at >= original_updated);
     }

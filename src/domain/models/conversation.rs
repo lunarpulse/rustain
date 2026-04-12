@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use serde::{Deserialize, Serialize};
 
+use super::checkpoint::CheckpointId;
 use super::content::ContentBlockType;
 use super::stream::StopReason;
 use super::tools::ToolCallInfo;
@@ -71,6 +72,15 @@ pub struct ConversationSummary {
 pub struct ForkSource {
     pub conversation_id: String,
     pub message_index: usize,
+    /// Checkpoint identifier at the fork point.
+    /// Non-optional per Amendment 2.  Pre-existing fork entries that lack this
+    /// field deserialize to `CheckpointId(0)` via the `default` helper.
+    #[serde(default = "default_checkpoint_id")]
+    pub checkpoint_id: CheckpointId,
+}
+
+fn default_checkpoint_id() -> CheckpointId {
+    CheckpointId(0)
 }
 
 /// Generate a unique conversation ID using nanoid.

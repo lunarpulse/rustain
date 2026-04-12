@@ -939,9 +939,9 @@ pub async fn run(
                                         state.sidebar_visible = !state.sidebar_visible;
                                         if state.sidebar_visible {
                                             state.sidebar_panel = Some(crate::domain::models::visual::PanelType::History);
-                                            state.focus = FocusState::Sidebar { 
-                                                panel: crate::domain::models::visual::PanelType::History, 
-                                                selected: state.sidebar_selected 
+                                            state.focus = FocusState::Sidebar {
+                                                panel: crate::domain::models::visual::PanelType::History,
+                                                selected: state.sidebar_selected
                                             };
                                         } else {
                                             state.sidebar_panel = None;
@@ -1033,7 +1033,7 @@ pub async fn run(
                                     if let Some(entry) = session_index.entries().get(state.sidebar_selected) {
                                         let conv_id = entry.conversation_id.clone();
                                         let title = entry.title.clone();
-                                        
+
                                         // Don't delete the active conversation if it's the only tab
                                         if conv_id == conversation.id && tab_manager.tab_count() == 1 {
                                             state.status = StatusState::Flash {
@@ -1043,18 +1043,18 @@ pub async fn run(
                                         } else {
                                             // Show confirmation prompt (AC5)
                                             let display_title = if title.is_empty() { "Untitled".to_string() } else { title };
-                                            state.pending_delete = Some(DeleteConfirmTarget::Single { 
-                                                id: conv_id.clone(), 
-                                                title: display_title.clone() 
+                                            state.pending_delete = Some(DeleteConfirmTarget::Single {
+                                                id: conv_id.clone(),
+                                                title: display_title.clone()
                                             });
                                             state.status = StatusState::Flash {
                                                 message: format!("Delete \"{}\"? This cannot be undone. [y/n]", display_title),
                                                 remaining_ms: 30_000, // Long timeout for confirmation
                                             };
                                             state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                                ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Single { 
-                                                    id: conv_id.clone(), 
-                                                    title: display_title 
+                                                ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Single {
+                                                    id: conv_id.clone(),
+                                                    title: display_title
                                                 })
                                             ));
                                         }
@@ -1146,7 +1146,7 @@ pub async fn run(
                                                 state.sidebar_selected = 0;
                                                 // F14: Reset sidebar_scroll_offset during DeleteAll
                                                 state.sidebar_scroll_offset = 0;
-                                                
+
                                                 let fs_ref = fs_storage.clone();
                                                 tokio::spawn(async move {
                                                     for id in conv_ids {
@@ -1155,7 +1155,7 @@ pub async fn run(
                                                         }
                                                     }
                                                 });
-                                                
+
                                                 while tab_manager.tab_count() > 1 {
                                                     let tab_id = tab_manager.tabs().last().map(|t| t.id).unwrap();
                                                     tab_manager.close_tab(tab_id);
@@ -1194,6 +1194,133 @@ pub async fn run(
                                     } else {
                                         FocusState::Input
                                     };
+                                    state.needs_redraw = true;
+                                }
+                                // ── Fork Conversation (Story 4-3a) ──────────────
+                                InputAction::ForkAtMessage => {
+                                    // Guard: cannot fork while streaming
+                                    if streaming.is_streaming {
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot fork while streaming — wait for response to complete".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else if conversation.messages.is_empty() {
+                                        // Guard: no messages to fork
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot fork: conversation has no messages".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else if state.message_boundaries.is_empty() {
+                                        // Guard: chat pane hasn't rendered yet
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot fork: chat pane not ready".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else {
+                                        // Determine which message is focused
+                                        let fork_message_index = if state.auto_scroll {
+                                            conversation.messages.len().saturating_sub(1)
+                                        } else {
+                                            let vp = state.terminal_height as usize;
+                                            let max_off = state.total_content_height.saturating_sub(vp);
+                                            let clamped = state.scroll_offset.min(max_off);
+                                            let top_line = max_off.saturating_sub(clamped);
+                                            match state.message_boundaries.binary_search(&top_line) {
+                                                Ok(i) => i,
+                                                Err(i) => i.saturating_sub(1),
+                                            }
+                                            .min(conversation.messages.len().saturating_sub(1))
+                                        };
+                                        state.pending_fork_index = Some(fork_message_index);
+                                        state.focus = FocusState::Overlay(
+                                            crate::domain::models::visual::OverlayType::Confirmation(
+                                                crate::domain::models::visual::ConfirmationType::Fork,
+                                            ),
+                                        );
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::ForkConfirm => {
+                                    // P5 dedup invariant (party-mode review 2026-04-12):
+                                    // `.take()` drops pending_fork_index to None BEFORE the
+                                    // storage await, so a second 'y' press that lands while
+                                    // fork_at_checkpoint is in flight will be a no-op. The
+                                    // event loop is single-threaded per iteration — crossterm
+                                    // events queue behind the current select! branch and are
+                                    // processed after we return. Do not move `.take()` below
+                                    // the await without re-analyzing this invariant.
+                                    if let Some(message_index) = state.pending_fork_index.take() {
+                                        use crate::domain::models::checkpoint::CheckpointId;
+                                        let checkpoint = CheckpointId(message_index as u64);
+                                        let source_id = conversation.id.clone();
+                                        let is_last = message_index == conversation.messages.len().saturating_sub(1);
+
+                                        match storage.fork_at_checkpoint(&source_id, checkpoint).await {
+                                            Ok(new_id) => {
+                                                match storage.load_conversation(&new_id).await {
+                                                    Ok(Some(forked_conv)) => {
+                                                        // Save current tab state before creating new tab
+                                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                                        // Create new tab with the forked conversation
+                                                        tab_manager.create_tab_with_conversation(forked_conv);
+                                                        // Load the new active tab
+                                                        let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                        // Update session index
+                                                        session_index.set_open(&conversation.id, true);
+                                                        session_index.set_active(Some(&conversation.id));
+                                                        state.sidebar_entry_count = session_index.len();
+                                                        // Show fork hint in status bar
+                                                        let hint_msg = if is_last {
+                                                            "Forked at last message — both copies are now identical".to_string()
+                                                        } else {
+                                                            // Get the source conversation title from the fork_source.
+                                                            // P4 (party-mode 2026-04-12): guard against empty/whitespace
+                                                            // titles so the status doesn't render `Forked from "" at ...`.
+                                                            let source_title = conversation.fork_source.as_ref()
+                                                                .and_then(|fs| tab_manager.find_by_conversation(&fs.conversation_id))
+                                                                .map(|t| t.conversation.title.clone())
+                                                                .filter(|t| !t.trim().is_empty())
+                                                                .unwrap_or_else(|| "(Untitled)".to_string());
+                                                            format!(
+                                                                "Forked from \"{}\" at message {}",
+                                                                source_title,
+                                                                message_index + 1
+                                                            )
+                                                        };
+                                                        state.status = StatusState::Flash {
+                                                            message: hint_msg,
+                                                            remaining_ms: 5000,
+                                                        };
+                                                        state.focus = FocusState::Chat;
+                                                    }
+                                                    Ok(None) => {
+                                                        tracing::error!("Forked conversation {} not found after creation", new_id);
+                                                        state.focus = FocusState::Chat;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!("Failed to load forked conversation: {}", e);
+                                                        state.focus = FocusState::Chat;
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Fork failed: {}", e);
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Fork failed: {}", e),
+                                                    remaining_ms: 3000,
+                                                };
+                                                state.focus = FocusState::Chat;
+                                            }
+                                        }
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::ForkCancel => {
+                                    state.pending_fork_index = None;
+                                    state.focus = FocusState::Chat;
                                     state.needs_redraw = true;
                                 }
                                 InputAction::Consumed | InputAction::Ignored => {}
@@ -1987,7 +2114,6 @@ fn start_turn(
     state.needs_redraw = true;
 }
 
-
 /// Handle a render failure: abort active turn, reset streaming, attempt terminal recovery.
 fn handle_render_error(
     err: anyhow::Error,
@@ -2090,6 +2216,7 @@ fn render(
         ref image_indicator,
         ref current_hint,
         sidebar_visible,
+        ref pending_fork_index,
         ..
     } = *state;
 
@@ -2210,6 +2337,42 @@ fn render(
                     let paragraph = ratatui::widgets::Paragraph::new(aq_lines);
                     frame.render_widget(ratatui::widgets::Clear, aq_area);
                     frame.render_widget(paragraph, aq_area);
+                }
+
+                // Render fork confirmation card at bottom of chat pane if pending (Story 4-3a, AC1)
+                if *focus
+                    == FocusState::Overlay(
+                        crate::domain::models::visual::OverlayType::Confirmation(
+                            crate::domain::models::visual::ConfirmationType::Fork,
+                        ),
+                    )
+                {
+                    if let Some(fork_idx) = pending_fork_index {
+                        use crate::adapters::tui::widgets::fork_confirm;
+                        // Get message preview from conversation
+                        let preview = conversation
+                            .messages
+                            .get(*fork_idx)
+                            .map(|m| m.content.as_str())
+                            .unwrap_or("");
+                        let fork_lines = fork_confirm::render_fork_confirmation_lines(
+                            preview,
+                            *fork_idx,
+                            app_layout.chat_pane.width,
+                            theme,
+                        );
+                        let fork_height = fork_lines.len() as u16;
+                        let fork_area = ratatui::prelude::Rect {
+                            x: app_layout.chat_pane.x,
+                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                                - fork_height.min(app_layout.chat_pane.height),
+                            width: app_layout.chat_pane.width,
+                            height: fork_height.min(app_layout.chat_pane.height),
+                        };
+                        let paragraph = ratatui::widgets::Paragraph::new(fork_lines);
+                        frame.render_widget(ratatui::widgets::Clear, fork_area);
+                        frame.render_widget(paragraph, fork_area);
+                    }
                 }
 
                 let session_title = if !conversation.title.is_empty() {

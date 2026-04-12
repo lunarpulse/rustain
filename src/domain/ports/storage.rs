@@ -2,6 +2,7 @@
 use async_trait::async_trait;
 
 use crate::domain::errors::StorageError;
+use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{Conversation, ConversationSummary, SessionMeta};
 
 /// Persistence for conversations and settings.
@@ -16,7 +17,9 @@ pub trait StoragePort: Send + Sync {
     /// Delete a conversation and its metadata.
     /// Default implementation returns NotSupported error.
     async fn delete_conversation(&self, _id: &str) -> Result<(), StorageError> {
-        Err(StorageError::NotSupported("delete_conversation".to_string()))
+        Err(StorageError::NotSupported(
+            "delete_conversation".to_string(),
+        ))
     }
 
     /// Save session metadata sidecar file.
@@ -29,5 +32,16 @@ pub trait StoragePort: Send + Sync {
     /// Default implementation returns NotSupported error.
     async fn load_session_meta(&self, _id: &str) -> Result<Option<SessionMeta>, StorageError> {
         Err(StorageError::NotSupported("load_session_meta".to_string()))
+    }
+
+    /// Fork conversation at a given checkpoint into a new conversation.
+    /// Returns the new conversation's ID. Original is unchanged.
+    /// Default implementation returns NotSupported error.
+    async fn fork_at_checkpoint(
+        &self,
+        _source_conversation_id: &str,
+        _checkpoint: CheckpointId,
+    ) -> Result<String, StorageError> {
+        Err(StorageError::NotSupported("fork".into()))
     }
 }

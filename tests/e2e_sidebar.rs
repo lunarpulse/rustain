@@ -2,7 +2,7 @@
 //! Tests SessionIndex integration, sidebar keyboard navigation,
 //! focus cycling, sidebar widget rendering, and live updates.
 
-use rustain::adapters::tui::app::{handle_input, InputAction};
+use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::sidebar;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
@@ -10,8 +10,8 @@ use rustain::domain::models::visual::{DeleteConfirmTarget, PanelType};
 use rustain::domain::models::{ConversationSummary, FocusState};
 use rustain::domain::services::session_index::{SessionIndex, SessionSummary};
 
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 fn make_state() -> TuiState {
     TuiState::with_capability(
@@ -69,8 +69,20 @@ fn test_sidebar_renders_entries() {
     let theme = rustain::adapters::tui::theme::Theme::dark();
 
     let entries = vec![
-        SessionSummary::new("a".to_string(), "First Chat".to_string(), 1_700_000_000, 1_699_999_000, 3),
-        SessionSummary::new("b".to_string(), "Second Chat".to_string(), 1_699_999_000, 1_699_998_000, 7),
+        SessionSummary::new(
+            "a".to_string(),
+            "First Chat".to_string(),
+            1_700_000_000,
+            1_699_999_000,
+            3,
+        ),
+        SessionSummary::new(
+            "b".to_string(),
+            "Second Chat".to_string(),
+            1_699_999_000,
+            1_699_998_000,
+            7,
+        ),
     ];
 
     terminal
@@ -93,8 +105,20 @@ fn test_sidebar_highlights_active_conversation() {
     let theme = rustain::adapters::tui::theme::Theme::dark();
 
     let mut entries = vec![
-        SessionSummary::new("a".to_string(), "Active One".to_string(), 1_700_000_000, 1_699_999_000, 3),
-        SessionSummary::new("b".to_string(), "Inactive".to_string(), 1_699_999_000, 1_699_998_000, 7),
+        SessionSummary::new(
+            "a".to_string(),
+            "Active One".to_string(),
+            1_700_000_000,
+            1_699_999_000,
+            3,
+        ),
+        SessionSummary::new(
+            "b".to_string(),
+            "Inactive".to_string(),
+            1_699_999_000,
+            1_699_998_000,
+            7,
+        ),
     ];
     entries[0].is_active = true;
 
@@ -276,10 +300,7 @@ fn test_session_index_sorted_newest_first() {
 
 #[test]
 fn test_session_index_touch_moves_to_front() {
-    let summaries = vec![
-        make_summary("a", "A", 1000),
-        make_summary("b", "B", 2000),
-    ];
+    let summaries = vec![make_summary("a", "A", 1000), make_summary("b", "B", 2000)];
     let mut index = SessionIndex::build(summaries);
     // "a" is oldest, at the back
     assert_eq!(index.entries()[1].conversation_id, "a");
@@ -293,10 +314,7 @@ fn test_session_index_touch_moves_to_front() {
 
 #[test]
 fn test_session_index_set_active_clears_others() {
-    let summaries = vec![
-        make_summary("a", "A", 1000),
-        make_summary("b", "B", 2000),
-    ];
+    let summaries = vec![make_summary("a", "A", 1000), make_summary("b", "B", 2000)];
     let mut index = SessionIndex::build(summaries);
     index.set_active(Some("a"));
 
@@ -359,10 +377,7 @@ fn test_resize_keeps_sidebar_when_wide_enough() {
     };
 
     // Resize to exactly SIDEBAR_MIN_WIDTH — should keep sidebar
-    let _action = handle_input(
-        &mut state,
-        &DomainInputEvent::Resize(120, 24),
-    );
+    let _action = handle_input(&mut state, &DomainInputEvent::Resize(120, 24));
     assert!(state.sidebar_visible);
 }
 
@@ -373,9 +388,17 @@ fn test_delete_confirmation_y_confirms() {
     use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
     let mut state = make_state();
-    let target = DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test".to_string() };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
-    state.pending_delete = Some(DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test".to_string() });
+    let target = DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    };
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
+    state.pending_delete = Some(DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    });
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     assert_eq!(action, InputAction::ConfirmDelete);
@@ -386,9 +409,17 @@ fn test_delete_confirmation_n_cancels() {
     use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
     let mut state = make_state();
-    let target = DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test".to_string() };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
-    state.pending_delete = Some(DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test".to_string() });
+    let target = DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    };
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
+    state.pending_delete = Some(DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    });
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
     assert_eq!(action, InputAction::CancelDelete);
@@ -400,7 +431,9 @@ fn test_delete_confirmation_esc_cancels() {
 
     let mut state = make_state();
     let target = DeleteConfirmTarget::Bulk { count: 5 };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
     state.pending_delete = Some(DeleteConfirmTarget::Bulk { count: 5 });
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
@@ -425,12 +458,17 @@ fn test_e2e_delete_with_confirmation() {
     // Step 1: Press 'd' to initiate delete
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
     assert_eq!(action, InputAction::DeleteSidebarConversation);
-    
+
     // Simulate event loop setting up confirmation (would happen in real app)
-    let target = DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test Chat".to_string() };
+    let target = DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test Chat".to_string(),
+    };
     state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
-    
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
+
     // Step 2: Press 'y' to confirm
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     assert_eq!(action, InputAction::ConfirmDelete);
@@ -438,20 +476,28 @@ fn test_e2e_delete_with_confirmation() {
 
 #[test]
 fn test_e2e_delete_confirmation_clears_status() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
     use rustain::domain::models::StatusState;
+    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
     let mut state = make_state();
     // Set up a pending delete
-    let target = DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test".to_string() };
+    let target = DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    };
     state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
-    state.status = StatusState::Flash { message: "Delete \"Test\"? This cannot be undone. [y/n]".to_string(), remaining_ms: 30000 };
-    
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
+    state.status = StatusState::Flash {
+        message: "Delete \"Test\"? This cannot be undone. [y/n]".to_string(),
+        remaining_ms: 30000,
+    };
+
     // Cancel the delete
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
     assert_eq!(action, InputAction::CancelDelete);
-    
+
     // U1: Status should be cleared immediately (set to Idle by CancelDelete handler)
     // Note: In the real event loop, CancelDelete sets status to Idle
 }
@@ -461,10 +507,15 @@ fn test_e2e_delete_cancel() {
     use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
     let mut state = make_state();
-    let target = DeleteConfirmTarget::Single { id: "conv-123".to_string(), title: "Test".to_string() };
+    let target = DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    };
     state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
-    
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
+
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
     assert_eq!(action, InputAction::CancelDelete);
 }
@@ -476,12 +527,14 @@ fn test_e2e_bulk_delete_with_confirmation() {
     let mut state = make_state();
     // Simulate having conversations
     state.sidebar_entry_count = 5;
-    
+
     // Set up bulk delete confirmation
     let target = DeleteConfirmTarget::Bulk { count: 5 };
     state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(target)));
-    
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(target),
+    ));
+
     // Confirm bulk delete
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     assert_eq!(action, InputAction::ConfirmDelete);

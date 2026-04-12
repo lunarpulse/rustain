@@ -83,6 +83,15 @@ pub enum InputAction {
         data: String,
         warning: String,
     },
+    /// Fork conversation at the currently focused message (f key in Chat focus).
+    // Covers: Story 4-3a, AC1
+    ForkAtMessage,
+    /// Fork confirmation: user pressed y.
+    // Covers: Story 4-3a, AC1
+    ForkConfirm,
+    /// Fork confirmation: user pressed n or Esc.
+    // Covers: Story 4-3a, AC1
+    ForkCancel,
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -499,9 +508,14 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 let n = (c as u8 - b'0') as usize;
                 InputAction::SwitchToTab(n)
             }
+            // f = fork conversation at the currently focused message (Story 4-3a, AC1)
+            'f' => InputAction::ForkAtMessage,
             _ => InputAction::Ignored,
         },
-        FocusState::Sidebar { panel: _panel, selected: _selected } => {
+        FocusState::Sidebar {
+            panel: _panel,
+            selected: _selected,
+        } => {
             match c {
                 'j' => {
                     // Move selection down (clamped to entry count)
@@ -545,15 +559,34 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 _ => InputAction::Consumed,
             }
         }
+        // Fork confirmation: y = confirm, n = cancel (Story 4-3a, AC1)
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) => match c {
+            'y' => InputAction::ForkConfirm,
+            'n' => InputAction::ForkCancel,
+            _ => InputAction::Consumed,
+        },
         FocusState::Overlay(_) => InputAction::Ignored,
     }
 }
 
 fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Delete confirmation: Esc → Cancel
-    if matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(_)))) {
+    if matches!(
+        state.focus,
+        FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::DeleteConfirmation(_)
+        ))
+    ) {
         return match key {
             DomainKey::Esc => InputAction::CancelDelete,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Fork confirmation: Esc → Cancel (Story 4-3a, AC1)
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) {
+        return match key {
+            DomainKey::Esc => InputAction::ForkCancel,
             _ => InputAction::Consumed,
         };
     }

@@ -8,7 +8,7 @@
 
 use ratatui::{
     prelude::*,
-    style::{Style, Modifier},
+    style::{Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -17,7 +17,7 @@ use crate::domain::models::session_meta::now_unix;
 use crate::domain::services::session_index::SessionSummary;
 
 /// Render the history sidebar panel.
-/// 
+///
 /// # Arguments
 /// * `area` - The rect to render in
 /// * `buf` - The buffer to render to
@@ -52,8 +52,8 @@ pub fn render_history_panel(
                 .fg(theme.colors.fg_muted)
                 .add_modifier(Modifier::ITALIC),
         );
-        let empty_paragraph = ratatui::widgets::Paragraph::new(empty_text)
-            .alignment(Alignment::Center);
+        let empty_paragraph =
+            ratatui::widgets::Paragraph::new(empty_text).alignment(Alignment::Center);
         empty_paragraph.render(inner_area, buf);
         return;
     }
@@ -84,20 +84,17 @@ pub fn render_history_panel(
             let indicator_width = 2;
             let available_width = (inner_area.width as usize)
                 .saturating_sub(time_width + count_width + indicator_width + 2); // -2 for padding
-            
+
             let title = if entry.title.is_empty() {
                 "(Untitled)"
             } else {
                 &entry.title
             };
             let truncated_title = truncate_to_width(title, available_width);
-            
+
             let line_text = format!(
                 "{}{} {} {}",
-                indicator,
-                truncated_title,
-                relative_time,
-                msg_count
+                indicator, truncated_title, relative_time, msg_count
             );
 
             // Determine style based on state
@@ -130,7 +127,7 @@ pub fn render_history_panel(
 }
 
 /// Format a Unix timestamp as a relative time string.
-/// 
+///
 /// - < 60s: "just now"
 /// - < 60m: "Nm ago"
 /// - < 24h: "Nh ago"  

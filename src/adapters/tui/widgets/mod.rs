@@ -2,6 +2,7 @@ pub mod ask_user_question;
 pub mod autocomplete_popup;
 pub mod chat_pane;
 pub mod command_palette;
+pub mod fork_confirm;
 pub mod sidebar;
 
 pub mod empty_state;

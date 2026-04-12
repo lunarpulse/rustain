@@ -391,7 +391,11 @@ mod tests {
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
         assert!(reg.all_entries().iter().any(|e| e.name == "new tab"));
         assert!(reg.all_entries().iter().any(|e| e.name == "close tab"));
-        assert!(reg.all_entries().iter().any(|e| e.name == "delete all conversations"));
+        assert!(
+            reg.all_entries()
+                .iter()
+                .any(|e| e.name == "delete all conversations")
+        );
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);

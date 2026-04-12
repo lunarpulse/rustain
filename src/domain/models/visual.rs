@@ -46,6 +46,8 @@ pub enum ConfirmationType {
     Question,
     /// Delete confirmation for sidebar conversations (AC5, AC6).
     DeleteConfirmation(DeleteConfirmTarget),
+    /// Fork confirmation card (Story 4-3a, AC1).
+    Fork,
 }
 
 /// Overlay types for modal focus targets.
