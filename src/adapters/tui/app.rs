@@ -96,6 +96,18 @@ pub enum InputAction {
     /// Fork confirmation: user pressed n or Esc.
     // Covers: Story 4-3a, AC1
     ForkCancel,
+    /// Rewind conversation to the currently focused message (R key in Chat focus).
+    // Covers: Story 4-3b, AC1; UX-DR90
+    RewindAtMessage,
+    /// Rewind confirmation: user pressed y.
+    // Covers: Story 4-3b, AC1
+    RewindConfirm,
+    /// From rewind confirmation: user pressed f to fork instead.
+    // Covers: Story 4-3b, AC4
+    RewindForkInstead,
+    /// Rewind confirmation: user pressed n or Esc.
+    // Covers: Story 4-3b, AC1
+    RewindCancel,
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -456,7 +468,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             '{' => {
                 if let Some(new_offset) = find_next_boundary(
                     state.scroll_offset,
-                    &state.message_boundaries,
+                    &state.user_message_boundaries,
                     Direction::Up,
                     state.total_content_height,
                     state.terminal_height as usize,
@@ -471,7 +483,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             '}' => {
                 if let Some(new_offset) = find_next_boundary(
                     state.scroll_offset,
-                    &state.message_boundaries,
+                    &state.user_message_boundaries,
                     Direction::Down,
                     state.total_content_height,
                     state.terminal_height as usize,
@@ -514,6 +526,8 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             }
             // f = fork conversation at the currently focused message (Story 4-3a, AC1)
             'f' => InputAction::ForkAtMessage,
+            // R = rewind conversation to the currently focused message (Story 4-3b, AC1; UX-DR90)
+            'R' => InputAction::RewindAtMessage,
             _ => InputAction::Ignored,
         },
         FocusState::Sidebar {
@@ -569,6 +583,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'n' => InputAction::ForkCancel,
             _ => InputAction::Consumed,
         },
+        // Rewind confirmation: y = confirm, f = fork instead, n = cancel (Story 4-3b, AC1)
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)) => match c {
+            'y' => InputAction::RewindConfirm,
+            'f' => InputAction::RewindForkInstead,
+            'n' => InputAction::RewindCancel,
+            _ => InputAction::Consumed,
+        },
         FocusState::Overlay(_) => InputAction::Ignored,
     }
 }
@@ -591,6 +612,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) {
         return match key {
             DomainKey::Esc => InputAction::ForkCancel,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Rewind confirmation: Esc → Cancel (Story 4-3b, AC1)
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)) {
+        return match key {
+            DomainKey::Esc => InputAction::RewindCancel,
             _ => InputAction::Consumed,
         };
     }

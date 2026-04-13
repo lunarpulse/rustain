@@ -345,6 +345,7 @@ pub async fn run(
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
+                                            &storage,
                                         );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
@@ -547,6 +548,7 @@ pub async fn run(
                                         state.total_content_height = 0;
                                         state.block_boundaries.clear();
                                         state.message_boundaries.clear();
+                                        state.user_message_boundaries.clear();
                                         state.height_cache.invalidate_all();
                                         state.tool_block_states.clear();
                                         state.focused_tool_id = None;
@@ -641,6 +643,7 @@ pub async fn run(
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
+                                            &storage,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -961,7 +964,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -983,7 +986,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -997,7 +1000,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1015,7 +1018,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1068,7 +1071,7 @@ pub async fn run(
                                                 let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
+                                                        start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1190,7 +1193,7 @@ pub async fn run(
                                                     let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
+                                                            start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -1414,6 +1417,246 @@ pub async fn run(
                                     state.focus = FocusState::Chat;
                                     state.needs_redraw = true;
                                 }
+                                // ── Rewind Conversation (Story 4-3b) ─────────────────
+                                InputAction::RewindAtMessage => {
+                                    // DF-018 guard: block if permission/question overlay is active
+                                    if state.pending_permission.is_some() || state.ask_user_question.is_some() {
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot rewind: a permission/question is pending \u{2014} answer it first".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else if streaming.is_streaming {
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot rewind while streaming \u{2014} wait for response to complete".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else if conversation.messages.is_empty() {
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot rewind: conversation has no messages".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else if state.message_boundaries.is_empty() {
+                                        state.status = StatusState::Flash {
+                                            message: "Cannot rewind: chat pane not ready".to_string(),
+                                            remaining_ms: 3000,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else {
+                                        // MIRRORED FROM FORK: same message-targeting algorithm
+                                        let target_message_index = if state.auto_scroll {
+                                            conversation.messages.len().saturating_sub(1)
+                                        } else {
+                                            let vp = state.terminal_height as usize;
+                                            let max_off = state.total_content_height.saturating_sub(vp);
+                                            let clamped = state.scroll_offset.min(max_off);
+                                            let top_line = max_off.saturating_sub(clamped);
+                                            match state.message_boundaries.binary_search(&top_line) {
+                                                Ok(i) => i,
+                                                Err(i) => i.saturating_sub(1),
+                                            }
+                                            .min(conversation.messages.len().saturating_sub(1))
+                                        };
+
+                                        // Find target checkpoint covering this message
+                                        let target_cp = resolve_checkpoint_for_message(
+                                            &storage,
+                                            &conversation.id,
+                                            target_message_index,
+                                        ).await;
+
+                                        // Build preview (read-only, no mutations)
+                                        let messages_to_remove = conversation.messages.len()
+                                            .saturating_sub(target_message_index + 1);
+                                        let files = storage
+                                            .list_snapshot_files(&conversation.id, target_cp)
+                                            .await
+                                            .unwrap_or_default();
+                                        let files_to_revert: Vec<crate::adapters::tui::state::RevertPreviewItem> = files
+                                            .into_iter()
+                                            .map(|(path, is_conflict)| {
+                                                let display_path = path
+                                                    .strip_prefix(&workspace_path)
+                                                    .map(|p| p.to_string_lossy().to_string())
+                                                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                                                crate::adapters::tui::state::RevertPreviewItem {
+                                                    display_path,
+                                                    conflict: is_conflict,
+                                                }
+                                            })
+                                            .collect();
+
+                                        state.pending_rewind_index = Some(target_message_index);
+                                        state.rewind_preview = Some(crate::adapters::tui::state::RewindPreview {
+                                            target_message_index,
+                                            messages_to_remove,
+                                            files_to_revert,
+                                        });
+                                        state.focus = FocusState::Overlay(
+                                            crate::domain::models::visual::OverlayType::Confirmation(
+                                                crate::domain::models::visual::ConfirmationType::Rewind,
+                                            ),
+                                        );
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::RewindConfirm => {
+                                    // P5 dedup invariant: .take() before await prevents double-confirm
+                                    if let Some(target_msg_idx) = state.pending_rewind_index.take() {
+                                        state.rewind_preview = None;
+
+                                        // Resolve the checkpoint floor for FILE snapshots only.
+                                        // Message truncation uses `target_msg_idx` directly via
+                                        // `truncate_conversation` so the user's selection is
+                                        // honored (bug 1b fix). The checkpoint id returned here
+                                        // governs which snapshot files are eligible for revert
+                                        // (every cp_id > target_cp gets applied in reverse order).
+                                        let target_cp = resolve_checkpoint_for_message(
+                                            &storage,
+                                            &conversation.id,
+                                            target_msg_idx,
+                                        ).await;
+
+                                        // 1. Truncate conversation to the user's selected message
+                                        //    index (pure message-level; no checkpoint dependency).
+                                        match storage.truncate_conversation(&conversation.id, target_msg_idx).await {
+                                            Ok(truncated) => {
+                                                // 2. Revert files
+                                                let reverted = storage
+                                                    .revert_file_snapshots(&conversation.id, target_cp)
+                                                    .await
+                                                    .unwrap_or_default();
+                                                let restored = reverted
+                                                    .iter()
+                                                    .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Restored))
+                                                    .count();
+                                                let conflicts = reverted
+                                                    .iter()
+                                                    .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Conflict { .. }))
+                                                    .count();
+
+                                                // 3. Update active-tab proxy (AC3 step 3)
+                                                save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                                tab_manager.active_tab_mut().conversation = truncated;
+                                                let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+
+                                                // 4. DF-005: invalidate height cache entries for removed messages.
+                                                // load_active_tab already called invalidate_all(); truncate_from
+                                                // is a no-op here but satisfies the API contract and unit tests.
+                                                state.height_cache.truncate_from(target_msg_idx + 1);
+
+                                                // 5. Cancel in-flight permission/question + drain queue (AC3 step 5)
+                                                // Dropping response_tx closes the channel → turn gets Err
+                                                drop(state.pending_permission.take());
+                                                drop(state.ask_user_question.take());
+                                                drop(state.question_response_tx.take());
+                                                while turn_queue.dequeue().is_some() {}
+                                                // Abort active turn
+                                                if let Some(handle) = _active_turn.take() {
+                                                    handle.abort();
+                                                }
+
+                                                // 6. Status hint (5000ms — completed action, Status Timeout Rule)
+                                                let status_msg = if conflicts > 0 {
+                                                    format!(
+                                                        "\u{2139} Rewound to message {}. Reverted {} files. \u{26a0} {} files skipped (modified externally).",
+                                                        target_msg_idx + 1, restored, conflicts
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "\u{2139} Rewound to message {}. Reverted {} files.",
+                                                        target_msg_idx + 1, restored
+                                                    )
+                                                };
+                                                state.status = StatusState::Flash {
+                                                    message: status_msg,
+                                                    remaining_ms: 5000,
+                                                };
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("revert_to_checkpoint failed: {}", e);
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Rewind failed: {}", e),
+                                                    remaining_ms: 3000,
+                                                };
+                                            }
+                                        }
+                                        state.focus = FocusState::Chat;
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::RewindCancel => {
+                                    state.pending_rewind_index = None;
+                                    state.rewind_preview = None;
+                                    state.focus = FocusState::Chat;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::RewindForkInstead => {
+                                    // AC4: rewind → fork-instead path; mirrors ForkConfirm body.
+                                    state.rewind_preview = None;
+                                    if let Some(message_index) = state.pending_rewind_index.take() {
+                                        use crate::domain::models::checkpoint::CheckpointId;
+                                        let checkpoint = CheckpointId(message_index as u64);
+                                        let source_id = conversation.id.clone();
+                                        let is_last = message_index == conversation.messages.len().saturating_sub(1);
+
+                                        match storage.fork_at_checkpoint(&source_id, checkpoint).await {
+                                            Ok(new_id) => {
+                                                match storage.load_conversation(&new_id).await {
+                                                    Ok(Some(forked_conv)) => {
+                                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                                        tab_manager.create_tab_with_conversation(forked_conv);
+                                                        let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                                        session_index.set_open(&conversation.id, true);
+                                                        session_index.set_active(Some(&conversation.id));
+                                                        state.sidebar_entry_count = session_index.len();
+                                                        let hint_msg = if is_last {
+                                                            "Forked at last message \u{2014} both copies are now identical".to_string()
+                                                        } else {
+                                                            let source_title = conversation.fork_source.as_ref()
+                                                                .and_then(|fs| tab_manager.find_by_conversation(&fs.conversation_id))
+                                                                .map(|t| t.conversation.title.clone())
+                                                                .filter(|t| !t.trim().is_empty())
+                                                                .unwrap_or_else(|| "(Untitled)".to_string());
+                                                            format!(
+                                                                "Forked from \"{}\" at message {}",
+                                                                source_title,
+                                                                message_index + 1
+                                                            )
+                                                        };
+                                                        state.status = StatusState::Flash {
+                                                            message: hint_msg,
+                                                            remaining_ms: 5000,
+                                                        };
+                                                        state.focus = FocusState::Chat;
+                                                    }
+                                                    Ok(None) => {
+                                                        tracing::error!("Forked conversation {} not found after creation", new_id);
+                                                        state.focus = FocusState::Chat;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!("Failed to load forked conversation: {}", e);
+                                                        state.focus = FocusState::Chat;
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Fork (from rewind) failed: {}", e);
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Fork failed: {}", e),
+                                                    remaining_ms: 3000,
+                                                };
+                                                state.focus = FocusState::Chat;
+                                            }
+                                        }
+                                        state.needs_redraw = true;
+                                    } else {
+                                        state.focus = FocusState::Chat;
+                                        state.needs_redraw = true;
+                                    }
+                                }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
                         }
@@ -1535,6 +1778,7 @@ pub async fn run(
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
+                                            &storage,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -1739,22 +1983,36 @@ pub async fn run(
                     } => {
                         // Route permission request to the correct tab
                         if conversation_id == conversation.id {
-                            // For active tab, display immediately
-                            use crate::adapters::tui::state::PendingPermission;
-                            let new_pending = PendingPermission {
-                                tool_name,
-                                tool_input,
-                                response_tx,
-                            };
-                            if state.pending_permission.is_some() {
-                                state.permission_queue.push(new_pending);
+                            // DF-018 inverse guard (AC6, Story 4-3b): if the rewind overlay is active
+                            // for this conversation, the permission request is for a turn that is about
+                            // to be truncated out of existence — drop it silently.
+                            if matches!(
+                                state.focus,
+                                FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
+                            ) {
+                                tracing::debug!(
+                                    "Dropping permission request for conversation {} — rewind in progress",
+                                    conversation_id
+                                );
+                                // Drop response_tx — sender side closed, turn gets Err on the other end
                             } else {
-                                state.pending_permission = Some(new_pending);
-                                state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                    ConfirmationType::Permission,
-                                ));
+                                // For active tab, display immediately
+                                use crate::adapters::tui::state::PendingPermission;
+                                let new_pending = PendingPermission {
+                                    tool_name,
+                                    tool_input,
+                                    response_tx,
+                                };
+                                if state.pending_permission.is_some() {
+                                    state.permission_queue.push(new_pending);
+                                } else {
+                                    state.pending_permission = Some(new_pending);
+                                    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                        ConfirmationType::Permission,
+                                    ));
+                                }
+                                state.needs_redraw = true;
                             }
-                            state.needs_redraw = true;
                         } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
                             // For background tab, store in tab state for later display
                             use crate::adapters::tui::state::PendingPermission;
@@ -1812,6 +2070,7 @@ pub async fn run(
                             &workspace_path,
                             &mut session_manager,
                             &fs_storage,
+                            &storage,
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
@@ -1870,19 +2129,32 @@ pub async fn run(
                     } => {
                         // Only display question if it belongs to the active tab
                         if conversation_id == conversation.id {
-                            use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-                            state.ask_user_question = Some(AskUserQuestionState {
-                                tool_use_id,
-                                question,
-                                input_buffer: String::new(),
-                                cursor_position: 0,
-                                submitted_answer: None,
-                            });
-                            state.question_response_tx = Some(response_tx);
-                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                ConfirmationType::Question,
-                            ));
-                            state.needs_redraw = true;
+                            // DF-018 inverse guard (AC6, Story 4-3b): rewind overlay active →
+                            // drop the question request silently (its turn will be truncated).
+                            if matches!(
+                                state.focus,
+                                FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
+                            ) {
+                                tracing::debug!(
+                                    "Dropping AskUserQuestion for conversation {} — rewind in progress",
+                                    conversation_id
+                                );
+                                // Drop response_tx — turn gets RecvError on the other end
+                            } else {
+                                use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
+                                state.ask_user_question = Some(AskUserQuestionState {
+                                    tool_use_id,
+                                    question,
+                                    input_buffer: String::new(),
+                                    cursor_position: 0,
+                                    submitted_answer: None,
+                                });
+                                state.question_response_tx = Some(response_tx);
+                                state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                    ConfirmationType::Question,
+                                ));
+                                state.needs_redraw = true;
+                            }
                         } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
                             // Background tab: store for later (when tab becomes active)
                             // TODO: Add ask_user_question state to TabState for proper routing
@@ -2036,6 +2308,7 @@ fn save_active_tab(
     tab.auto_scroll = state.auto_scroll;
     tab.block_boundaries = state.block_boundaries.clone();
     tab.message_boundaries = state.message_boundaries.clone();
+    tab.user_message_boundaries = state.user_message_boundaries.clone();
     tab.focused_tool_id = state.focused_tool_id.clone();
     tab.feedback_blocks = state.feedback_blocks.clone();
     tab.active_feedback_id = state.active_feedback_id.clone();
@@ -2071,6 +2344,7 @@ fn load_active_tab(
     };
     state.block_boundaries = tab.block_boundaries.clone();
     state.message_boundaries = tab.message_boundaries.clone();
+    state.user_message_boundaries = tab.user_message_boundaries.clone();
     state.focused_tool_id = tab.focused_tool_id.clone();
     state.feedback_blocks = tab.feedback_blocks.clone();
     state.active_feedback_id = tab.active_feedback_id.clone();
@@ -2256,6 +2530,31 @@ pub fn rehydrate_historical_images(
     }
 }
 
+/// Find the checkpoint ID that covers the given message index.
+///
+/// Returns the checkpoint with the highest ID where `meta.message_index <= target_message_index`.
+/// Falls back to `CheckpointId(0)` when no checkpoint is found (no tool calls were made, or
+/// the conversation has no checkpoint log). A sentinel of 0 means "revert nothing" — callers
+/// should still truncate messages, but file-snapshot reversal will be a no-op since no snapshots
+/// exist with cp_id > 0.
+async fn resolve_checkpoint_for_message(
+    storage: &Arc<dyn StoragePort>,
+    conversation_id: &str,
+    target_message_index: usize,
+) -> crate::domain::models::checkpoint::CheckpointId {
+    use crate::domain::models::checkpoint::CheckpointId;
+    let checkpoints = storage
+        .list_checkpoints(conversation_id)
+        .await
+        .unwrap_or_default();
+    checkpoints
+        .iter()
+        .filter(|c| c.message_index <= target_message_index)
+        .max_by_key(|c| c.id)
+        .map(|c| c.id)
+        .unwrap_or(CheckpointId(0))
+}
+
 fn start_turn(
     text: &str,
     images: Vec<ImageAttachment>,
@@ -2272,6 +2571,7 @@ fn start_turn(
     workspace_path: &std::path::Path,
     session_manager: &mut SessionManager,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+    storage: &Arc<dyn StoragePort>,
 ) {
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
@@ -2375,6 +2675,7 @@ fn start_turn(
         security.clone(),
         tools.clone(),
         conversation.id.clone(),
+        storage.clone(),
     ));
     *active_turn = Some(handle);
 
@@ -2453,8 +2754,9 @@ fn render(
     let scroll_offset = state.scroll_offset;
     let auto_scroll = state.auto_scroll;
     let mut content_height = 0usize;
-    let mut block_bounds = Vec::new();
-    let mut msg_bounds = Vec::new();
+    let mut block_bounds: Vec<usize> = Vec::new();
+    let mut msg_bounds: Vec<usize> = Vec::new();
+    let mut user_msg_bounds: Vec<usize> = Vec::new();
     let mut focused_tool_id: Option<String> = None;
 
     let permission_mode = security.current_mode();
@@ -2485,6 +2787,8 @@ fn render(
         ref current_hint,
         sidebar_visible,
         ref pending_fork_index,
+        ref pending_rewind_index,
+        ref rewind_preview,
         ..
     } = *state;
 
@@ -2536,6 +2840,7 @@ fn render(
                 content_height = result.total_content_height;
                 block_bounds = result.block_boundaries;
                 msg_bounds = result.message_boundaries;
+                user_msg_bounds = result.user_message_boundaries;
                 focused_tool_id = result.focused_tool_id;
 
                 // Render peek overlay if any tool block has peek_active (AC5)
@@ -2640,6 +2945,36 @@ fn render(
                     }
                 }
 
+                // Render rewind confirmation card at bottom of chat pane if pending (Story 4-3b, AC1)
+                if *focus
+                    == FocusState::Overlay(
+                        crate::domain::models::visual::OverlayType::Confirmation(
+                            crate::domain::models::visual::ConfirmationType::Rewind,
+                        ),
+                    )
+                {
+                    let _ = pending_rewind_index; // used by handler; preview drives render
+                    if let Some(preview) = rewind_preview {
+                        use crate::adapters::tui::widgets::rewind_confirm;
+                        let rewind_lines = rewind_confirm::render_rewind_confirmation_lines(
+                            preview,
+                            app_layout.chat_pane.width,
+                            theme,
+                        );
+                        let rewind_height = rewind_lines.len() as u16;
+                        let rewind_area = ratatui::prelude::Rect {
+                            x: app_layout.chat_pane.x,
+                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                                - rewind_height.min(app_layout.chat_pane.height),
+                            width: app_layout.chat_pane.width,
+                            height: rewind_height.min(app_layout.chat_pane.height),
+                        };
+                        let paragraph = ratatui::widgets::Paragraph::new(rewind_lines);
+                        frame.render_widget(ratatui::widgets::Clear, rewind_area);
+                        frame.render_widget(paragraph, rewind_area);
+                    }
+                }
+
                 let session_title = if !conversation.title.is_empty() {
                     Some(conversation.title.as_str())
                 } else {
@@ -2719,6 +3054,7 @@ fn render(
     state.total_content_height = content_height;
     state.block_boundaries = block_bounds;
     state.message_boundaries = msg_bounds;
+    state.user_message_boundaries = user_msg_bounds;
     state.focused_tool_id = focused_tool_id;
 
     // Resolve pending anchor from resize: use new heights to find correct scroll_offset.

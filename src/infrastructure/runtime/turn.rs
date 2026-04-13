@@ -7,11 +7,12 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::domain::events::AppEvent;
+use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
     CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCallInfo,
     ToolResultMessage, ToolUseMessage,
 };
-use crate::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
+use crate::domain::ports::{ProviderPort, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::permission_chain::{self, PermissionDecision};
 
 /// Execute a turn: stream completion, execute tools, loop until EndTurn.
@@ -32,6 +33,7 @@ pub async fn run_turn(
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     conversation_id: String,
+    storage: Arc<dyn StoragePort>,
 ) {
     let mut iteration = 0;
     loop {
@@ -150,10 +152,29 @@ pub async fn run_turn(
                             context_prefix: None,
                         });
 
+                        // Create a checkpoint BEFORE executing any tools in this turn (AC2, Story 4-3b).
+                        // The checkpoint captures the conversation state just before the assistant's
+                        // tool-executing turn. If creation fails, we fall through with a sentinel
+                        // CheckpointId(0) — tools run but rewind to this point will be impossible.
+                        let checkpoint = match storage.create_checkpoint(&conversation_id).await {
+                            Ok(cp) => cp,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to create checkpoint before tool execution: {}",
+                                    e
+                                );
+                                CheckpointId(0)
+                            }
+                        };
+                        tools
+                            .set_execution_context(conversation_id.clone(), checkpoint)
+                            .await;
+
                         let mut tool_result_messages = Vec::new();
 
                         for tc in &tool_calls {
-                            // Special handling for AskUserQuestion tool
+                            // Special handling for AskUserQuestion tool — it does not write files,
+                            // so it is excluded from checkpoint dispatch (AC2, Story 4-3b note).
                             if tc.name == "AskUserQuestion" {
                                 let question = tc
                                     .input

@@ -99,13 +99,22 @@ pub async fn run() -> Result<()> {
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-    let session_id = nanoid::nanoid!();
     let security_adapter = SecurityAdapter::new(workspace_path.clone(), domain_tx.clone());
     // Load AlwaysAllow rules from .claude/settings.json
     security_adapter.init_allowed_rules().await;
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
-    let tools: Arc<dyn ToolSetPort> =
-        Arc::new(ToolSetAdapter::new(workspace_path.clone(), session_id));
+    // Storage must be constructed before ToolSetAdapter (Story 4-3b: tools use storage for snapshots).
+    // Story 4-3b P2: pass the real workspace root so `snapshot_file` can enforce
+    // path-traversal checks without falling back to the sessions_dir grandparent proxy.
+    let tools_sessions_dir = paths::sessions_dir(&workspace_path);
+    let tools_storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        tools_sessions_dir.clone(),
+        workspace_path.clone(),
+    ));
+    let tools: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
+        workspace_path.clone(),
+        Arc::clone(&tools_storage),
+    ));
 
     // 5c. Discover and load project context
     let context_loader = ProjectContextLoader::new(workspace_path.clone());
@@ -155,9 +164,13 @@ pub async fn run() -> Result<()> {
 
     let persona: Arc<dyn PersonaPort> = Arc::new(persona_adapter);
 
-    // 5d. Construct storage adapter and load last session
-    let sessions_dir = paths::sessions_dir(&workspace_path);
-    let storage = FileSystemStorage::new(sessions_dir);
+    // 5d. Use the same storage adapter constructed above for session management.
+    // Both tools and the event loop share one FileSystemStorage instance pointing
+    // to the same sessions directory (Story 4-3b: snapshots are co-located with conversations).
+    let sessions_dir = tools_sessions_dir.clone();
+    // Downcast to FileSystemStorage to access ensure_dir (concrete method).
+    // Mirror the workspace_root configuration from `tools_storage` above.
+    let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace_path.clone());
     if let Err(e) = storage.ensure_dir().await {
         tracing::warn!("Failed to create sessions directory: {}", e);
         let _ = domain_tx.send(AppEvent::SystemNotice {

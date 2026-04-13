@@ -22,7 +22,7 @@ pub mod visual;
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
 #[allow(unused_imports)]
-pub use checkpoint::CheckpointId;
+pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
 #[allow(unused_imports)]
 pub use completion::CompletionOptions;
 pub use config::AppConfig;

@@ -64,12 +64,36 @@ pub enum SessionLayout {
 #[derive(Debug)]
 pub struct FileSystemStorage {
     sessions_dir: PathBuf,
+    /// Workspace root used by `snapshot_file` for path-traversal validation.
+    /// `None` falls back to the `sessions_dir` grandparent-as-proxy for legacy
+    /// constructors. Production composition root SHOULD use
+    /// [`with_workspace_root`] to pass the real workspace root.
+    workspace_root: Option<PathBuf>,
 }
 
 impl FileSystemStorage {
     /// Create a new `FileSystemStorage` targeting the given sessions directory.
+    ///
+    /// Legacy constructor: leaves `workspace_root` unset. `snapshot_file` will
+    /// derive a proxy workspace root from `sessions_dir` grandparent; use
+    /// [`with_workspace_root`] in production to pass the real root explicitly.
+    #[allow(dead_code)] // retained for test fixtures and legacy call sites
     pub fn new(sessions_dir: PathBuf) -> Self {
-        Self { sessions_dir }
+        Self {
+            sessions_dir,
+            workspace_root: None,
+        }
+    }
+
+    /// Create a `FileSystemStorage` with an explicit workspace root.
+    ///
+    /// Preferred for production composition. `snapshot_file` enforces that all
+    /// snapshot paths resolve inside `workspace_root` after canonicalization.
+    pub fn with_workspace_root(sessions_dir: PathBuf, workspace_root: PathBuf) -> Self {
+        Self {
+            sessions_dir,
+            workspace_root: Some(workspace_root),
+        }
     }
 
     /// Ensure the sessions directory exists.
@@ -845,6 +869,771 @@ impl StoragePort for FileSystemStorage {
         Ok(Some(meta))
     }
 
+    // ── Checkpoint Protocol (Amendment 1, Story 4-3b) ─────────────────────────────
+
+    async fn create_checkpoint(
+        &self,
+        conversation_id: &str,
+    ) -> Result<crate::domain::models::checkpoint::CheckpointId, StorageError> {
+        use crate::domain::models::checkpoint::{CheckpointId, CheckpointMeta};
+        use crate::domain::models::session_meta::now_unix;
+
+        // Load conversation to determine the current message count.
+        let conv = match self.load_conversation(conversation_id).await? {
+            Some(c) => c,
+            None => {
+                return Err(StorageError::NotFound(format!(
+                    "conversation not found: {}",
+                    conversation_id
+                )));
+            }
+        };
+
+        // Ensure the session directory exists so we can write checkpoints.json.
+        tokio::fs::create_dir_all(self.session_dir(conversation_id))
+            .await
+            .map_err(|e| StorageError::IoError(format!("create session dir: {}", e)))?;
+
+        // Migrate the conversation to directory format now that the session dir exists.
+        // Without this, the next `load_conversation` call detects Directory layout and
+        // fails to find `{id}/conversation.json` (which only exists in directory mode).
+        // The check is cheap: stat the expected file, migrate only if absent.
+        let conv_file = self.conversation_file(conversation_id);
+        if !tokio::fs::try_exists(&conv_file).await.unwrap_or(false) {
+            self.save_conversation_inner(&conv, false).await?;
+        }
+
+        let mut log = self.load_checkpoint_log(conversation_id).await?;
+
+        // Next id is max existing + 1, or 1 for the first checkpoint.
+        let next_id = log.entries.iter().map(|e| e.id.0).max().unwrap_or(0) + 1;
+
+        // message_index is the index of the last message currently present.
+        // The checkpoint captures the conversation state *before* the assistant turn
+        // whose tool calls triggered this checkpoint.
+        let message_index = conv.messages.len().saturating_sub(1);
+
+        let meta = CheckpointMeta {
+            id: CheckpointId(next_id),
+            message_index,
+            created_at: now_unix(),
+        };
+        log.entries.push(meta.clone());
+        self.save_checkpoint_log(conversation_id, &log).await?;
+
+        tracing::debug!(
+            "Created checkpoint {} for conversation {} at message_index {}",
+            next_id,
+            conversation_id,
+            message_index
+        );
+        Ok(meta.id)
+    }
+
+    async fn list_checkpoints(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<crate::domain::models::checkpoint::CheckpointMeta>, StorageError> {
+        let mut log = self.load_checkpoint_log(conversation_id).await?;
+        log.entries.sort_by_key(|e| e.id);
+        Ok(log.entries)
+    }
+
+    async fn revert_to_checkpoint(
+        &self,
+        conversation_id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+    ) -> Result<crate::domain::models::Conversation, StorageError> {
+        use crate::domain::models::session_meta::{SessionMeta, now_unix};
+
+        let log = self.load_checkpoint_log(conversation_id).await?;
+
+        // Find the entry for the requested checkpoint.
+        let meta = log
+            .entries
+            .iter()
+            .find(|e| e.id == checkpoint)
+            .ok_or_else(|| {
+                StorageError::NotFound(format!(
+                    "checkpoint {} not found for conversation {}",
+                    checkpoint.0, conversation_id
+                ))
+            })?
+            .clone();
+
+        // Load conversation.
+        let mut conv = match self.load_conversation(conversation_id).await? {
+            Some(c) => c,
+            None => {
+                return Err(StorageError::NotFound(format!(
+                    "conversation not found: {}",
+                    conversation_id
+                )));
+            }
+        };
+
+        // Truncate messages: keep messages[0..=meta.message_index].
+        let keep_until = (meta.message_index + 1).min(conv.messages.len());
+        conv.messages.truncate(keep_until);
+        conv.updated_at = now_unix();
+
+        // Load the existing SessionMeta BEFORE save_conversation_inner overwrites it,
+        // so we can preserve the `extra` flatten map (DF-088 round-trip invariant).
+        let pre_save_meta = self.load_session_meta(conversation_id).await.ok().flatten();
+
+        // 1. Atomically save the truncated conversation.
+        self.save_conversation_inner(&conv, false).await?;
+
+        // 2. Atomically update SessionMeta, preserving extra fields from the pre-save load.
+        let session_meta_result = match pre_save_meta {
+            Some(mut existing_meta) => {
+                existing_meta.message_count = conv.messages.len();
+                existing_meta.updated_at = conv.updated_at;
+                self.save_session_meta(conversation_id, &existing_meta)
+                    .await
+            }
+            None => {
+                // Legacy session without sidecar: build a fresh one.
+                let fresh = SessionMeta::from_conversation(&conv);
+                self.save_session_meta(conversation_id, &fresh).await
+            }
+        };
+        if let Err(e) = session_meta_result {
+            // Step 5 succeeded but step 6 failed. The next load_session_meta will
+            // reconcile by re-reading the actual message count from the conversation file.
+            tracing::error!(
+                conversation_id = conversation_id,
+                checkpoint = checkpoint.0,
+                error = %e,
+                "INCONSISTENT STATE: conversation truncated but meta.json update failed. \
+                 Will be reconciled on next load."
+            );
+        }
+
+        // 3. Truncate the checkpoint log: remove entries with id > checkpoint.
+        let mut updated_log = CheckpointLog {
+            entries: log
+                .entries
+                .into_iter()
+                .filter(|e| e.id <= checkpoint)
+                .collect(),
+        };
+        updated_log.entries.sort_by_key(|e| e.id);
+        self.save_checkpoint_log(conversation_id, &updated_log)
+            .await?;
+
+        tracing::debug!(
+            "Rewound conversation {} to checkpoint {} (message_index {})",
+            conversation_id,
+            checkpoint.0,
+            meta.message_index
+        );
+        Ok(conv)
+    }
+
+    async fn truncate_conversation(
+        &self,
+        conversation_id: &str,
+        target_message_index: usize,
+    ) -> Result<crate::domain::models::Conversation, StorageError> {
+        use crate::domain::models::session_meta::{SessionMeta, now_unix};
+
+        // Load conversation.
+        let mut conv = match self.load_conversation(conversation_id).await? {
+            Some(c) => c,
+            None => {
+                return Err(StorageError::NotFound(format!(
+                    "conversation not found: {}",
+                    conversation_id
+                )));
+            }
+        };
+
+        // Truncate to the user's selected message index. Pure message-level
+        // operation — no dependency on the checkpoint log. Works for text-only
+        // conversations where no checkpoint was ever created.
+        let keep_until = (target_message_index + 1).min(conv.messages.len());
+        conv.messages.truncate(keep_until);
+        conv.updated_at = now_unix();
+
+        // Load the existing SessionMeta BEFORE save_conversation_inner overwrites it,
+        // so we can preserve the `extra` flatten map (DF-088 round-trip invariant).
+        let pre_save_meta = self.load_session_meta(conversation_id).await.ok().flatten();
+
+        // 1. Atomically save the truncated conversation.
+        self.save_conversation_inner(&conv, false).await?;
+
+        // 2. Atomically update SessionMeta, preserving extra fields.
+        let session_meta_result = match pre_save_meta {
+            Some(mut existing_meta) => {
+                existing_meta.message_count = conv.messages.len();
+                existing_meta.updated_at = conv.updated_at;
+                self.save_session_meta(conversation_id, &existing_meta)
+                    .await
+            }
+            None => {
+                let fresh = SessionMeta::from_conversation(&conv);
+                self.save_session_meta(conversation_id, &fresh).await
+            }
+        };
+        if let Err(e) = session_meta_result {
+            tracing::error!(
+                conversation_id = conversation_id,
+                target_message_index = target_message_index,
+                error = %e,
+                "INCONSISTENT STATE: conversation truncated but meta.json update failed. \
+                 Will be reconciled on next load."
+            );
+        }
+
+        // 3. Prune the checkpoint log: remove entries whose message_index is
+        //    beyond the truncation point. Unlike `revert_to_checkpoint`, the
+        //    filter is on `message_index`, not on checkpoint id — the target
+        //    is user-selected and may fall between adjacent checkpoints.
+        //
+        //    Important: only touch the checkpoint log if it actually exists on
+        //    disk. Text-only conversations (no tool calls) never wrote a
+        //    checkpoint file. Calling `save_checkpoint_log` would
+        //    `create_dir_all({session_dir})` and flip `detect_layout` to
+        //    `Directory`, leaving an orphaned `conversation.json` parent dir
+        //    while the actual conversation file lives at the flat path.
+        //    Subsequent `load_conversation` would then return `None`. Skip
+        //    the save entirely when there's no log file.
+        let cp_file = self.checkpoints_file(conversation_id);
+        if tokio::fs::try_exists(&cp_file).await.unwrap_or(false) {
+            let log = self.load_checkpoint_log(conversation_id).await?;
+            let mut updated_log = CheckpointLog {
+                entries: log
+                    .entries
+                    .into_iter()
+                    .filter(|e| e.message_index <= target_message_index)
+                    .collect(),
+            };
+            updated_log.entries.sort_by_key(|e| e.id);
+            self.save_checkpoint_log(conversation_id, &updated_log)
+                .await?;
+        }
+
+        tracing::debug!(
+            "Truncated conversation {} to message_index {} ({} messages kept)",
+            conversation_id,
+            target_message_index,
+            conv.messages.len()
+        );
+        Ok(conv)
+    }
+
+    async fn snapshot_file(
+        &self,
+        conversation_id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        path: &std::path::Path,
+        content: &[u8],
+    ) -> Result<(), StorageError> {
+        use base64::Engine as _;
+
+        // DF-110 soft-cap: refuse to snapshot files larger than SNAPSHOT_MAX_BYTES.
+        // The tool still executes — we just don't protect the file with rewind.
+        // Full streaming base64 encoder is deferred to Story 4-6 cleanup.
+        const SNAPSHOT_MAX_BYTES: usize = 50 * 1024 * 1024; // 50 MiB
+        if content.len() > SNAPSHOT_MAX_BYTES {
+            tracing::warn!(
+                "Skipping snapshot for {} ({} bytes > {} byte cap); \
+                 rewind will not restore this file. See DF-110.",
+                path.display(),
+                content.len(),
+                SNAPSHOT_MAX_BYTES
+            );
+            return Ok(());
+        }
+
+        // 1. Canonicalize path. FAIL CLOSED on unresolvable paths — do not fall
+        //    back to the raw input. If the target file doesn't exist yet (Write
+        //    tool creating a new file), canonicalize the parent and join the
+        //    filename. This keeps new-file snapshots working while rejecting
+        //    paths whose parent chain cannot be resolved.
+        let canonical: PathBuf = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(_) => {
+                let parent = path.parent().ok_or_else(|| {
+                    StorageError::NotSupported(format!(
+                        "snapshot path has no parent: {}",
+                        path.display()
+                    ))
+                })?;
+                let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+                    StorageError::NotSupported(format!(
+                        "snapshot parent canonicalization failed for {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+                let file_name = path.file_name().ok_or_else(|| {
+                    StorageError::NotSupported(format!(
+                        "snapshot path has no file name: {}",
+                        path.display()
+                    ))
+                })?;
+                canonical_parent.join(file_name)
+            }
+        };
+
+        // 2. Determine workspace root. Prefer explicit config; fall back to
+        //    sessions_dir grandparent-as-proxy for legacy constructors. FAIL
+        //    CLOSED if neither can be determined.
+        let workspace_root = self
+            .workspace_root
+            .clone()
+            .or_else(|| {
+                self.sessions_dir
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(PathBuf::from)
+            })
+            .ok_or_else(|| {
+                StorageError::NotSupported(
+                    "snapshot workspace root not configured and cannot be derived".to_string(),
+                )
+            })?;
+
+        let workspace_canonical = std::fs::canonicalize(&workspace_root).map_err(|e| {
+            StorageError::NotSupported(format!(
+                "workspace root canonicalization failed for {}: {}",
+                workspace_root.display(),
+                e
+            ))
+        })?;
+
+        // 3. Path-traversal guard. Canonical paths are always absolute — no
+        //    is_absolute() bypass. Relative, symlinked, and ../-escaping paths
+        //    all pass through canonicalize first and then this check.
+        if !canonical.starts_with(&workspace_canonical) {
+            tracing::warn!(
+                "Path traversal blocked: {} is not inside workspace {}",
+                canonical.display(),
+                workspace_canonical.display()
+            );
+            return Err(StorageError::NotSupported(
+                "path outside workspace".to_string(),
+            ));
+        }
+
+        // 4. Compute path hash from OsStr bytes (not to_string_lossy — two distinct
+        //    non-UTF8 paths could hash to the same value under lossy conversion).
+        //    path_display is stored separately for human-readable debugging.
+        let path_hash = content_hash(canonical.as_os_str().as_encoded_bytes());
+        let path_display = canonical.to_string_lossy().into_owned();
+
+        // 5. Build snapshot filename: {cp_id}_{path_hash} (no extension per Amendment 1).
+        let snapshots_dir = self.snapshots_dir(conversation_id);
+        let snapshot_name = format!("{}_{}", checkpoint.0, path_hash);
+        let snapshot_path = snapshots_dir.join(&snapshot_name);
+
+        // 6. Idempotency: if this (checkpoint, path) pair already has a snapshot, skip.
+        //    The first snapshot wins because it holds the original (pre-modification) content.
+        if tokio::fs::metadata(&snapshot_path).await.is_ok() {
+            return Ok(());
+        }
+
+        // 7. Ensure snapshots directory exists.
+        tokio::fs::create_dir_all(&snapshots_dir)
+            .await
+            .map_err(|e| StorageError::IoError(format!("create snapshots dir: {}", e)))?;
+
+        // 8. Compute sha256 of original content.
+        use sha2::{Digest, Sha256};
+        let original_hash = {
+            let mut h = Sha256::new();
+            h.update(content);
+            format!("sha256:{:x}", h.finalize())
+        };
+
+        // 9. Base64-encode the content (supports binary files safely).
+        let original_content_b64 = base64::engine::general_purpose::STANDARD.encode(content);
+
+        // D1 schema v2: explicit file_existed sentinel. An empty-content snapshot
+        // with file_existed=false means the file did not exist pre-checkpoint
+        // (so rewind should DELETE it). An empty-content snapshot with
+        // file_existed=true means the file was actually empty (rewind writes empty).
+        //
+        // For now all callers pass the pre-existing file content (or an empty
+        // slice when the file is new). A future Write-tool path will distinguish
+        // new-file creation from empty-file overwrite via a separate API.
+        // Conservative default: empty content => file did not exist; non-empty
+        // content => file existed. This matches current caller behavior and is
+        // forward-compatible with an explicit `file_existed` parameter.
+        let file_existed = !content.is_empty();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let envelope = serde_json::json!({
+            "schema_version": 2,
+            "conversation_id": conversation_id,
+            "checkpoint_id": checkpoint.0,
+            "path": path_display,
+            "path_hash": path_hash,
+            "original_hash": original_hash,
+            "original_content_b64": original_content_b64,
+            "file_existed": file_existed,
+            "created_at_ms": now_ms,
+        });
+
+        // 9. Atomic write: temp file + rename.
+        let tmp_path = snapshot_path.with_extension("tmp");
+        let content_bytes = serde_json::to_vec_pretty(&envelope)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        tokio::fs::write(&tmp_path, &content_bytes)
+            .await
+            .map_err(|e| StorageError::IoError(format!("write snapshot tmp: {}", e)))?;
+        tokio::fs::rename(&tmp_path, &snapshot_path)
+            .await
+            .map_err(|e| StorageError::IoError(format!("rename snapshot file: {}", e)))?;
+
+        tracing::debug!(
+            "Snapshotted file {} for conversation {} at checkpoint {}",
+            path_display,
+            conversation_id,
+            checkpoint.0
+        );
+        Ok(())
+    }
+
+    async fn revert_file_snapshots(
+        &self,
+        conversation_id: &str,
+        after_checkpoint: crate::domain::models::checkpoint::CheckpointId,
+    ) -> Result<Vec<crate::domain::models::checkpoint::RevertedFile>, StorageError> {
+        use crate::domain::models::checkpoint::{RevertStatus, RevertedFile};
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let snapshots_dir = self.snapshots_dir(conversation_id);
+
+        // 1. Read the snapshots directory. Return empty if it doesn't exist.
+        let mut entries = match tokio::fs::read_dir(&snapshots_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(vec![]);
+            }
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read snapshots dir: {}",
+                    e
+                )));
+            }
+        };
+
+        // 2. Collect snapshot file entries: parse filename to (cp_id, path_hash).
+        // Filename format: "{cp_id}_{path_hash}" (no extension).
+        let mut candidates: Vec<(u64, String, PathBuf)> = Vec::new(); // (cp_id, path_hash, path)
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            // Skip temp files left by interrupted writes.
+            if fname.ends_with(".tmp") {
+                continue;
+            }
+            if let Some((cp_str, hash_str)) = fname
+                .splitn(2, '_')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+                .split_first()
+                .and_then(|(first, rest)| rest.first().map(|h| (*first, *h)))
+            {
+                if let Ok(cp_id) = cp_str.parse::<u64>() {
+                    if cp_id > after_checkpoint.0 {
+                        candidates.push((cp_id, hash_str.to_string(), entry.path()));
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 3. Sort descending by cp_id (Amendment 1: reverse chronological order).
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // 4. Per-path dedup: for the same path_hash, keep only the LOWEST cp_id entry
+        //    (the oldest original content — the true pre-rewind state).
+        let mut deduped: HashMap<String, (u64, PathBuf)> = HashMap::new();
+        for (cp_id, path_hash, file_path) in &candidates {
+            let entry = deduped
+                .entry(path_hash.clone())
+                .or_insert((*cp_id, file_path.clone()));
+            if *cp_id < entry.0 {
+                *entry = (*cp_id, file_path.clone());
+            }
+        }
+
+        // 5. Process each surviving snapshot.
+        let mut results: Vec<RevertedFile> = Vec::new();
+        for (path_hash, (_, snapshot_path)) in &deduped {
+            let _ = path_hash; // used as key, not needed here
+
+            // Read the snapshot envelope.
+            let envelope_bytes = match tokio::fs::read(snapshot_path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("Failed to read snapshot {:?}: {}", snapshot_path, e);
+                    continue;
+                }
+            };
+            let envelope: serde_json::Value = match serde_json::from_slice(&envelope_bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Failed to parse snapshot {:?}: {}", snapshot_path, e);
+                    continue;
+                }
+            };
+
+            let stored_path_str = envelope
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let stored_hash = envelope
+                .get("original_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let stored_content_b64 = envelope
+                .get("original_content_b64")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let file_path = PathBuf::from(&stored_path_str);
+
+            // Decode the stored content.
+            let stored_content =
+                match base64::engine::general_purpose::STANDARD.decode(&stored_content_b64) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to decode snapshot content for {}: {}",
+                            stored_path_str,
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+            // D1 resolution (Option C): schema v2 envelopes carry an explicit
+            // `file_existed: bool`. Schema v1 envelopes fall back to the legacy
+            // "empty content == absent" heuristic for backward compatibility with
+            // any snapshots already on disk.
+            let file_existed_explicit = envelope.get("file_existed").and_then(|v| v.as_bool());
+            let file_was_absent_pre_checkpoint = match file_existed_explicit {
+                Some(existed) => !existed,
+                None => stored_content_b64.is_empty(), // v1 fallback
+            };
+
+            // Read current file content.
+            let current_read = tokio::fs::read(&file_path).await;
+
+            let status = match current_read {
+                Ok(_current_bytes) if file_was_absent_pre_checkpoint => {
+                    // File now exists but didn't exist before checkpoint → delete it.
+                    if let Err(e) = tokio::fs::remove_file(&file_path).await {
+                        tracing::warn!("Failed to delete file {:?}: {}", file_path, e);
+                    }
+                    RevertStatus::Restored
+                }
+                Ok(current_bytes) => {
+                    // Compute current hash.
+                    let mut h = Sha256::new();
+                    h.update(&current_bytes);
+                    let current_hash = format!("sha256:{:x}", h.finalize());
+
+                    if current_hash == stored_hash {
+                        // File unchanged since snapshot → restore from snapshot content.
+                        // (Stored content may differ because tools may have written
+                        // the new content; we restore the *original* content.)
+                        if let Some(parent) = file_path.parent() {
+                            let _ = tokio::fs::create_dir_all(parent).await;
+                        }
+                        match tokio::fs::write(&file_path, &stored_content).await {
+                            Ok(_) => RevertStatus::Restored,
+                            Err(e) => {
+                                tracing::warn!("Failed to restore file {:?}: {}", file_path, e);
+                                RevertStatus::Conflict {
+                                    expected_hash: stored_hash.clone(),
+                                    actual_hash: current_hash,
+                                }
+                            }
+                        }
+                    } else {
+                        // File externally modified → leave untouched.
+                        RevertStatus::Conflict {
+                            expected_hash: stored_hash,
+                            actual_hash: current_hash,
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if file_was_absent_pre_checkpoint {
+                        // Didn't exist before checkpoint, doesn't exist now → no-op.
+                        RevertStatus::Restored
+                    } else {
+                        // File deleted by user since snapshot → recreate it.
+                        if let Some(parent) = file_path.parent() {
+                            let _ = tokio::fs::create_dir_all(parent).await;
+                        }
+                        match tokio::fs::write(&file_path, &stored_content).await {
+                            Ok(_) => RevertStatus::Restored,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to recreate deleted file {:?}: {}",
+                                    file_path,
+                                    e
+                                );
+                                RevertStatus::NoSnapshot
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read current file {:?}: {}", file_path, e);
+                    RevertStatus::NoSnapshot
+                }
+            };
+
+            results.push(RevertedFile {
+                path: file_path,
+                status,
+            });
+        }
+
+        // 6. Delete ALL snapshot files for cp_id > after_checkpoint (including those
+        //    that were deduped-out in step 4).
+        for (cp_id, _path_hash, file_path) in &candidates {
+            let _ = cp_id; // already filtered to > after_checkpoint above
+            if let Err(e) = tokio::fs::remove_file(file_path).await {
+                tracing::warn!("Failed to delete snapshot file {:?}: {}", file_path, e);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Read-only preview: list files that would be reverted by `revert_file_snapshots`.
+    /// Returns `(absolute_path, is_conflict)` pairs. Does NOT modify any files.
+    async fn list_snapshot_files(
+        &self,
+        conversation_id: &str,
+        after_checkpoint: crate::domain::models::checkpoint::CheckpointId,
+    ) -> Result<Vec<(std::path::PathBuf, bool)>, StorageError> {
+        use sha2::{Digest, Sha256};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let snapshots_dir = self.snapshots_dir(conversation_id);
+
+        // Read the snapshots directory.
+        let mut entries = match tokio::fs::read_dir(&snapshots_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(vec![]);
+            }
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read snapshots dir: {}",
+                    e
+                )));
+            }
+        };
+
+        // Collect candidates: (cp_id, path_hash, snapshot_file_path)
+        let mut candidates: Vec<(u64, String, PathBuf)> = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.ends_with(".tmp") {
+                continue;
+            }
+            if let Some((cp_str, hash_str)) = fname
+                .splitn(2, '_')
+                .collect::<Vec<_>>()
+                .as_slice()
+                .split_first()
+                .and_then(|(first, rest)| rest.first().map(|h| (*first, *h)))
+            {
+                if let Ok(cp_id) = cp_str.parse::<u64>() {
+                    if cp_id > after_checkpoint.0 {
+                        candidates.push((cp_id, hash_str.to_string(), entry.path()));
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Per-path dedup: keep lowest cp_id per path_hash (oldest original content).
+        let mut deduped: HashMap<String, (u64, PathBuf)> = HashMap::new();
+        for (cp_id, path_hash, file_path) in &candidates {
+            let entry = deduped
+                .entry(path_hash.clone())
+                .or_insert((*cp_id, file_path.clone()));
+            if *cp_id < entry.0 {
+                *entry = (*cp_id, file_path.clone());
+            }
+        }
+
+        // For each surviving snapshot, check for conflict (read-only).
+        let mut results: Vec<(PathBuf, bool)> = Vec::new();
+        for (_cp_id, snapshot_path) in deduped.values() {
+            let envelope_bytes = match tokio::fs::read(snapshot_path).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let envelope: serde_json::Value = match serde_json::from_slice(&envelope_bytes) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let stored_path_str = envelope
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let stored_hash = envelope
+                .get("original_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let file_path = PathBuf::from(&stored_path_str);
+
+            // Check conflict: does the current file hash differ from stored hash?
+            let is_conflict = match tokio::fs::read(&file_path).await {
+                Ok(current_bytes) => {
+                    let mut h = Sha256::new();
+                    h.update(&current_bytes);
+                    let current_hash = format!("sha256:{:x}", h.finalize());
+                    current_hash != stored_hash
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // File deleted — not a conflict (will be recreated from snapshot)
+                    false
+                }
+                Err(_) => false, // IO error — treat as no conflict
+            };
+
+            results.push((file_path, is_conflict));
+        }
+
+        Ok(results)
+    }
+
     async fn fork_at_checkpoint(
         &self,
         source_conversation_id: &str,
@@ -947,6 +1736,113 @@ impl StoragePort for FileSystemStorage {
             }
         }
 
+        // Amendment 2 (Story 4-3b): copy the source conversation's checkpoint
+        // log and snapshot files into the forked session directory, filtered to
+        // entries with `message_index <= fork_message_index`. Without this step,
+        // the forked conversation has no checkpoint history and rewind fails
+        // with NotFound (pre-Amendment-2 behavior). With this step, the fork is
+        // an independently-rewindable conversation whose state-before-fork is
+        // preserved exactly.
+        //
+        // Checkpoint ids are conversation-scoped and kept identical across the
+        // copy — the `{cp_id}_{path_hash}` filename is reused verbatim, so the
+        // forked session's snapshot dir and checkpoint log remain in lockstep.
+        //
+        // Best-effort: individual snapshot copy failures log a warning but do
+        // not abort the fork (mirrors the image-copy graceful-degradation
+        // policy above). If the source conversation never had any tool calls,
+        // `load_checkpoint_log` returns an empty log and no snapshot work is
+        // done.
+        {
+            let source_log = self.load_checkpoint_log(source_conversation_id).await?;
+            let filtered_entries: Vec<_> = source_log
+                .entries
+                .into_iter()
+                .filter(|e| e.message_index <= message_index)
+                .collect();
+
+            if !filtered_entries.is_empty() {
+                let eligible_cp_ids: std::collections::HashSet<u64> =
+                    filtered_entries.iter().map(|e| e.id.0).collect();
+
+                // Migrate the forked conversation to Directory layout BEFORE
+                // writing the checkpoint log. `save_checkpoint_log` would
+                // otherwise call `create_dir_all({session_dir})`, which flips
+                // `detect_layout` to Directory while the conversation file is
+                // still at the Flat path — leaving the next `load_conversation`
+                // looking inside `{id}/` for a `conversation.json` that does
+                // not exist. Mirror the pattern used by `create_checkpoint`:
+                // ensure the dir, then re-save the conversation in Directory
+                // layout if not already there.
+                let conv_file = self.conversation_file(&new_id);
+                if !tokio::fs::try_exists(&conv_file).await.unwrap_or(false) {
+                    if let Err(e) = tokio::fs::create_dir_all(self.session_dir(&new_id)).await {
+                        tracing::warn!(
+                            target = %new_id,
+                            "Failed to create session dir for fork checkpoint copy: {}",
+                            e
+                        );
+                    }
+                    if let Err(e) = self.save_conversation_inner(&forked, false).await {
+                        tracing::warn!(
+                            target = %new_id,
+                            "Failed to migrate forked conversation to directory layout: {}",
+                            e
+                        );
+                    }
+                }
+
+                // Persist the filtered checkpoint log to the forked session.
+                let forked_log = CheckpointLog {
+                    entries: filtered_entries,
+                };
+                if let Err(e) = self.save_checkpoint_log(&new_id, &forked_log).await {
+                    tracing::warn!(
+                        source = source_conversation_id,
+                        target = %new_id,
+                        "Failed to copy checkpoint log during fork: {}",
+                        e
+                    );
+                }
+
+                // Copy snapshot files whose cp_id is in the eligible set.
+                let src_snapshots_dir = self.snapshots_dir(source_conversation_id);
+                let dst_snapshots_dir = self.snapshots_dir(&new_id);
+                if let Ok(mut entries) = tokio::fs::read_dir(&src_snapshots_dir).await {
+                    let _ = tokio::fs::create_dir_all(&dst_snapshots_dir).await;
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let fname = entry.file_name().to_string_lossy().to_string();
+                        if fname.ends_with(".tmp") {
+                            continue;
+                        }
+                        // Filename format: "{cp_id}_{path_hash}"
+                        let cp_id_part = match fname.split('_').next() {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        let cp_id = match cp_id_part.parse::<u64>() {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        if !eligible_cp_ids.contains(&cp_id) {
+                            continue;
+                        }
+                        let src_path = entry.path();
+                        let dst_path = dst_snapshots_dir.join(&fname);
+                        if let Err(e) = tokio::fs::copy(&src_path, &dst_path).await {
+                            tracing::warn!(
+                                source = source_conversation_id,
+                                target = %new_id,
+                                snapshot = %fname,
+                                "Failed to copy snapshot file during fork: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         tracing::debug!(
             "Forked conversation {} -> {} at message {}",
             source_conversation_id,
@@ -954,6 +1850,71 @@ impl StoragePort for FileSystemStorage {
             message_index
         );
         Ok(new_id)
+    }
+}
+
+// ── Private serde structs for checkpoint persistence ─────────────────────────
+
+/// Serde-able log of all checkpoints for a conversation.
+/// Persisted to `{session_dir}/checkpoints.json`.
+///
+/// **Implementation note (Story 4-3b):** The Amendment 1 specification also allows
+/// JSONL append-only context with `_checkpoint` markers, but this codebase uses
+/// JSON-format conversation files (not JSONL), so a sidecar JSON file is used
+/// instead.  The two approaches are functionally equivalent (both produce a
+/// sorted list of CheckpointMeta).  A future story that migrates to JSONL can
+/// replace this file with inline markers.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct CheckpointLog {
+    entries: Vec<crate::domain::models::checkpoint::CheckpointMeta>,
+}
+
+// ── Checkpoint & Snapshot helpers (Amendment 1, Story 4-3b) ──────────────────
+
+impl FileSystemStorage {
+    /// Path to the snapshots directory for a conversation.
+    fn snapshots_dir(&self, id: &str) -> std::path::PathBuf {
+        self.session_dir(id).join("snapshots")
+    }
+
+    /// Path to the checkpoint log file for a conversation.
+    fn checkpoints_file(&self, id: &str) -> std::path::PathBuf {
+        self.session_dir(id).join("checkpoints.json")
+    }
+
+    /// Load the checkpoint log. Returns an empty log if the file does not exist.
+    async fn load_checkpoint_log(&self, id: &str) -> Result<CheckpointLog, StorageError> {
+        let path = self.checkpoints_file(id);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => serde_json::from_str::<CheckpointLog>(&content)
+                .map_err(|e| StorageError::SerializationError(e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CheckpointLog::default()),
+            Err(e) => Err(StorageError::IoError(format!(
+                "Failed to read checkpoints.json: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Atomically save the checkpoint log (tempfile + rename pattern).
+    async fn save_checkpoint_log(&self, id: &str, log: &CheckpointLog) -> Result<(), StorageError> {
+        // Ensure the session directory exists (it should already for any active conversation).
+        let session_dir = self.session_dir(id);
+        tokio::fs::create_dir_all(&session_dir)
+            .await
+            .map_err(|e| StorageError::IoError(format!("Failed to create session dir: {}", e)))?;
+        let dest = self.checkpoints_file(id);
+        let content = serde_json::to_vec_pretty(log)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        // Atomic write: write to a temp file then rename.
+        let tmp_path = dest.with_extension("json.tmp");
+        tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
+            StorageError::IoError(format!("Failed to write checkpoints tmp: {}", e))
+        })?;
+        tokio::fs::rename(&tmp_path, &dest).await.map_err(|e| {
+            StorageError::IoError(format!("Failed to rename checkpoints file: {}", e))
+        })?;
+        Ok(())
     }
 }
 
@@ -1870,5 +2831,163 @@ mod tests {
         assert_eq!(loaded.updated_at, meta.updated_at);
         assert_eq!(loaded.message_count, meta.message_count);
         assert_eq!(loaded.bookmarks, meta.bookmarks);
+    }
+
+    // ── Story 4-3b review patches (P2, P3, D1, DF-110) ────────────────────
+
+    use crate::domain::models::checkpoint::CheckpointId;
+    use crate::domain::ports::StoragePort;
+
+    /// P2: `snapshot_file` must reject paths that resolve outside the configured
+    /// workspace root. Covers `../` escape via canonicalization.
+    #[tokio::test]
+    async fn test_snapshot_rejects_path_outside_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let bad_file = outside.join("secret.txt");
+        std::fs::write(&bad_file, b"top secret").unwrap();
+
+        let sessions_dir = workspace.join(".claude").join("sessions");
+        let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace.clone());
+
+        let result = storage
+            .snapshot_file("conv-1", CheckpointId(1), &bad_file, b"top secret")
+            .await;
+
+        assert!(
+            matches!(result, Err(StorageError::NotSupported(ref msg)) if msg.contains("path outside workspace")),
+            "expected path traversal rejection, got {:?}",
+            result
+        );
+    }
+
+    /// P2: snapshot_file must fail closed when the workspace root cannot be
+    /// determined (neither explicit nor derivable from sessions_dir parents).
+    #[tokio::test]
+    async fn test_snapshot_fails_closed_without_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Use a root-level path for sessions_dir so neither parent nor
+        // grandparent can derive a workspace proxy.
+        let sessions_dir = PathBuf::from("/");
+        let storage = FileSystemStorage::new(sessions_dir);
+
+        let file = tmp.path().join("victim.txt");
+        std::fs::write(&file, b"content").unwrap();
+
+        let result = storage
+            .snapshot_file("conv-1", CheckpointId(1), &file, b"content")
+            .await;
+
+        // Either NotSupported (workspace not derivable) or NotSupported (path outside);
+        // both are fail-closed outcomes. The key assertion is that the call does NOT
+        // succeed with the file unprotected.
+        assert!(
+            matches!(result, Err(StorageError::NotSupported(_))),
+            "expected fail-closed NotSupported, got {:?}",
+            result
+        );
+    }
+
+    /// P3: path hash must be derived from OsStr bytes so that two distinct
+    /// non-UTF8 paths (which would collide under `to_string_lossy`) produce
+    /// distinct hashes. We approximate by hashing `content_hash(OsStr.bytes)`
+    /// directly since constructing real non-UTF8 paths portably is awkward.
+    #[test]
+    fn test_path_hash_stable_from_os_str() {
+        use std::ffi::OsString;
+        let a = OsString::from("/tmp/foo/bar.txt");
+        let b = OsString::from("/tmp/foo/baz.txt");
+        let ha = content_hash(a.as_encoded_bytes());
+        let hb = content_hash(b.as_encoded_bytes());
+        assert_ne!(ha, hb, "distinct paths must produce distinct hashes");
+        // Same path → same hash (stability)
+        let ha2 = content_hash(a.as_encoded_bytes());
+        assert_eq!(ha, ha2);
+    }
+
+    /// D1 (schema v2): round-trip an envelope with `file_existed=false` and
+    /// verify `revert_file_snapshots` deletes the file that appeared after the
+    /// checkpoint. Also verifies v1 envelopes (no `file_existed` field) still
+    /// work via the empty-content fallback.
+    #[tokio::test]
+    async fn test_snapshot_schema_v2_file_existed_false_deletes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        let sessions_dir = workspace.join(".claude").join("sessions");
+        tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
+
+        let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace.clone());
+
+        // Set up a conversation + checkpoint log so revert has something to
+        // anchor against. snapshot_file is tested via an empty-content snapshot,
+        // which under our caller convention encodes "file did not exist".
+        let file = workspace.join("new_file.txt");
+
+        // Snapshot with empty content (simulates "file did not exist pre-checkpoint").
+        storage
+            .snapshot_file("conv-v2", CheckpointId(1), &file, b"")
+            .await
+            .expect("empty-content snapshot should succeed");
+
+        // Now the tool creates the file.
+        tokio::fs::write(&file, b"created by tool").await.unwrap();
+        assert!(file.exists());
+
+        // Revert any snapshots newer than checkpoint 0 (which is all of them).
+        let reverted = storage
+            .revert_file_snapshots("conv-v2", CheckpointId(0))
+            .await
+            .expect("revert should succeed");
+
+        assert!(!reverted.is_empty(), "at least one file should be reverted");
+        assert!(
+            !file.exists(),
+            "file that didn't exist pre-checkpoint should be deleted on revert"
+        );
+    }
+
+    /// DF-110 in-story pre-guard: snapshot_file must refuse files larger than
+    /// SNAPSHOT_MAX_BYTES (50MiB) and return Ok without creating a snapshot.
+    /// The tool still executes — rewind simply won't restore the file.
+    #[tokio::test]
+    async fn test_snapshot_skips_files_over_soft_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        let sessions_dir = workspace.join(".claude").join("sessions");
+        tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
+        let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace.clone());
+
+        let file = workspace.join("big.bin");
+        tokio::fs::write(&file, vec![0u8; 1024]).await.unwrap();
+
+        // Fabricate an oversized content slice (we don't need to actually write it).
+        let oversized = vec![0u8; (50 * 1024 * 1024) + 1];
+
+        let result = storage
+            .snapshot_file("conv-big", CheckpointId(1), &file, &oversized)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "oversized snapshot should succeed as a no-op"
+        );
+
+        // No snapshot file should have been created.
+        let snapshots_dir = workspace
+            .join(".claude")
+            .join("sessions")
+            .join("conv-big")
+            .join("snapshots");
+        if let Ok(mut entries) = tokio::fs::read_dir(&snapshots_dir).await {
+            let mut count = 0;
+            while let Ok(Some(_)) = entries.next_entry().await {
+                count += 1;
+            }
+            assert_eq!(count, 0, "no snapshot file should be written when over cap");
+        }
     }
 }

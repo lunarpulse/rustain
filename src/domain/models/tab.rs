@@ -23,8 +23,12 @@ pub struct TabState {
     pub auto_scroll: bool,
     /// Line offsets (from top) where each content block starts.
     pub block_boundaries: Vec<usize>,
-    /// Line offsets (from top) where each user message starts.
+    /// Line offsets (from top) where each message starts (all roles).
+    /// Drives the status-bar position counter and rewind/fork targeting.
     pub message_boundaries: Vec<usize>,
+    /// Line offsets (from top) where each **user** message starts.
+    /// Drives `{`/`}` jump-between-turn navigation.
+    pub user_message_boundaries: Vec<usize>,
     /// Tool block id at the top of the viewport (for focus/keyboard interaction).
     pub focused_tool_id: Option<String>,
     /// Feedback blocks displayed in conversation, keyed by block ID.
@@ -64,6 +68,7 @@ impl TabState {
             auto_scroll: true,
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
+            user_message_boundaries: Vec::new(),
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,
@@ -85,6 +90,7 @@ impl TabState {
             auto_scroll: true,
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
+            user_message_boundaries: Vec::new(),
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,
@@ -100,6 +106,7 @@ impl TabState {
         self.auto_scroll = true;
         self.block_boundaries.clear();
         self.message_boundaries.clear();
+        self.user_message_boundaries.clear();
         self.focused_tool_id = None;
         self.total_content_height = 0;
         self.pending_anchor = None;

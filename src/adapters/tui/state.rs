@@ -48,11 +48,42 @@ pub enum Direction {
     Down,
 }
 
+/// A single file entry in the rewind confirmation preview.
+#[derive(Debug, Clone)]
+pub struct RevertPreviewItem {
+    /// Workspace-relative path for display (falls back to absolute if outside workspace).
+    pub display_path: String,
+    /// Whether the file has been externally modified since the snapshot was taken.
+    pub conflict: bool,
+}
+
+/// Pre-flight preview data for the rewind confirmation card.
+/// Built by `event_loop.rs::build_rewind_preview` without mutating any state.
+#[derive(Debug, Clone)]
+pub struct RewindPreview {
+    /// The message index the conversation will be truncated to (inclusive).
+    pub target_message_index: usize,
+    /// How many messages come after target_message_index (will be removed).
+    pub messages_to_remove: usize,
+    /// Files that would be reverted, with conflict flags.
+    pub files_to_revert: Vec<RevertPreviewItem>,
+}
+
 /// Cache of rendered line heights for each message, keyed by message ID (not index).
 /// Value: rendered line count.
+///
+/// # Positional invalidation invariant
+///
+/// `truncate_from(message_index)` drops all entries at or after `message_index`.
+/// This is correct for rewind (truncate-only). In-place message editing would require
+/// keying by message ID alone; that is deferred until whatever future story introduces
+/// edit semantics. (DF-005 resolved in 4-3b.)
 #[derive(Debug, Default)]
 pub struct HeightCache {
     entries: HashMap<String, usize>,
+    /// Insertion-order tracking for positional invalidation via `truncate_from`.
+    /// Each push in `set` appends the message ID so index == insertion order.
+    id_order: Vec<String>,
     /// Terminal width at which heights were computed.
     pub cached_width: u16,
 }
@@ -65,12 +96,32 @@ impl HeightCache {
 
     /// Set cached height for a message ID.
     pub fn set(&mut self, message_id: String, height: usize) {
+        if !self.entries.contains_key(&message_id) {
+            self.id_order.push(message_id.clone());
+        }
         self.entries.insert(message_id, height);
     }
 
     /// Full invalidation (e.g., on resize).
     pub fn invalidate_all(&mut self) {
         self.entries.clear();
+        self.id_order.clear();
+    }
+
+    /// Positional invalidation: drop all cache entries at or after `message_index`.
+    ///
+    /// This is safe for rewind (which only truncates) because the positional order
+    /// of retained messages 0..message_index does not change. See the struct-level
+    /// comment for the full invariant.
+    pub fn truncate_from(&mut self, message_index: usize) {
+        if message_index >= self.id_order.len() {
+            return;
+        }
+        // Remove entries for all messages from message_index onward.
+        let ids_to_remove = self.id_order.split_off(message_index);
+        for id in ids_to_remove {
+            self.entries.remove(&id);
+        }
     }
 
     /// Incremental invalidation: only invalidate the given message ID (streaming).
@@ -606,8 +657,12 @@ pub struct TuiState {
     pub total_content_height: usize,
     /// Line offsets for each content block boundary in rendered view.
     pub block_boundaries: Vec<usize>,
-    /// Line offsets for each user message boundary in rendered view.
+    /// Line offsets for each message boundary (all roles) in rendered view.
+    /// Drives the status-bar position counter and rewind/fork targeting.
     pub message_boundaries: Vec<usize>,
+    /// Line offsets for each **user** message boundary in rendered view.
+    /// Drives `{`/`}` jump-between-turn navigation.
+    pub user_message_boundaries: Vec<usize>,
     /// Height cache for virtual scrolling.
     pub height_cache: HeightCache,
     /// Pending anchor message index for resize scroll preservation.
@@ -700,6 +755,14 @@ pub struct TuiState {
     /// Message index selected for fork (set when user presses `f`, cleared on confirm/cancel).
     /// Story 4-3a, AC1.
     pub pending_fork_index: Option<usize>,
+    /// Message index selected for rewind (set when user presses `R`, cleared on confirm/cancel).
+    /// Mirrors pending_fork_index — both are session-level overlay state.
+    /// Story 4-3b, AC1.
+    pub pending_rewind_index: Option<usize>,
+    /// Pre-computed preview data for the rewind confirmation card.
+    /// Populated when pending_rewind_index is set; cleared on confirm/cancel.
+    /// Story 4-3b, AC1.
+    pub rewind_preview: Option<RewindPreview>,
 }
 
 impl TuiState {
@@ -726,6 +789,7 @@ impl TuiState {
             total_content_height: 0,
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
+            user_message_boundaries: Vec::new(),
             height_cache: HeightCache::default(),
             pending_anchor: None,
             tool_block_states: HashMap::new(),
@@ -761,6 +825,8 @@ impl TuiState {
             sidebar_scroll_offset: 0,
             pending_delete: None,
             pending_fork_index: None,
+            pending_rewind_index: None,
+            rewind_preview: None,
         }
     }
 }

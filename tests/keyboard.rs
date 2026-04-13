@@ -178,7 +178,8 @@ fn test_message_jump_no_user_messages_noop() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
     state.total_content_height = 100;
-    state.message_boundaries = vec![]; // No user messages
+    state.message_boundaries = vec![]; // No messages
+    state.user_message_boundaries = vec![]; // No user messages
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('{'));
     assert_eq!(action, InputAction::Consumed);

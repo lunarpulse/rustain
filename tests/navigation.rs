@@ -14,7 +14,8 @@ fn test_full_navigation_flow() {
     // Simulate 5 messages at lines 0, 40, 80, 120, 160
     // User messages at 0, 80, 160
     state.block_boundaries = vec![0, 40, 80, 120, 160];
-    state.message_boundaries = vec![0, 80, 160];
+    state.message_boundaries = vec![0, 40, 80, 120, 160];
+    state.user_message_boundaries = vec![0, 80, 160];
 
     // Start at bottom (offset=0, auto_scroll=true)
     assert_eq!(state.scroll_offset, 0);
@@ -89,6 +90,7 @@ fn test_message_jump_down_across_messages() {
     state.focus = FocusState::Chat;
     state.total_content_height = 200;
     state.message_boundaries = vec![0, 50, 100, 150];
+    state.user_message_boundaries = vec![0, 50, 100, 150];
     // Start scrolled to top
     state.scroll_offset = 176; // max_offset = 200 - 24 = 176
     state.auto_scroll = false;

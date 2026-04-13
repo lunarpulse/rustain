@@ -48,6 +48,8 @@ pub enum ConfirmationType {
     DeleteConfirmation(DeleteConfirmTarget),
     /// Fork confirmation card (Story 4-3a, AC1).
     Fork,
+    /// Rewind confirmation card (Story 4-3b, AC1).
+    Rewind,
 }
 
 /// Overlay types for modal focus targets.

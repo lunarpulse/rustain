@@ -23,8 +23,15 @@ pub struct RenderResult {
     pub total_content_height: usize,
     /// Line offsets (from top) where each content block starts.
     pub block_boundaries: Vec<usize>,
-    /// Line offsets (from top) where each user message starts.
+    /// Line offsets (from top) where each message starts (all roles).
+    /// Used by the status-bar position counter and by rewind/fork target
+    /// resolution — both need a one-to-one mapping between visible turn
+    /// anchors and `conversation.messages` indices.
     pub message_boundaries: Vec<usize>,
+    /// Line offsets (from top) where each **user** message starts.
+    /// Used exclusively by the `{`/`}` keybindings to jump between user
+    /// turns, skipping assistant responses.
+    pub user_message_boundaries: Vec<usize>,
     /// Tool block id at the top of the viewport (for focus/keyboard interaction).
     pub focused_tool_id: Option<String>,
 }
@@ -143,6 +150,7 @@ pub fn render(
         total_content_height: 0,
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
+        user_message_boundaries: Vec::new(),
         focused_tool_id: None,
     };
 
@@ -172,6 +180,7 @@ pub fn render(
     let mut message_heights: Vec<usize> = Vec::with_capacity(msg_count + 1);
     let mut block_boundaries: Vec<usize> = Vec::new();
     let mut message_boundaries: Vec<usize> = Vec::new();
+    let mut user_message_boundaries: Vec<usize> = Vec::new();
     let mut cumulative_offset: usize = 0;
 
     for (i, msg) in conversation.messages.iter().enumerate() {
@@ -179,9 +188,13 @@ pub fn render(
             cumulative_offset += spacing;
         }
 
-        // Track boundaries
+        // Track boundaries. `message_boundaries` records **every** message so
+        // the status-bar `msg N/M` counter and rewind/fork target resolution
+        // map 1:1 to `conversation.messages` indices. `user_message_boundaries`
+        // records user turns only, for `{`/`}` jump-between-turns navigation.
+        message_boundaries.push(cumulative_offset);
         if msg.role == MessageRole::User {
-            message_boundaries.push(cumulative_offset);
+            user_message_boundaries.push(cumulative_offset);
         }
         block_boundaries.push(cumulative_offset);
 
@@ -479,6 +492,7 @@ pub fn render(
         total_content_height,
         block_boundaries,
         message_boundaries,
+        user_message_boundaries,
         focused_tool_id,
     }
 }

@@ -1,36 +1,48 @@
 //! Concrete ToolSetPort adapter.
 //! Implements Bash, Read, Write tool execution with file snapshots and write serialization.
 //! Follows the same patterns as rustycode's ToolExecutor but implemented directly.
+//!
+//! Story 4-3b: The old workspace-rooted `take_snapshot` mechanism (storing to
+//! `.claude/sessions/{global_session_id}/snapshots/`) has been REPLACED by the
+//! `StoragePort::snapshot_file()` protocol which stores snapshots co-located with
+//! their conversation at `{sessions_dir}/{conversation_id}/snapshots/`.
+//! The old path leaked across conversations and was not cleaned up by `delete_conversation()`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::errors::ToolError;
+use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{ToolDefinition, ToolResult};
-use crate::domain::ports::ToolSetPort;
+use crate::domain::ports::{StoragePort, ToolSetPort};
+
+/// Active checkpoint context for file snapshotting within a turn.
+struct ToolExecutionContext {
+    conversation_id: String,
+    checkpoint: CheckpointId,
+}
 
 /// ToolSetPort implementation with Bash, Read, Write tools.
 pub struct ToolSetAdapter {
     workspace_path: PathBuf,
     write_locks: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
-    session_id: String,
-    /// Monotonically increasing counter for unique snapshot message indices.
-    message_counter: AtomicUsize,
+    storage: Arc<dyn StoragePort>,
+    /// Active checkpoint context for the current tool-executing turn.
+    /// Set by `set_execution_context` before any tools run; cleared between turns.
+    current_context: Mutex<Option<ToolExecutionContext>>,
 }
 
 impl ToolSetAdapter {
-    pub fn new(workspace_path: PathBuf, session_id: String) -> Self {
+    pub fn new(workspace_path: PathBuf, storage: Arc<dyn StoragePort>) -> Self {
         Self {
             workspace_path,
             write_locks: Arc::new(Mutex::new(HashMap::new())),
-            session_id,
-            message_counter: AtomicUsize::new(0),
+            storage,
+            current_context: Mutex::new(None),
         }
     }
 
@@ -58,20 +70,24 @@ impl ToolSetAdapter {
         .map_err(|_| ToolError::Timeout)?
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to spawn bash: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut result = String::new();
+        if !output.stdout.is_empty() {
+            result.push_str(&String::from_utf8_lossy(&output.stdout));
+        }
+        if !output.stderr.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
 
-        let content = if stderr.is_empty() {
-            stdout.to_string()
-        } else if stdout.is_empty() {
-            stderr.to_string()
-        } else {
-            format!("{}{}", stdout, stderr)
-        };
+        if result.is_empty() {
+            result = format!("Command exited with status {}", output.status);
+        }
 
         Ok(ToolResult {
-            tool_use_id: String::new(), // Set by caller
-            content,
+            tool_use_id: String::new(),
+            content: result,
             is_error: !output.status.success(),
         })
     }
@@ -83,7 +99,6 @@ impl ToolSetAdapter {
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'file_path' parameter".into()))?;
 
         let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
         let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
 
         let path = if std::path::Path::new(file_path).is_absolute() {
@@ -92,20 +107,34 @@ impl ToolSetAdapter {
             self.workspace_path.join(file_path)
         };
 
+        // Read raw bytes to preserve binary content; lossy-decode for line iteration.
+        // This mirrors rustycode's Read tool contract — binary files return a
+        // best-effort textual view rather than failing outright.
         let bytes = tokio::fs::read(&path).await.map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to read '{}': {}", file_path, e))
         })?;
         let content = String::from_utf8_lossy(&bytes).into_owned();
 
-        // Apply offset and limit (line-based, cat -n style)
         let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
         let selected: Vec<String> = lines
-            .iter()
+            .into_iter()
             .enumerate()
             .skip(offset)
             .take(limit)
-            .map(|(i, line)| format!("{}\t{}", i + 1, line))
+            .map(|(i, l)| format!("{}\t{}", i + 1, l))
             .collect();
+
+        if selected.is_empty() {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!(
+                    "File '{}' has {} lines total; offset {} is past end",
+                    file_path, total, offset
+                ),
+                is_error: false,
+            });
+        }
 
         Ok(ToolResult {
             tool_use_id: String::new(),
@@ -118,7 +147,6 @@ impl ToolSetAdapter {
         &self,
         input: &serde_json::Value,
         tool_use_id: &str,
-        message_index: usize,
     ) -> Result<ToolResult, ToolError> {
         let file_path = input
             .get("file_path")
@@ -146,8 +174,22 @@ impl ToolSetAdapter {
         };
         let _write_guard = per_path_lock.lock().await;
 
-        // Take snapshot before writing (AC10)
-        self.take_snapshot(&path, message_index).await;
+        // Take snapshot before writing via StoragePort (Story 4-3b).
+        if let Some(ctx) = self.current_context.lock().await.as_ref() {
+            let original = tokio::fs::read(&path).await.unwrap_or_default();
+            if let Err(e) = self
+                .storage
+                .snapshot_file(&ctx.conversation_id, ctx.checkpoint, &path, &original)
+                .await
+            {
+                tracing::warn!("snapshot_file failed for {}: {}", path.display(), e);
+            }
+        } else {
+            tracing::warn!(
+                "Write tool executed without an active checkpoint context — no snapshot taken for {}",
+                path.display()
+            );
+        }
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -168,73 +210,12 @@ impl ToolSetAdapter {
             is_error: false,
         })
     }
-
-    /// Take a file snapshot before modification (AC10).
-    async fn take_snapshot(&self, path: &PathBuf, message_index: usize) {
-        let snapshot_dir = self
-            .workspace_path
-            .join(".claude")
-            .join("sessions")
-            .join(&self.session_id)
-            .join("snapshots");
-
-        // Create snapshot directory lazily
-        if let Err(e) = tokio::fs::create_dir_all(&snapshot_dir).await {
-            tracing::warn!("Failed to create snapshot directory: {}", e);
-            return;
-        }
-
-        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        let path_str = canonical_path.to_string_lossy();
-
-        // Compute path hash for filename
-        let mut hasher = Sha256::new();
-        hasher.update(path_str.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-        let short_hash = &hash[..16.min(hash.len())];
-
-        let snapshot_file = snapshot_dir.join(format!("{}_{}.json", short_hash, message_index));
-
-        // Read original content (if file exists)
-        let (original_content, original_hash) = match tokio::fs::read_to_string(path).await {
-            Ok(content) => {
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let hash = format!("{:x}", hasher.finalize());
-                (Some(content), Some(hash))
-            }
-            Err(_) => (None, None),
-        };
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        let snapshot = serde_json::json!({
-            "path": path_str,
-            "original_hash": original_hash,
-            "original_content": original_content,
-            "message_index": message_index,
-            "timestamp_ms": now_ms,
-        });
-
-        if let Err(e) = tokio::fs::write(
-            &snapshot_file,
-            serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
-        )
-        .await
-        {
-            tracing::warn!("Failed to write snapshot: {}", e);
-        }
-    }
 }
 
 impl std::fmt::Debug for ToolSetAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolSetAdapter")
             .field("workspace_path", &self.workspace_path)
-            .field("session_id", &self.session_id)
             .finish()
     }
 }
@@ -312,21 +293,29 @@ impl ToolSetPort for ToolSetAdapter {
         match tool_name {
             "Bash" | "bash" => self.execute_bash(&input).await,
             "Read" | "read" => self.execute_read(&input).await,
-            "Write" | "write" => {
-                let idx = self.message_counter.fetch_add(1, Ordering::Relaxed);
-                self.execute_write(&input, "", idx).await
-            }
+            "Write" | "write" => self.execute_write(&input, "").await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
+    }
+
+    /// Set the active checkpoint context for file snapshotting (Story 4-3b, AC2).
+    async fn set_execution_context(&self, conversation_id: String, checkpoint: CheckpointId) {
+        *self.current_context.lock().await = Some(ToolExecutionContext {
+            conversation_id,
+            checkpoint,
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::filesystem::FileSystemStorage;
 
     fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
-        ToolSetAdapter::new(dir.to_path_buf(), "test-session".to_string())
+        let sessions_dir = dir.join(".claude").join("sessions");
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir));
+        ToolSetAdapter::new(dir.to_path_buf(), storage)
     }
 
     #[tokio::test]
@@ -360,6 +349,40 @@ mod tests {
         assert!(!result.is_error);
     }
 
+    /// Regression: Story 4-3b review P1 — Read tool must not fail on binary files.
+    /// Prior implementation used `read_to_string` which errored on any non-UTF8 byte.
+    /// Current implementation reads raw bytes and lossy-decodes, matching rustycode's contract.
+    #[tokio::test]
+    async fn test_read_tool_preserves_binary_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("binary.bin");
+        // Write non-UTF8 bytes (0xFF 0xFE is invalid UTF-8 start, 0x00 is null, 0x41 is 'A').
+        std::fs::write(&file, [0xFFu8, 0xFE, 0x00, 0x41, b'\n', 0xC3, 0x28]).unwrap();
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "Read",
+                serde_json::json!({"file_path": file.to_str().unwrap()}),
+            )
+            .await
+            .expect("Read must not fail on binary content");
+
+        assert!(
+            !result.is_error,
+            "binary read should succeed via lossy decode"
+        );
+        // Replacement char U+FFFD should appear for invalid sequences, 'A' should survive.
+        assert!(
+            result.content.contains('A'),
+            "ASCII content must survive lossy decode"
+        );
+        assert!(
+            result.content.contains('\u{FFFD}'),
+            "invalid UTF-8 should map to replacement chars, not an error"
+        );
+    }
+
     #[tokio::test]
     async fn test_write_creates_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -383,13 +406,50 @@ mod tests {
         assert_eq!(content, "hello world");
     }
 
+    /// Verifies that when a checkpoint context is active, a snapshot is created
+    /// at the per-conversation path before the Write tool modifies the file.
     #[tokio::test]
     async fn test_write_snapshot_created() {
+        use crate::domain::models::conversation::generate_conversation_id;
+
         let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join(".claude").join("sessions");
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir.clone()));
+        let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), Arc::clone(&storage));
+
+        // Create a minimal conversation so that create_checkpoint has somewhere to write.
+        let conv_id = generate_conversation_id();
+        let conv = crate::domain::models::Conversation {
+            id: conv_id.clone(),
+            title: "test".to_string(),
+            messages: vec![crate::domain::models::ChatMessage {
+                id: "msg-1".to_string(),
+                role: crate::domain::models::MessageRole::User,
+                content: "hello".to_string(),
+                content_blocks: vec![],
+                tool_calls: vec![],
+                created_at: 0,
+                token_count: None,
+                stop_reason: None,
+                images: vec![],
+            }],
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            fork_source: None,
+        };
+        storage.save_conversation(&conv).await.unwrap();
+
+        // Create a checkpoint and set context.
+        let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+        adapter.set_execution_context(conv_id.clone(), cp).await;
+
+        // Write an existing file — should snapshot first.
         let file = tmp.path().join("existing.txt");
         std::fs::write(&file, "original content").unwrap();
 
-        let adapter = make_adapter(tmp.path());
         adapter
             .execute(
                 "Write",
@@ -401,23 +461,42 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot_dir = tmp
-            .path()
-            .join(".claude")
-            .join("sessions")
-            .join("test-session")
-            .join("snapshots");
-        assert!(snapshot_dir.exists());
-        let entries: Vec<_> = std::fs::read_dir(&snapshot_dir).unwrap().collect();
-        assert_eq!(entries.len(), 1);
-
-        let snapshot_content =
-            std::fs::read_to_string(entries[0].as_ref().unwrap().path()).unwrap();
-        let snapshot: serde_json::Value = serde_json::from_str(&snapshot_content).unwrap();
-        assert_eq!(
-            snapshot["original_content"].as_str().unwrap(),
-            "original content"
+        // The snapshot should be in {sessions_dir}/{conv_id}/snapshots/
+        let snapshot_dir = sessions_dir.join(&conv_id).join("snapshots");
+        assert!(
+            snapshot_dir.exists(),
+            "snapshot dir should exist at {:?}",
+            snapshot_dir
         );
+        let entries: Vec<_> = std::fs::read_dir(&snapshot_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "expected exactly 1 snapshot file");
+
+        let snapshot_content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot_content).unwrap();
+
+        // Verify envelope structure (schema v2 added in 4-3b review — D1 / Option C).
+        assert_eq!(snapshot["schema_version"].as_u64().unwrap(), 2);
+        assert_eq!(snapshot["conversation_id"].as_str().unwrap(), conv_id);
+        assert!(
+            snapshot["file_existed"].as_bool().unwrap(),
+            "existing-file snapshot must set file_existed=true"
+        );
+        assert!(
+            snapshot["original_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+
+        // Verify original content is stored (base64).
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(snapshot["original_content_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"original content");
     }
 
     #[tokio::test]
