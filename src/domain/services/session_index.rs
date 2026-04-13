@@ -24,6 +24,10 @@ pub struct SessionSummary {
     pub is_open: bool,
     /// Whether this conversation is the active tab.
     pub is_active: bool,
+    /// Whether this conversation is a fork (Story 4-3a.1 / DF-095). Populated
+    /// from `SessionMeta.fork_source.is_some()` at index-build time; the
+    /// sidebar render path reads this flag directly (never touches disk).
+    pub has_fork_source: bool,
 }
 
 impl SessionSummary {
@@ -43,6 +47,7 @@ impl SessionSummary {
             message_count,
             is_open: false,
             is_active: false,
+            has_fork_source: false,
         }
     }
 
@@ -56,6 +61,7 @@ impl SessionSummary {
             message_count: summary.message_count,
             is_open: false,
             is_active: false,
+            has_fork_source: summary.has_fork_source,
         }
     }
 }
@@ -103,6 +109,10 @@ impl SessionIndex {
     }
 
     /// Get a specific entry by conversation ID.
+    ///
+    /// `#[allow(dead_code)]`: public API consumed by tests; the binary currently
+    /// reads entries via `entries()` and `get_mut()` only.
+    #[allow(dead_code)]
     pub fn get(&self, conversation_id: &str) -> Option<&SessionSummary> {
         self.id_index
             .get(conversation_id)
@@ -205,6 +215,7 @@ impl SessionIndex {
     }
 
     /// Whether the index is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -247,6 +258,7 @@ mod tests {
             created_at: updated_at - 1000,
             updated_at,
             message_count: 5,
+            has_fork_source: false,
         }
     }
 

@@ -33,6 +33,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             } else {
                 None
             },
+            images: vec![],
         });
     }
 

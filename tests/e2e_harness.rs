@@ -388,6 +388,7 @@ impl TestHarness {
             created_at: now,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
 
         self.streaming.is_streaming = true;
@@ -935,6 +936,7 @@ fn test_e2e_api_messages_valid_after_tool_use() {
         created_at: 0,
         token_count: None,
         stop_reason: Some(StopReason::ToolUse),
+        images: vec![],
     });
 
     // Validate API messages — this is the critical regression test

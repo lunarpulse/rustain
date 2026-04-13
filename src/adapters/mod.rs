@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod clipboard_adapter;
 pub mod command_registry;
 pub mod file_scanner;
 pub mod filesystem;

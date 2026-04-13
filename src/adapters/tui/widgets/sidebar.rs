@@ -67,7 +67,7 @@ pub fn render_history_panel(
             let is_selected = idx == selected_index;
             let is_active = active_conversation_id == Some(entry.conversation_id.as_str());
 
-            // Format the line: [indicator] Title (relative_time) [msg_count]
+            // Format the line: [indicator] [fork?] Title (relative_time) [msg_count]
             let indicator = if entry.is_active {
                 "● " // Active conversation indicator
             } else if entry.is_open {
@@ -75,6 +75,8 @@ pub fn render_history_panel(
             } else {
                 "  "
             };
+            // Story 4-3a.1 / DF-095: forked conversations get a prefix marker.
+            let fork_marker = if entry.has_fork_source { "🔀 " } else { "" };
             let relative_time = format_relative_time(entry.updated_at, now);
             let msg_count = format!("[{}]", entry.message_count);
 
@@ -82,8 +84,9 @@ pub fn render_history_panel(
             let time_width = relative_time.width() + 1; // +1 for space
             let count_width = msg_count.width() + 1; // +1 for space
             let indicator_width = 2;
+            let fork_marker_width = fork_marker.width();
             let available_width = (inner_area.width as usize)
-                .saturating_sub(time_width + count_width + indicator_width + 2); // -2 for padding
+                .saturating_sub(time_width + count_width + indicator_width + fork_marker_width + 2); // -2 for padding
 
             let title = if entry.title.is_empty() {
                 "(Untitled)"
@@ -93,8 +96,8 @@ pub fn render_history_panel(
             let truncated_title = truncate_to_width(title, available_width);
 
             let line_text = format!(
-                "{}{} {} {}",
-                indicator, truncated_title, relative_time, msg_count
+                "{}{}{} {} {}",
+                indicator, fork_marker, truncated_title, relative_time, msg_count
             );
 
             // Determine style based on state

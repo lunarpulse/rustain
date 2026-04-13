@@ -68,6 +68,7 @@ fn test_e2e_image_in_api_request() {
             created_at: 0,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
 
     // Build API messages
@@ -202,6 +203,7 @@ fn test_e2e_image_reference_stored() {
             created_at: 0,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
 
     // Message exists
@@ -233,6 +235,7 @@ fn test_e2e_copy_key_in_chat_focus() {
             created_at: 0,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
 
     // Press 'c' - action depends on implementation
@@ -270,6 +273,7 @@ fn test_e2e_copy_assistant_message() {
             created_at: 0,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
 
     // Verify message content available for copy

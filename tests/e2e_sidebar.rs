@@ -28,6 +28,7 @@ fn make_summary(id: &str, title: &str, updated_at: i64) -> ConversationSummary {
         created_at: updated_at - 1000,
         updated_at,
         message_count: 5,
+        has_fork_source: false,
     }
 }
 

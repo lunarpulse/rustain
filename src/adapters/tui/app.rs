@@ -83,6 +83,10 @@ pub enum InputAction {
         data: String,
         warning: String,
     },
+    /// Request a system-clipboard paste: read image (or text) from the OS clipboard.
+    /// The event loop handles this asynchronously via ClipboardPort, then re-enters
+    /// handle_input with the resulting ImagePaste or Paste event.
+    RequestClipboardPaste,
     /// Fork conversation at the currently focused message (f key in Chat focus).
     // Covers: Story 4-3a, AC1
     ForkAtMessage,
@@ -740,6 +744,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        // Alt+V: paste image (or text) from the system clipboard.
+        // The event loop receives RequestClipboardPaste and handles it async
+        // via ClipboardPort, then re-enters handle_input with ImagePaste/Paste.
+        DomainKey::AltV => InputAction::RequestClipboardPaste,
+
         // Ctrl+Enter: submit in multiline mode
         // Covers: UX-DR76
         DomainKey::CtrlEnter if state.focus == FocusState::Input => {
@@ -1375,6 +1384,7 @@ fn dispatch_palette_action(
         PaletteAction::NewTab => InputAction::NewTab,
         PaletteAction::CloseTab => InputAction::CloseTab,
         PaletteAction::DeleteAllConversations => InputAction::DeleteAllConversations,
+        PaletteAction::PasteImageFromClipboard => InputAction::RequestClipboardPaste,
         PaletteAction::Noop => {
             // Show "Not yet available" feedback
             let block = crate::domain::models::FeedbackBlock {
@@ -1487,6 +1497,12 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             if *modifiers == KeyModifiers::ALT && *code == KeyCode::Char('m') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::AltM));
             }
+            // Alt+V → paste image (or text) from the system clipboard.
+            // We use Alt+V rather than Ctrl+V because terminal emulators intercept
+            // Ctrl+V / Ctrl+Shift+V themselves for their own paste operation.
+            if *modifiers == KeyModifiers::ALT && *code == KeyCode::Char('v') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::AltV));
+            }
             // Ctrl+P → command palette
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('p') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlP));
@@ -1553,5 +1569,98 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
         Event::FocusGained => Some(DomainInputEvent::FocusGained),
         Event::FocusLost => Some(DomainInputEvent::FocusLost),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn alt_key(c: char) -> crossterm::event::Event {
+        crossterm::event::Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::ALT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    fn ctrl_key(c: char) -> crossterm::event::Event {
+        crossterm::event::Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    // ── convert_crossterm_event ──────────────────────────────────────────────
+
+    fn make_state() -> TuiState {
+        TuiState::new(80, 24)
+    }
+
+    #[test]
+    fn alt_v_maps_to_alt_v_domain_key() {
+        let event = alt_key('v');
+        assert!(matches!(
+            convert_crossterm_event(&event),
+            Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
+        ));
+    }
+
+    #[test]
+    fn alt_m_maps_to_alt_m_domain_key() {
+        // Regression: ensure AltM still works after AltV addition
+        let event = alt_key('m');
+        assert!(matches!(
+            convert_crossterm_event(&event),
+            Some(DomainInputEvent::SpecialKey(DomainKey::AltM))
+        ));
+    }
+
+    #[test]
+    fn ctrl_v_does_not_map_to_alt_v() {
+        // Ctrl+V must not accidentally trigger clipboard paste (terminals intercept it)
+        let event = ctrl_key('v');
+        let result = convert_crossterm_event(&event);
+        assert!(!matches!(
+            result,
+            Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
+        ));
+    }
+
+    // ── handle_special_key via handle_input ─────────────────────────────────
+
+    #[test]
+    fn alt_v_returns_request_clipboard_paste_in_input_focus() {
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        let event = DomainInputEvent::SpecialKey(DomainKey::AltV);
+        let action = handle_input(&mut state, &event);
+        assert_eq!(action, InputAction::RequestClipboardPaste);
+    }
+
+    #[test]
+    fn alt_v_returns_request_clipboard_paste_in_chat_focus() {
+        // Alt+V works regardless of focus — clipboard paste is a global action
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let event = DomainInputEvent::SpecialKey(DomainKey::AltV);
+        let action = handle_input(&mut state, &event);
+        assert_eq!(action, InputAction::RequestClipboardPaste);
+    }
+
+    // ── dispatch_palette_action ──────────────────────────────────────────────
+
+    #[test]
+    fn palette_paste_image_dispatches_request_clipboard_paste() {
+        let mut state = make_state();
+        let action = dispatch_palette_action(
+            &mut state,
+            crate::domain::models::palette::PaletteAction::PasteImageFromClipboard,
+        );
+        assert_eq!(action, InputAction::RequestClipboardPaste);
     }
 }

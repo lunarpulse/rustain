@@ -32,7 +32,9 @@ use crate::domain::models::{
     SessionManager, SessionState, StatusState, StreamChunk, StreamingState, UserMessage,
     apply_chunk, generate_conversation_id, next_delay,
 };
-use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
+use crate::domain::ports::{
+    ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
+};
 use crate::domain::services::message_builder;
 use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::turn;
@@ -50,6 +52,7 @@ pub async fn run(
     persona: Arc<dyn PersonaPort>,
     storage: Arc<dyn StoragePort>,
     fs_storage: Arc<crate::adapters::filesystem::FileSystemStorage>,
+    clipboard: Arc<dyn ClipboardPort>,
     workspace_path: std::path::PathBuf,
     restored_conversation: Option<Conversation>,
     recovery_prompt: Option<(String, u32)>,
@@ -341,6 +344,7 @@ pub async fn run(
                                             &persona,
                                             &workspace_path,
                                             &mut session_manager,
+                                            &fs_storage,
                                         );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
@@ -388,6 +392,7 @@ pub async fn run(
                                                 created_at: crate::domain::models::session_meta::now_unix(),
                                                 token_count: None,
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
+                                                images: vec![],
                                             });
                                         }
                                         // Abort the active turn task
@@ -635,6 +640,7 @@ pub async fn run(
                                             &persona,
                                             &workspace_path,
                                             &mut session_manager,
+                                            &fs_storage,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -743,6 +749,90 @@ pub async fn run(
                                     state.focus = FocusState::Input;
                                     state.needs_redraw = true;
                                 }
+                                InputAction::RequestClipboardPaste => {
+                                    // Async: read image (or text) from the OS clipboard via
+                                    // ClipboardPort, then re-enter handle_input so all existing
+                                    // image validation / state mutation runs exactly once.
+                                    use crate::domain::events::DomainInputEvent;
+                                    match clipboard.read_image_png().await {
+                                        Ok(Some(png_bytes)) => {
+                                            let inner_action = handle_input(
+                                                &mut state,
+                                                &DomainInputEvent::ImagePaste(png_bytes),
+                                            );
+                                            // Propagate image-validation outcomes inline
+                                            match inner_action {
+                                                InputAction::ImageFormatError => {
+                                                    let fb = FeedbackBlock {
+                                                        id: generate_conversation_id(),
+                                                        message: "Unsupported image format. Supported: PNG, JPEG, GIF, WebP".to_string(),
+                                                        level: FeedbackLevel::Error,
+                                                        actions: vec![],
+                                                    };
+                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
+                                                    state.needs_redraw = true;
+                                                }
+                                                InputAction::ImageSizeWarning { media_type, data, warning } => {
+                                                    let attachment = ImageAttachment { media_type, data };
+                                                    state.pending_large_image = Some(attachment);
+                                                    let fb = FeedbackBlock {
+                                                        id: generate_conversation_id(),
+                                                        message: warning,
+                                                        level: FeedbackLevel::Warning,
+                                                        actions: vec![
+                                                            FeedbackAction::Custom("[y] Attach anyway".to_string()),
+                                                            FeedbackAction::Custom("[n] Cancel".to_string()),
+                                                        ],
+                                                    };
+                                                    state.active_feedback_id = Some(fb.id.clone());
+                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
+                                                    state.focus = FocusState::Chat;
+                                                    state.needs_redraw = true;
+                                                }
+                                                _ => {} // Consumed or other — already mutated state
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            // No image: try text
+                                            match clipboard.read_text().await {
+                                                Ok(Some(text)) => {
+                                                    handle_input(
+                                                        &mut state,
+                                                        &DomainInputEvent::Paste(text),
+                                                    );
+                                                }
+                                                Ok(None) => {
+                                                    state.status_before_flash = Some(state.status.clone());
+                                                    state.status = StatusState::Flash {
+                                                        message: "Clipboard is empty".to_string(),
+                                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                                    };
+                                                    state.needs_redraw = true;
+                                                }
+                                                Err(e) => {
+                                                    let fb = FeedbackBlock {
+                                                        id: generate_conversation_id(),
+                                                        message: format!("Could not read clipboard: {e}"),
+                                                        level: FeedbackLevel::Error,
+                                                        actions: vec![],
+                                                    };
+                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let fb = FeedbackBlock {
+                                                id: generate_conversation_id(),
+                                                message: format!("Could not read clipboard: {e}"),
+                                                level: FeedbackLevel::Error,
+                                                actions: vec![],
+                                            };
+                                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                                            state.needs_redraw = true;
+                                        }
+                                    }
+                                }
                                 InputAction::NewTab => {
                                     // Abort any active streaming on this tab before saving,
                                     // so the saved state reflects the abort (is_streaming = false,
@@ -773,6 +863,7 @@ pub async fn run(
                                                 created_at: crate::domain::models::session_meta::now_unix(),
                                                 token_count: None,
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
+                                                images: vec![],
                                             });
                                         }
                                         // Abort the streaming task
@@ -870,7 +961,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -892,7 +983,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -906,7 +997,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -924,7 +1015,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -977,7 +1068,7 @@ pub async fn run(
                                                 let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                        start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1099,7 +1190,7 @@ pub async fn run(
                                                     let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager);
+                                                            start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage);
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -1443,6 +1534,7 @@ pub async fn run(
                                             &persona,
                                             &workspace_path,
                                             &mut session_manager,
+                                            &fs_storage,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -1467,68 +1559,66 @@ pub async fn run(
                                 chunk,
                                 crate::domain::models::session_meta::now_unix(),
                             );
-                            match action {
-                                ChunkAction::TurnComplete { persist, trigger_title_generation } => {
-                                    // apply_chunk already set tab.streaming.is_streaming = false
-                                    if persist {
-                                        let now = crate::domain::models::session_meta::now_unix();
-                                        tab.conversation.updated_at = now;
-                                        tab.conversation.last_response_at = Some(now);
-                                        if let Some(prev) = _pending_save.take() {
-                                            let _ = prev.await;
+                            if let ChunkAction::TurnComplete { persist, trigger_title_generation } = action {
+                                // apply_chunk already set tab.streaming.is_streaming = false
+                                if persist {
+                                    let now = crate::domain::models::session_meta::now_unix();
+                                    tab.conversation.updated_at = now;
+                                    tab.conversation.last_response_at = Some(now);
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    let storage_ref = storage.clone();
+                                    let conv_clone = tab.conversation.clone();
+                                    _pending_save = Some(tokio::spawn(async move {
+                                        match tokio::time::timeout(
+                                            BACKGROUND_TASK_TIMEOUT,
+                                            storage_ref.save_conversation(&conv_clone),
+                                        ).await {
+                                            Ok(Ok(())) => {}
+                                            Ok(Err(e)) => tracing::error!("Failed to persist background tab: {}", e),
+                                            Err(_) => tracing::warn!("Background tab save timed out"),
                                         }
-                                        let storage_ref = storage.clone();
-                                        let conv_clone = tab.conversation.clone();
-                                        _pending_save = Some(tokio::spawn(async move {
-                                            match tokio::time::timeout(
-                                                BACKGROUND_TASK_TIMEOUT,
-                                                storage_ref.save_conversation(&conv_clone),
-                                            ).await {
-                                                Ok(Ok(())) => {}
-                                                Ok(Err(e)) => tracing::error!("Failed to persist background tab: {}", e),
-                                                Err(_) => tracing::warn!("Background tab save timed out"),
-                                            }
-                                        }));
-                                    }
-                                    if trigger_title_generation && tab.conversation.title.is_empty()
-                                        && tab.conversation.messages.len() >= 2
-                                    {
-                                        let provider_ref = provider.clone();
-                                        let event_tx_ref = domain_tx.clone();
-                                        let model = config.model.clone();
-                                        let user_msg = tab.conversation.messages[0].content.clone();
-                                        let assistant_msg = truncate(&tab.conversation.messages[1].content, 500);
-                                        let title_conv_id = tab.conversation.id.clone();
-                                        tokio::spawn(async move {
-                                            match tokio::time::timeout(
-                                                BACKGROUND_TASK_TIMEOUT,
-                                                generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
-                                            ).await {
-                                                Ok(Ok(title)) => {
-                                                    let _ = event_tx_ref.send(AppEvent::TitleGenerated {
-                                                        conversation_id: title_conv_id,
-                                                        title,
-                                                    });
-                                                }
-                                                Ok(Err(e)) => tracing::warn!("Background title gen failed: {}", e),
-                                                Err(_) => tracing::warn!("Background title gen timed out"),
-                                            }
-                                        });
-                                    }
-                                    // Redraw tab bar — background tab may have gained a title
-                                    state.needs_redraw = true;
+                                    }));
                                 }
-                                // NeedsRedraw/TurnContinuing/None for background tab:
-                                // user isn't viewing it, no UI update needed
-                                _ => {}
+                                if trigger_title_generation && tab.conversation.title.is_empty()
+                                    && tab.conversation.messages.len() >= 2
+                                {
+                                    let provider_ref = provider.clone();
+                                    let event_tx_ref = domain_tx.clone();
+                                    let model = config.model.clone();
+                                    let user_msg = tab.conversation.messages[0].content.clone();
+                                    let assistant_msg = truncate(&tab.conversation.messages[1].content, 500);
+                                    let title_conv_id = tab.conversation.id.clone();
+                                    tokio::spawn(async move {
+                                        match tokio::time::timeout(
+                                            BACKGROUND_TASK_TIMEOUT,
+                                            generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
+                                        ).await {
+                                            Ok(Ok(title)) => {
+                                                let _ = event_tx_ref.send(AppEvent::TitleGenerated {
+                                                    conversation_id: title_conv_id,
+                                                    title,
+                                                });
+                                            }
+                                            Ok(Err(e)) => tracing::warn!("Background title gen failed: {}", e),
+                                            Err(_) => tracing::warn!("Background title gen timed out"),
+                                        }
+                                    });
+                                }
+                                // Redraw tab bar — background tab may have gained a title
+                                state.needs_redraw = true;
                             }
+                            // NeedsRedraw/TurnContinuing/None for background tab:
+                            // user isn't viewing it, no UI update needed
                         }
                     }
                     AppEvent::SystemNotice { conversation_id: notice_conv_id, level, message: msg } => {
                         // Route by conversation_id: None = global (always active tab),
                         // Some(id) = only affects that conversation's tab.
-                        let is_active_tab = notice_conv_id.as_deref()
-                            .map_or(true, |id| id == conversation.id);
+                        let is_active_tab = notice_conv_id
+                            .as_deref()
+                            .is_none_or(|id| id == conversation.id);
 
                         if is_active_tab {
                             // Detect session expiry from provider authentication errors.
@@ -1721,6 +1811,7 @@ pub async fn run(
                             &persona,
                             &workspace_path,
                             &mut session_manager,
+                            &fs_storage,
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
@@ -2008,6 +2099,163 @@ fn load_active_tab(
 
 /// Start a new turn: add user message, spawn provider streaming task.
 #[allow(clippy::too_many_arguments)]
+/// Decode, hash, and persist the `pending_images` drained on message submit.
+///
+/// Returns the image refs to attach to the new user `ChatMessage` so they survive
+/// a reload (Story 4-3a.1 AC3). Failures are logged via `tracing::warn!` and the
+/// corresponding attachment is dropped from the persisted list — AC4's
+/// graceful-degradation on load handles missing files if a partial save occurs.
+fn persist_image_attachments(
+    conversation_id: &str,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+    attachments: &[ImageAttachment],
+) -> Vec<crate::domain::models::ImageReference> {
+    use crate::adapters::filesystem::{content_hash, normalize_extension};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    // Guard: base64 encoding inflates size by ~4/3. MAX_RAW_IMAGE_SIZE is 20MB, so the
+    // encoded ceiling is ceil(20MB * 4/3) ≈ 27MB. Reject larger input before decoding to
+    // prevent memory exhaustion from a malformed or hostile attachment (P1, party-mode
+    // review 2026-04-12). The upstream paste handler already enforces MAX_RAW_IMAGE_SIZE
+    // on the raw bytes; this is a second line of defence at the persistence boundary.
+    const MAX_BASE64_ENCODED_SIZE: usize = 27 * 1024 * 1024; // 27MB
+
+    let mut refs = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        if attachment.data.len() > MAX_BASE64_ENCODED_SIZE {
+            tracing::warn!(
+                size = attachment.data.len(),
+                limit = MAX_BASE64_ENCODED_SIZE,
+                "Skipping image attachment: base64 data exceeds size limit"
+            );
+            continue;
+        }
+        let bytes = match STANDARD.decode(attachment.data.as_bytes()) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to base64-decode pending image: {}", e);
+                continue;
+            }
+        };
+        let hash = content_hash(&bytes);
+        let ext = normalize_extension(&attachment.media_type);
+        let file_name = format!("{}.{}", hash, ext);
+        let image_ref = crate::domain::models::ImageReference {
+            file_name,
+            media_type: attachment.media_type.clone(),
+            original_size: bytes.len(),
+        };
+        // Block on the async save via tokio's current-runtime handle. This
+        // runs inside the event loop task which already holds the runtime
+        // context, so `block_in_place` + a short-lived local is sufficient.
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(fs_storage.save_image(
+                conversation_id,
+                &image_ref,
+                &bytes,
+            ))
+        });
+        match result {
+            Ok(()) => refs.push(image_ref),
+            Err(e) => {
+                tracing::warn!(
+                    conversation_id,
+                    file_name = %image_ref.file_name,
+                    "Failed to persist image attachment: {}",
+                    e
+                );
+                // Still record the ref — the ChatMessage will carry it, and
+                // load-time validation will flag the missing file to the user.
+                refs.push(image_ref);
+            }
+        }
+    }
+    refs
+}
+
+/// Walk `conversation.messages` in parallel with the `Vec<Message>` produced
+/// by `build_api_messages` and, for each historical user message that carries
+/// persisted `ImageReference` entries, load the bytes from disk, base64-encode
+/// them, and attach the resulting `ImageAttachment` blocks to the matching
+/// API `Message`.
+///
+/// This is the runtime half of DF-067: Story 4-3a.1's original scope only
+/// covered persisting images to disk so they survive reload. It did not cover
+/// re-attaching them to the outbound API request on turn N+1, which meant the
+/// assistant "forgot" images across turns. Addendum 2 (2026-04-12 party-mode
+/// follow-up) closes that gap.
+///
+/// Messages whose `images` vec is already populated are skipped — the fresh
+/// turn's just-submitted message already has raw base64 attached by the
+/// caller and does not need a disk read.
+///
+/// Missing files are logged via `tracing::warn!` and the corresponding block
+/// is dropped from the request (AC4 graceful degradation extended to the API
+/// request path).
+///
+/// The index-advance logic must stay in sync with `build_api_messages`: it
+/// emits one `Message` per `ChatMessage`, plus a second synthetic user
+/// `Message` when an assistant turn carries tool-call results.
+///
+/// NOTE on `block_in_place`: mirrors `persist_image_attachments` — both call
+/// sites share the same sync-over-async pattern and will be lifted together
+/// whenever DF-102 (async conversion of `start_turn`) is resolved.
+pub fn rehydrate_historical_images(
+    conversation: &Conversation,
+    messages: &mut [crate::domain::models::Message],
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let mut msg_idx = 0;
+    for cm in &conversation.messages {
+        if msg_idx >= messages.len() {
+            break;
+        }
+
+        if cm.role == MessageRole::User
+            && !cm.images.is_empty()
+            && messages[msg_idx].images.is_empty()
+        {
+            for image_ref in &cm.images {
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(fs_storage.load_image(&conversation.id, image_ref))
+                });
+                match result {
+                    Ok(bytes) => {
+                        let data = STANDARD.encode(&bytes);
+                        messages[msg_idx].images.push(ImageAttachment {
+                            media_type: image_ref.media_type.clone(),
+                            data,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            conversation_id = %conversation.id,
+                            file_name = %image_ref.file_name,
+                            "Skipping historical image in API request: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        msg_idx += 1;
+
+        // Mirror `build_api_messages`: assistant messages with at least one
+        // tool-call result produce a second synthetic user message for the
+        // tool results.
+        if cm.role == MessageRole::Assistant
+            && !cm.tool_calls.is_empty()
+            && cm.tool_calls.iter().any(|tc| tc.result.is_some())
+        {
+            msg_idx += 1;
+        }
+    }
+}
+
 fn start_turn(
     text: &str,
     images: Vec<ImageAttachment>,
@@ -2023,7 +2271,17 @@ fn start_turn(
     persona: &Arc<dyn PersonaPort>,
     workspace_path: &std::path::Path,
     session_manager: &mut SessionManager,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
 ) {
+    // Persist any image attachments and collect their references. These are
+    // attached to the user ChatMessage so they survive a session reload
+    // (Story 4-3a.1 AC3 / DF-067).
+    let persisted_refs = if images.is_empty() {
+        Vec::new()
+    } else {
+        persist_image_attachments(&conversation.id, fs_storage, &images)
+    };
+
     // Add user ChatMessage to conversation
     conversation.messages.push(ChatMessage {
         id: generate_conversation_id(),
@@ -2034,6 +2292,7 @@ fn start_turn(
         created_at: crate::domain::models::session_meta::now_unix(),
         token_count: None,
         stop_reason: None,
+        images: persisted_refs,
     });
 
     // Build messages list for provider
@@ -2050,6 +2309,15 @@ fn start_turn(
             last_user_msg.images = images;
         }
     }
+
+    // Rehydrate historical images from disk so the provider sees the same
+    // visual context on every subsequent turn (Story 4-3a.1 Addendum 2 /
+    // multi-turn image rehydration). `build_api_messages` is a pure domain
+    // function and cannot touch disk, so rehydration happens here — after
+    // the fresh-turn attachment above, so the just-submitted message is
+    // skipped (its `images` vec is already populated with the raw base64
+    // and we don't need to re-read it from disk).
+    rehydrate_historical_images(conversation, &mut messages, fs_storage);
 
     // If session manager indicates history rebuild needed, prepend context
     if session_manager.needs_history_rebuild() {
@@ -2241,11 +2509,8 @@ fn render(
 
                 // P1/AC1: Render sidebar when visible
                 if let Some(sidebar_area) = app_layout.sidebar {
-                    let active_conv_id = if let Some(tm) = tab_manager_for_bar {
-                        Some(tm.active_tab().conversation.id.as_str())
-                    } else {
-                        None
-                    };
+                    let active_conv_id =
+                        tab_manager_for_bar.map(|tm| tm.active_tab().conversation.id.as_str());
                     sidebar::render_history_panel(
                         sidebar_area,
                         frame.buffer_mut(),
@@ -2892,5 +3157,330 @@ mod tests {
     fn test_truncate_exact_length() {
         let exact = "A".repeat(500);
         assert_eq!(truncate(&exact, 500), exact);
+    }
+
+    // P1 (party-mode review 2026-04-12): base64 size guard in persist_image_attachments
+    #[test]
+    fn test_persist_image_attachments_rejects_oversized_base64() {
+        use crate::adapters::filesystem::FileSystemStorage;
+        use crate::domain::models::ImageAttachment;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        // Synthesize a base64 string that exceeds MAX_BASE64_ENCODED_SIZE (27MB).
+        // 28MB of 'A' characters (all-same base64 input is fine for this test).
+        let oversized_base64 = "A".repeat(28 * 1024 * 1024);
+        let attachments = vec![ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: oversized_base64,
+        }];
+        let refs = persist_image_attachments("test-conv-p1", &storage, &attachments);
+        assert!(
+            refs.is_empty(),
+            "oversized base64 attachment must be dropped, got {} refs",
+            refs.len()
+        );
+    }
+
+    // P1: normal-sized attachment passes the guard and produces a ref.
+    // Requires multi_thread flavor because persist_image_attachments uses
+    // block_in_place internally (pre-existing DF-097).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_persist_image_attachments_accepts_valid_small_attachment() {
+        use crate::adapters::filesystem::FileSystemStorage;
+        use crate::domain::models::ImageAttachment;
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+
+        // 4 bytes of PNG → valid small attachment
+        let data = STANDARD.encode(b"\x89PNG");
+        let attachments = vec![ImageAttachment {
+            media_type: "image/png".to_string(),
+            data,
+        }];
+        let refs = persist_image_attachments("test-conv-p1-ok", &storage, &attachments);
+        assert_eq!(
+            refs.len(),
+            1,
+            "valid small attachment must produce one ImageReference"
+        );
+        assert!(refs[0].file_name.ends_with(".png"));
+    }
+
+    // ── Addendum 2 (2026-04-12): Multi-turn image rehydration ──────────
+    // See `rehydrate_historical_images` for the full rationale. These tests
+    // cover the unit-level contract: given a Conversation with persisted
+    // ImageReferences, the output `Vec<Message>` must carry the bytes as
+    // ImageAttachment blocks on the matching User messages.
+
+    fn mk_chat_msg_user_with_images(
+        content: &str,
+        images: Vec<crate::domain::models::ImageReference>,
+    ) -> ChatMessage {
+        ChatMessage {
+            id: generate_conversation_id(),
+            role: MessageRole::User,
+            content: content.to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 1_700_000_000,
+            token_count: None,
+            stop_reason: None,
+            images,
+        }
+    }
+
+    fn mk_chat_msg_assistant(content: &str) -> ChatMessage {
+        ChatMessage {
+            id: generate_conversation_id(),
+            role: MessageRole::Assistant,
+            content: content.to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 1_700_000_001,
+            token_count: None,
+            stop_reason: None,
+            images: vec![],
+        }
+    }
+
+    fn mk_conversation(id: &str, messages: Vec<ChatMessage>) -> Conversation {
+        Conversation {
+            id: id.to_string(),
+            title: "rehydrate test".to_string(),
+            messages,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_001,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            fork_source: None,
+        }
+    }
+
+    /// Multi-turn happy path: image saved on turn 1 is rehydrated into the
+    /// API request on turn 2. This is the core regression test for the
+    /// reported bug ("assistant forgets image on next turn").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rehydrate_historical_images_multi_turn_happy_path() {
+        use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
+        use crate::domain::models::ImageReference;
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv_id = "conv-rehydrate-happy";
+
+        // Given: a user turn-1 message with an image persisted on disk.
+        let bytes: Vec<u8> = b"\x89PNG\r\n\x1a\n-turn1-payload".to_vec();
+        let file_name = format!(
+            "{}.{}",
+            content_hash(&bytes),
+            normalize_extension("image/png")
+        );
+        let image_ref = ImageReference {
+            file_name: file_name.clone(),
+            media_type: "image/png".to_string(),
+            original_size: bytes.len(),
+        };
+        storage
+            .save_image(conv_id, &image_ref, &bytes)
+            .await
+            .unwrap();
+
+        // Conversation state on turn 2: turn-1 user msg (with persisted ref),
+        // turn-1 assistant reply, turn-2 user msg (fresh text, no images).
+        let conv = mk_conversation(
+            conv_id,
+            vec![
+                mk_chat_msg_user_with_images("what is this?", vec![image_ref.clone()]),
+                mk_chat_msg_assistant("a cat"),
+                mk_chat_msg_user_with_images("what colour?", vec![]),
+            ],
+        );
+
+        let mut messages = message_builder::build_api_messages(&conv);
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].images.is_empty(), "pre-rehydrate: empty");
+
+        // When: rehydration runs
+        rehydrate_historical_images(&conv, &mut messages, &storage);
+
+        // Then: turn-1 user message carries the image bytes as base64 in
+        // its API image attachment, and turn-2 remains empty (no ref).
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].images.len(), 1, "turn-1 must be rehydrated");
+        assert_eq!(messages[0].images[0].media_type, "image/png");
+        let expected_b64 = STANDARD.encode(&bytes);
+        assert_eq!(messages[0].images[0].data, expected_b64);
+
+        assert_eq!(messages[2].role, MessageRole::User);
+        assert!(messages[2].images.is_empty(), "turn-2 has no image ref");
+    }
+
+    /// A message whose `images` vec is already populated (e.g. fresh turn
+    /// attachment happened before rehydrate ran) must NOT be touched. This
+    /// guards against double-attaching the same image twice in the same
+    /// API request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rehydrate_skips_already_populated_messages() {
+        use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
+        use crate::domain::models::ImageReference;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv_id = "conv-rehydrate-skip";
+
+        let bytes: Vec<u8> = b"\x89PNG\r\n\x1a\n-skip".to_vec();
+        let file_name = format!(
+            "{}.{}",
+            content_hash(&bytes),
+            normalize_extension("image/png")
+        );
+        let image_ref = ImageReference {
+            file_name,
+            media_type: "image/png".to_string(),
+            original_size: bytes.len(),
+        };
+        storage
+            .save_image(conv_id, &image_ref, &bytes)
+            .await
+            .unwrap();
+
+        let conv = mk_conversation(
+            conv_id,
+            vec![mk_chat_msg_user_with_images("hi", vec![image_ref.clone()])],
+        );
+
+        let mut messages = message_builder::build_api_messages(&conv);
+        // Pre-populate with a sentinel "fresh" attachment — rehydrate must leave it alone.
+        messages[0].images.push(ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "SENTINEL-FRESH".to_string(),
+        });
+
+        rehydrate_historical_images(&conv, &mut messages, &storage);
+
+        assert_eq!(messages[0].images.len(), 1, "must not double-attach");
+        assert_eq!(messages[0].images[0].data, "SENTINEL-FRESH");
+    }
+
+    /// Missing image file on disk must not panic or fail the turn — just
+    /// warn and skip. This extends AC4 graceful degradation to the API
+    /// request path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rehydrate_missing_file_degrades_gracefully() {
+        use crate::adapters::filesystem::FileSystemStorage;
+        use crate::domain::models::ImageReference;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv_id = "conv-rehydrate-missing";
+
+        // Dangling reference: valid shape (16 hex chars + .png) but no file.
+        let image_ref = ImageReference {
+            file_name: "deadbeefdeadbeef.png".to_string(),
+            media_type: "image/png".to_string(),
+            original_size: 42,
+        };
+
+        let conv = mk_conversation(
+            conv_id,
+            vec![mk_chat_msg_user_with_images("ghost", vec![image_ref])],
+        );
+
+        let mut messages = message_builder::build_api_messages(&conv);
+        rehydrate_historical_images(&conv, &mut messages, &storage);
+
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].images.is_empty(),
+            "missing image must be dropped, not panicked"
+        );
+    }
+
+    /// Index-parity regression: when an assistant message with tool-call
+    /// results sits between two user messages, `build_api_messages` emits
+    /// an extra synthetic user message (for tool results). Rehydration
+    /// must still land images on the correct turn-1 user message.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rehydrate_index_parity_with_tool_results() {
+        use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
+        use crate::domain::models::ImageReference;
+        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv_id = "conv-rehydrate-tools";
+
+        let bytes: Vec<u8> = b"\x89PNG\r\n\x1a\n-tools".to_vec();
+        let file_name = format!(
+            "{}.{}",
+            content_hash(&bytes),
+            normalize_extension("image/png")
+        );
+        let image_ref = ImageReference {
+            file_name,
+            media_type: "image/png".to_string(),
+            original_size: bytes.len(),
+        };
+        storage
+            .save_image(conv_id, &image_ref, &bytes)
+            .await
+            .unwrap();
+
+        // turn-1: user with image
+        // turn-1: assistant with a tool call + result (→ 2 API messages)
+        // turn-2: user with no image
+        let mut assistant_with_tool = mk_chat_msg_assistant("calling tool");
+        assistant_with_tool.tool_calls.push(ToolCallInfo {
+            id: "tool-1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"path": "x"}),
+            result: Some(ToolResultInfo {
+                content: "file contents".to_string(),
+                is_error: false,
+            }),
+            started_at_ms: None,
+            completed_at_ms: None,
+        });
+        let conv = mk_conversation(
+            conv_id,
+            vec![
+                mk_chat_msg_user_with_images("analyse this", vec![image_ref.clone()]),
+                assistant_with_tool,
+                mk_chat_msg_user_with_images("more?", vec![]),
+            ],
+        );
+
+        let mut messages = message_builder::build_api_messages(&conv);
+        // Expected layout: [User(analyse), Assistant(calling), User(tool-result), User(more)]
+        assert_eq!(messages.len(), 4, "tool-result synthetic message present");
+
+        rehydrate_historical_images(&conv, &mut messages, &storage);
+
+        // Image lands on messages[0], NOT on the synthetic tool-result at [2].
+        assert_eq!(
+            messages[0].images.len(),
+            1,
+            "image must rehydrate onto turn-1 user message"
+        );
+        assert!(
+            messages[2].images.is_empty(),
+            "synthetic tool-result user message must not receive images"
+        );
+        assert!(
+            messages[3].images.is_empty(),
+            "turn-2 user message has no image ref"
+        );
     }
 }

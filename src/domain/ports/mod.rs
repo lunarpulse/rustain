@@ -3,6 +3,8 @@
 #[allow(unused_imports)]
 mod channel;
 #[allow(unused_imports)]
+mod clipboard;
+#[allow(unused_imports)]
 mod context;
 #[allow(unused_imports)]
 mod memory;
@@ -22,6 +24,7 @@ mod storage;
 mod toolset;
 
 pub use channel::ChannelPort;
+pub use clipboard::ClipboardPort;
 pub use context::ContextPort;
 pub use memory::MemoryPort;
 pub use persona::PersonaPort;

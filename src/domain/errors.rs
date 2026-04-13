@@ -198,3 +198,12 @@ pub enum TurnQueueError {
     #[error("Message queue full")]
     QueueFull,
 }
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ClipboardError {
+    #[error("clipboard backend error: {0}")]
+    Backend(String),
+    #[error("clipboard read timed out")]
+    Timeout,
+}

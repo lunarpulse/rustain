@@ -24,6 +24,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
             created_at: i as i64,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         })
         .collect();
 
@@ -457,6 +458,7 @@ fn test_virtual_scroll_only_user_messages() {
             created_at: i as i64,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         })
         .collect();
     let conversation = Conversation {

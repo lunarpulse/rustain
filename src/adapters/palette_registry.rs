@@ -87,6 +87,16 @@ impl PaletteRegistry {
             action: PaletteAction::DeleteAllConversations,
         });
 
+        // Clipboard paste
+        self.entries.push(PaletteEntry {
+            name: "paste image from clipboard".to_string(),
+            description: "Paste an image from the OS clipboard into the current message"
+                .to_string(),
+            shortcut: Some("Alt+V".to_string()),
+            scope: PaletteScope::All,
+            action: PaletteAction::PasteImageFromClipboard,
+        });
+
         self.populated_from_discovered = cr_discovered;
     }
 
@@ -385,8 +395,9 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 1 slash command (/new) + 4 built-ins (version, new tab, close tab, delete all) = 5
-        assert_eq!(reg.all_entries().len(), 5);
+        // 1 slash command (/new) + 5 built-ins (version, new tab, close tab, delete all,
+        // paste image from clipboard) = 6
+        assert_eq!(reg.all_entries().len(), 6);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
         assert!(reg.all_entries().iter().any(|e| e.name == "new tab"));
@@ -399,6 +410,6 @@ mod tests {
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 5);
+        assert_eq!(reg.all_entries().len(), 6);
     }
 }

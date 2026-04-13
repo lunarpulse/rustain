@@ -13,7 +13,9 @@ use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
-use crate::domain::ports::{PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort};
+use crate::domain::ports::{
+    ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
+};
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, paths, signals};
 
@@ -243,6 +245,14 @@ pub async fn run() -> Result<()> {
     signals::set_shutdown_sender(domain_tx.clone());
     signals::install_signal_handlers().await;
 
+    // 5e. Construct clipboard adapter
+    #[cfg(feature = "clipboard")]
+    let clipboard: Arc<dyn ClipboardPort> =
+        Arc::new(crate::adapters::clipboard_adapter::ArboardClipboard::new());
+    #[cfg(not(feature = "clipboard"))]
+    let clipboard: Arc<dyn ClipboardPort> =
+        Arc::new(crate::adapters::clipboard_adapter::NoOpClipboard::new());
+
     // 7. Setup terminal
     let mut tui = terminal::setup()?;
 
@@ -258,6 +268,7 @@ pub async fn run() -> Result<()> {
         persona,
         storage_port,
         storage,
+        clipboard,
         workspace_path,
         restored_conversation,
         recovery_prompt,

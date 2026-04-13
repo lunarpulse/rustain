@@ -44,6 +44,8 @@ pub enum PaletteAction {
     /// Delete all conversations (with confirmation).
     // Covers: AC5 (bulk delete), P9
     DeleteAllConversations,
+    /// Paste image (or text) from the system clipboard.
+    PasteImageFromClipboard,
     /// No-op — target feature not yet implemented.
     Noop,
 }

@@ -57,6 +57,7 @@ fn test_error_feedback_block_in_conversation() {
         created_at: 0,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }]);
     let streaming = StreamingState::default();
 

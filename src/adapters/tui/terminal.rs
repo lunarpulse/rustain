@@ -4,7 +4,7 @@ use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
     cursor::Show,
-    event::{DisableFocusChange, EnableFocusChange},
+    event::{DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::prelude::*;
@@ -24,6 +24,12 @@ pub fn setup() -> Result<Tui> {
         let _ = disable_raw_mode();
         return Err(e.into());
     }
+    // Enable bracketed paste so text pastes arrive as Event::Paste(String)
+    // instead of a stream of individual KeyEvents.
+    if let Err(e) = out.execute(EnableBracketedPaste) {
+        let _ = disable_raw_mode();
+        return Err(e.into());
+    }
     let backend = CrosstermBackend::new(out);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -35,6 +41,7 @@ pub fn teardown() -> Result<()> {
     disable_raw_mode()?;
     let mut out = stdout();
     out.execute(DisableFocusChange)?;
+    out.execute(DisableBracketedPaste)?;
     out.execute(LeaveAlternateScreen)?;
     out.execute(Show)?;
     io::Write::flush(&mut out)?;
@@ -46,6 +53,12 @@ pub fn teardown() -> Result<()> {
 pub fn restore_terminal_raw() {
     let _ = disable_raw_mode();
     let mut out = stdout().lock();
-    let _ = crossterm::execute!(out, DisableFocusChange, LeaveAlternateScreen, Show);
+    let _ = crossterm::execute!(
+        out,
+        DisableFocusChange,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
     let _ = io::Write::flush(&mut out);
 }

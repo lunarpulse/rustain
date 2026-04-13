@@ -287,6 +287,7 @@ fn test_chat_message_serializes_with_id() {
         created_at: 1000,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     };
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("\"id\":\"test-msg-id\""));

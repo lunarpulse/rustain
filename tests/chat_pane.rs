@@ -82,6 +82,7 @@ fn test_chat_pane_shows_user_message() {
         created_at: 0,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -128,6 +129,7 @@ fn test_chat_pane_shows_assistant_message() {
         created_at: 0,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -259,6 +261,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         created_at: 0,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }]);
     let streaming = StreamingState {
         is_streaming: true,
@@ -318,6 +321,7 @@ fn test_chat_pane_error_displays_in_red() {
         created_at: 0,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -434,6 +438,7 @@ fn test_feedback_block_visible_with_auto_scroll() {
             created_at: 0,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         })
         .collect();
     let conversation = make_conversation(messages);
@@ -515,6 +520,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         created_at: 0,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();

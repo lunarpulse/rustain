@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::conversation::ForkSource;
+
 /// Lightweight session metadata for sidebar display (sidecar file).
 /// Stored as `{id}.session.json` alongside the full `{id}.meta.json` conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,13 +20,16 @@ pub struct SessionMeta {
     /// Bookmarked message indices (for Story 4.4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bookmarks: Vec<usize>,
-    // Future fields (Story 4.3a, 4.5):
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub fork_source: Option<ForkSource>,
-    // #[serde(default, skip_serializing_if = "Option::is_none")]
-    // pub imported_from: Option<String>,
-    // #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    // pub tags: Vec<String>,
+    /// Mirror of `Conversation.fork_source` for fast sidebar rendering (Story
+    /// 4-3a.1 / DF-095). The sidebar render path must not touch disk, so the
+    /// fork indicator is read from SessionSummary (built from this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_source: Option<ForkSource>,
+    /// Lossless round-trip of unknown fields (DF-088). Any serde fields we
+    /// don't know about are captured here and written back on re-save so
+    /// cross-version saves never silently drop data.
+    #[serde(flatten, default)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl SessionMeta {
@@ -39,6 +44,8 @@ impl SessionMeta {
             updated_at: now,
             message_count: 0,
             bookmarks: Vec::new(),
+            fork_source: None,
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -51,6 +58,8 @@ impl SessionMeta {
             updated_at: conv.updated_at,
             message_count: conv.messages.len(),
             bookmarks: Vec::new(),
+            fork_source: conv.fork_source.clone(),
+            extra: serde_json::Map::new(),
         }
     }
 
@@ -206,6 +215,8 @@ mod tests {
             updated_at: 1700000100,
             message_count: 5,
             bookmarks: vec![1, 3],
+            fork_source: None,
+            extra: serde_json::Map::new(),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -285,5 +296,67 @@ mod tests {
         let meta: SessionMeta = serde_json::from_str(json).unwrap();
         assert_eq!(meta.version, 2);
         assert_eq!(meta.title, "Future Session");
+    }
+
+    /// DF-088 regression: unknown fields written by a newer rustain must survive
+    /// a round-trip through an older rustain's load→save cycle. Without the
+    /// `extra` flatten-map, serde would silently drop them on re-save and
+    /// forward-compat data would be lost.
+    #[test]
+    fn test_session_meta_preserves_unknown_fields_on_resave() {
+        // Simulated on-disk JSON written by a future rustain that knows about
+        // `futureField` and `nestedMeta`.
+        let original_json = r#"{
+            "version": 2,
+            "title": "Future Session",
+            "createdAt": 1700000000,
+            "updatedAt": 1700000100,
+            "messageCount": 3,
+            "bookmarks": [1, 2],
+            "futureField": "opaque string",
+            "nestedMeta": {
+                "reviewer": "alice",
+                "score": 7
+            }
+        }"#;
+
+        // Load → unknowns land in `extra`.
+        let meta: SessionMeta = serde_json::from_str(original_json).unwrap();
+        assert_eq!(
+            meta.extra.get("futureField").and_then(|v| v.as_str()),
+            Some("opaque string"),
+            "futureField must be captured in extra map"
+        );
+        assert!(
+            meta.extra.contains_key("nestedMeta"),
+            "nestedMeta must be captured in extra map"
+        );
+
+        // Re-save → unknowns must appear back in the output JSON.
+        let resaved = serde_json::to_string(&meta).unwrap();
+        assert!(
+            resaved.contains("\"futureField\""),
+            "re-saved JSON must contain futureField: {}",
+            resaved
+        );
+        assert!(
+            resaved.contains("\"opaque string\""),
+            "re-saved JSON must preserve futureField value: {}",
+            resaved
+        );
+        assert!(
+            resaved.contains("\"nestedMeta\""),
+            "re-saved JSON must contain nestedMeta: {}",
+            resaved
+        );
+        assert!(
+            resaved.contains("\"reviewer\""),
+            "re-saved JSON must preserve nested field: {}",
+            resaved
+        );
+
+        // And a second round-trip must be stable (load → save → load equal).
+        let meta2: SessionMeta = serde_json::from_str(&resaved).unwrap();
+        assert_eq!(meta.extra, meta2.extra);
     }
 }

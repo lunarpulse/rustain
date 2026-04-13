@@ -30,8 +30,8 @@ pub use config::AppConfig;
 pub use content::ContentBlockType;
 #[allow(unused_imports)]
 pub use conversation::{
-    ChatMessage, Conversation, ConversationSummary, ForkSource, generate_conversation_id,
-    generate_message_id,
+    ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
+    generate_conversation_id, generate_message_id,
 };
 pub use focus::FocusState;
 #[allow(unused_imports)]

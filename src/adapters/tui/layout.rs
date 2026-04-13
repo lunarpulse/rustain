@@ -49,7 +49,7 @@ pub fn compute_layout(
     // Calculate sidebar width: min(50, terminal_width * 0.3) with minimum of 30
     let show_sidebar = sidebar_visible && area.width >= SIDEBAR_MIN_WIDTH;
     let sidebar_width = if show_sidebar {
-        ((area.width as f32) * 0.3).min(50.0).max(30.0) as u16
+        ((area.width as f32) * 0.3).clamp(30.0, 50.0) as u16
     } else {
         0
     };

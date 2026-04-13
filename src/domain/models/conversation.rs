@@ -7,6 +7,57 @@ use super::stream::StopReason;
 use super::tools::ToolCallInfo;
 use super::usage::UsageInfo;
 
+/// Returns `true` only if `s` matches the hash-addressed filename format produced by
+/// `content_hash`: exactly 16 lowercase hex chars, a dot, and a known extension.
+///
+/// Validated at deserialization time to block path traversal via crafted session files
+/// (party-mode review finding D1, 2026-04-12). The constraint is tight by design —
+/// only `persist_image_attachments` ever creates these names.
+fn is_valid_image_file_name(s: &str) -> bool {
+    let Some(dot) = s.find('.') else { return false };
+    let (name, rest) = s.split_at(dot);
+    let ext = &rest[1..]; // skip the dot
+    name.len() == 16
+        && name.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+        && matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "bin")
+}
+
+fn deserialize_image_file_name<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    if is_valid_image_file_name(&s) {
+        Ok(s)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "invalid ImageReference.file_name {:?}: expected \
+             '{{16 lowercase hex chars}}.{{png|jpg|jpeg|gif|webp|bin}}'",
+            s
+        )))
+    }
+}
+
+/// A reference to an image file persisted on disk in the session's `images/` directory.
+///
+/// Stored on `ChatMessage.images` so image attachments survive a reload. Pairs with the
+/// hash-addressed file `{sessions_dir}/{conversation_id}/images/{file_name}`.
+/// See Story 4-3a.1 (DF-067).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageReference {
+    /// Hash-based filename (e.g., "a1b2c3d4e5f60708.png"). Resolved against the
+    /// session's images/ directory.
+    /// Validated at deserialization: must be 16 hex chars + known extension to prevent
+    /// path traversal via crafted session files (D1, party-mode review 2026-04-12).
+    #[serde(deserialize_with = "deserialize_image_file_name")]
+    pub file_name: String,
+    /// MIME type (e.g., "image/png", "image/jpeg").
+    pub media_type: String,
+    /// Original file size in bytes (post base64-decode).
+    pub original_size: usize,
+}
+
 /// A single message in a conversation. Persisted to session files.
 /// Distinct from `Message` which is the provider-agnostic API request format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +76,10 @@ pub struct ChatMessage {
     /// Why this message's generation stopped. `None` for user messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    /// Image attachments persisted alongside this message.
+    /// Empty vec is omitted from JSON output for backward compatibility with pre-4.3a.1 sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageReference>,
 }
 
 /// Generate a unique message ID using nanoid.
@@ -64,6 +119,11 @@ pub struct ConversationSummary {
     /// Unix timestamp in seconds.
     pub updated_at: i64,
     pub message_count: usize,
+    /// Whether this conversation is a fork (mirrors `SessionMeta.fork_source.is_some()`).
+    /// Used by the sidebar to render a fork indicator without touching disk.
+    /// `#[serde(default)]` for backward compat with pre-4-3a.1 session metas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_fork_source: bool,
 }
 
 /// Tracks the origin of a forked conversation.
@@ -146,6 +206,157 @@ impl PersistedConversation {
             session_id: self.session_id,
             usage: self.usage,
             fork_source: self.fork_source,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::MessageRole;
+
+    fn make_image_ref(name: &str) -> ImageReference {
+        ImageReference {
+            file_name: name.to_string(),
+            media_type: "image/png".to_string(),
+            original_size: 1024,
+        }
+    }
+
+    fn make_chat_message(images: Vec<ImageReference>) -> ChatMessage {
+        ChatMessage {
+            id: "msg-test".to_string(),
+            role: MessageRole::User,
+            content: "hello".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 1700000000,
+            token_count: None,
+            stop_reason: None,
+            images,
+        }
+    }
+
+    // Task 1.5: ChatMessage with images serializes/deserializes correctly
+    #[test]
+    fn test_chat_message_with_images_roundtrip() {
+        // Use valid 16-char hex filenames (required by deserialize_image_file_name validator)
+        let images = vec![
+            make_image_ref("a1b2c3d4e5f60708.png"),
+            ImageReference {
+                file_name: "b2c3d4e5f607080a.jpg".to_string(),
+                media_type: "image/jpeg".to_string(),
+                original_size: 2048,
+            },
+        ];
+        let msg = make_chat_message(images.clone());
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: ChatMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.images.len(), 2);
+        assert_eq!(deserialized.images[0].file_name, "a1b2c3d4e5f60708.png");
+        assert_eq!(deserialized.images[0].media_type, "image/png");
+        assert_eq!(deserialized.images[0].original_size, 1024);
+        assert_eq!(deserialized.images[1].file_name, "b2c3d4e5f607080a.jpg");
+        assert_eq!(deserialized.images[1].media_type, "image/jpeg");
+    }
+
+    // Task 1.6: empty images vec is omitted from JSON output (skip_serializing_if)
+    #[test]
+    fn test_chat_message_empty_images_omitted_from_json() {
+        let msg = make_chat_message(vec![]);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("\"images\""),
+            "empty images vec must be omitted from JSON: {}",
+            json
+        );
+    }
+
+    // Task 1.7: existing JSON without `images` field deserializes with empty Vec (backward compat)
+    #[test]
+    fn test_chat_message_backward_compat_without_images_field() {
+        // Legacy JSON from pre-4.3a.1 sessions — no `images` field at all
+        let json = r#"{
+            "id": "legacy-msg",
+            "role": "user",
+            "content": "legacy content",
+            "contentBlocks": [],
+            "toolCalls": [],
+            "createdAt": 1700000000,
+            "tokenCount": null
+        }"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.id, "legacy-msg");
+        assert!(msg.images.is_empty());
+    }
+
+    // camelCase field names for ImageReference
+    #[test]
+    fn test_image_reference_camel_case_serialization() {
+        let image_ref = ImageReference {
+            file_name: "a1b2c3d4e5f60708.png".to_string(),
+            media_type: "image/png".to_string(),
+            original_size: 5000,
+        };
+        let json = serde_json::to_string(&image_ref).unwrap();
+        // camelCase expected due to ChatMessage's serde(rename_all)? No — ImageReference
+        // has its own derive. We set rename_all = "camelCase" on it too.
+        assert!(
+            json.contains("\"fileName\""),
+            "expected camelCase: {}",
+            json
+        );
+        assert!(
+            json.contains("\"mediaType\""),
+            "expected camelCase: {}",
+            json
+        );
+        assert!(
+            json.contains("\"originalSize\""),
+            "expected camelCase: {}",
+            json
+        );
+    }
+
+    // D1 (party-mode review 2026-04-12): deserializer rejects path-traversal filenames
+    #[test]
+    fn test_image_reference_rejects_path_traversal_filename() {
+        let json =
+            r#"{"fileName":"../../../etc/passwd","mediaType":"image/png","originalSize":100}"#;
+        let result: serde_json::Result<ImageReference> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "path traversal filename must be rejected by deserializer"
+        );
+    }
+
+    // D1: empty filename rejected (also covers F6 — empty file_name validation)
+    #[test]
+    fn test_image_reference_rejects_empty_filename() {
+        let json = r#"{"fileName":"","mediaType":"image/png","originalSize":100}"#;
+        let result: serde_json::Result<ImageReference> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "empty filename must be rejected by deserializer"
+        );
+    }
+
+    // D1: valid hash-addressed filename accepted (regression guard)
+    #[test]
+    fn test_image_reference_accepts_valid_hash_filename() {
+        for name in &[
+            "a1b2c3d4e5f60708.png",
+            "deadbeefcafe1234.jpg",
+            "0123456789abcdef.gif",
+            "ffffffffffffffff.webp",
+            "0000000000000000.bin",
+        ] {
+            let json = format!(
+                r#"{{"fileName":"{}","mediaType":"image/png","originalSize":100}}"#,
+                name
+            );
+            let result: serde_json::Result<ImageReference> = serde_json::from_str(&json);
+            assert!(result.is_ok(), "valid filename {:?} must be accepted", name);
         }
     }
 }

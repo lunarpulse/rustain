@@ -145,6 +145,7 @@ data: {\"type\":\"message_stop\"}\n\
             created_at: 999,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
 
         // Usage
@@ -274,6 +275,7 @@ data: {\"type\":\"message_stop\"}\n\
             created_at: 999,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
         let mut streaming = make_streaming();
 
@@ -605,6 +607,7 @@ data: {\"type\":\"message_stop\"}\n\
             created_at: 999,
             token_count: None,
             stop_reason: None,
+            images: vec![],
         });
         let mut streaming = make_streaming();
 

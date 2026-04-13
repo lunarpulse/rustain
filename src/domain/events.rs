@@ -107,6 +107,8 @@ pub enum DomainKey {
     /// Alt+M: toggle multi-line mode (VS Code terminal alternative to Ctrl+E).
     // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment
     AltM,
+    /// Alt+V: paste image (or text) from the system clipboard.
+    AltV,
     Esc,
     Backspace,
     Delete,

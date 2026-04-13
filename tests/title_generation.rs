@@ -97,6 +97,7 @@ fn add_user_message(conv: &mut Conversation, content: &str) {
         created_at: 1000,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     });
 }
 
@@ -324,6 +325,7 @@ fn test_no_title_generation_for_subsequent_turns() {
         created_at: 1001,
         token_count: None,
         stop_reason: Some(StopReason::EndTurn),
+        images: vec![],
     });
 
     // Add another user message + assistant response (messages.len() will be 4)

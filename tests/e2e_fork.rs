@@ -39,6 +39,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         created_at: 1700000000,
         token_count: None,
         stop_reason: None,
+        images: vec![],
     }
 }
 
