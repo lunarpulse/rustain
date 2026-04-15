@@ -14,6 +14,23 @@ pub struct Theme {
     pub timing: TimingTokens,
     pub borders: BorderTokens,
     pub typography: TypographyTokens,
+    /// Base highlight style for every substring match in the within-conversation
+    /// search overlay (Ctrl+F). Default: `Modifier::REVERSED` (terminal-native
+    /// inverse), which works in monochrome and does not rely on color tokens.
+    // Covers: Story 4-4 AC2 (UX-DR86)
+    pub search_highlight: Style,
+    /// Layered highlight for the **currently focused** match only. Default:
+    /// `Modifier::REVERSED | Modifier::BOLD` — the bold frame makes the focused
+    /// match visually distinct from the rest so users can see where `n` / `N`
+    /// will move them next.
+    // Covers: Story 4-4 AC2, AC3 (UX-DR86)
+    pub search_highlight_focused: Style,
+    /// Prefix glyph rendered on bookmarked messages. Default `"» "` — ASCII
+    /// Latin-1 + space, guaranteed 2 display columns in every terminal so the
+    /// height invariant stays stable. Users can override with `"🔖 "` if their
+    /// terminal handles emoji width correctly (trailing space mandatory).
+    // Covers: Story 4-4 AC9 (UX-DR91), independent reviewer Fix 2
+    pub bookmark_glyph: String,
 }
 
 /// Semantic color tokens for all UI elements.
@@ -53,6 +70,11 @@ pub struct ColorTokens {
     pub profile_base: Color,
     /// Hint text color (dim, italic) for token estimates and secondary info.
     pub text_hint: Color,
+    /// Color for the bookmark prefix glyph. Same family as `warning` by
+    /// default (yellow) so bookmarks stand out without conflicting with
+    /// the fork marker or other accents.
+    // Covers: Story 4-4 AC9
+    pub bookmark_accent: Color,
 }
 
 /// Spacing tokens for layout calculations.
@@ -133,6 +155,29 @@ pub fn dotted_line_set() -> line::Set<'static> {
     }
 }
 
+/// Validate the unicode-width of a bookmark glyph per Story 4-4 AC9 Dev
+/// Notes. Accepts strings whose display width is in `[2, 4]` — rejects
+/// zero-width and over-wide glyphs that would break the height invariant.
+/// Returns `Ok(())` on success, `Err(reason)` with a human-readable message
+/// on rejection so the caller can log a warning and fall back to the default.
+pub fn validate_bookmark_glyph(glyph: &str) -> Result<(), String> {
+    use unicode_width::UnicodeWidthStr;
+    let width = UnicodeWidthStr::width(glyph);
+    if width < 2 {
+        return Err(format!(
+            "bookmark_glyph {:?} has display width {} < 2 — must be at least 2 columns (e.g. '» ')",
+            glyph, width
+        ));
+    }
+    if width > 4 {
+        return Err(format!(
+            "bookmark_glyph {:?} has display width {} > 4 — too wide, will break message column alignment",
+            glyph, width
+        ));
+    }
+    Ok(())
+}
+
 impl Theme {
     /// Create the default dark theme with all hardcoded values from the UX spec.
     pub fn dark() -> Self {
@@ -173,6 +218,8 @@ impl Theme {
                 profile_custom: Color::Rgb(180, 80, 200),
                 profile_base: Color::Rgb(128, 128, 128),
                 text_hint: Color::DarkGray,
+                // Story 4-4 AC9: bookmark glyph color (yellow family).
+                bookmark_accent: Color::Rgb(230, 200, 0),
             },
             spacing: SpacingTokens {
                 none: 0,
@@ -216,6 +263,17 @@ impl Theme {
                     .add_modifier(Modifier::DIM)
                     .add_modifier(Modifier::ITALIC),
             },
+            // Story 4-4: search overlay highlight styles — terminal-native
+            // inverse so they work in all color capabilities without touching
+            // the color degradation path.
+            search_highlight: Style::default().add_modifier(Modifier::REVERSED),
+            search_highlight_focused: Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .add_modifier(Modifier::BOLD),
+            // Story 4-4 AC9: bookmark prefix glyph. `"» "` is U+00BB +
+            // trailing space — guaranteed 2 display columns. See Dev Notes
+            // § Bookmark Glyph Theming for why not emoji.
+            bookmark_glyph: "» ".to_string(),
         }
     }
 
@@ -262,6 +320,13 @@ impl Theme {
             ColorCapability::Color256 => theme.degrade_to_256(),
             ColorCapability::Color16 => theme.degrade_to_16(),
             ColorCapability::Monochrome => theme.degrade_to_monochrome(),
+        }
+        // Story 4-4 AC9: validate the bookmark glyph width at theme-load.
+        // The dark theme uses `"» "` which is stable 2-col — this validation
+        // catches any future override that would violate the height invariant.
+        if let Err(msg) = validate_bookmark_glyph(&theme.bookmark_glyph) {
+            tracing::warn!("{} — falling back to default '» '", msg);
+            theme.bookmark_glyph = "» ".to_string();
         }
         theme
     }
@@ -346,6 +411,7 @@ impl ColorTokens {
         self.profile_custom = mapper(self.profile_custom);
         self.profile_base = mapper(self.profile_base);
         self.text_hint = mapper(self.text_hint);
+        self.bookmark_accent = mapper(self.bookmark_accent);
     }
 }
 

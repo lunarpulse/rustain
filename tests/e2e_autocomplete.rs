@@ -83,7 +83,7 @@ fn test_e2e_slash_command_navigation() {
 
     // Open autocomplete
     h.type_char('/');
-    let initial_index = h.state.autocomplete.selected_index;
+    let _initial_index = h.state.autocomplete.selected_index;
 
     // Down arrow navigates
     let action = h.press_key(DomainKey::Down);

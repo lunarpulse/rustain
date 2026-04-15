@@ -377,11 +377,7 @@ mod tests {
         );
         // 1 content line + 1 blank line
         assert_eq!(result.len(), 2);
-        assert!(
-            result[1].spans.is_empty()
-                || result[1].spans[0].content.is_empty()
-                || result[1].spans[0].content == ""
-        );
+        assert!(result[1].spans.is_empty() || result[1].spans[0].content.is_empty());
     }
 
     #[test]
@@ -583,7 +579,7 @@ mod tests {
         let lines = wrap_spans(spans, 4);
         // "你好" = 4 cols → fits on line 1; " world" wraps
         // Actually "你好" is 4 cols, then " world" doesn't fit in 4 cols on same line
-        assert!(lines.len() >= 1);
+        assert!(!lines.is_empty());
     }
 
     #[test]

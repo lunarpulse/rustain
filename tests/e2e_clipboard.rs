@@ -7,7 +7,6 @@
 //! - Clipboard operations (c key, OSC 52)
 //! - Tool output and message copying
 
-use rustain::adapters::tui::app::InputAction;
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::{FocusState, MessageRole};
 

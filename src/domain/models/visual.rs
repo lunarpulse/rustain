@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Border style variants for content blocks.
 /// Mapped to ratatui `BorderType` + optional custom line sets in the theme layer.
@@ -50,6 +51,9 @@ pub enum ConfirmationType {
     Fork,
     /// Rewind confirmation card (Story 4-3b, AC1).
     Rewind,
+    /// Export overwrite confirmation (Story 4-4 AC12) —
+    /// shown only in explicit-path mode when the target file already exists.
+    ExportOverwrite(PathBuf),
 }
 
 /// Overlay types for modal focus targets.
@@ -65,6 +69,15 @@ pub enum OverlayType {
     /// Reverse search overlay for input history (Ctrl+R).
     // Covers: UX-DR74
     ReverseSearch,
+    /// Within-conversation search overlay (Ctrl+F).
+    // Covers: UX-DR86, Story 4-4 AC1-AC4
+    Search,
+    /// Cross-conversation search overlay (/ in sidebar).
+    // Covers: UX-DR87, Story 4-4 AC5-AC7
+    CrossSearch,
+    /// Bookmark list bottom panel (' key).
+    // Covers: UX-DR91, Story 4-4 AC10
+    BookmarkList,
     /// Inline autocomplete popup (/ or @).
     // Covers: UX-DR75
     Autocomplete(super::autocomplete::AutocompleteKind),

@@ -2,6 +2,7 @@ use crate::domain::models::tab::ConversationId;
 use crate::domain::models::{
     ApprovalDecision, NoticeLevel, PermissionMode, StreamChunk, ToolResult,
 };
+use crate::domain::services::cross_search::CrossSearchResult;
 
 /// Domain-level application events flowing through the event loop.
 /// crossterm types MUST NOT appear here — the adapter converts them to DomainInputEvent.
@@ -70,6 +71,21 @@ pub enum AppEvent {
         tool_input: serde_json::Value,
         response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
     },
+    /// Cross-search results ready from an async scan task (Story 4-4 AC5).
+    /// Carries the original query so the event loop can discard stale results
+    /// if the user has typed more characters in the meantime.
+    /// No `conversation_id` — this is a view-update event per Amendment 3.
+    CrossSearchResultsReady {
+        query: String,
+        results: Vec<CrossSearchResult>,
+        truncated_by_count: bool,
+        truncated_by_time: bool,
+    },
+    /// Peek highlight for a cross-search jump has expired (Story 4-4 AC6).
+    /// Fired 1500 ms after the highlight was set by `OpenCrossSearchResult`.
+    /// No `conversation_id` — view-update per Amendment 3. `tab_id` targets
+    /// the specific tab whose peek highlight should clear.
+    PeekHighlightExpired { tab_id: usize },
 }
 
 /// Event wrapping a tool execution result.
@@ -122,10 +138,12 @@ pub enum DomainKey {
     ShiftTab,
     CtrlC,
     CtrlE,
+    CtrlF,
     CtrlH,
     CtrlP,
     CtrlR,
     CtrlT,
+    CtrlU,
     CtrlX,
 }
 

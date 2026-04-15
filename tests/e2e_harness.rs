@@ -162,6 +162,12 @@ pub struct TestHarness {
     pub theme: Theme,
 }
 
+impl Default for TestHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestHarness {
     /// Create a new test harness with standard 80x24 terminal.
     pub fn new() -> Self {
@@ -836,7 +842,7 @@ fn test_e2e_error_during_streaming() {
 
     // Error text should be captured in the assistant response
     assert!(
-        h.conversation.messages.len() >= 1,
+        !h.conversation.messages.is_empty(),
         "At least user message exists"
     );
 }

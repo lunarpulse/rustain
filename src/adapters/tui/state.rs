@@ -9,6 +9,8 @@ use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::{
     ApprovalDecision, FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
 };
+use crate::domain::services::cross_search::CrossSearchResult;
+use crate::domain::services::search::SearchMatch;
 
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
@@ -286,6 +288,129 @@ impl ReverseSearchState {
 }
 
 impl Default for ReverseSearchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Sub-state of the within-conversation search overlay.
+///
+/// Resolves the `n` / `N` input-vs-navigation collision (Story 4-4 AC3): in
+/// `Typing` every printable key builds the query; in `Navigating` the query is
+/// committed and `n` / `N` cycle matches. Any printable key in `Navigating`
+/// returns to `Typing` and applies the keystroke, letting the user refine the
+/// query without pressing Esc.
+// Covers: UX-DR86, Story 4-4 AC3
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchSubstate {
+    Typing,
+    Navigating,
+}
+
+/// Transient peek-highlight applied to a single match for 1500 ms when a
+/// cross-conversation search result is opened in a new tab (Story 4-4 AC6).
+/// Fields are populated by the cross-search-result handler in Task 8.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PeekHighlight {
+    pub m: SearchMatch,
+    pub expires_at: Instant,
+}
+
+/// State for the within-conversation search overlay (Ctrl+F).
+///
+/// Distinct from `ReverseSearchState` (Ctrl+R input history search) — that one
+/// searches the user's past-input buffer; this one searches the rendered
+/// conversation. Byte offsets in `matches` are into the **original** message
+/// content string, not a lowercased copy — see `domain::services::search`.
+// Covers: UX-DR86, Story 4-4 AC1-AC7
+pub struct SearchState {
+    pub active: bool,
+    pub query: String,
+    pub matches: Vec<SearchMatch>,
+    /// Index into `matches` of the currently focused match.
+    pub focused_match_index: usize,
+    /// Typing (cursor in input, n/N build query) vs Navigating (query committed,
+    /// n/N cycle matches). See AC3 amendment.
+    pub substate: SearchSubstate,
+    /// Last time `find_matches` ran — drives the 30 ms recomputation debounce
+    /// in Task 3.3, separate from the calm-jump rule.
+    pub last_search_instant: Option<Instant>,
+    /// Query length at the time of the last `find_matches` call — when the
+    /// length changes, bypass the 30 ms debounce; when it doesn't (held-key
+    /// repeat), honor the debounce and skip the scan.
+    pub last_query_len: usize,
+    /// Focus to restore on Esc (typically `FocusState::Chat`).
+    pub prior_focus: Option<FocusState>,
+    /// Transient peek highlight for cross-search result jumps (AC6).
+    /// Populated by Task 8 (open cross-search result in new tab).
+    #[allow(dead_code)]
+    pub peek_highlight: Option<PeekHighlight>,
+}
+
+impl SearchState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            matches: Vec::new(),
+            focused_match_index: 0,
+            substate: SearchSubstate::Typing,
+            last_search_instant: None,
+            last_query_len: 0,
+            prior_focus: None,
+            peek_highlight: None,
+        }
+    }
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// State for the cross-conversation search overlay (`/` in sidebar focus).
+///
+/// Lives in the adapter layer because it's TUI view state. The actual scan
+/// runs in the event loop via `domain::services::cross_search::run_cross_search`
+/// and writes its results back into this struct via a stale-guarded update.
+// Covers: Story 4-4 AC5, AC6, AC7 (UX-DR87)
+pub struct CrossSearchState {
+    pub active: bool,
+    pub query: String,
+    pub results: Vec<CrossSearchResult>,
+    pub selected: usize,
+    /// Set when the last scan hit the count cap (20 results).
+    pub truncated_by_count: bool,
+    /// Set when the last scan hit the wall-clock budget (200 ms).
+    pub truncated_by_time: bool,
+    /// Total conversations in the index at the time of the last scan.
+    pub total: usize,
+    /// Actual conversations scanned before truncation.
+    pub scanned: usize,
+    /// Currently running — shown as a "Searching…" hint while the scan task
+    /// is in flight. Mirrors reviewer Fix 5's loading indicator requirement.
+    pub running: bool,
+}
+
+impl CrossSearchState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            results: Vec::new(),
+            selected: 0,
+            truncated_by_count: false,
+            truncated_by_time: false,
+            total: 0,
+            scanned: 0,
+            running: false,
+        }
+    }
+}
+
+impl Default for CrossSearchState {
     fn default() -> Self {
         Self::new()
     }
@@ -698,6 +823,12 @@ pub struct TuiState {
     /// State for reverse search overlay (Ctrl+R).
     // Covers: UX-DR74
     pub reverse_search: ReverseSearchState,
+    /// State for the within-conversation search overlay (Ctrl+F).
+    // Covers: UX-DR86, Story 4-4 AC1-AC7
+    pub search_state: SearchState,
+    /// State for the cross-conversation search overlay (`/` in sidebar).
+    // Covers: UX-DR87, Story 4-4 AC5-AC7
+    pub cross_search: CrossSearchState,
     /// Vertical scroll offset within the input box when lines exceed max height.
     pub input_scroll_offset: usize,
     /// Autocomplete popup state (/ commands and @ file mentions).
@@ -763,6 +894,28 @@ pub struct TuiState {
     /// Populated when pending_rewind_index is set; cleared on confirm/cancel.
     /// Story 4-3b, AC1.
     pub rewind_preview: Option<RewindPreview>,
+    /// Currently selected row in the bookmark list panel (AC10). `0` when
+    /// the panel is closed.
+    // Covers: Story 4-4 AC10
+    pub bookmark_list_selected: usize,
+    /// Mirror of the active tab's bookmark count — kept in sync by the event
+    /// loop whenever the panel opens or a bookmark is added / removed. The
+    /// key-handler layer in `app.rs` reads this to clamp `j`/`Down` to the
+    /// upper bound (Story 4-4 AC10 clamping requirement).
+    pub bookmark_list_count: usize,
+    /// Single-entry undo buffer for bookmark list deletes (AC10 synthesis).
+    /// Stores `(deleted_index, timestamp)`; `u` within 5 s restores it, then
+    /// the buffer clears silently on expiry.
+    // Covers: Story 4-4 AC10 amendment
+    pub bookmark_undo_buffer: Option<(usize, Instant)>,
+    /// Pending export overwrite confirmation — set when `/export <name>` is
+    /// invoked on a path that already exists. Carries the resolved target
+    /// `PathBuf` and the *pre-rendered* markdown content captured at the
+    /// moment of confirmation (so the overlay's `y` press writes a stable
+    /// snapshot even if the conversation mutates in the background).
+    /// Cleared on confirm / cancel / Esc.
+    // Covers: Story 4-4 AC12
+    pub pending_export: Option<(std::path::PathBuf, String)>,
 }
 
 impl TuiState {
@@ -805,6 +958,8 @@ impl TuiState {
             input_history: InputHistory::new(),
             multiline_mode: false,
             reverse_search: ReverseSearchState::new(),
+            search_state: SearchState::new(),
+            cross_search: CrossSearchState::new(),
             input_scroll_offset: 0,
             autocomplete: AutocompleteState::new(),
             resolved_mentions: Vec::new(),
@@ -827,6 +982,10 @@ impl TuiState {
             pending_fork_index: None,
             pending_rewind_index: None,
             rewind_preview: None,
+            bookmark_list_selected: 0,
+            bookmark_list_count: 0,
+            bookmark_undo_buffer: None,
+            pending_export: None,
         }
     }
 }

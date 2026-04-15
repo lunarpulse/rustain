@@ -14,9 +14,9 @@ fn test_scan_finds_files() {
     let results = scan_workspace_files(tmp.path(), "", 50);
     assert!(results.len() >= 3);
     let paths: Vec<&str> = results.iter().map(|r| r.relative_path.as_str()).collect();
-    assert!(paths.iter().any(|p| *p == "main.rs"));
-    assert!(paths.iter().any(|p| *p == "lib.rs"));
-    assert!(paths.iter().any(|p| *p == "src/app.rs"));
+    assert!(paths.contains(&"main.rs"));
+    assert!(paths.contains(&"lib.rs"));
+    assert!(paths.contains(&"src/app.rs"));
 }
 
 // Covers: AC3 — scan filters by prefix

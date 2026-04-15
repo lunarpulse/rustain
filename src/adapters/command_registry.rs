@@ -38,6 +38,13 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            // Built-in: /export — Story 4-4 AC11
+            SlashCommandDef {
+                name: "export".to_string(),
+                description: "Export conversation to markdown (optional filename arg)".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

@@ -1,7 +1,9 @@
 pub mod ask_user_question;
 pub mod autocomplete_popup;
+pub mod bookmark_list;
 pub mod chat_pane;
 pub mod command_palette;
+pub mod cross_search;
 pub mod fork_confirm;
 pub mod rewind_confirm;
 pub mod sidebar;
@@ -12,6 +14,7 @@ pub mod help_overlay;
 pub mod input_box;
 pub mod permission_prompt;
 pub mod reverse_search;
+pub mod search_bar;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod tool_block;

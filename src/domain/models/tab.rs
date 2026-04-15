@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use std::collections::BTreeMap;
 
+use crate::domain::models::SessionMeta;
 use crate::domain::models::conversation::{Conversation, generate_conversation_id};
 use crate::domain::models::notice::FeedbackBlock;
 use crate::domain::models::session::{SessionManager, SessionState};
@@ -19,6 +20,12 @@ pub struct TabState {
     pub conversation: Conversation,
     pub streaming: StreamingState,
     pub session: SessionManager,
+    /// Per-conversation sidecar metadata — title, timestamps, message count,
+    /// **and bookmarks** (Story 4-4). This is the in-memory mirror of
+    /// `meta.json`; bookmark toggles write through to disk via
+    /// `StoragePort::save_session_meta` and this field is reloaded from disk
+    /// at conversation open time.
+    pub session_meta: SessionMeta,
     pub scroll_offset: usize,
     pub auto_scroll: bool,
     /// Line offsets (from top) where each content block starts.
@@ -59,11 +66,13 @@ impl TabState {
             fork_source: None,
         };
         let session_id = conversation.session_id.clone().unwrap_or_default();
+        let session_meta = SessionMeta::from_conversation(&conversation);
         Self {
             id,
             conversation,
             streaming: StreamingState::default(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
+            session_meta,
             scroll_offset: 0,
             auto_scroll: true,
             block_boundaries: Vec::new(),
@@ -79,13 +88,20 @@ impl TabState {
     }
 
     /// Create a TabState from an existing conversation.
+    ///
+    /// Initializes `session_meta` from the conversation (empty bookmarks).
+    /// The event loop should replace `session_meta` with the disk-loaded value
+    /// via `StoragePort::load_session_meta` immediately after calling this
+    /// constructor, so bookmarks from previous sessions survive reload.
     pub fn from_conversation(id: TabId, conversation: Conversation) -> Self {
         let session_id = conversation.session_id.clone().unwrap_or_default();
+        let session_meta = SessionMeta::from_conversation(&conversation);
         Self {
             id,
             conversation,
             streaming: StreamingState::default(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
+            session_meta,
             scroll_offset: 0,
             auto_scroll: true,
             block_boundaries: Vec::new(),

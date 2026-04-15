@@ -10,6 +10,7 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::status_bar;
 use rustain::domain::models::{PermissionMode, StatusState, UsageInfo};
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_bar(
     width: u16,
     model: &str,
@@ -39,6 +40,7 @@ fn render_status_bar(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_status_bar_ml(
     width: u16,
     model: &str,

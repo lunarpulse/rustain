@@ -107,8 +107,10 @@ fn add_user_message(conv: &mut Conversation, content: &str) {
 #[test]
 fn test_trigger_title_generation_only_at_two_messages() {
     let mut conv = make_conversation();
-    let mut streaming = StreamingState::default();
-    streaming.is_streaming = true;
+    let mut streaming = StreamingState {
+        is_streaming: true,
+        ..StreamingState::default()
+    };
 
     // No user message — only assistant response → messages.len() == 1 → no trigger
     apply_chunk(
@@ -139,8 +141,10 @@ fn test_trigger_title_generation_only_at_two_messages() {
     // Now with user message first → messages.len() == 2 → trigger
     let mut conv2 = make_conversation();
     add_user_message(&mut conv2, "Hi there");
-    let mut streaming2 = StreamingState::default();
-    streaming2.is_streaming = true;
+    let mut streaming2 = StreamingState {
+        is_streaming: true,
+        ..StreamingState::default()
+    };
 
     apply_chunk(
         &mut conv2,
@@ -330,8 +334,10 @@ fn test_no_title_generation_for_subsequent_turns() {
 
     // Add another user message + assistant response (messages.len() will be 4)
     add_user_message(&mut conv, "Second message");
-    let mut streaming = StreamingState::default();
-    streaming.is_streaming = true;
+    let mut streaming = StreamingState {
+        is_streaming: true,
+        ..StreamingState::default()
+    };
 
     apply_chunk(
         &mut conv,

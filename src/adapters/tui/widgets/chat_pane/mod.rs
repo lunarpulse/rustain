@@ -13,6 +13,7 @@ use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
 use crate::domain::models::{
     ContentBlockType, Conversation, FeedbackBlock, MessageRole, StopReason, StreamingState,
 };
+use crate::domain::services::search::SearchMatch;
 
 use super::empty_state;
 use crate::adapters::tui::markdown;
@@ -36,15 +37,143 @@ pub struct RenderResult {
     pub focused_tool_id: Option<String>,
 }
 
+/// Compute the `scroll_offset` value needed to bring `target_message_idx`
+/// into the viewport at (or near) the top, using the same offset-from-bottom
+/// model as the rest of the TUI scroll code.
+///
+/// Used by Story 4-4 search navigation (`n` / `N` and calm-jump) and bookmark
+/// list "jump to bookmark" to scroll to a specific message. Returns 0 if the
+/// message is already in the auto-scroll region (near the bottom).
+// Covers: Story 4-4 Task 3.4, Task 5.7
+pub fn find_scroll_offset_for_message(
+    target_message_idx: usize,
+    message_boundaries: &[usize],
+    total_content_height: usize,
+    viewport_height: usize,
+) -> usize {
+    if target_message_idx >= message_boundaries.len() {
+        return 0;
+    }
+    let target_line = message_boundaries[target_message_idx];
+    let max_offset = total_content_height.saturating_sub(viewport_height);
+    if target_line >= max_offset {
+        0
+    } else {
+        max_offset - target_line
+    }
+}
+
+/// Resolve which message index is currently focused given the scroll state.
+///
+/// Used by fork, rewind, and bookmark targeting — any feature that says
+/// "operate on the message the user can see at the top of the viewport".
+/// When `auto_scroll` is true, the focused message is the last one (most
+/// recent). Otherwise, a viewport-to-line-to-index binary search is used.
+///
+/// Returns a value clamped to `[0, message_count - 1]`, so callers can trust
+/// the result as a valid index into `conversation.messages`. Returns 0 if
+/// `message_count == 0` (caller must separately guard against empty
+/// conversations before using the index).
+// Covers: Story 4-4 Task 4.0 (extracted from fork/rewind inline patterns)
+pub fn find_message_index_from_scroll_offset(
+    auto_scroll: bool,
+    scroll_offset: usize,
+    message_boundaries: &[usize],
+    total_content_height: usize,
+    viewport_height: usize,
+    message_count: usize,
+) -> usize {
+    if message_count == 0 {
+        return 0;
+    }
+    let last = message_count.saturating_sub(1);
+    if auto_scroll {
+        return last;
+    }
+    let max_off = total_content_height.saturating_sub(viewport_height);
+    let clamped = scroll_offset.min(max_off);
+    let top_line = max_off.saturating_sub(clamped);
+    let idx = match message_boundaries.binary_search(&top_line) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    idx.min(last)
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod targeting_tests {
+    use super::*;
+
+    #[test]
+    fn auto_scroll_returns_last_message() {
+        let idx = find_message_index_from_scroll_offset(true, 0, &[0, 10, 20], 30, 10, 3);
+        assert_eq!(idx, 2);
+    }
+
+    #[test]
+    fn empty_conversation_returns_zero() {
+        let idx = find_message_index_from_scroll_offset(false, 5, &[], 0, 10, 0);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn scroll_at_top_returns_first_message() {
+        // 3 messages, boundaries at line 0, 10, 20. Total content 30, vp 10.
+        // max_off = 20. scroll_offset = 20 means "scrolled to top".
+        let idx = find_message_index_from_scroll_offset(false, 20, &[0, 10, 20], 30, 10, 3);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn scroll_at_bottom_returns_last_message() {
+        let idx = find_message_index_from_scroll_offset(false, 0, &[0, 10, 20], 30, 10, 3);
+        assert_eq!(idx, 2);
+    }
+
+    #[test]
+    fn scroll_mid_returns_middle_message() {
+        let idx = find_message_index_from_scroll_offset(false, 10, &[0, 10, 20], 30, 10, 3);
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn clamps_to_last_when_scroll_offset_oversized() {
+        let idx = find_message_index_from_scroll_offset(false, 9999, &[0, 10, 20], 30, 10, 3);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn clamps_to_message_count_minus_one() {
+        // If message_boundaries has more entries than message_count, we still
+        // clamp the returned index.
+        let idx = find_message_index_from_scroll_offset(true, 0, &[0, 10, 20, 30], 40, 10, 2);
+        assert_eq!(idx, 1);
+    }
+}
+
 /// Compute the rendered height of a single message (role line + content lines)
 /// without building actual Line objects (for off-screen height computation).
+///
+/// `is_bookmarked`: included as a signature-level contract to mirror
+/// `render_message`. The bookmark glyph is prepended to the role line as a
+/// 2-column stable-width string (`theme.bookmark_glyph`, validated at theme
+/// load to have `unicode-width` ∈ [2, 4]). Because the role label itself is
+/// at most `"Assistant:"` (10 chars) and the minimum terminal width enforced
+/// by `compute_layout` is 60, the total role-line width of at most 14 cannot
+/// wrap. The role line is therefore always 1 row, with or without the
+/// bookmark glyph — this parameter asserts that contract rather than
+/// computing from it.
+#[allow(clippy::too_many_arguments)]
 fn compute_message_height(
     content: &str,
     has_error: bool,
     is_cancelled: bool,
+    _is_bookmarked: bool,
     width: usize,
 ) -> usize {
-    // 1 for role line
+    // 1 for role line (see docstring — role + bookmark glyph never wraps at
+    // the enforced minimum width).
     let content_height = if has_error || content.is_empty() {
         let wrapped = wrap_text(content, width);
         wrapped.len()
@@ -65,41 +194,69 @@ fn compute_message_height(
 ///
 /// `is_fork_point`: if true, prepend a `🔀` fork marker to the role indicator.
 /// Used for the last message in forked conversations (AC3, Story 4-3a).
+///
+/// `is_bookmarked`: if true, prepend the configured `theme.bookmark_glyph`
+/// (default `"» "`) to the role indicator, colored with
+/// `theme.colors.bookmark_accent`. Story 4-4 AC9. Stable-width glyph so the
+/// height invariant is preserved — see Dev Notes § Bookmark Glyph Theming.
+///
+/// `search_query`: if `Some`, applies case-insensitive substring highlighting
+/// to every match in every content line of the message (Story 4-4 AC2). The
+/// highlight uses `theme.search_highlight` for most matches and
+/// `theme.search_highlight_focused` for the one at position
+/// `focused_match_ordinal_in_message` (0-indexed, scoped to THIS message only).
+///
+/// Pragmatic v1 note: line-level substring rebuild — for lines containing a
+/// match, the non-matched regions lose their original bold/italic/color span
+/// styling and fall back to plain text. Acceptable since search-highlight
+/// operations are rare and the role line / most content remains untouched.
+/// Markdown rendering artifacts (e.g., dropped asterisks from `*bold*`) can
+/// cause the rendered match count to diverge from `find_matches` on raw
+/// content — known v1 limitation, to be addressed in 4-6 cleanup.
+#[allow(clippy::too_many_arguments)]
 fn render_message<'a>(
     msg: &crate::domain::models::ChatMessage,
     width: usize,
     theme: &Theme,
     is_fork_point: bool,
+    is_bookmarked: bool,
+    search_query: Option<&str>,
+    focused_match_ordinal_in_message: Option<usize>,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
 
-    // Role indicator (with optional fork marker)
-    let role_label = match msg.role {
-        MessageRole::User => {
-            if is_fork_point {
-                "🔀 You:".to_string()
-            } else {
-                "You:".to_string()
-            }
-        }
-        MessageRole::Assistant => {
-            if is_fork_point {
-                "🔀 Assistant:".to_string()
-            } else {
-                "Assistant:".to_string()
-            }
-        }
+    // Role indicator — may gain a fork marker, a bookmark marker, or both.
+    // Fork marker (if any) comes first, then bookmark, then the role label.
+    // Keeps order stable so visual tests can match on the prefix sequence.
+    let role_text = match msg.role {
+        MessageRole::User => "You:",
+        MessageRole::Assistant => "Assistant:",
     };
     let role_color = match msg.role {
         MessageRole::User => theme.colors.accent,
         MessageRole::Assistant => theme.colors.fg_secondary,
     };
-    let role_line = Line::from(Span::styled(
-        role_label,
+    let mut role_spans: Vec<Span<'a>> = Vec::new();
+    if is_fork_point {
+        role_spans.push(Span::styled(
+            "🔀 ".to_string(),
+            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if is_bookmarked {
+        role_spans.push(Span::styled(
+            theme.bookmark_glyph.clone(),
+            Style::default()
+                .fg(theme.colors.bookmark_accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    role_spans.push(Span::styled(
+        role_text.to_string(),
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),
     ));
-    lines.push(role_line);
+    lines.push(Line::from(role_spans));
 
     // Content
     if has_error {
@@ -128,12 +285,142 @@ fn render_message<'a>(
         )));
     }
 
+    // Apply search highlights if a query is active (Story 4-4 AC2).
+    //
+    // Second-audit Fix 1: **skip the first line** (the role indicator like
+    // "You:" / "Assistant:"). The role line is UI scaffolding, not message
+    // content — `find_matches` never scans it, so highlighting it would:
+    //   (a) visually highlight the role word if the user queries "assistant",
+    //       which looks like a parse error rather than a match, AND
+    //   (b) shift `match_cursor` by the number of role-line matches, causing
+    //       the focused-match style to land on the wrong content match.
+    //
+    // Walk the lines in render order starting from index 1, rebuilding each
+    // line that contains a match. The match cursor counts every highlight
+    // applied across all content lines in this message so the focused-match
+    // style lands on the right one.
+    if let Some(q) = search_query {
+        if !q.is_empty() {
+            let mut match_cursor: usize = 0;
+            let base_style = theme.search_highlight;
+            let focused_style = theme.search_highlight_focused;
+            for line in lines.iter_mut().skip(1) {
+                *line = apply_search_highlights(
+                    line.clone(),
+                    q,
+                    base_style,
+                    focused_style,
+                    focused_match_ordinal_in_message,
+                    &mut match_cursor,
+                );
+            }
+        }
+    }
+
     lines
+}
+
+/// Rebuild `line` with case-insensitive substring highlighting applied to
+/// every occurrence of `query`. Non-matched regions fall back to plain
+/// unstyled text — see the v1 limitation note on `render_message`.
+///
+/// `match_cursor` is incremented once per match found; when it equals
+/// `focused_idx` at the moment of a match, `focused_style` is applied instead
+/// of `base_style`.
+fn apply_search_highlights<'a>(
+    line: Line<'a>,
+    query: &str,
+    base_style: Style,
+    focused_style: Style,
+    focused_idx: Option<usize>,
+    match_cursor: &mut usize,
+) -> Line<'a> {
+    // Flatten the line spans into a single plain string for search.
+    let plain: String = line
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<Vec<&str>>()
+        .concat();
+
+    if plain.is_empty() {
+        return line;
+    }
+
+    // Build a lowercased mirror with a char-boundary map back to plain bytes,
+    // mirroring the approach used by `domain::services::search`.
+    let mut lower = String::with_capacity(plain.len());
+    let mut boundary_map: Vec<(usize, usize)> = Vec::new();
+    for (orig_byte_idx, ch) in plain.char_indices() {
+        boundary_map.push((lower.len(), orig_byte_idx));
+        for lc in ch.to_lowercase() {
+            lower.push(lc);
+        }
+    }
+    boundary_map.push((lower.len(), plain.len()));
+
+    let query_lower: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
+    if query_lower.is_empty() || query_lower.len() > lower.len() {
+        return line;
+    }
+
+    // Collect (orig_start, orig_end) pairs for every match in this line.
+    let mut match_ranges: Vec<(usize, usize)> = Vec::new();
+    for (mstart_lower, _) in lower.match_indices(query_lower.as_str()) {
+        let mend_lower = mstart_lower + query_lower.len();
+        let orig_start = boundary_map
+            .iter()
+            .find(|(l, _)| *l == mstart_lower)
+            .map(|(_, o)| *o);
+        let orig_end = boundary_map
+            .iter()
+            .find(|(l, _)| *l == mend_lower)
+            .map(|(_, o)| *o);
+        if let (Some(s), Some(e)) = (orig_start, orig_end) {
+            match_ranges.push((s, e));
+        }
+    }
+
+    if match_ranges.is_empty() {
+        return line;
+    }
+
+    // Rebuild the line as a sequence of unstyled (non-match) and styled
+    // (match) spans. Non-matched regions lose their original span styling —
+    // v1 limitation documented on `render_message`.
+    let mut new_spans: Vec<Span<'a>> = Vec::new();
+    let mut cursor = 0usize;
+    for (ms, me) in &match_ranges {
+        if *ms > cursor {
+            new_spans.push(Span::raw(plain[cursor..*ms].to_string()));
+        }
+        let is_focused = focused_idx == Some(*match_cursor);
+        let style = if is_focused {
+            focused_style
+        } else {
+            base_style
+        };
+        new_spans.push(Span::styled(plain[*ms..*me].to_string(), style));
+        *match_cursor += 1;
+        cursor = *me;
+    }
+    if cursor < plain.len() {
+        new_spans.push(Span::raw(plain[cursor..].to_string()));
+    }
+
+    Line::from(new_spans)
 }
 
 /// Render the chat pane with virtual scrolling (viewport culling).
 ///
 /// Returns `RenderResult` with total content height and boundary data.
+///
+/// Backward-compatible wrapper around `render_with_search` for callers that
+/// don't need search highlighting or bookmarks (pre-4-4 tests, non-search
+/// code paths). The main binary calls `render_with_search` directly; this
+/// wrapper is only exercised by integration tests in `tests/`, so it looks
+/// dead from a lib-only compile.
+#[allow(clippy::too_many_arguments, dead_code)]
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -145,6 +432,60 @@ pub fn render(
     height_cache: &mut HeightCache,
     tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
+) -> RenderResult {
+    render_with_search(
+        frame,
+        area,
+        conversation,
+        streaming,
+        scroll_offset,
+        auto_scroll,
+        theme,
+        height_cache,
+        tool_block_states,
+        feedback_blocks,
+        None,
+        None,
+        &[],
+        &[],
+    )
+}
+
+/// Full chat pane render with optional search highlighting and bookmark
+/// marker overlays.
+///
+/// Story 4-4 AC2: when `search_query` is `Some`, every message is rendered
+/// with case-insensitive substring highlights using `theme.search_highlight`.
+/// When `focused_search_match` is also `Some`, the matched byte range
+/// belonging to the focused-match's message uses the bolder
+/// `theme.search_highlight_focused` style so the user can see which match
+/// `n` / `N` will move to next.
+///
+/// Story 4-4 AC9: `bookmarks` is a sorted slice of message indices that
+/// should render with a bookmark glyph prefix on their role line. The render
+/// loop uses `binary_search` to check membership per message — O(log N) per
+/// message, imperceptible even with hundreds of bookmarks.
+/// `search_matches`: the full match list for the active query. Used to
+/// compute the true focused-match local ordinal when a message contains
+/// multiple matches (second-audit Fix 2). Pass `&[]` when no search is
+/// active. The event loop owns the canonical list via
+/// `state.search_state.matches`.
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_search(
+    frame: &mut Frame,
+    area: Rect,
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    scroll_offset: usize,
+    auto_scroll: bool,
+    theme: &Theme,
+    height_cache: &mut HeightCache,
+    tool_block_states: &HashMap<String, ToolBlockState>,
+    feedback_blocks: &BTreeMap<String, FeedbackBlock>,
+    search_query: Option<&str>,
+    focused_search_match: Option<&SearchMatch>,
+    search_matches: &[SearchMatch],
+    bookmarks: &[usize],
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -201,7 +542,9 @@ pub fn render(
         // Get or compute height (invalidate cache if tool block states changed)
         let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
         let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
-        let mut h = compute_message_height(&msg.content, has_error, is_cancelled, width);
+        let is_bookmarked = bookmarks.binary_search(&i).is_ok();
+        let mut h =
+            compute_message_height(&msg.content, has_error, is_cancelled, is_bookmarked, width);
 
         // Add tool block heights
         for tc in &msg.tool_calls {
@@ -332,7 +675,35 @@ pub fn render(
             // Only the forked conversation gets the marker (not the original).
             let is_fork_point = conversation.fork_source.is_some()
                 && i == conversation.messages.len().saturating_sub(1);
-            let msg_lines = render_message(msg, width, theme, is_fork_point);
+            // If the focused search match belongs to this message, compute
+            // its local ordinal (0-based position among matches in this
+            // message) so `render_message` knows which match in this message
+            // should use the focused style.
+            //
+            // Second-audit Fix 2: use the full `search_matches` list — not
+            // just the focused pointer — to compute the true ordinal. Matches
+            // are sorted by `(message_index, byte_start)`, so filtering by
+            // `message_index == i` yields the in-message matches in order,
+            // and `position()` gives the focused ordinal within that subset.
+            let focused_local_ordinal: Option<usize> = focused_search_match.and_then(|focused| {
+                if focused.message_index != i {
+                    return None;
+                }
+                search_matches
+                    .iter()
+                    .filter(|m| m.message_index == i)
+                    .position(|m| m == focused)
+            });
+            let is_bookmarked = bookmarks.binary_search(&i).is_ok();
+            let msg_lines = render_message(
+                msg,
+                width,
+                theme,
+                is_fork_point,
+                is_bookmarked,
+                search_query,
+                focused_local_ordinal,
+            );
             for (j, line) in msg_lines.into_iter().enumerate() {
                 let abs_line = line_offset + j;
                 if abs_line >= visible_start && abs_line < visible_end {
@@ -345,6 +716,7 @@ pub fn render(
                 &msg.content,
                 msg.content_blocks.contains(&ContentBlockType::Error),
                 msg.stop_reason == Some(StopReason::Cancelled),
+                is_bookmarked,
                 width,
             );
             let mut tool_line_offset = line_offset + text_height;

@@ -204,8 +204,10 @@ fn test_tab_manager_returns_conversation_on_close() {
 
 #[test]
 fn test_reset_thinking_buffer_clears() {
-    let mut streaming = StreamingState::default();
-    streaming.thinking_buffer = "some thoughts".to_string();
+    let mut streaming = StreamingState {
+        thinking_buffer: "some thoughts".to_string(),
+        ..StreamingState::default()
+    };
     streaming.reset_thinking_buffer();
     assert!(streaming.thinking_buffer.is_empty());
 }

@@ -737,7 +737,13 @@ fn test_palette_enter_executes_command() {
     }];
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::ExecuteCommand("new".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "new".to_string(),
+            args: None
+        }
+    );
     assert!(!state.command_palette.active);
 }
 

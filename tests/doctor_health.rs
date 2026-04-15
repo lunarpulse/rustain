@@ -121,7 +121,7 @@ fn test_display_results_formats_all_statuses() {
 // Covers: FR98 (doctor health)
 #[test]
 fn test_summary_counts_various_combos() {
-    let results = vec![
+    let results = [
         CheckResult {
             name: "A".to_string(),
             status: CheckStatus::Pass,

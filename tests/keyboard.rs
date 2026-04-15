@@ -687,7 +687,13 @@ fn test_slash_new_submits_execute_command() {
 
     // Submit the /new command
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::ExecuteCommand("new".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "new".to_string(),
+            args: None
+        }
+    );
 }
 
 // Covers: AC2 — user-defined command submission returns SubmitWithContext
@@ -754,7 +760,13 @@ fn test_slash_new_command_flow() {
 
     // Submit
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::ExecuteCommand("new".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "new".to_string(),
+            args: None
+        }
+    );
     assert!(state.input_buffer.is_empty());
 }
 
@@ -767,7 +779,13 @@ fn test_slash_new_empty_session() {
     state.cursor_position = 4;
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::ExecuteCommand("new".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "new".to_string(),
+            args: None
+        }
+    );
 }
 
 // Covers: AC7 — resolved mentions are cleared on /new
@@ -783,7 +801,13 @@ fn test_slash_new_clears_mentions() {
     state.cursor_position = 4;
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     // /new is a built-in command — returns ExecuteCommand, event loop handles state reset
-    assert_eq!(action, InputAction::ExecuteCommand("new".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "new".to_string(),
+            args: None
+        }
+    );
     // Input buffer should be cleared by submit_message
     assert!(state.input_buffer.is_empty());
 }
@@ -799,7 +823,13 @@ fn test_slash_ml_returns_execute_command() {
     state.cursor_position = 3;
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::ExecuteCommand("ml".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "ml".to_string(),
+            args: None
+        }
+    );
     assert!(state.input_buffer.is_empty());
 }
 
@@ -817,7 +847,13 @@ fn test_slash_ml_via_autocomplete_returns_execute_command() {
     assert_eq!(state.input_buffer, "/ml");
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert_eq!(action, InputAction::ExecuteCommand("ml".to_string()));
+    assert_eq!(
+        action,
+        InputAction::ExecuteCommand {
+            name: "ml".to_string(),
+            args: None
+        }
+    );
 }
 
 // === Story 3-4: Image Attachment & Clipboard Operations ===

@@ -307,7 +307,7 @@ fn test_estimate_tokens_500_chars() {
     let text = "a".repeat(500);
     let tokens = input_box::estimate_tokens(&text);
     assert!(
-        tokens >= 100 && tokens <= 200,
+        (100..=200).contains(&tokens),
         "500 chars should estimate ~125 tokens, got {}",
         tokens
     );
@@ -318,7 +318,7 @@ fn test_estimate_tokens_1000_chars() {
     let text = "a".repeat(1000);
     let tokens = input_box::estimate_tokens(&text);
     assert!(
-        tokens >= 200 && tokens <= 400,
+        (200..=400).contains(&tokens),
         "1000 chars should estimate ~250 tokens, got {}",
         tokens
     );

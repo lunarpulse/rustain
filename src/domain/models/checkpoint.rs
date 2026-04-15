@@ -129,7 +129,7 @@ mod tests {
     fn test_reverted_file_ordering_by_cp_id() {
         // Tests that Vec<RevertedFile> can be created with explicit cp_id ordering
         // (ordering is enforced by the adapter — see Task 6.5; not by this type itself).
-        let files = vec![
+        let files = [
             RevertedFile {
                 path: PathBuf::from("/a/b.rs"),
                 status: RevertStatus::Restored,

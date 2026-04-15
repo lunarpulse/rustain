@@ -293,7 +293,7 @@ fn test_e2e_palette_opens_during_stream() {
     h.state.status = rustain::domain::models::StatusState::Streaming;
 
     // Palette should still open
-    let action = h.press_key(DomainKey::CtrlP);
+    let _action = h.press_key(DomainKey::CtrlP);
     assert!(h.state.command_palette.active);
     // Streaming should still be active
     assert!(h.streaming.is_streaming);
@@ -328,7 +328,7 @@ fn test_e2e_which_key_blocked_when_palette_open() {
     h.press_key(DomainKey::CtrlP);
 
     // Ctrl+X should be consumed
-    let action = h.press_key(DomainKey::CtrlX);
+    let _action = h.press_key(DomainKey::CtrlX);
     // Palette should remain state
     assert!(h.state.command_palette.active);
 }

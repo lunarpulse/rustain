@@ -247,9 +247,10 @@ mod tests {
     }
 
     fn make_streaming() -> StreamingState {
-        let mut s = StreamingState::default();
-        s.is_streaming = true;
-        s
+        StreamingState {
+            is_streaming: true,
+            ..StreamingState::default()
+        }
     }
 
     #[test]

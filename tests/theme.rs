@@ -453,3 +453,39 @@ fn test_color256_degradation_boundary_values() {
     check_indexed("error", theme.colors.error);
     check_indexed("info", theme.colors.info);
 }
+
+// ── Story 4-4 AC9: bookmark glyph validation (party-mode Fix 29) ─────────
+
+#[test]
+fn test_bookmark_glyph_default_is_two_columns() {
+    use rustain::adapters::tui::theme::validate_bookmark_glyph;
+    // Default `"» "` is U+00BB + space, guaranteed 2 columns.
+    assert!(validate_bookmark_glyph("» ").is_ok());
+}
+
+#[test]
+fn test_bookmark_glyph_validation_rejects_single_char() {
+    use rustain::adapters::tui::theme::validate_bookmark_glyph;
+    // A single `»` is only 1 display column — rejected per AC9 Dev Notes
+    // (width < 2 would break the height invariant at the role line).
+    assert!(validate_bookmark_glyph("»").is_err());
+}
+
+#[test]
+fn test_bookmark_glyph_validation_rejects_overly_wide() {
+    use rustain::adapters::tui::theme::validate_bookmark_glyph;
+    // Five ASCII chars = 5 columns, which exceeds the max of 4.
+    assert!(validate_bookmark_glyph("ABCDE").is_err());
+}
+
+#[test]
+fn test_theme_load_falls_back_to_default_on_invalid_glyph() {
+    // The `for_capability` constructor validates `bookmark_glyph` and
+    // falls back to `"» "` on failure. We can't easily inject an invalid
+    // glyph here since the dark theme uses the valid default, but we
+    // verify the validated default survives across all capabilities.
+    let truecolor = Theme::for_capability(ColorCapability::TrueColor);
+    let color16 = Theme::for_capability(ColorCapability::Color16);
+    assert_eq!(truecolor.bookmark_glyph, "» ");
+    assert_eq!(color16.bookmark_glyph, "» ");
+}

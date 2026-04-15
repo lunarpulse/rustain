@@ -391,14 +391,15 @@ mod tests {
 
     #[test]
     fn test_populate_from_command_registry() {
-        let cr = CommandRegistry::new(); // has built-in /new
+        let cr = CommandRegistry::new(); // has built-in /new and /export
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 1 slash command (/new) + 5 built-ins (version, new tab, close tab, delete all,
-        // paste image from clipboard) = 6
-        assert_eq!(reg.all_entries().len(), 6);
+        // 2 slash commands (/new, /export — Story 4-4) + 5 built-ins (version, new tab,
+        // close tab, delete all, paste image from clipboard) = 7
+        assert_eq!(reg.all_entries().len(), 7);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
         assert!(reg.all_entries().iter().any(|e| e.name == "new tab"));
         assert!(reg.all_entries().iter().any(|e| e.name == "close tab"));
@@ -410,6 +411,6 @@ mod tests {
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 6);
+        assert_eq!(reg.all_entries().len(), 7);
     }
 }

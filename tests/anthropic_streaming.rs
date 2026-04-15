@@ -30,9 +30,10 @@ mod streaming_integration {
 
     /// Helper: create streaming state.
     fn make_streaming() -> StreamingState {
-        let mut s = StreamingState::default();
-        s.is_streaming = true;
-        s
+        StreamingState {
+            is_streaming: true,
+            ..StreamingState::default()
+        }
     }
 
     // ─── Task 9.1: SseLineBuffer tests (beyond inline tests) ─────────────

@@ -9,7 +9,6 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
-use rustain::adapters::tui::widgets::chat_pane::RenderResult;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::{
     ChatMessage, ContentBlockType, Conversation, FeedbackBlock, FeedbackLevel, MessageRole,

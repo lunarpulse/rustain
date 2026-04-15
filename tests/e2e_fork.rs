@@ -644,7 +644,7 @@ async fn test_e2e_fork_storage_source_unchanged() {
 async fn test_e2e_fork_noop_adapter_returns_not_supported() {
     // AC[8]: NoOpStorage uses default NotSupported implementation from StoragePort trait
     use rustain::adapters::noop::NoOpStorage;
-    let noop = NoOpStorage::default();
+    let noop = NoOpStorage;
     let result: Result<String, _> = noop.fork_at_checkpoint("any-id", CheckpointId(0)).await;
     assert!(
         result.is_err(),

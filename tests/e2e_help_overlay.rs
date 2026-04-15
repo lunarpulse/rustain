@@ -108,9 +108,9 @@ fn test_e2e_help_overlay_closes_with_esc() {
 #[test]
 fn test_e2e_help_overlay_shows_categories() {
     // Use larger terminal to fit all categories without scrolling.
-    // Height was increased from 50→65 to accommodate new Alt+Enter/Alt+M/ml entries
-    // added in Story 3-6a to the INPUT section.
-    let mut h = TestHarness::with_size(100, 65);
+    // Height was increased from 50→65 in Story 3-6a (INPUT section expansion)
+    // and again from 65→85 in Story 4-4 (SEARCH & BOOKMARKS category: 11 new bindings).
+    let mut h = TestHarness::with_size(100, 85);
 
     h.press_key(DomainKey::Esc);
     h.type_char('?');
@@ -150,8 +150,9 @@ fn test_e2e_help_overlay_shows_tmux_warning() {
         std::env::set_var("TMUX", "/tmp/tmux-1000/default,1234,0");
     }
 
-    // Use larger terminal to fit tmux warning without scrolling
-    let mut h = TestHarness::with_size(100, 60);
+    // Use larger terminal to fit tmux warning without scrolling.
+    // Height bumped 60→85 in Story 4-4 to accommodate SEARCH & BOOKMARKS category.
+    let mut h = TestHarness::with_size(100, 85);
     h.press_key(DomainKey::Esc);
     h.type_char('?');
 

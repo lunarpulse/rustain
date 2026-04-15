@@ -199,6 +199,66 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
             ],
         },
         HelpCategory {
+            name: "Search, Bookmarks & Export",
+            bindings: vec![
+                HelpBinding {
+                    key: "Ctrl+F",
+                    description: "Search within conversation (Typing mode)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Enter",
+                    description: "Commit query → enable n/N navigation",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "n / N",
+                    description: "Next / previous match (Navigating mode)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+U",
+                    description: "Clear search query",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Esc (search)",
+                    description: "Close search, preserve scroll",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "m",
+                    description: "Toggle bookmark on current message",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "'",
+                    description: "Open bookmark list panel",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "d / Del / Backspace",
+                    description: "Delete selected bookmark (in list)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "u (in list)",
+                    description: "Undo last bookmark delete (within 5s)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/ (in sidebar)",
+                    description: "Cross-conversation search",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/export",
+                    description: "Export conversation to markdown",
+                    available: true,
+                },
+            ],
+        },
+        HelpCategory {
             name: "GENERAL",
             bindings: vec![
                 HelpBinding {

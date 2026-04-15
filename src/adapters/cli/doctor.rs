@@ -826,29 +826,29 @@ mod tests {
 
     #[test]
     fn test_summary_counting() {
-        let results = vec![
+        let results = [
             CheckResult {
                 name: "A".to_string(),
                 status: CheckStatus::Pass,
-                message: "".to_string(),
+                message: String::new(),
                 fix: None,
             },
             CheckResult {
                 name: "B".to_string(),
                 status: CheckStatus::Pass,
-                message: "".to_string(),
+                message: String::new(),
                 fix: None,
             },
             CheckResult {
                 name: "C".to_string(),
                 status: CheckStatus::Warning,
-                message: "".to_string(),
+                message: String::new(),
                 fix: None,
             },
             CheckResult {
                 name: "D".to_string(),
                 status: CheckStatus::Fail,
-                message: "".to_string(),
+                message: String::new(),
                 fix: None,
             },
         ];

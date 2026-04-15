@@ -68,6 +68,7 @@ impl SessionSummary {
 
 /// In-memory index of all conversations for sidebar display.
 /// Maintains entries sorted by `updated_at` descending (most recent first).
+#[derive(Clone)]
 pub struct SessionIndex {
     /// Sorted entries (newest first).
     entries: Vec<SessionSummary>,

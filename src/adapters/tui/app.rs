@@ -30,8 +30,11 @@ pub enum InputAction {
     FeedbackRetry,
     /// AskUserQuestion: user submitted their answer.
     SubmitQuestionAnswer(String),
-    /// Execute a built-in command (e.g., "/new").
-    ExecuteCommand(String),
+    /// Execute a built-in command (e.g., "/new", "/export").
+    /// `args` carries an optional trailing argument for commands that support
+    /// one — e.g., `/export meeting-notes.md` → `args: Some("meeting-notes.md")`.
+    /// Empty / whitespace-only arguments are normalized to `None` by the parser.
+    ExecuteCommand { name: String, args: Option<String> },
     /// Submit message with file context and/or command context.
     /// Contains (user_text, resolved_mentions, command_name_if_any).
     SubmitWithContext {
@@ -108,6 +111,76 @@ pub enum InputAction {
     /// Rewind confirmation: user pressed n or Esc.
     // Covers: Story 4-3b, AC1
     RewindCancel,
+    /// Open the within-conversation search overlay (Ctrl+F in Chat focus).
+    // Covers: Story 4-4, AC1 (UX-DR86)
+    OpenSearch,
+    /// Close the search overlay (Esc from Search overlay).
+    // Covers: Story 4-4, AC4
+    CloseSearch,
+    /// Query string changed — event loop should re-run `find_matches`
+    /// and apply the calm-jump rule. Fired for printable chars and Backspace
+    /// in the Typing sub-state.
+    // Covers: Story 4-4, AC2
+    SearchQueryChanged,
+    /// Enter pressed in Typing sub-state — if matches exist, transition
+    /// to Navigating.
+    // Covers: Story 4-4, AC3
+    SearchCommit,
+    /// `n` in Navigating — advance focused match (wraps at end).
+    // Covers: Story 4-4, AC3
+    SearchNext,
+    /// `N` (Shift+n) in Navigating — reverse focused match (wraps at start).
+    // Covers: Story 4-4, AC3
+    SearchPrev,
+    /// `Ctrl+U` — clear query, stay in Typing sub-state.
+    // Covers: Story 4-4, AC3 (Reviewer Fix 4)
+    SearchClear,
+    /// Printable char or Backspace in Navigating — return to Typing and
+    /// re-apply the keystroke so the user can refine the query without
+    /// pressing Esc. The char has already been appended / removed by
+    /// `handle_input`.
+    // Covers: Story 4-4, AC3 amendment
+    SearchReturnToTyping,
+    /// Toggle bookmark on the currently focused message (m in Chat focus).
+    // Covers: Story 4-4, AC8 (UX-DR91)
+    ToggleBookmark,
+    /// Open the bookmark list panel (' in Chat focus).
+    // Covers: Story 4-4, AC10 (UX-DR91)
+    OpenBookmarkList,
+    /// Jump to the selected bookmark (Enter in BookmarkList overlay).
+    // Covers: Story 4-4, AC10
+    JumpToBookmark,
+    /// Delete the currently selected bookmark from the list (d/Del/Backspace).
+    // Covers: Story 4-4, AC10
+    DeleteBookmark,
+    /// Undo the last bookmark delete (u in BookmarkList overlay, within 5 s).
+    // Covers: Story 4-4, AC10 synthesis
+    UndoBookmarkDelete,
+    /// Close the bookmark list panel (Esc in BookmarkList overlay).
+    // Covers: Story 4-4, AC10
+    CloseBookmarkList,
+    /// Open the cross-conversation search overlay (`/` in sidebar focus).
+    // Covers: Story 4-4, AC5 (UX-DR87)
+    OpenCrossSearch,
+    /// Query updated in the cross-search overlay — event loop should kick
+    /// off a new scan (if query.len() >= 2).
+    // Covers: Story 4-4, AC5
+    CrossSearchQueryChanged,
+    /// Open the currently selected cross-search result in a new (or existing)
+    /// tab, applying a peek highlight per AC6 amendment.
+    // Covers: Story 4-4, AC6
+    OpenCrossSearchResult,
+    /// Close the cross-search overlay (Esc).
+    // Covers: Story 4-4, AC5
+    CloseCrossSearch,
+    /// Export-overwrite confirmation: user pressed `y` — commit the
+    /// pre-rendered content to the target path atomically.
+    // Covers: Story 4-4, AC12
+    ConfirmExportOverwrite,
+    /// Export-overwrite confirmation: user pressed `n` / `Esc` — discard
+    /// the pending content and flash "Export cancelled".
+    // Covers: Story 4-4, AC12
+    CancelExportOverwrite,
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -528,6 +601,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'f' => InputAction::ForkAtMessage,
             // R = rewind conversation to the currently focused message (Story 4-3b, AC1; UX-DR90)
             'R' => InputAction::RewindAtMessage,
+            // m = toggle bookmark on the focused message (Story 4-4, AC8; UX-DR91)
+            'm' => InputAction::ToggleBookmark,
+            // ' = open the bookmark list panel (Story 4-4, AC10; UX-DR91)
+            '\'' => InputAction::OpenBookmarkList,
             _ => InputAction::Ignored,
         },
         FocusState::Sidebar {
@@ -566,6 +643,14 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     // Delete selected conversation — shows confirmation overlay
                     InputAction::DeleteSidebarConversation
                 }
+                '/' => {
+                    // Open cross-conversation search (Story 4-4 AC5; UX-DR87)
+                    state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
+                    state.cross_search.active = true;
+                    state.focus = FocusState::Overlay(OverlayType::CrossSearch);
+                    state.needs_redraw = true;
+                    InputAction::OpenCrossSearch
+                }
                 'q' => InputAction::Quit,
                 _ => InputAction::Ignored,
             }
@@ -588,6 +673,82 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'y' => InputAction::RewindConfirm,
             'f' => InputAction::RewindForkInstead,
             'n' => InputAction::RewindCancel,
+            _ => InputAction::Consumed,
+        },
+        // Export-overwrite confirmation: y = overwrite, n = cancel (Story 4-4 AC12).
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ExportOverwrite(_))) => {
+            match c {
+                'y' | 'Y' => InputAction::ConfirmExportOverwrite,
+                'n' | 'N' => InputAction::CancelExportOverwrite,
+                _ => InputAction::Consumed,
+            }
+        }
+        // Search overlay printable-key handling (Story 4-4 AC2, AC3).
+        //
+        // Dispatches on `search_state.substate`:
+        // - Typing: append char to query, signal re-scan via SearchQueryChanged
+        // - Navigating: `n` / `N` navigate, any other printable returns to
+        //   Typing AND applies the char so the user can refine without Esc
+        FocusState::Overlay(OverlayType::Search) => {
+            use crate::adapters::tui::state::SearchSubstate;
+            match state.search_state.substate {
+                SearchSubstate::Typing => {
+                    state.search_state.query.push(c);
+                    state.needs_redraw = true;
+                    InputAction::SearchQueryChanged
+                }
+                SearchSubstate::Navigating => match c {
+                    'n' => InputAction::SearchNext,
+                    'N' => InputAction::SearchPrev,
+                    other => {
+                        // Return to Typing and apply the char.
+                        state.search_state.substate = SearchSubstate::Typing;
+                        state.search_state.query.push(other);
+                        state.needs_redraw = true;
+                        InputAction::SearchReturnToTyping
+                    }
+                },
+            }
+        }
+        // Cross-search overlay printable-key handling (Story 4-4 AC5).
+        // j/k navigate results; every other printable char extends the query.
+        FocusState::Overlay(OverlayType::CrossSearch) => match c {
+            'j' => {
+                if !state.cross_search.results.is_empty() {
+                    let last = state.cross_search.results.len() - 1;
+                    state.cross_search.selected = (state.cross_search.selected + 1).min(last);
+                }
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            'k' => {
+                state.cross_search.selected = state.cross_search.selected.saturating_sub(1);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            other => {
+                state.cross_search.query.push(other);
+                state.needs_redraw = true;
+                InputAction::CrossSearchQueryChanged
+            }
+        },
+        // Bookmark list panel printable-key handling (Story 4-4 AC10).
+        // j/k navigate, d deletes, u undoes (within 5 s), Enter jumps, Esc closes.
+        FocusState::Overlay(OverlayType::BookmarkList) => match c {
+            'j' => {
+                let last = state.bookmark_list_count.saturating_sub(1);
+                state.bookmark_list_selected =
+                    state.bookmark_list_selected.saturating_add(1).min(last);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            'k' => {
+                state.bookmark_list_selected = state.bookmark_list_selected.saturating_sub(1);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            'd' => InputAction::DeleteBookmark,
+            'u' => InputAction::UndoBookmarkDelete,
             _ => InputAction::Consumed,
         },
         FocusState::Overlay(_) => InputAction::Ignored,
@@ -620,6 +781,19 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)) {
         return match key {
             DomainKey::Esc => InputAction::RewindCancel,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Export-overwrite confirmation: Esc → Cancel (Story 4-4 AC12)
+    if matches!(
+        state.focus,
+        FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::ExportOverwrite(_)
+        ))
+    ) {
+        return match key {
+            DomainKey::Esc => InputAction::CancelExportOverwrite,
             _ => InputAction::Consumed,
         };
     }
@@ -719,6 +893,69 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // P16: Allow Ctrl+P and Ctrl+X to dismiss reverse search and open their overlays (Tier-2).
     if state.reverse_search.active && !matches!(key, DomainKey::CtrlP | DomainKey::CtrlX) {
         return handle_reverse_search_key(state, key);
+    }
+
+    // Within-conversation search overlay handling (Story 4-4 AC3, AC4).
+    // Tier-1 overlay: consumes ALL special keys (including Ctrl+P / Ctrl+X)
+    // while active, matching the fork/rewind/delete confirmation pattern.
+    // Users must Esc first before opening the palette or which-key chords.
+    if state.focus == FocusState::Overlay(OverlayType::Search) {
+        return handle_search_overlay_key(state, key);
+    }
+
+    // Cross-search overlay special-key handling (Story 4-4 AC5, AC6).
+    if state.focus == FocusState::Overlay(OverlayType::CrossSearch) {
+        return match key {
+            DomainKey::Esc => InputAction::CloseCrossSearch,
+            DomainKey::Enter => {
+                if !state.cross_search.results.is_empty() {
+                    InputAction::OpenCrossSearchResult
+                } else {
+                    InputAction::Consumed
+                }
+            }
+            DomainKey::Backspace => {
+                state.cross_search.query.pop();
+                state.needs_redraw = true;
+                InputAction::CrossSearchQueryChanged
+            }
+            DomainKey::Up => {
+                state.cross_search.selected = state.cross_search.selected.saturating_sub(1);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            DomainKey::Down => {
+                if !state.cross_search.results.is_empty() {
+                    let last = state.cross_search.results.len() - 1;
+                    state.cross_search.selected = (state.cross_search.selected + 1).min(last);
+                }
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Bookmark list panel special-key handling (Story 4-4 AC10).
+    if state.focus == FocusState::Overlay(OverlayType::BookmarkList) {
+        return match key {
+            DomainKey::Esc => InputAction::CloseBookmarkList,
+            DomainKey::Enter => InputAction::JumpToBookmark,
+            DomainKey::Delete | DomainKey::Backspace => InputAction::DeleteBookmark,
+            DomainKey::Up => {
+                state.bookmark_list_selected = state.bookmark_list_selected.saturating_sub(1);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            DomainKey::Down => {
+                let last = state.bookmark_list_count.saturating_sub(1);
+                state.bookmark_list_selected =
+                    state.bookmark_list_selected.saturating_add(1).min(last);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        };
     }
 
     match key {
@@ -1032,6 +1269,21 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
 
         DomainKey::CtrlC => InputAction::CancelOrQuit,
+        // Ctrl+F in Chat OR Input focus (when nothing pending): open the
+        // within-conversation search overlay (Story 4-4 AC1). No-op from
+        // other focus states — Tier-1 overlays intercept earlier.
+        DomainKey::CtrlF
+            if state.focus == FocusState::Chat
+                || (state.focus == FocusState::Input && state.input_buffer.is_empty()) =>
+        {
+            let prior = state.focus.clone();
+            state.search_state = crate::adapters::tui::state::SearchState::new();
+            state.search_state.active = true;
+            state.search_state.prior_focus = Some(prior);
+            state.focus = FocusState::Overlay(OverlayType::Search);
+            state.needs_redraw = true;
+            InputAction::OpenSearch
+        }
         DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
         // Tab/focus cycling (AC11):
@@ -1086,17 +1338,40 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             .unwrap_or("")
             .to_string();
         if !cmd_name.is_empty() {
+            // Extract optional trailing argument (text after the command name,
+            // trimmed; empty string → None).
+            let raw_args = after_slash[cmd_name.len()..].trim();
+            let args: Option<String> = if raw_args.is_empty() {
+                None
+            } else {
+                Some(raw_args.to_string())
+            };
+
             // Check if it's a built-in command
             if cmd_name == "new" {
-                return InputAction::ExecuteCommand(cmd_name);
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args: None,
+                };
             }
             // /ml: toggle multi-line mode (AC#3)
             // Covers: Sprint Change Proposal 2026-04-08
             if cmd_name == "ml" {
-                return InputAction::ExecuteCommand(cmd_name);
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args: None,
+                };
+            }
+            // /export [filename]: export conversation to markdown.
+            // Covers: Story 4-4, AC11/AC12
+            if cmd_name == "export" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
             }
             // User-defined command: submit with command context
-            let remainder = after_slash[cmd_name.len()..].trim().to_string();
+            let remainder = raw_args.to_string();
             state.resolved_mentions.clear();
             return InputAction::SubmitWithContext {
                 text: remainder,
@@ -1379,7 +1654,7 @@ fn dispatch_palette_action(
     use crate::domain::models::palette::PaletteAction;
 
     match action {
-        PaletteAction::ExecuteCommand(name) => InputAction::ExecuteCommand(name),
+        PaletteAction::ExecuteCommand(name) => InputAction::ExecuteCommand { name, args: None },
         PaletteAction::InsertMention(path) => {
             // Insert @path at cursor position, return to input focus
             let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
@@ -1498,6 +1773,58 @@ fn update_reverse_search_matches(state: &mut TuiState) {
     state.reverse_search.selected_match = old_selected.min(new_len.saturating_sub(1));
 }
 
+/// Handle special keys while the within-conversation search overlay is active.
+///
+/// Sub-state aware (Story 4-4 AC3):
+/// - `Typing`: Enter commits (if matches > 0), Backspace pops query,
+///   Ctrl+U clears, Esc closes.
+/// - `Navigating`: Backspace returns to Typing (and pops), Ctrl+U clears and
+///   returns to Typing, Enter is a no-op, Esc closes.
+///
+/// The printable-char path is in `handle_char`'s `FocusState::Overlay(Search)`
+/// arm — that's where `n` / `N` navigation and "return to Typing on any
+/// printable" live.
+// Covers: Story 4-4 AC3, AC4 (UX-DR86)
+fn handle_search_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    use crate::adapters::tui::state::SearchSubstate;
+    match (state.search_state.substate, key) {
+        // Esc closes the overlay regardless of sub-state (AC4).
+        (_, DomainKey::Esc) => InputAction::CloseSearch,
+
+        // Enter in Typing: commit query → Navigating (if matches exist).
+        // Enter in Navigating: no-op (already committed).
+        (SearchSubstate::Typing, DomainKey::Enter) => InputAction::SearchCommit,
+        (SearchSubstate::Navigating, DomainKey::Enter) => InputAction::Consumed,
+
+        // Backspace in Typing: pop query tail, re-scan.
+        // Backspace in Navigating: return to Typing and pop (refine).
+        (SearchSubstate::Typing, DomainKey::Backspace) => {
+            state.search_state.query.pop();
+            state.needs_redraw = true;
+            InputAction::SearchQueryChanged
+        }
+        (SearchSubstate::Navigating, DomainKey::Backspace) => {
+            state.search_state.substate = SearchSubstate::Typing;
+            state.search_state.query.pop();
+            state.needs_redraw = true;
+            InputAction::SearchReturnToTyping
+        }
+
+        // Ctrl+U clears query in either sub-state, returns to Typing.
+        (_, DomainKey::CtrlU) => {
+            state.search_state.query.clear();
+            state.search_state.matches.clear();
+            state.search_state.focused_match_index = 0;
+            state.search_state.substate = SearchSubstate::Typing;
+            state.needs_redraw = true;
+            InputAction::SearchClear
+        }
+
+        // All other keys consumed as no-ops while the overlay is active.
+        _ => InputAction::Consumed,
+    }
+}
+
 /// Convert a crossterm key event into a domain input event.
 /// This is the ONLY place where crossterm types are mapped to domain types.
 // Covers: FR16, UX-DR76, UX-DR74
@@ -1515,6 +1842,10 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             // Ctrl+E → toggle multi-line mode
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
+            }
+            // Ctrl+F → within-conversation search (Story 4-4 AC1, UX-DR86)
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('f') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlF));
             }
             // Ctrl+H → toggle history sidebar
             // Covers: FR107, UX-DR20
@@ -1547,6 +1878,10 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             // Ctrl+T → new tab
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('t') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlT));
+            }
+            // Ctrl+U → clear search query in Search overlay (Story 4-4, standard readline)
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('u') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlU));
             }
 
             match code {
@@ -1691,5 +2026,298 @@ mod tests {
             crate::domain::models::palette::PaletteAction::PasteImageFromClipboard,
         );
         assert_eq!(action, InputAction::RequestClipboardPaste);
+    }
+
+    // ── Story 4-4: Within-Conversation Search dispatch ───────────────────────
+
+    use crate::adapters::tui::state::SearchSubstate;
+
+    fn open_search(state: &mut TuiState) {
+        state.focus = FocusState::Chat;
+        let evt = ctrl_key('f');
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt) {
+            handle_input(state, &DomainInputEvent::SpecialKey(key));
+        }
+    }
+
+    #[test]
+    fn ctrl_f_in_chat_opens_search_overlay_in_typing_substate() {
+        let mut state = make_state();
+        open_search(&mut state);
+        assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
+        assert!(state.search_state.active);
+        assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+        assert_eq!(state.search_state.query, "");
+    }
+
+    #[test]
+    fn ctrl_f_from_input_with_empty_buffer_opens_search() {
+        // AC1 (party-mode Fix 16): Ctrl+F opens the search overlay from
+        // either `Chat` OR `Input` focus when the input buffer is empty.
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        state.input_buffer.clear();
+        let evt = ctrl_key('f');
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt) {
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
+        }
+        assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
+        assert!(state.search_state.active);
+    }
+
+    #[test]
+    fn ctrl_f_from_input_with_pending_text_does_not_open_search() {
+        // AC1 (party-mode Fix 16): Ctrl+F is consumed as Ignored when the
+        // user has pending text in the input buffer — they may be composing
+        // a message that will include the letter `f`.
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        state.input_buffer = "hello".to_string();
+        let evt = ctrl_key('f');
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt) {
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
+        }
+        assert_ne!(state.focus, FocusState::Overlay(OverlayType::Search));
+        assert!(!state.search_state.active);
+    }
+
+    #[test]
+    fn typing_n_in_query_does_not_navigate_critical_collision_fix() {
+        // The critical Story 4-4 spec bug: typing `n` while building a query
+        // must NOT trigger navigation. It must append to the query string
+        // because we are in the Typing sub-state.
+        let mut state = make_state();
+        open_search(&mut state);
+        // Type "nginx" — every char (including 'n') must land in the query.
+        for c in "nginx".chars() {
+            handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.search_state.query, "nginx");
+        assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+    }
+
+    #[test]
+    fn enter_on_zero_matches_stays_in_typing() {
+        let mut state = make_state();
+        open_search(&mut state);
+        handle_input(&mut state, &DomainInputEvent::KeyPress('q'));
+        // matches is still empty (find_matches runs in event_loop, not handle_input)
+        assert!(state.search_state.matches.is_empty());
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_eq!(action, InputAction::SearchCommit);
+        // Substate unchanged — event loop decides whether to transition based on matches.
+        assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+    }
+
+    #[test]
+    fn n_in_navigating_substate_returns_search_next() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.substate = SearchSubstate::Navigating;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
+        assert_eq!(action, InputAction::SearchNext);
+    }
+
+    #[test]
+    fn shift_n_in_navigating_substate_returns_search_prev() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.substate = SearchSubstate::Navigating;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('N'));
+        assert_eq!(action, InputAction::SearchPrev);
+    }
+
+    #[test]
+    fn printable_char_in_navigating_returns_to_typing_and_appends() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.query = "foo".to_string();
+        state.search_state.substate = SearchSubstate::Navigating;
+        // Typing 'x' while in Navigating should return to Typing AND append 'x'
+        // so the user can refine without pressing Esc.
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
+        assert_eq!(action, InputAction::SearchReturnToTyping);
+        assert_eq!(state.search_state.query, "foox");
+        assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+    }
+
+    #[test]
+    fn ctrl_u_clears_query_and_stays_in_typing() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.query = "something".to_string();
+        state.search_state.substate = SearchSubstate::Navigating;
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlU));
+        assert_eq!(action, InputAction::SearchClear);
+        assert_eq!(state.search_state.query, "");
+        assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+    }
+
+    #[test]
+    fn backspace_in_typing_pops_query_and_requests_rescan() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.query = "hello".to_string();
+        let action = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(action, InputAction::SearchQueryChanged);
+        assert_eq!(state.search_state.query, "hell");
+    }
+
+    #[test]
+    fn backspace_in_navigating_returns_to_typing_and_pops() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.query = "hello".to_string();
+        state.search_state.substate = SearchSubstate::Navigating;
+        let action = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(action, InputAction::SearchReturnToTyping);
+        assert_eq!(state.search_state.query, "hell");
+        assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+    }
+
+    #[test]
+    fn esc_in_search_overlay_returns_close_search() {
+        let mut state = make_state();
+        open_search(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_eq!(action, InputAction::CloseSearch);
+    }
+
+    #[test]
+    fn enter_in_typing_with_empty_query_still_returns_search_commit() {
+        // Even on empty query, handle_input returns SearchCommit — the event
+        // loop decides whether to actually transition substate based on
+        // matches. This separation keeps handle_input pure (no conversation).
+        let mut state = make_state();
+        open_search(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_eq!(action, InputAction::SearchCommit);
+    }
+
+    // ── Story 4-4: Bookmark dispatch ─────────────────────────────────────────
+
+    #[test]
+    fn m_in_chat_focus_returns_toggle_bookmark() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('m'));
+        assert_eq!(action, InputAction::ToggleBookmark);
+    }
+
+    #[test]
+    fn quote_in_chat_focus_returns_open_bookmark_list() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('\''));
+        assert_eq!(action, InputAction::OpenBookmarkList);
+    }
+
+    #[test]
+    fn m_outside_chat_focus_does_not_toggle_bookmark() {
+        // Input focus appends 'm' to buffer; does not emit ToggleBookmark.
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('m'));
+        assert_ne!(action, InputAction::ToggleBookmark);
+    }
+
+    fn open_bookmark_list(state: &mut TuiState) {
+        state.focus = FocusState::Overlay(OverlayType::BookmarkList);
+        state.bookmark_list_selected = 0;
+        // Mirror count for the clamp path — tests assume at least 5 entries
+        // so j/Down advance freely within [0, 4].
+        state.bookmark_list_count = 5;
+    }
+
+    #[test]
+    fn d_in_bookmark_list_returns_delete() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
+        assert_eq!(action, InputAction::DeleteBookmark);
+    }
+
+    #[test]
+    fn delete_key_in_bookmark_list_returns_delete() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Delete));
+        assert_eq!(action, InputAction::DeleteBookmark);
+    }
+
+    #[test]
+    fn backspace_in_bookmark_list_returns_delete() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        let action = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(action, InputAction::DeleteBookmark);
+    }
+
+    #[test]
+    fn u_in_bookmark_list_returns_undo() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('u'));
+        assert_eq!(action, InputAction::UndoBookmarkDelete);
+    }
+
+    #[test]
+    fn enter_in_bookmark_list_returns_jump() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_eq!(action, InputAction::JumpToBookmark);
+    }
+
+    #[test]
+    fn esc_in_bookmark_list_returns_close() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_eq!(action, InputAction::CloseBookmarkList);
+    }
+
+    #[test]
+    fn j_in_bookmark_list_advances_selection() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        state.bookmark_list_selected = 0;
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        assert_eq!(state.bookmark_list_selected, 1);
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        assert_eq!(state.bookmark_list_selected, 2);
+    }
+
+    #[test]
+    fn k_in_bookmark_list_reverses_selection() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        state.bookmark_list_selected = 3;
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+        assert_eq!(state.bookmark_list_selected, 2);
+        // Saturating at 0.
+        state.bookmark_list_selected = 0;
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+        assert_eq!(state.bookmark_list_selected, 0);
+    }
+
+    #[test]
+    fn arrow_keys_in_bookmark_list_also_navigate() {
+        let mut state = make_state();
+        open_bookmark_list(&mut state);
+        state.bookmark_list_selected = 1;
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Down));
+        assert_eq!(state.bookmark_list_selected, 2);
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Up));
+        assert_eq!(state.bookmark_list_selected, 1);
     }
 }

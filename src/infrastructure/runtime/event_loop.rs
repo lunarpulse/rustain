@@ -97,6 +97,17 @@ pub async fn run(
         tab_manager.active_tab_mut().conversation.session_id = Some(sid);
     }
 
+    // Story 4-4 AC8/AC9: hydrate session_meta for the restored conversation
+    // so bookmarks from previous sessions survive reload. Failure is silent —
+    // fresh/new conversations have no meta.json yet and that's the correct
+    // default (empty bookmarks).
+    {
+        let conv_id = tab_manager.active_tab().conversation.id.clone();
+        if let Ok(Some(meta)) = fs_storage.load_session_meta(&conv_id).await {
+            tab_manager.active_tab_mut().session_meta = meta;
+        }
+    }
+
     // Active-tab proxies — always reflect the current tab; synced on every tab switch
     let mut conversation = tab_manager.active_tab().conversation.clone();
     let mut streaming = tab_manager.active_tab().streaming.clone();
@@ -500,13 +511,24 @@ pub async fn run(
                                     state.focus = FocusState::Input;
                                     state.needs_redraw = true;
                                 }
-                                InputAction::ExecuteCommand(cmd) => {
-                                    if cmd == "ml" {
+                                InputAction::ExecuteCommand { name: cmd_name, args: cmd_args } => {
+                                    let cmd_arg: Option<&str> = cmd_args.as_deref();
+                                    let cmd_name: &str = cmd_name.as_str();
+                                    if cmd_name == "ml" {
                                         // /ml command: toggle multi-line mode (AC#3)
                                         // Covers: Sprint Change Proposal 2026-04-08
                                         state.multiline_mode = !state.multiline_mode;
                                         state.needs_redraw = true;
-                                    } else if cmd == "new" {
+                                    } else if cmd_name == "export" {
+                                        apply_export_command(
+                                            cmd_arg,
+                                            &conversation,
+                                            &tab_manager.active_tab().session_meta.clone(),
+                                            &workspace_path,
+                                            &mut state,
+                                        )
+                                        .await;
+                                    } else if cmd_name == "new" {
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
                                         if !conversation.messages.is_empty() {
@@ -1089,6 +1111,10 @@ pub async fn run(
                                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     // Overwrite the fresh conversation with the loaded one
                                                     conversation = loaded_conv;
+                                                    // Story 4-4: hydrate session_meta (bookmarks) for the loaded tab
+                                                    if let Ok(Some(meta)) = fs_storage.load_session_meta(&conv_id).await {
+                                                        tab_manager.active_tab_mut().session_meta = meta;
+                                                    }
                                                     // Save loaded conversation back into TabManager so it's not lost on tab switch
                                                     save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                                     // Update session_index
@@ -1657,6 +1683,168 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     }
                                 }
+                                // ── Story 4-4: Within-Conversation Search ──────────────
+                                InputAction::OpenSearch => {
+                                    // app.rs::handle_special_key already set focus
+                                    // and activated search_state. Event loop just
+                                    // needs to trigger the initial (empty) find_matches
+                                    // so the counter renders 0/0 correctly and mark redraw.
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CloseSearch => {
+                                    let prior = state
+                                        .search_state
+                                        .prior_focus
+                                        .take()
+                                        .unwrap_or(FocusState::Chat);
+                                    state.search_state =
+                                        crate::adapters::tui::state::SearchState::new();
+                                    state.focus = prior;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::SearchQueryChanged
+                                | InputAction::SearchClear
+                                | InputAction::SearchReturnToTyping => {
+                                    apply_search_rescan(&conversation, &mut state);
+                                }
+                                InputAction::SearchCommit => {
+                                    if !state.search_state.matches.is_empty() {
+                                        state.search_state.substate =
+                                            crate::adapters::tui::state::SearchSubstate::Navigating;
+                                    } else {
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = StatusState::Flash {
+                                            message: "No matches found".to_string(),
+                                            remaining_ms: 1200,
+                                        };
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::SearchNext => {
+                                    apply_search_navigate(&mut state, 1);
+                                }
+                                InputAction::SearchPrev => {
+                                    apply_search_navigate(&mut state, -1);
+                                }
+                                // ── Story 4-4: Bookmarks ──────────────────────────────
+                                InputAction::ToggleBookmark => {
+                                    // Await any in-flight conversation save before mutating
+                                    // meta.json to serialize all writes to the same file
+                                    // (Dev Notes § Bookmark Persistence — Failure Mode 1).
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    apply_bookmark_toggle(
+                                        &mut tab_manager,
+                                        &mut state,
+                                        &conversation,
+                                        &fs_storage,
+                                    ).await;
+                                }
+                                InputAction::OpenBookmarkList => {
+                                    apply_open_bookmark_list(&tab_manager, &mut state);
+                                }
+                                InputAction::JumpToBookmark => {
+                                    apply_jump_bookmark(&tab_manager, &mut state);
+                                }
+                                InputAction::DeleteBookmark => {
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    apply_delete_bookmark(
+                                        &mut tab_manager,
+                                        &mut state,
+                                        &conversation,
+                                        &fs_storage,
+                                    ).await;
+                                }
+                                InputAction::UndoBookmarkDelete => {
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    apply_undo_bookmark_delete(
+                                        &mut tab_manager,
+                                        &mut state,
+                                        &conversation,
+                                        &fs_storage,
+                                    ).await;
+                                }
+                                InputAction::CloseBookmarkList => {
+                                    state.focus = FocusState::Chat;
+                                    state.bookmark_list_selected = 0;
+                                    state.needs_redraw = true;
+                                }
+                                // ── Story 4-4: Cross-Conversation Search ──────────────
+                                InputAction::OpenCrossSearch => {
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CrossSearchQueryChanged => {
+                                    // Story 4-4 AC5 — delegate the guard to
+                                    // `apply_cross_search_query_change` so tests exercise the
+                                    // same code path (third-audit Fix R4). If the helper
+                                    // returns Spawn, kick off the async scan; Cleared is a
+                                    // no-op aside from the needs_redraw below.
+                                    match apply_cross_search_query_change(&mut state) {
+                                        CrossSearchScanAction::Spawn { query } => {
+                                            let storage_ref = storage.clone();
+                                            let index_clone = session_index.clone();
+                                            let tx = domain_tx.clone();
+                                            tokio::spawn(async move {
+                                                use crate::domain::services::cross_search::{
+                                                    CrossSearchBudget, run_cross_search,
+                                                };
+                                                let outcome = run_cross_search(
+                                                    &*storage_ref,
+                                                    &index_clone,
+                                                    &query,
+                                                    CrossSearchBudget::default(),
+                                                )
+                                                .await;
+                                                let _ = tx.send(AppEvent::CrossSearchResultsReady {
+                                                    query,
+                                                    results: outcome.results,
+                                                    truncated_by_count: outcome.truncated_by_count,
+                                                    truncated_by_time: outcome.truncated_by_time,
+                                                });
+                                            });
+                                        }
+                                        CrossSearchScanAction::Cleared => {}
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::OpenCrossSearchResult => {
+                                    apply_open_cross_search_result(
+                                        &mut tab_manager,
+                                        &mut conversation,
+                                        &mut streaming,
+                                        &mut session_manager,
+                                        &mut state,
+                                        &mut turn_queue,
+                                        &*storage,
+                                        &fs_storage,
+                                        &mut session_index,
+                                        &domain_tx,
+                                    )
+                                    .await;
+                                }
+                                InputAction::CloseCrossSearch => {
+                                    state.cross_search =
+                                        crate::adapters::tui::state::CrossSearchState::new();
+                                    state.focus = FocusState::Sidebar {
+                                        panel: crate::domain::models::visual::PanelType::History,
+                                        selected: state.sidebar_selected,
+                                    };
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ConfirmExportOverwrite => {
+                                    // Third-audit Fix R6 — delegate to the `pub` helper so
+                                    // integration tests exercise the same code path as the
+                                    // event loop.
+                                    apply_confirm_export_overwrite(&mut state).await;
+                                }
+                                InputAction::CancelExportOverwrite => {
+                                    apply_cancel_export_overwrite(&mut state);
+                                }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
                         }
@@ -2195,6 +2383,35 @@ pub async fn run(
                         state.focus = FocusState::Chat;
                         state.needs_redraw = true;
                     }
+                    AppEvent::CrossSearchResultsReady {
+                        query,
+                        results,
+                        truncated_by_count,
+                        truncated_by_time,
+                    } => {
+                        // Story 4-4 AC5 stale-result guard — delegated to the
+                        // `apply_cross_search_results` helper so the event loop
+                        // and tests exercise the same code path
+                        // (third-audit Fix R4).
+                        let outcome = apply_cross_search_results(
+                            &mut state,
+                            query,
+                            results,
+                            truncated_by_count,
+                            truncated_by_time,
+                        );
+                        if matches!(outcome, CrossSearchResultsOutcome::Applied) {
+                            state.needs_redraw = true;
+                        }
+                    }
+                    AppEvent::PeekHighlightExpired { tab_id: _ } => {
+                        // Story 4-4 AC6 — peek highlight window has elapsed.
+                        // Clear the peek on the active tab's search state.
+                        // `tab_id` is passed for future multi-tab routing but
+                        // currently all peeks are applied to the active tab.
+                        state.search_state.peek_highlight = None;
+                        state.needs_redraw = true;
+                    }
                     _ => {
                         state.needs_redraw = true;
                     }
@@ -2292,6 +2509,963 @@ pub async fn run(
 }
 
 /// Save the active-tab proxy state into TabManager before switching tabs.
+/// Re-scan the active conversation for search matches and apply the calm-jump
+/// rule (Story 4-4 AC2 amendment). Called from event-loop arms that mutate
+/// `state.search_state.query` (keystrokes in Typing sub-state, Ctrl+U clear,
+/// and return-from-Navigating transitions).
+///
+/// Calm-jump rule:
+///   1. Jump to match 0 only if match count transitioned 0 → ≥1
+///   2. Jump to match 0 only if the previously focused match no longer exists
+///   3. Otherwise preserve the viewport (no yo-yo)
+fn apply_search_rescan(conversation: &Conversation, state: &mut TuiState) {
+    use crate::adapters::tui::widgets::chat_pane;
+    use crate::domain::services::search::find_matches;
+
+    // Story 4-4 Task 3.3 — debounce guard: skip the scan if the last scan
+    // happened less than 30 ms ago AND the query length did not change.
+    // This avoids burning CPU on held-key repeats without losing accuracy on
+    // normal typing (where length changes every keystroke).
+    let prev_query_len = state.search_state.last_query_len;
+    let cur_query_len = state.search_state.query.chars().count();
+    if let Some(last) = state.search_state.last_search_instant {
+        if last.elapsed() < std::time::Duration::from_millis(30) && prev_query_len == cur_query_len
+        {
+            return;
+        }
+    }
+    state.search_state.last_query_len = cur_query_len;
+
+    let prev_focused = state
+        .search_state
+        .matches
+        .get(state.search_state.focused_match_index)
+        .cloned();
+    let prev_was_empty = state.search_state.matches.is_empty();
+
+    let new_matches = find_matches(conversation, &state.search_state.query);
+    let new_is_empty = new_matches.is_empty();
+    let prev_focused_still_valid = match &prev_focused {
+        Some(f) => new_matches.contains(f),
+        None => false,
+    };
+    state.search_state.matches = new_matches;
+    state.search_state.last_search_instant = Some(std::time::Instant::now());
+
+    let should_jump = (prev_was_empty && !new_is_empty) || !prev_focused_still_valid;
+    if should_jump && !state.search_state.matches.is_empty() {
+        state.search_state.focused_match_index = 0;
+        let target_msg = state.search_state.matches[0].message_index;
+        state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+            target_msg,
+            &state.message_boundaries,
+            state.total_content_height,
+            state.terminal_height as usize,
+        );
+        state.auto_scroll = state.scroll_offset == 0;
+    }
+    state.needs_redraw = true;
+}
+
+/// Action returned by `apply_cross_search_query_change` so the event loop
+/// knows whether to spawn an async scan task or skip scanning entirely
+/// (Story 4-4 AC5 + third-audit Fix R4).
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrossSearchScanAction {
+    /// Query is ≥ 2 chars — the event loop should spawn `run_cross_search`
+    /// with the carried query string.
+    Spawn { query: String },
+    /// Query is < 2 chars — `state.cross_search.results` has already been
+    /// cleared in-place by this helper. No scan should be spawned.
+    Cleared,
+}
+
+/// Guard helper for the `CrossSearchQueryChanged` input action. Encapsulates
+/// the "≥ 2 chars → scan, else clear" decision so the event loop and the
+/// tests call the SAME logic — no more tautological copies of the guard
+/// (third-audit Fix R4).
+#[doc(hidden)]
+pub fn apply_cross_search_query_change(state: &mut TuiState) -> CrossSearchScanAction {
+    if state.cross_search.query.chars().count() >= 2 {
+        state.cross_search.running = true;
+        CrossSearchScanAction::Spawn {
+            query: state.cross_search.query.clone(),
+        }
+    } else {
+        state.cross_search.results.clear();
+        state.cross_search.selected = 0;
+        state.cross_search.truncated_by_count = false;
+        state.cross_search.truncated_by_time = false;
+        state.cross_search.running = false;
+        CrossSearchScanAction::Cleared
+    }
+}
+
+/// Story 4-4 AC12 + third-audit Fix R6 — commit the pre-staged export
+/// content when the user confirms the overwrite overlay with `y`.
+///
+/// Atomic write: tmp → fsync → rename, all routed through
+/// `tokio::task::spawn_blocking` so the event loop is never held on disk
+/// latency. Takes `state.pending_export` and clears it regardless of
+/// success/failure. Sets a success or error flash and returns focus to Chat.
+///
+/// Extracted as `pub` so integration tests can exercise the full
+/// confirmation path against a real tempdir workspace.
+#[doc(hidden)]
+pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
+    if let Some((target_path, content)) = state.pending_export.take() {
+        let target_for_msg = target_path.clone();
+        let write_result = tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
+            let tmp_path = target_path.with_extension("md.tmp");
+            let res: std::io::Result<()> = (|| {
+                let mut f = std::fs::File::create(&tmp_path)?;
+                f.write_all(content.as_bytes())?;
+                f.sync_all()?;
+                drop(f);
+                std::fs::rename(&tmp_path, &target_path)?;
+                Ok(())
+            })();
+            if res.is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
+            }
+            res
+        })
+        .await;
+        match write_result {
+            Ok(Ok(())) => {
+                state.status = StatusState::Flash {
+                    message: format!("Overwrote {}", target_for_msg.display()),
+                    remaining_ms: 3000,
+                };
+            }
+            Ok(Err(e)) => {
+                state.status = StatusState::Flash {
+                    message: format!("Export failed: {}", e),
+                    remaining_ms: 3000,
+                };
+            }
+            Err(join_err) => {
+                state.status = StatusState::Flash {
+                    message: format!("Export failed: {}", join_err),
+                    remaining_ms: 3000,
+                };
+            }
+        }
+    }
+    state.focus = FocusState::Chat;
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC12 + third-audit Fix R6 — drop the pre-staged export content
+/// when the user dismisses the overwrite overlay with `n` or `Esc`.
+///
+/// Clears `state.pending_export`, sets a "cancelled" flash, and returns
+/// focus to Chat. The original file on disk is never touched by this path.
+#[doc(hidden)]
+pub fn apply_cancel_export_overwrite(state: &mut TuiState) {
+    state.pending_export = None;
+    state.status = StatusState::Flash {
+        message: "Export cancelled".to_string(),
+        remaining_ms: 2000,
+    };
+    state.focus = FocusState::Chat;
+    state.needs_redraw = true;
+}
+
+/// Outcome returned by `apply_cross_search_results` so callers know whether
+/// the incoming scan results were applied or dropped as stale (Story 4-4 AC5
+/// stale-result guard + third-audit Fix R4).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossSearchResultsOutcome {
+    /// Results matched the current query and were written into state.
+    Applied,
+    /// Results were for an older query; discarded silently.
+    DiscardedStale,
+}
+
+/// Handler helper for the `AppEvent::CrossSearchResultsReady` event.
+/// Applies the stale-result guard: if the incoming `query` still matches
+/// `state.cross_search.query`, the results are written into state;
+/// otherwise they're dropped.
+#[doc(hidden)]
+pub fn apply_cross_search_results(
+    state: &mut TuiState,
+    query: String,
+    results: Vec<crate::domain::services::cross_search::CrossSearchResult>,
+    truncated_by_count: bool,
+    truncated_by_time: bool,
+) -> CrossSearchResultsOutcome {
+    if state.cross_search.query != query {
+        return CrossSearchResultsOutcome::DiscardedStale;
+    }
+    state.cross_search.results = results;
+    state.cross_search.truncated_by_count = truncated_by_count;
+    state.cross_search.truncated_by_time = truncated_by_time;
+    state.cross_search.running = false;
+    if state.cross_search.results.is_empty() {
+        state.cross_search.selected = 0;
+    } else {
+        state.cross_search.selected = state
+            .cross_search
+            .selected
+            .min(state.cross_search.results.len() - 1);
+    }
+    CrossSearchResultsOutcome::Applied
+}
+
+/// Advance or reverse the focused search match, wrapping at boundaries.
+/// Emits a "Wrapped to top" / "Wrapped to bottom" flash (800 ms) when the
+/// index wraps past 0 or `matches.len() - 1` (Story 4-4 AC3 amendment Fix 3).
+///
+/// `delta`: +1 for `n` (next), -1 for `N` (previous).
+fn apply_search_navigate(state: &mut TuiState, delta: i32) {
+    use crate::adapters::tui::widgets::chat_pane;
+    if state.search_state.matches.is_empty() {
+        state.needs_redraw = true;
+        return;
+    }
+    let len = state.search_state.matches.len();
+    let prev = state.search_state.focused_match_index;
+    let new_idx = if delta > 0 {
+        (prev + 1) % len
+    } else {
+        (prev + len - 1) % len
+    };
+    state.search_state.focused_match_index = new_idx;
+    let target_msg = state.search_state.matches[new_idx].message_index;
+    state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+        target_msg,
+        &state.message_boundaries,
+        state.total_content_height,
+        state.terminal_height as usize,
+    );
+    state.auto_scroll = state.scroll_offset == 0;
+
+    // Wrap-around flash (only fires when len > 1 — a single match never wraps visibly).
+    if len > 1 {
+        let wrapped_forward = delta > 0 && prev == len - 1 && new_idx == 0;
+        let wrapped_backward = delta < 0 && prev == 0 && new_idx == len - 1;
+        if wrapped_forward {
+            state.status_before_flash = Some(state.status.clone());
+            state.status = StatusState::Flash {
+                message: "Wrapped to top".to_string(),
+                remaining_ms: 800,
+            };
+        } else if wrapped_backward {
+            state.status_before_flash = Some(state.status.clone());
+            state.status = StatusState::Flash {
+                message: "Wrapped to bottom".to_string(),
+                remaining_ms: 800,
+            };
+        }
+    }
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC8: toggle a bookmark on the currently focused message.
+///
+/// Resolves the target via `find_message_index_from_scroll_offset`, mutates
+/// the in-memory mirror on the active tab's `session_meta.bookmarks`, then
+/// atomically persists `meta.json` via `save_session_meta`. If the disk save
+/// fails, the in-memory change is rolled back and an error flash is shown
+/// (AC8 optimistic-UI contract).
+///
+/// Rejects tool-call / tool-result messages with a flash — bookmarks only
+/// apply to user/assistant messages per Dev Notes § Bookmarkable Message
+/// Types.
+async fn apply_bookmark_toggle(
+    tab_manager: &mut TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+) {
+    use crate::adapters::tui::widgets::chat_pane::find_message_index_from_scroll_offset;
+
+    if conversation.messages.is_empty() {
+        state.status = StatusState::Flash {
+            message: "No messages to bookmark".to_string(),
+            remaining_ms: 2000,
+        };
+        state.needs_redraw = true;
+        return;
+    }
+    if state.message_boundaries.is_empty() {
+        state.status = StatusState::Flash {
+            message: "Chat pane not ready — try again after first render".to_string(),
+            remaining_ms: 2000,
+        };
+        state.needs_redraw = true;
+        return;
+    }
+
+    let target_idx = find_message_index_from_scroll_offset(
+        state.auto_scroll,
+        state.scroll_offset,
+        &state.message_boundaries,
+        state.total_content_height,
+        state.terminal_height as usize,
+        conversation.messages.len(),
+    );
+
+    // Guard: bookmark only user/assistant messages. Tool messages have
+    // structural first lines; prefixing them with `» ` looks like an error.
+    use crate::domain::models::MessageRole;
+    let role = conversation.messages[target_idx].role;
+    if !matches!(role, MessageRole::User | MessageRole::Assistant) {
+        state.status = StatusState::Flash {
+            message: "Cannot bookmark tool message — target a user or assistant message"
+                .to_string(),
+            remaining_ms: 2000,
+        };
+        state.needs_redraw = true;
+        return;
+    }
+
+    // Clone-mutate-save pattern for rollback safety.
+    let mut new_meta = tab_manager.active_tab().session_meta.clone();
+    let was_bookmarked = new_meta.bookmarks.binary_search(&target_idx).is_ok();
+    if was_bookmarked {
+        new_meta.bookmarks.retain(|&i| i != target_idx);
+    } else {
+        match new_meta.bookmarks.binary_search(&target_idx) {
+            Ok(_) => {} // already there, should not happen given we checked above
+            Err(pos) => new_meta.bookmarks.insert(pos, target_idx),
+        }
+    }
+
+    // Optimistic UI: update in-memory first.
+    let old_meta = tab_manager.active_tab().session_meta.clone();
+    tab_manager.active_tab_mut().session_meta = new_meta.clone();
+
+    // Persist to disk. Rollback on failure.
+    match fs_storage
+        .save_session_meta(&conversation.id, &new_meta)
+        .await
+    {
+        Ok(()) => {
+            // Third-audit Fix R1: flash indices are 0-based per AC10 — match
+            // the bookmark list display and the internal Vec<usize> storage.
+            let msg = if was_bookmarked {
+                format!("Bookmark removed (msg {})", target_idx)
+            } else {
+                format!("Bookmark added (msg {})", target_idx)
+            };
+            state.status = StatusState::Flash {
+                message: msg,
+                remaining_ms: 2000,
+            };
+        }
+        Err(e) => {
+            tab_manager.active_tab_mut().session_meta = old_meta;
+            state.status = StatusState::Flash {
+                message: format!("Failed to save bookmark: {}", e),
+                remaining_ms: 3000,
+            };
+        }
+    }
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC10: open the bookmark list panel. Flashes a teaching message
+/// when the active tab has no bookmarks (reviewer Fix 10 — warmer copy).
+fn apply_open_bookmark_list(tab_manager: &TabManager, state: &mut TuiState) {
+    let bookmarks = &tab_manager.active_tab().session_meta.bookmarks;
+    if bookmarks.is_empty() {
+        state.status = StatusState::Flash {
+            message: "No bookmarks in this conversation — press 'm' on a message to add one"
+                .to_string(),
+            remaining_ms: 2000,
+        };
+        state.needs_redraw = true;
+        return;
+    }
+    state.focus = FocusState::Overlay(crate::domain::models::visual::OverlayType::BookmarkList);
+    // AC10 amendment (party-mode Fix 30): reset selection to 0 on every open
+    // so a stale index from a previous session doesn't survive the close.
+    state.bookmark_list_selected = 0;
+    // AC10 amendment (party-mode Fix 18): mirror bookmark count onto state
+    // for the key-handler's upper-bound clamp (j / Down).
+    state.bookmark_list_count = bookmarks.len();
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC10: jump to the currently selected bookmark.
+fn apply_jump_bookmark(tab_manager: &TabManager, state: &mut TuiState) {
+    use crate::adapters::tui::widgets::chat_pane;
+    let bookmarks = &tab_manager.active_tab().session_meta.bookmarks;
+    if bookmarks.is_empty() {
+        state.focus = FocusState::Chat;
+        state.needs_redraw = true;
+        return;
+    }
+    let sel = state.bookmark_list_selected.min(bookmarks.len() - 1);
+    let target_msg = bookmarks[sel];
+    state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+        target_msg,
+        &state.message_boundaries,
+        state.total_content_height,
+        state.terminal_height as usize,
+    );
+    state.auto_scroll = state.scroll_offset == 0;
+    state.focus = FocusState::Chat;
+    state.bookmark_list_selected = 0;
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC10: delete the currently selected bookmark, stashing it in
+/// the undo buffer for 5 s (synthesis of Sally #7 + Reviewer Fix 8).
+async fn apply_delete_bookmark(
+    tab_manager: &mut TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+) {
+    let mut new_meta = tab_manager.active_tab().session_meta.clone();
+    if new_meta.bookmarks.is_empty() {
+        return;
+    }
+    let sel = state
+        .bookmark_list_selected
+        .min(new_meta.bookmarks.len() - 1);
+    let removed_idx = new_meta.bookmarks.remove(sel);
+
+    let old_meta = tab_manager.active_tab().session_meta.clone();
+    tab_manager.active_tab_mut().session_meta = new_meta.clone();
+
+    match fs_storage
+        .save_session_meta(&conversation.id, &new_meta)
+        .await
+    {
+        Ok(()) => {
+            // Stash in undo buffer (single-entry, 5 s window).
+            state.bookmark_undo_buffer = Some((removed_idx, std::time::Instant::now()));
+            // Keep the mirror count in sync for the key handler's clamp.
+            state.bookmark_list_count = new_meta.bookmarks.len();
+            // Clamp selection to the new list length.
+            if new_meta.bookmarks.is_empty() {
+                state.bookmark_list_selected = 0;
+                state.focus = FocusState::Chat;
+            } else {
+                state.bookmark_list_selected = state
+                    .bookmark_list_selected
+                    .min(new_meta.bookmarks.len() - 1);
+            }
+            state.status = StatusState::Flash {
+                message: format!("Bookmark removed (msg {}) — press u to undo", removed_idx),
+                remaining_ms: 2000,
+            };
+        }
+        Err(e) => {
+            tab_manager.active_tab_mut().session_meta = old_meta;
+            state.status = StatusState::Flash {
+                message: format!("Failed to delete bookmark: {}", e),
+                remaining_ms: 3000,
+            };
+        }
+    }
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC10: undo the most recent bookmark delete (if within 5 s).
+async fn apply_undo_bookmark_delete(
+    tab_manager: &mut TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+) {
+    let Some((idx, when)) = state.bookmark_undo_buffer else {
+        return; // silent no-op
+    };
+    if when.elapsed() > std::time::Duration::from_secs(5) {
+        state.bookmark_undo_buffer = None;
+        return; // silent no-op (expired)
+    }
+
+    let mut new_meta = tab_manager.active_tab().session_meta.clone();
+    // Re-insert sorted.
+    match new_meta.bookmarks.binary_search(&idx) {
+        Ok(_) => {
+            // Already present — nothing to do but clear the buffer.
+            state.bookmark_undo_buffer = None;
+            return;
+        }
+        Err(pos) => new_meta.bookmarks.insert(pos, idx),
+    }
+
+    let old_meta = tab_manager.active_tab().session_meta.clone();
+    tab_manager.active_tab_mut().session_meta = new_meta.clone();
+    match fs_storage
+        .save_session_meta(&conversation.id, &new_meta)
+        .await
+    {
+        Ok(()) => {
+            state.bookmark_undo_buffer = None;
+            state.status = StatusState::Flash {
+                message: format!("Bookmark restored (msg {})", idx),
+                remaining_ms: 1500,
+            };
+        }
+        Err(e) => {
+            tab_manager.active_tab_mut().session_meta = old_meta;
+            state.status = StatusState::Flash {
+                message: format!("Failed to restore bookmark: {}", e),
+                remaining_ms: 3000,
+            };
+        }
+    }
+    state.needs_redraw = true;
+}
+
+/// Story 4-4 AC11/AC12: export the active conversation to markdown.
+///
+/// Dual-mode semantics:
+/// - `/export` (no arg) → **auto-number mode**: write to
+///   `.rustain/exports/<slug>.md`, incrementing a `-N` suffix until a free
+///   name is found. Never prompts, never overwrites.
+/// - `/export <filename>` → **explicit-path mode**: write to the named path
+///   relative to `.rustain/exports/`. On collision, opens the Tier-1
+///   `ExportOverwrite` confirmation overlay with the pre-rendered content
+///   stashed in `state.pending_export` for a stable snapshot at confirm time.
+///
+/// Runs async. All blocking filesystem I/O is routed through
+/// `tokio::task::spawn_blocking` so the TUI event loop is never held up by
+/// disk latency.
+///
+/// Path-traversal hardening (second-audit Fix 27): `/export <name>` rejects
+/// absolute paths and any relative path that contains `..` components, and
+/// additionally verifies the canonicalized parent stays within the
+/// `.rustain/exports/` directory. Supersedes the original Dev Notes wording
+/// that allowed absolute paths.
+///
+/// Atomic write: `.tmp` → `fsync` → `rename` per Dev Notes § Atomic Write
+/// Pattern. Keeps crash-safety guarantees for exported files.
+///
+/// **Visibility:** marked `pub` for integration test access — the tests in
+/// `tests/e2e_export_filesystem.rs` need to exercise the full flow with a
+/// real tempdir workspace. Not intended for external callers.
+#[doc(hidden)]
+pub async fn apply_export_command(
+    arg: Option<&str>,
+    conversation: &Conversation,
+    meta: &crate::domain::models::SessionMeta,
+    workspace_path: &std::path::Path,
+    state: &mut TuiState,
+) {
+    use crate::domain::services::export::{render_conversation_markdown, slugify};
+
+    let exports_dir = workspace_path.join(".rustain").join("exports");
+    // Create the exports dir on a blocking task.
+    {
+        let exports_dir = exports_dir.clone();
+        let create_result =
+            tokio::task::spawn_blocking(move || std::fs::create_dir_all(&exports_dir)).await;
+        match create_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                state.status = StatusState::Flash {
+                    message: format!("Export failed: cannot create exports dir: {}", e),
+                    remaining_ms: 3000,
+                };
+                state.needs_redraw = true;
+                return;
+            }
+            Err(join_err) => {
+                state.status = StatusState::Flash {
+                    message: format!("Export failed: {}", join_err),
+                    remaining_ms: 3000,
+                };
+                state.needs_redraw = true;
+                return;
+            }
+        }
+    }
+
+    // Canonicalize the exports_dir for the path-traversal check.
+    let canonical_exports = match tokio::task::spawn_blocking({
+        let exports_dir = exports_dir.clone();
+        move || std::fs::canonicalize(&exports_dir)
+    })
+    .await
+    {
+        Ok(Ok(p)) => p,
+        _ => exports_dir.clone(),
+    };
+
+    // Resolve the target path.
+    let target_path: std::path::PathBuf = match arg {
+        None => {
+            // Auto-number mode — browser-style. Loop unbounded; if the user
+            // has 1000+ exports they hit them in practice, that's their
+            // problem per Story 4-4 Dev Notes § Export Invocation Modes.
+            let base_slug = if conversation.title.is_empty() {
+                format!(
+                    "conversation-{}",
+                    &conversation.id[..8.min(conversation.id.len())]
+                )
+            } else {
+                slugify(&conversation.title)
+            };
+            let candidate = exports_dir.join(format!("{}.md", base_slug));
+            find_available_numbered_path(candidate, &exports_dir, &base_slug).await
+        }
+        Some(name) => {
+            // Explicit-path mode — Phase 3 security: reject absolute paths
+            // and path-traversal attempts that escape the exports dir.
+            let raw = std::path::PathBuf::from(name);
+            if raw.is_absolute() {
+                state.status = StatusState::Flash {
+                    message:
+                        "Export failed: absolute paths are not allowed (use a name relative to .rustain/exports/)"
+                            .to_string(),
+                    remaining_ms: 3500,
+                };
+                state.needs_redraw = true;
+                return;
+            }
+            // Reject paths containing `..` components outright — simpler and
+            // stronger than canonicalize-then-compare because non-existent
+            // files cannot be canonicalized.
+            if raw
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                state.status = StatusState::Flash {
+                    message: "Export failed: path contains '..' — not allowed".to_string(),
+                    remaining_ms: 3500,
+                };
+                state.needs_redraw = true;
+                return;
+            }
+            let candidate = exports_dir.join(&raw);
+            // Defense-in-depth: canonicalize the parent and verify containment.
+            // If the parent doesn't exist yet, that's acceptable — we rejected
+            // `..` above, so the candidate cannot escape.
+            if let Some(parent) = candidate.parent() {
+                if let Ok(Ok(canonical_parent)) = tokio::task::spawn_blocking({
+                    let parent = parent.to_path_buf();
+                    move || std::fs::canonicalize(&parent)
+                })
+                .await
+                {
+                    if !canonical_parent.starts_with(&canonical_exports) {
+                        state.status = StatusState::Flash {
+                            message: "Export failed: target escapes .rustain/exports/".to_string(),
+                            remaining_ms: 3500,
+                        };
+                        state.needs_redraw = true;
+                        return;
+                    }
+                }
+            }
+            candidate
+        }
+    };
+
+    // Render content before checking for collisions so the overlay captures a
+    // stable snapshot (avoids races with the conversation mutating between
+    // the `y` press and the write).
+    let now = crate::domain::models::session_meta::now_unix();
+    let content = render_conversation_markdown(conversation, meta, now);
+
+    // Check collision for explicit-path mode (arg = Some) — open the Tier-1
+    // ExportOverwrite confirmation overlay instead of flashing an error.
+    let target_exists = tokio::task::spawn_blocking({
+        let target_path = target_path.clone();
+        move || target_path.exists()
+    })
+    .await
+    .unwrap_or(false);
+    if arg.is_some() && target_exists {
+        state.pending_export = Some((target_path.clone(), content));
+        state.focus =
+            FocusState::Overlay(crate::domain::models::visual::OverlayType::Confirmation(
+                crate::domain::models::visual::ConfirmationType::ExportOverwrite(target_path),
+            ));
+        state.needs_redraw = true;
+        return;
+    }
+
+    // Atomic write on a blocking thread.
+    let workspace_path_owned = workspace_path.to_path_buf();
+    let target_path_owned = target_path.clone();
+    let write_result = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let tmp_path = target_path_owned.with_extension("md.tmp");
+        let write: std::io::Result<()> = (|| {
+            let mut f = std::fs::File::create(&tmp_path)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp_path, &target_path_owned)?;
+            Ok(())
+        })();
+        if write.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        write
+    })
+    .await;
+
+    match write_result {
+        Ok(Ok(())) => {
+            let display_path = target_path
+                .strip_prefix(&workspace_path_owned)
+                .unwrap_or(&target_path);
+            state.status = StatusState::Flash {
+                message: format!("Exported to {}", display_path.display()),
+                remaining_ms: 3000,
+            };
+        }
+        Ok(Err(e)) => {
+            state.status = StatusState::Flash {
+                message: format!("Export failed: {}", e),
+                remaining_ms: 3000,
+            };
+        }
+        Err(join_err) => {
+            state.status = StatusState::Flash {
+                message: format!("Export failed: {}", join_err),
+                remaining_ms: 3000,
+            };
+        }
+    }
+    state.needs_redraw = true;
+}
+
+/// Auto-number helper: walk `<slug>.md`, `<slug>-2.md`, ... until we find a
+/// filename that doesn't exist. Unbounded per spec — in the absurd case of
+/// 10000+ exports the user will notice before we do.
+///
+/// Second-audit Fix 5: the existence probe loop is wrapped in a single
+/// `spawn_blocking` call so the entire walk runs off the async event loop.
+/// For the common case of 0–2 collisions this is a <100 µs round trip.
+async fn find_available_numbered_path(
+    initial: std::path::PathBuf,
+    exports_dir: &std::path::Path,
+    base_slug: &str,
+) -> std::path::PathBuf {
+    let exports_dir_owned = exports_dir.to_path_buf();
+    let exports_dir_fallback = exports_dir_owned.clone();
+    let base_slug_owned = base_slug.to_string();
+    let base_slug_fallback = base_slug_owned.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut path = initial;
+        let mut n: u64 = 2;
+        while path.exists() {
+            path = exports_dir_owned.join(format!("{}-{}.md", base_slug_owned, n));
+            n = n.saturating_add(1);
+        }
+        path
+    })
+    .await
+    .unwrap_or_else(|_| exports_dir_fallback.join(format!("{}.md", base_slug_fallback)))
+}
+
+/// Story 4-4 AC5: run a cross-conversation search scan and populate
+/// `state.cross_search` with the results. Blocks the event loop for up to
+/// DEPRECATED in favor of the async-spawned path that delivers results via
+/// `AppEvent::CrossSearchResultsReady`. Kept temporarily for reference until
+/// Phase 5 E2E tests are rewritten. No longer called from the event loop.
+#[allow(dead_code)]
+async fn apply_cross_search_scan(
+    storage: &dyn StoragePort,
+    session_index: &SessionIndex,
+    state: &mut TuiState,
+) {
+    use crate::domain::services::cross_search::{CrossSearchBudget, run_cross_search};
+    state.cross_search.running = true;
+    let outcome = run_cross_search(
+        storage,
+        session_index,
+        &state.cross_search.query,
+        CrossSearchBudget::default(),
+    )
+    .await;
+    state.cross_search.running = false;
+    state.cross_search.results = outcome.results;
+    state.cross_search.truncated_by_count = outcome.truncated_by_count;
+    state.cross_search.truncated_by_time = outcome.truncated_by_time;
+    state.cross_search.scanned = outcome.scanned;
+    state.cross_search.total = outcome.total;
+    // Clamp selection.
+    if state.cross_search.results.is_empty() {
+        state.cross_search.selected = 0;
+    } else {
+        state.cross_search.selected = state
+            .cross_search
+            .selected
+            .min(state.cross_search.results.len() - 1);
+    }
+}
+
+/// Story 4-4 AC6 (amended): open the selected cross-search result in a new
+/// tab (or switch to its existing tab), scroll to the target message, and
+/// apply a transient peek highlight for 1500 ms.
+///
+/// Does NOT auto-open the inline search bar — the reviewer's Fix 5 synthesis
+/// replaces the original auto-open with a peek highlight, eliminating
+/// cognitive whiplash.
+#[allow(clippy::too_many_arguments)]
+async fn apply_open_cross_search_result(
+    tab_manager: &mut TabManager,
+    conversation: &mut Conversation,
+    streaming: &mut StreamingState,
+    session_manager: &mut SessionManager,
+    state: &mut TuiState,
+    turn_queue: &mut TurnQueue,
+    storage: &dyn StoragePort,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+    session_index: &mut SessionIndex,
+    domain_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    // Resolve the selected result.
+    let Some(result) = state
+        .cross_search
+        .results
+        .get(state.cross_search.selected)
+        .cloned()
+    else {
+        return;
+    };
+
+    // If already open in a tab, switch to it. Otherwise load and create new.
+    let existing_tab_idx = tab_manager
+        .tabs()
+        .iter()
+        .position(|t| t.conversation.id == result.conversation_id);
+
+    if let Some(idx) = existing_tab_idx {
+        save_active_tab(
+            tab_manager,
+            conversation,
+            streaming,
+            session_manager,
+            state,
+            turn_queue,
+        );
+        tab_manager.switch_to_index(idx + 1); // 1-based
+        let _ = load_active_tab(
+            tab_manager,
+            conversation,
+            streaming,
+            session_manager,
+            state,
+            turn_queue,
+        );
+    } else {
+        match storage.load_conversation(&result.conversation_id).await {
+            Ok(Some(loaded)) => {
+                save_active_tab(
+                    tab_manager,
+                    conversation,
+                    streaming,
+                    session_manager,
+                    state,
+                    turn_queue,
+                );
+                tab_manager.create_tab_with_conversation(loaded.clone());
+                // Hydrate session_meta (bookmarks) for the new tab.
+                if let Ok(Some(meta)) = fs_storage.load_session_meta(&result.conversation_id).await
+                {
+                    tab_manager.active_tab_mut().session_meta = meta;
+                }
+                *conversation = loaded;
+                session_index.set_open(&result.conversation_id, true);
+                session_index.set_active(Some(&result.conversation_id));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "cross-search: conversation {} not found at open time",
+                    result.conversation_id
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "cross-search: load_conversation({}) failed: {}",
+                    result.conversation_id,
+                    e
+                );
+                state.status = StatusState::Flash {
+                    message: format!("Failed to open conversation: {}", e),
+                    remaining_ms: 3000,
+                };
+                state.needs_redraw = true;
+                return;
+            }
+        }
+    }
+
+    // Stash the cross-search query before resetting the overlay, so we can
+    // pre-populate the inline search bar on the next Ctrl+F press (AC6
+    // amendment: we do NOT auto-open the bar, but we DO preserve the query
+    // in case the user wants to jump to other matches in the same
+    // conversation).
+    let preserved_query = state.cross_search.query.clone();
+
+    // Close the cross-search overlay.
+    state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
+
+    // Scroll to the target message. `message_boundaries` for the newly
+    // activated tab will be computed on the next render tick, so this scroll
+    // may be briefly off until the first repaint — acceptable for v1.
+    use crate::adapters::tui::widgets::chat_pane;
+    state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+        result.first_match_message_index,
+        &state.message_boundaries,
+        state.total_content_height,
+        state.terminal_height as usize,
+    );
+    state.auto_scroll = state.scroll_offset == 0;
+    state.focus = FocusState::Chat;
+
+    // Preserve the query on state.search_state.query (inactive) so Ctrl+F
+    // opens the bar pre-populated. AC6 amendment: no auto-open.
+    state.search_state.query = preserved_query.clone();
+
+    // Set a 1500 ms peek highlight on the cross-search flagged match in the
+    // newly loaded conversation (AC6 — replaces the v1 status flash).
+    //
+    // Second-audit Fix 6: target the match in `result.first_match_message_index`
+    // explicitly rather than relying on `matches.first()`. Under normal
+    // operation the two are the same (because `find_matches` is deterministic
+    // and returns matches sorted by `(message_index, byte_start)`), but the
+    // explicit filter is defensive against conversation mutation between scan
+    // and open, and makes the intent visible to future readers.
+    //
+    // The event loop wakes itself via AppEvent::PeekHighlightExpired to clear
+    // the highlight on time even without further user input.
+    if !preserved_query.is_empty() {
+        use crate::adapters::tui::state::PeekHighlight;
+        use crate::domain::services::search::find_matches;
+        let matches = find_matches(conversation, &preserved_query);
+        let target = matches
+            .iter()
+            .find(|m| m.message_index == result.first_match_message_index)
+            .or_else(|| matches.first());
+        if let Some(target_match) = target {
+            let expires_at = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            state.search_state.peek_highlight = Some(PeekHighlight {
+                m: target_match.clone(),
+                expires_at,
+            });
+            // Schedule the expiry event: tokio::time::sleep_until the deadline,
+            // then send PeekHighlightExpired to the event loop so the render
+            // loop clears the highlight on time even if no other input occurs.
+            let tx = domain_tx.clone();
+            let tab_id = tab_manager.active_tab_index();
+            tokio::spawn(async move {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)).await;
+                let _ = tx.send(AppEvent::PeekHighlightExpired { tab_id });
+            });
+        }
+    }
+    state.needs_redraw = true;
+}
+
 fn save_active_tab(
     tab_manager: &mut TabManager,
     conversation: &Conversation,
@@ -2779,6 +3953,7 @@ fn render(
         multiline_mode,
         input_scroll_offset,
         ref reverse_search,
+        ref search_state,
         ref autocomplete,
         ref command_palette,
         ref which_key,
@@ -2796,8 +3971,25 @@ fn render(
         let area = frame.area();
 
         match layout::compute_layout(area, theme, input_buffer, tab_count, sidebar_visible) {
-            Some(app_layout) => {
+            Some(mut app_layout) => {
                 let _is_compact = area.width < 80 || area.height < 24;
+
+                // Story 4-4 AC1: reserve the top row for the search bar when active.
+                app_layout.reserve_search_bar(search_state.active);
+                // Story 4-4 AC10: reserve the bottom panel when the bookmark
+                // list overlay is focused. Panel height scales with the
+                // bookmark count (1 header + N entries + 1 footer, capped at 6).
+                if focus
+                    == &FocusState::Overlay(
+                        crate::domain::models::visual::OverlayType::BookmarkList,
+                    )
+                {
+                    let bookmark_count = tab_manager_for_bar
+                        .map(|tm| tm.active_tab().session_meta.bookmarks.len())
+                        .unwrap_or(0);
+                    let requested_height = ((bookmark_count + 3).min(6)) as u16;
+                    app_layout.reserve_bookmark_panel(requested_height);
+                }
 
                 // Render tab bar if present
                 if let (Some(tab_bar_area), Some(tm)) = (app_layout.tab_bar, tab_manager_for_bar) {
@@ -2825,7 +4017,26 @@ fn render(
                     );
                 }
 
-                let result = chat_pane::render(
+                // Story 4-4 AC2: thread search query + focused match into chat pane
+                // rendering so substring matches render with highlight styling.
+                let search_query_opt: Option<&str> =
+                    if search_state.active && !search_state.query.is_empty() {
+                        Some(search_state.query.as_str())
+                    } else {
+                        None
+                    };
+                let focused_match_opt = if search_state.active {
+                    search_state.matches.get(search_state.focused_match_index)
+                } else {
+                    None
+                };
+
+                // Story 4-4 AC9: source the bookmark list from the active
+                // tab's session_meta (in-memory mirror of meta.json).
+                let bookmark_indices: &[usize] = tab_manager_for_bar
+                    .map(|tm| tm.active_tab().session_meta.bookmarks.as_slice())
+                    .unwrap_or(&[]);
+                let result = chat_pane::render_with_search(
                     frame,
                     app_layout.chat_pane,
                     conversation,
@@ -2836,7 +4047,48 @@ fn render(
                     height_cache,
                     tool_block_states,
                     feedback_blocks,
+                    search_query_opt,
+                    focused_match_opt,
+                    search_state.matches.as_slice(),
+                    bookmark_indices,
                 );
+
+                // Story 4-4 AC1: render the search bar widget into its reserved slot.
+                if let Some(search_bar_area) = app_layout.search_bar {
+                    crate::adapters::tui::widgets::search_bar::render(
+                        frame,
+                        search_bar_area,
+                        search_state,
+                        theme,
+                    );
+                }
+
+                // Story 4-4 AC5: render cross-search overlay inside the sidebar column.
+                if state.cross_search.active {
+                    if let Some(sidebar_area) = app_layout.sidebar {
+                        crate::adapters::tui::widgets::cross_search::render(
+                            frame,
+                            sidebar_area,
+                            &state.cross_search,
+                            theme,
+                        );
+                    }
+                }
+
+                // Story 4-4 AC10: render the bookmark list panel into its reserved slot.
+                if let Some(bookmark_panel_area) = app_layout.bookmark_panel {
+                    let bookmarks: &[usize] = tab_manager_for_bar
+                        .map(|tm| tm.active_tab().session_meta.bookmarks.as_slice())
+                        .unwrap_or(&[]);
+                    crate::adapters::tui::widgets::bookmark_list::render(
+                        frame,
+                        bookmark_panel_area,
+                        conversation,
+                        bookmarks,
+                        state.bookmark_list_selected,
+                        theme,
+                    );
+                }
                 content_height = result.total_content_height;
                 block_bounds = result.block_boundaries;
                 msg_bounds = result.message_boundaries;
