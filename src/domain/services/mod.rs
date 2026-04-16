@@ -1,6 +1,8 @@
+pub mod claude_code_jsonl;
 pub mod cross_search;
 pub mod export;
 pub mod history_rebuild;
+pub mod import;
 pub mod message_builder;
 pub mod permission_chain;
 pub mod search;

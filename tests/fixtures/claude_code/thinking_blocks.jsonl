@@ -1,0 +1,4 @@
+{"type":"file-history-snapshot","timestamp":"2026-04-01T09:59:00Z"}
+{"type":"user","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>injected</local-command-caveat>"}}
+{"type":"user","uuid":"u2","timestamp":"2026-04-01T10:00:01Z","message":{"role":"user","content":"What is recursion?"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-04-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The user wants to know about recursion. Let me explain clearly."},{"type":"text","text":"Recursion is when a function calls itself."}]}}

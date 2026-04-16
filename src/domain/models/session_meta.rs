@@ -2,6 +2,19 @@ use serde::{Deserialize, Serialize};
 
 use super::conversation::ForkSource;
 
+/// Import provenance — set during `rustain migrate --from <source>`.
+/// `None` for native rustain sessions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSource {
+    /// Source tool identifier (e.g., "claude-code").
+    pub source: String,
+    /// Original session ID in the source tool.
+    pub original_session_id: String,
+    /// Unix timestamp of the import operation.
+    pub imported_at: i64,
+}
+
 /// Lightweight session metadata for sidebar display (sidecar file).
 /// Stored as `{id}.session.json` alongside the full `{id}.meta.json` conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +38,10 @@ pub struct SessionMeta {
     /// fork indicator is read from SessionSummary (built from this field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_source: Option<ForkSource>,
+    /// Import provenance — set during `rustain migrate --from <source>`.
+    /// `None` for native rustain sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<ImportSource>,
     /// Lossless round-trip of unknown fields (DF-088). Any serde fields we
     /// don't know about are captured here and written back on re-save so
     /// cross-version saves never silently drop data.
@@ -45,6 +62,7 @@ impl SessionMeta {
             message_count: 0,
             bookmarks: Vec::new(),
             fork_source: None,
+            imported_from: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -59,6 +77,7 @@ impl SessionMeta {
             message_count: conv.messages.len(),
             bookmarks: Vec::new(),
             fork_source: conv.fork_source.clone(),
+            imported_from: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -216,6 +235,7 @@ mod tests {
             message_count: 5,
             bookmarks: vec![1, 3],
             fork_source: None,
+            imported_from: None,
             extra: serde_json::Map::new(),
         };
 
@@ -296,6 +316,110 @@ mod tests {
         let meta: SessionMeta = serde_json::from_str(json).unwrap();
         assert_eq!(meta.version, 2);
         assert_eq!(meta.title, "Future Session");
+    }
+
+    #[test]
+    fn test_session_meta_with_imported_from_roundtrip() {
+        let meta = SessionMeta {
+            version: 1,
+            title: "Imported Session".to_string(),
+            created_at: 1700000000,
+            updated_at: 1700000100,
+            message_count: 10,
+            bookmarks: vec![],
+            fork_source: None,
+            imported_from: Some(ImportSource {
+                source: "claude-code".to_string(),
+                original_session_id: "abc-123-def".to_string(),
+                imported_at: 1700000200,
+            }),
+            extra: serde_json::Map::new(),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let deserialized: SessionMeta = serde_json::from_str(&json).unwrap();
+
+        let imported = deserialized.imported_from.as_ref().unwrap();
+        assert_eq!(imported.source, "claude-code");
+        assert_eq!(imported.original_session_id, "abc-123-def");
+        assert_eq!(imported.imported_at, 1700000200);
+    }
+
+    #[test]
+    fn test_session_meta_without_imported_from_omits_field() {
+        let meta = SessionMeta {
+            version: 1,
+            title: "Native Session".to_string(),
+            created_at: 1700000000,
+            updated_at: 1700000100,
+            message_count: 3,
+            bookmarks: vec![],
+            fork_source: None,
+            imported_from: None,
+            extra: serde_json::Map::new(),
+        };
+
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            !json.contains("importedFrom"),
+            "importedFrom must not appear when None: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_session_meta_legacy_json_without_imported_from_deserializes() {
+        let json = r#"{
+            "version": 1,
+            "title": "Legacy Session",
+            "createdAt": 1700000000,
+            "updatedAt": 1700000100,
+            "messageCount": 3
+        }"#;
+
+        let meta: SessionMeta = serde_json::from_str(json).unwrap();
+        assert!(
+            meta.imported_from.is_none(),
+            "legacy JSON without importedFrom must deserialize with None"
+        );
+    }
+
+    #[test]
+    fn test_session_meta_imported_from_preserves_extra_fields() {
+        let json = r#"{
+            "version": 1,
+            "title": "Extended Session",
+            "createdAt": 1700000000,
+            "updatedAt": 1700000100,
+            "messageCount": 5,
+            "importedFrom": {
+                "source": "claude-code",
+                "originalSessionId": "uuid-xxx",
+                "importedAt": 1700000300
+            },
+            "futureField": "x"
+        }"#;
+
+        let meta: SessionMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.imported_from.is_some());
+        assert_eq!(
+            meta.extra.get("futureField").and_then(|v| v.as_str()),
+            Some("x"),
+            "futureField must survive in extra map"
+        );
+
+        // Re-serialize and verify both fields survive
+        let resaved = serde_json::to_string(&meta).unwrap();
+        assert!(
+            resaved.contains("\"importedFrom\""),
+            "importedFrom must survive re-save: {}",
+            resaved
+        );
+        assert!(
+            resaved.contains("\"futureField\""),
+            "futureField must survive re-save: {}",
+            resaved
+        );
     }
 
     /// DF-088 regression: unknown fields written by a newer rustain must survive

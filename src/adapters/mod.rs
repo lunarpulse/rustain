@@ -3,6 +3,7 @@ pub mod clipboard_adapter;
 pub mod command_registry;
 pub mod file_scanner;
 pub mod filesystem;
+pub mod importers;
 pub mod noop;
 pub mod palette_registry;
 pub mod persona_adapter;

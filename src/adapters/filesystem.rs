@@ -2815,6 +2815,7 @@ mod tests {
             message_count: 5,
             bookmarks: vec![1, 3],
             fork_source: None,
+            imported_from: None,
             extra: serde_json::Map::new(),
         };
 

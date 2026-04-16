@@ -68,6 +68,7 @@ fn meta() -> SessionMeta {
         message_count: 2,
         bookmarks: vec![],
         fork_source: None,
+        imported_from: None,
         extra: serde_json::Map::new(),
     }
 }

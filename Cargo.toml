@@ -58,7 +58,7 @@ unicode-width = "0.2"
 arboard = { version = "3", optional = true }
 png = { version = "0.17", optional = true }
 pulldown-cmark = "0.13"
-# chrono = { version = "0.4", features = ["serde"] }  # Re-add when time formatting is needed
+chrono = { version = "0.4", features = ["serde"] }
 
 # ── Rustycode path deps — uncomment in Story 1.2 ────────────────
 # Verify crossterm/ratatui version compatibility with rustycode before enabling
@@ -72,6 +72,7 @@ tempfile = "3.0"
 pretty_assertions = "1"
 mockito = "1"
 serial_test = "3"
+async-trait = "0.1"
 
 [features]
 default = ["anthropic", "clipboard"]

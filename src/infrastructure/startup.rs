@@ -63,7 +63,7 @@ pub async fn run() -> Result<()> {
     // 4. Install panic hook
     signals::install_panic_hook();
 
-    // 4a. Intercept init/doctor subcommands BEFORE provider construction and terminal setup
+    // 4a. Intercept init/doctor/migrate subcommands BEFORE provider construction and terminal setup
     if let Some(Command::Init) = cli.command {
         return crate::adapters::cli::init::run_init().await;
     }
@@ -74,6 +74,21 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("Doctor subcommand failed: {e}");
+                SubcommandExit.into()
+            });
+    }
+    if let Some(Command::Migrate {
+        from,
+        path,
+        yes,
+        select,
+        dry_run,
+    }) = cli.command
+    {
+        return crate::adapters::cli::migrate::run_migrate(from, path, yes, select, dry_run)
+            .await
+            .map_err(|e| {
+                tracing::error!("Migrate subcommand failed: {e}");
                 SubcommandExit.into()
             });
     }
