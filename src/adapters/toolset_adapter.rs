@@ -21,6 +21,7 @@ use crate::domain::models::{ToolDefinition, ToolResult};
 use crate::domain::ports::{StoragePort, ToolSetPort};
 
 /// Active checkpoint context for file snapshotting within a turn.
+#[derive(Clone)]
 struct ToolExecutionContext {
     conversation_id: String,
     checkpoint: CheckpointId,
@@ -175,8 +176,29 @@ impl ToolSetAdapter {
         let _write_guard = per_path_lock.lock().await;
 
         // Take snapshot before writing via StoragePort (Story 4-3b).
-        if let Some(ctx) = self.current_context.lock().await.as_ref() {
-            let original = tokio::fs::read(&path).await.unwrap_or_default();
+        // Also capture original_hash for DF-107 TOCTOU re-check just before write.
+        let snapshot_ctx = self.current_context.lock().await.clone();
+        let original_hash_for_toctou: Option<String> = if let Some(ref ctx) = snapshot_ctx {
+            let original = match tokio::fs::read(&path).await {
+                Ok(data) => data,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+                Err(e) => {
+                    tracing::warn!("snapshot pre-read failed for {}: {}", path.display(), e);
+                    vec![]
+                }
+            };
+
+            // Compute hash of original content for TOCTOU check (DF-107, B2).
+            // Empty vec from NotFound = new file creation, no TOCTOU concern.
+            let hash = if !original.is_empty() {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(&original);
+                Some(format!("sha256:{:x}", h.finalize()))
+            } else {
+                None
+            };
+
             if let Err(e) = self
                 .storage
                 .snapshot_file(&ctx.conversation_id, ctx.checkpoint, &path, &original)
@@ -184,11 +206,74 @@ impl ToolSetAdapter {
             {
                 tracing::warn!("snapshot_file failed for {}: {}", path.display(), e);
             }
+            hash
         } else {
             tracing::warn!(
                 "Write tool executed without an active checkpoint context — no snapshot taken for {}",
                 path.display()
             );
+            None
+        };
+
+        // DF-107 (AC2): TOCTOU re-hash — verify the file has not been externally
+        // modified between the snapshot read and this write. Re-read and re-hash
+        // the file immediately before writing. If the hash diverges, report a
+        // Conflict rather than silently overwriting an external change.
+        // Re-hashing (not advisory flock) is chosen: portable, no OS-level lock
+        // inheritance issues, and sufficient for single-machine tool execution.
+        // Documented here per AC2: rationale for mechanism selection.
+        if let Some(ref expected_hash) = original_hash_for_toctou {
+            match tokio::fs::read(&path).await {
+                Ok(current_content) if !current_content.is_empty() => {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(&current_content);
+                    let actual_hash = format!("sha256:{:x}", h.finalize());
+                    if actual_hash != *expected_hash {
+                        return Ok(ToolResult {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: format!(
+                                "TOCTOU conflict: '{}' was modified between snapshot and write.\n\
+                                 expected_hash: {}\n\
+                                 actual_hash: {}\n\
+                                 Rewind protection is intact — please retry or resolve the conflict.",
+                                file_path, expected_hash, actual_hash
+                            ),
+                            is_error: true,
+                        });
+                    }
+                }
+                Ok(_) => {
+                    // File now empty — was non-empty when we snapshotted. Conflict.
+                    return Ok(ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "TOCTOU conflict: '{}' was truncated or emptied between snapshot and write.\n\
+                             expected_hash: {}\n\
+                             Rewind protection is intact — please retry or resolve the conflict.",
+                            file_path, expected_hash
+                        ),
+                        is_error: true,
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // File deleted between snapshot and write — that's a conflict.
+                    return Ok(ToolResult {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: format!(
+                            "TOCTOU conflict: '{}' was deleted between snapshot and write.\n\
+                             expected_hash: {}\n\
+                             Rewind protection is intact — please retry or resolve the conflict.",
+                            file_path, expected_hash
+                        ),
+                        is_error: true,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("TOCTOU re-check read failed for {}: {}", path.display(), e);
+                    // Proceed with write — cannot verify, but don't block the tool.
+                }
+            }
         }
 
         // Create parent directories
@@ -202,6 +287,24 @@ impl ToolSetAdapter {
         tokio::fs::write(&path, new_content).await.map_err(|e| {
             ToolError::ExecutionFailed(format!("Failed to write '{}': {}", file_path, e))
         })?;
+
+        // DF-111 (AC5, schema v3): record post-write hash so revert can distinguish
+        // "tool-modified" (→ Restore) from "externally-modified" (→ Conflict).
+        if let Some(ref ctx) = snapshot_ctx {
+            if let Err(e) = self
+                .storage
+                .finalize_snapshot(
+                    &ctx.conversation_id,
+                    ctx.checkpoint,
+                    &path,
+                    new_content.as_bytes(),
+                )
+                .await
+            {
+                // Non-fatal: degrades to v2 semantics (current != original → Restore).
+                tracing::debug!("finalize_snapshot failed for {}: {}", path.display(), e);
+            }
+        }
 
         let byte_count = new_content.len();
         Ok(ToolResult {
@@ -477,8 +580,8 @@ mod tests {
         let snapshot_content = std::fs::read_to_string(entries[0].path()).unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(&snapshot_content).unwrap();
 
-        // Verify envelope structure (schema v2 added in 4-3b review — D1 / Option C).
-        assert_eq!(snapshot["schema_version"].as_u64().unwrap(), 2);
+        // Verify envelope structure (schema v3 — DF-111 expected_current_hash field).
+        assert_eq!(snapshot["schema_version"].as_u64().unwrap(), 3);
         assert_eq!(snapshot["conversation_id"].as_str().unwrap(), conv_id);
         assert!(
             snapshot["file_existed"].as_bool().unwrap(),

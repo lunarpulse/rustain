@@ -15,6 +15,7 @@ pub mod session_meta;
 mod stream;
 pub mod tab;
 mod tools;
+pub mod transaction;
 mod usage;
 #[allow(dead_code)]
 pub mod visual;

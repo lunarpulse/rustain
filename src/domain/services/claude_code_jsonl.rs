@@ -167,6 +167,19 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                     ClaudeCodeContent::Blocks(blocks) => {
                         // A user turn with blocks is a tool_result wrapper —
                         // merge each tool_result onto the previous assistant message.
+                        // DF-131: warn for image blocks in user turns (not imported).
+                        let image_count = blocks
+                            .iter()
+                            .filter(|b| matches!(b, ClaudeCodeBlock::Image))
+                            .count();
+                        if image_count > 0 {
+                            tracing::warn!(
+                                image_count,
+                                "Skipping {} image block(s) in user turn — inline images not supported by importer",
+                                image_count
+                            );
+                        }
+
                         let tool_results: Vec<&ClaudeCodeBlock> = blocks
                             .iter()
                             .filter(|b| matches!(b, ClaudeCodeBlock::ToolResult { .. }))
@@ -398,11 +411,27 @@ pub fn extract_candidate_metadata(
         if matches!(line.line_type.as_str(), "user" | "assistant") {
             message_count += 1;
 
-            // Extract title from first user message
+            // Extract title from first user message (DF-134: walk blocks for block-array).
             if line.line_type == "user" && first_user_content.is_none() && !line.is_meta {
                 if let Some(ref msg) = line.message {
-                    if let Some(ClaudeCodeContent::Text(text)) = &msg.content {
-                        first_user_content = Some(text.clone());
+                    match &msg.content {
+                        Some(ClaudeCodeContent::Text(text)) => {
+                            first_user_content = Some(text.clone());
+                        }
+                        Some(ClaudeCodeContent::Blocks(blocks)) => {
+                            // Walk blocks to find the first Text block (DF-134).
+                            let text = blocks.iter().find_map(|b| {
+                                if let ClaudeCodeBlock::Text { text } = b {
+                                    Some(text.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(t) = text {
+                                first_user_content = Some(t);
+                            }
+                        }
+                        None => {}
                     }
                 }
             }

@@ -69,6 +69,10 @@ pub struct FileSystemStorage {
     /// constructors. Production composition root SHOULD use
     /// [`with_workspace_root`] to pass the real workspace root.
     workspace_root: Option<PathBuf>,
+    /// Maximum checkpoints to retain per conversation (DF-106).
+    /// Older checkpoints are pruned opportunistically in `create_checkpoint`.
+    /// `None` = unlimited (test use only). Default: 100.
+    snapshot_retention_count: Option<usize>,
 }
 
 impl FileSystemStorage {
@@ -82,6 +86,7 @@ impl FileSystemStorage {
         Self {
             sessions_dir,
             workspace_root: None,
+            snapshot_retention_count: Some(100),
         }
     }
 
@@ -93,7 +98,15 @@ impl FileSystemStorage {
         Self {
             sessions_dir,
             workspace_root: Some(workspace_root),
+            snapshot_retention_count: Some(100),
         }
+    }
+
+    /// Override the snapshot retention count (for tests or CLI override).
+    /// Pass `None` for unlimited retention.
+    pub fn with_snapshot_retention(mut self, count: Option<usize>) -> Self {
+        self.snapshot_retention_count = count;
+        self
     }
 
     /// Ensure the sessions directory exists.
@@ -145,16 +158,59 @@ impl FileSystemStorage {
 
     /// Detect the storage layout for a given conversation id.
     ///
-    /// Disambiguation rule: always use directory vs. file presence, never filename.
+    /// Disambiguation rule (DF-112, AC6): Directory layout requires BOTH
+    /// `{sessions_dir}/{id}/` as a directory AND `{id}/conversation.json`
+    /// as a regular file. An orphaned sidecar-only directory (e.g., created
+    /// by `save_checkpoint_log` or image copy without a full migration) is
+    /// treated as Flat or Missing, not Directory.
+    ///
     /// - `Directory` if `{sessions_dir}/{id}/` exists as a directory
+    ///   AND `{sessions_dir}/{id}/conversation.json` is a regular file
     /// - `Flat` if `{sessions_dir}/{id}.meta.json` exists as a file
     /// - `Missing` otherwise
     async fn detect_layout(&self, id: &str) -> SessionLayout {
         let dir = self.session_dir(id);
-        if let Ok(meta) = tokio::fs::metadata(&dir).await
-            && meta.is_dir()
-        {
-            return SessionLayout::Directory;
+        // DF-099: single read_dir pass on the session directory — eliminates
+        // the TOCTOU race window between the two sequential metadata() calls
+        // (metadata(dir) → metadata(conv_file)) used in the previous
+        // implementation. If the directory exists, enumerate its entries to
+        // check for conversation.json in one kernel call.
+        match tokio::fs::read_dir(&dir).await {
+            Ok(mut entries) => {
+                // Session directory exists. Look for conversation.json.
+                let mut found_conv = false;
+                while let Ok(Some(e)) = entries.next_entry().await {
+                    if e.file_name() == "conversation.json" {
+                        if let Ok(ft) = e.file_type().await {
+                            if ft.is_file() {
+                                found_conv = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+                if found_conv {
+                    return SessionLayout::Directory;
+                }
+                // Dir exists but conversation.json absent — fall through to
+                // flat check (handles sidecar-only or images-only directories).
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::NotADirectory =>
+            {
+                // Directory does not exist or path is not a directory.
+            }
+            Err(e) => {
+                // Other I/O error (PermissionDenied, etc.) — log and fall through.
+                // This may misclassify a Directory session as Flat/Missing, but
+                // logging ensures the issue is diagnosable.
+                tracing::warn!(
+                    id = %id,
+                    error = %e,
+                    "detect_layout: read_dir failed with unexpected error — session may be misclassified"
+                );
+            }
         }
         let flat = self.session_path(id);
         if let Ok(meta) = tokio::fs::metadata(&flat).await
@@ -314,6 +370,20 @@ impl FileSystemStorage {
             .map_err(|e| StorageError::IoError(format!("Failed to write meta.json: {}", e)))?;
         if let Err(e) = tokio::fs::rename(&meta_tmp, &meta_path).await {
             let _ = tokio::fs::remove_file(&meta_tmp).await;
+            // DF-096: conversation.json was already renamed — roll it back so
+            // the flat files remain the authoritative copy.
+            if let Err(rb) = tokio::fs::remove_file(&conv_path).await {
+                tracing::warn!(
+                    id = %id,
+                    rollback_error = %rb,
+                    "save_directory_layout: meta.json rename failed; rollback of conversation.json also failed — session may be inconsistent"
+                );
+            } else {
+                tracing::info!(
+                    id = %id,
+                    "save_directory_layout: meta.json rename failed; rolled back conversation.json — flat files remain authoritative"
+                );
+            }
             return Err(StorageError::IoError(format!(
                 "Failed to rename meta.json: {}",
                 e
@@ -527,12 +597,30 @@ impl StoragePort for FileSystemStorage {
         // Story 4-3a.1 AC4: validate image references on load. Missing files
         // log a warning but never fail the load — the ImageReference entry is
         // preserved so later fixes (restore from backup, etc.) can re-populate.
+        //
+        // DF-098: single read_dir pass to build a HashSet of present filenames,
+        // then O(1) membership check per image — eliminates N separate
+        // metadata() syscalls (one per image in the old implementation).
         if layout == SessionLayout::Directory {
             let images_dir = self.images_dir(&conv.id);
+            let present: std::collections::HashSet<String> = {
+                let mut set = std::collections::HashSet::new();
+                if let Ok(mut rd) = tokio::fs::read_dir(&images_dir).await {
+                    while let Ok(Some(e)) = rd.next_entry().await {
+                        if let Ok(ft) = e.file_type().await {
+                            if ft.is_file() {
+                                if let Some(name) = e.file_name().to_str() {
+                                    set.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                set
+            };
             for msg in &conv.messages {
                 for img in &msg.images {
-                    let p = images_dir.join(&img.file_name);
-                    if tokio::fs::metadata(&p).await.is_err() {
+                    if !present.contains(&img.file_name) {
                         tracing::warn!(
                             conversation_id = %conv.id,
                             message_id = %msg.id,
@@ -895,12 +983,25 @@ impl StoragePort for FileSystemStorage {
             .map_err(|e| StorageError::IoError(format!("create session dir: {}", e)))?;
 
         // Migrate the conversation to directory format now that the session dir exists.
-        // Without this, the next `load_conversation` call detects Directory layout and
-        // fails to find `{id}/conversation.json` (which only exists in directory mode).
-        // The check is cheap: stat the expected file, migrate only if absent.
+        // Without this, `load_conversation` would fail to find `{id}/conversation.json`.
+        //
+        // Note: we call `save_directory_layout` directly instead of `save_conversation_inner`
+        // because `detect_layout` (called inside `save_conversation_inner`) now requires BOTH
+        // `{id}/` directory AND `{id}/conversation.json` to classify as Directory (DF-112 fix).
+        // The first time we create the session dir, `conversation.json` doesn't exist yet, so
+        // `detect_layout` would return Flat and `save_conversation_inner` would incorrectly save
+        // to the flat format rather than migrating.
         let conv_file = self.conversation_file(conversation_id);
         if !tokio::fs::try_exists(&conv_file).await.unwrap_or(false) {
-            self.save_conversation_inner(&conv, false).await?;
+            let persisted = PersistedConversation::from_conversation_with_exit(&conv, false);
+            let json = serde_json::to_string_pretty(&persisted)
+                .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+            let meta = crate::domain::models::SessionMeta::from_conversation(&conv);
+            self.save_directory_layout(conversation_id, &json, &meta)
+                .await?;
+            // Clean up stale flat-format files (best-effort).
+            self.finish_flat_to_directory_migration(conversation_id)
+                .await?;
         }
 
         let mut log = self.load_checkpoint_log(conversation_id).await?;
@@ -920,6 +1021,20 @@ impl StoragePort for FileSystemStorage {
         };
         log.entries.push(meta.clone());
         self.save_checkpoint_log(conversation_id, &log).await?;
+
+        // DF-106 (AC1): Opportunistic snapshot retention — prune oldest checkpoints
+        // after recording the new one so the log stays within the configured limit.
+        if let Some(retention) = self.snapshot_retention_count {
+            if log.entries.len() > retention {
+                if let Err(e) = self
+                    .prune_old_snapshots(conversation_id, &log, retention)
+                    .await
+                {
+                    // Non-fatal: log and continue. Disk space grows but no data is lost.
+                    let _ = e; // warning already emitted inside prune_old_snapshots
+                }
+            }
+        }
 
         tracing::debug!(
             "Created checkpoint {} for conversation {} at message_index {}",
@@ -1091,14 +1206,12 @@ impl StoragePort for FileSystemStorage {
         //    filter is on `message_index`, not on checkpoint id — the target
         //    is user-selected and may fall between adjacent checkpoints.
         //
-        //    Important: only touch the checkpoint log if it actually exists on
-        //    disk. Text-only conversations (no tool calls) never wrote a
-        //    checkpoint file. Calling `save_checkpoint_log` would
-        //    `create_dir_all({session_dir})` and flip `detect_layout` to
-        //    `Directory`, leaving an orphaned `conversation.json` parent dir
-        //    while the actual conversation file lives at the flat path.
-        //    Subsequent `load_conversation` would then return `None`. Skip
-        //    the save entirely when there's no log file.
+        //    DF-112 (AC6): `detect_layout` now requires BOTH the directory AND
+        //    `conversation.json` to return `Directory`. Creating the checkpoint
+        //    dir via `save_checkpoint_log → create_dir_all` no longer silently
+        //    flips the layout, so the Amendment 2 `try_exists` guard is removed.
+        //    We call `save_checkpoint_log` only when the log file actually exists
+        //    (text-only conversations never created one — no-op is the right behaviour).
         let cp_file = self.checkpoints_file(conversation_id);
         if tokio::fs::try_exists(&cp_file).await.unwrap_or(false) {
             let log = self.load_checkpoint_log(conversation_id).await?;
@@ -1130,29 +1243,19 @@ impl StoragePort for FileSystemStorage {
         path: &std::path::Path,
         content: &[u8],
     ) -> Result<(), StorageError> {
-        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
 
-        // DF-110 soft-cap: refuse to snapshot files larger than SNAPSHOT_MAX_BYTES.
-        // The tool still executes — we just don't protect the file with rewind.
-        // Full streaming base64 encoder is deferred to Story 4-6 cleanup.
-        const SNAPSHOT_MAX_BYTES: usize = 50 * 1024 * 1024; // 50 MiB
-        if content.len() > SNAPSHOT_MAX_BYTES {
-            tracing::warn!(
-                "Skipping snapshot for {} ({} bytes > {} byte cap); \
-                 rewind will not restore this file. See DF-110.",
-                path.display(),
-                content.len(),
-                SNAPSHOT_MAX_BYTES
-            );
-            return Ok(());
-        }
+        // DF-110 (AC4): Stream-encode large files using base64::write::EncoderWriter
+        // instead of loading the whole file into memory. Cap raised significantly —
+        // the streaming path handles arbitrarily large files within available I/O
+        // throughput. The 50 MiB guard from Story 4-3b is removed.
 
         // 1. Canonicalize path. FAIL CLOSED on unresolvable paths — do not fall
         //    back to the raw input. If the target file doesn't exist yet (Write
         //    tool creating a new file), canonicalize the parent and join the
         //    filename. This keeps new-file snapshots working while rejecting
         //    paths whose parent chain cannot be resolved.
-        let canonical: PathBuf = match std::fs::canonicalize(path) {
+        let canonical: PathBuf = match tokio::fs::canonicalize(path).await {
             Ok(p) => p,
             Err(_) => {
                 let parent = path.parent().ok_or_else(|| {
@@ -1161,7 +1264,7 @@ impl StoragePort for FileSystemStorage {
                         path.display()
                     ))
                 })?;
-                let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+                let canonical_parent = tokio::fs::canonicalize(parent).await.map_err(|e| {
                     StorageError::NotSupported(format!(
                         "snapshot parent canonicalization failed for {}: {}",
                         parent.display(),
@@ -1196,13 +1299,15 @@ impl StoragePort for FileSystemStorage {
                 )
             })?;
 
-        let workspace_canonical = std::fs::canonicalize(&workspace_root).map_err(|e| {
-            StorageError::NotSupported(format!(
-                "workspace root canonicalization failed for {}: {}",
-                workspace_root.display(),
-                e
-            ))
-        })?;
+        let workspace_canonical = tokio::fs::canonicalize(&workspace_root)
+            .await
+            .map_err(|e| {
+                StorageError::NotSupported(format!(
+                    "workspace root canonicalization failed for {}: {}",
+                    workspace_root.display(),
+                    e
+                ))
+            })?;
 
         // 3. Path-traversal guard. Canonical paths are always absolute — no
         //    is_absolute() bypass. Relative, symlinked, and ../-escaping paths
@@ -1241,27 +1346,44 @@ impl StoragePort for FileSystemStorage {
             .map_err(|e| StorageError::IoError(format!("create snapshots dir: {}", e)))?;
 
         // 8. Compute sha256 of original content.
-        use sha2::{Digest, Sha256};
         let original_hash = {
             let mut h = Sha256::new();
             h.update(content);
             format!("sha256:{:x}", h.finalize())
         };
 
-        // 9. Base64-encode the content (supports binary files safely).
-        let original_content_b64 = base64::engine::general_purpose::STANDARD.encode(content);
+        // 9. Base64-encode the content in 64 KiB chunks (DF-110, AC4).
+        //    Uses base64::write::EncoderWriter over a Vec<u8> buffer to avoid
+        //    loading the entire base64 string into memory at once.
+        let original_content_b64 = {
+            use base64::write::EncoderWriter;
+            use std::io::Write as _;
+            const CHUNK: usize = 64 * 1024; // 64 KiB
+            let mut b64_buf: Vec<u8> = Vec::with_capacity(content.len() * 4 / 3 + 4);
+            {
+                let mut encoder =
+                    EncoderWriter::new(&mut b64_buf, &base64::engine::general_purpose::STANDARD);
+                for chunk in content.chunks(CHUNK) {
+                    encoder.write_all(chunk).map_err(|e| {
+                        StorageError::IoError(format!("base64 encode chunk: {}", e))
+                    })?;
+                }
+                encoder
+                    .finish()
+                    .map_err(|e| StorageError::IoError(format!("base64 encoder finish: {}", e)))?;
+            }
+            String::from_utf8(b64_buf)
+                .map_err(|e| StorageError::SerializationError(format!("base64 utf8: {}", e)))?
+        };
 
-        // D1 schema v2: explicit file_existed sentinel. An empty-content snapshot
-        // with file_existed=false means the file did not exist pre-checkpoint
-        // (so rewind should DELETE it). An empty-content snapshot with
-        // file_existed=true means the file was actually empty (rewind writes empty).
-        //
-        // For now all callers pass the pre-existing file content (or an empty
-        // slice when the file is new). A future Write-tool path will distinguish
-        // new-file creation from empty-file overwrite via a separate API.
-        // Conservative default: empty content => file did not exist; non-empty
-        // content => file existed. This matches current caller behavior and is
-        // forward-compatible with an explicit `file_existed` parameter.
+        // D1 schema v2: explicit file_existed sentinel.
+        // Schema v3 (DF-111, AC5): adds expected_current_hash.
+        //   `expected_current_hash` is null at snapshot time (pre-tool execution).
+        //   The toolset adapter MUST call `finalize_snapshot` after the Write tool
+        //   completes to populate this field with the post-write hash.
+        //   At revert time: if expected_current_hash is present and matches current
+        //   file hash → tool modified it → Restore. If mismatch → external edit → Conflict.
+        //   If absent (v1/v2 fallback): if current_hash != original_hash → Restore.
         let file_existed = !content.is_empty();
 
         let now_ms = std::time::SystemTime::now()
@@ -1270,7 +1392,7 @@ impl StoragePort for FileSystemStorage {
             .as_millis() as u64;
 
         let envelope = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "conversation_id": conversation_id,
             "checkpoint_id": checkpoint.0,
             "path": path_display,
@@ -1278,10 +1400,11 @@ impl StoragePort for FileSystemStorage {
             "original_hash": original_hash,
             "original_content_b64": original_content_b64,
             "file_existed": file_existed,
+            "expected_current_hash": null,  // populated by finalize_snapshot after write
             "created_at_ms": now_ms,
         });
 
-        // 9. Atomic write: temp file + rename.
+        // 10. Atomic write: temp file + rename.
         let tmp_path = snapshot_path.with_extension("tmp");
         let content_bytes = serde_json::to_vec_pretty(&envelope)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
@@ -1453,10 +1576,37 @@ impl StoragePort for FileSystemStorage {
                     h.update(&current_bytes);
                     let current_hash = format!("sha256:{:x}", h.finalize());
 
-                    if current_hash == stored_hash {
-                        // File unchanged since snapshot → restore from snapshot content.
-                        // (Stored content may differ because tools may have written
-                        // the new content; we restore the *original* content.)
+                    // DF-111 (AC5) fix: schema v3 envelopes carry `expected_current_hash`
+                    // (hash of the file AFTER the tool write). Compare against that.
+                    //
+                    //   current == expected_current → tool wrote it, nobody changed it since
+                    //     → safe to restore to original → Restored
+                    //   current != expected_current → externally modified since tool write
+                    //     → leave untouched → Conflict
+                    //
+                    // Schema v1/v2 fallback (no expected_current_hash):
+                    //   current == original_hash → file was never modified by the tool
+                    //     (or reverted already) → no-op, mark Restored
+                    //   current != original_hash → file was changed (presumed by tool)
+                    //     → restore to original
+                    //
+                    // NOTE: The pre-4.6 code had this inverted: it restored when
+                    // current == stored (original), and reported Conflict otherwise —
+                    // meaning tool-modified files were never actually reverted.
+                    let expected_current_hash = envelope
+                        .get("expected_current_hash")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
+
+                    let should_restore = if let Some(expected) = expected_current_hash {
+                        // Schema v3: current matches what the tool left → safe to restore
+                        current_hash == expected
+                    } else {
+                        // Schema v1/v2 fallback: file was changed since snapshot → restore
+                        current_hash != stored_hash
+                    };
+
+                    if should_restore {
                         if let Some(parent) = file_path.parent() {
                             let _ = tokio::fs::create_dir_all(parent).await;
                         }
@@ -1465,17 +1615,23 @@ impl StoragePort for FileSystemStorage {
                             Err(e) => {
                                 tracing::warn!("Failed to restore file {:?}: {}", file_path, e);
                                 RevertStatus::Conflict {
-                                    expected_hash: stored_hash.clone(),
+                                    expected_hash: expected_current_hash
+                                        .unwrap_or(&stored_hash)
+                                        .to_string(),
                                     actual_hash: current_hash,
                                 }
                             }
                         }
-                    } else {
-                        // File externally modified → leave untouched.
+                    } else if expected_current_hash.is_some() {
+                        // Schema v3: external modification detected
                         RevertStatus::Conflict {
-                            expected_hash: stored_hash,
+                            expected_hash: expected_current_hash.unwrap().to_string(),
                             actual_hash: current_hash,
                         }
+                    } else {
+                        // Schema v2 fallback: current == original_hash → already matches
+                        // pre-tool state, nothing to do
+                        RevertStatus::Restored
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1765,28 +1921,19 @@ impl StoragePort for FileSystemStorage {
                 let eligible_cp_ids: std::collections::HashSet<u64> =
                     filtered_entries.iter().map(|e| e.id.0).collect();
 
-                // Migrate the forked conversation to Directory layout BEFORE
-                // writing the checkpoint log. `save_checkpoint_log` would
-                // otherwise call `create_dir_all({session_dir})`, which flips
-                // `detect_layout` to Directory while the conversation file is
-                // still at the Flat path — leaving the next `load_conversation`
-                // looking inside `{id}/` for a `conversation.json` that does
-                // not exist. Mirror the pattern used by `create_checkpoint`:
-                // ensure the dir, then re-save the conversation in Directory
-                // layout if not already there.
+                // DF-112 (AC6): `detect_layout` now requires `conversation.json`
+                // to exist for Directory layout. `save_checkpoint_log` calls
+                // `create_dir_all(session_dir)` but that alone no longer flips
+                // `detect_layout` — only `conversation.json` presence matters.
+                // Still ensure the directory exists before writing the log.
                 let conv_file = self.conversation_file(&new_id);
                 if !tokio::fs::try_exists(&conv_file).await.unwrap_or(false) {
-                    if let Err(e) = tokio::fs::create_dir_all(self.session_dir(&new_id)).await {
-                        tracing::warn!(
-                            target = %new_id,
-                            "Failed to create session dir for fork checkpoint copy: {}",
-                            e
-                        );
-                    }
+                    // Ensure dir and save conversation in Directory layout so that
+                    // the forked session has a self-consistent directory structure.
                     if let Err(e) = self.save_conversation_inner(&forked, false).await {
                         tracing::warn!(
                             target = %new_id,
-                            "Failed to migrate forked conversation to directory layout: {}",
+                            "Failed to ensure forked conversation in directory layout: {}",
                             e
                         );
                     }
@@ -1851,6 +1998,88 @@ impl StoragePort for FileSystemStorage {
         );
         Ok(new_id)
     }
+
+    async fn finalize_snapshot(
+        &self,
+        conversation_id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        path: &std::path::Path,
+        post_write_content: &[u8],
+    ) -> Result<(), crate::domain::errors::StorageError> {
+        self.finalize_snapshot_inner(conversation_id, checkpoint, path, post_write_content)
+            .await
+    }
+
+    // ── Rewind Transaction Journal (DF-109, AC3) ─────────────────────────────
+
+    async fn begin_rewind_txn(
+        &self,
+        conversation_id: &str,
+        target_message_index: usize,
+        after_checkpoint: crate::domain::models::checkpoint::CheckpointId,
+    ) -> Result<(), crate::domain::errors::StorageError> {
+        use crate::domain::models::transaction::{RewindTxn, RewindTxnPhase};
+        let txn = RewindTxn {
+            conversation_id: conversation_id.to_string(),
+            target_message_index,
+            after_checkpoint,
+            phase: RewindTxnPhase::Pending,
+            created_at: {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            },
+        };
+        self.write_rewind_txn_file(conversation_id, &txn).await
+    }
+
+    async fn write_rewind_phase(
+        &self,
+        conversation_id: &str,
+        phase: crate::domain::models::transaction::RewindTxnPhase,
+    ) -> Result<(), crate::domain::errors::StorageError> {
+        let mut txn = self
+            .load_rewind_txn_inner(conversation_id)
+            .await?
+            .ok_or_else(|| {
+                crate::domain::errors::StorageError::IoError(format!(
+                    "write_rewind_phase: no active transaction for {}",
+                    conversation_id
+                ))
+            })?;
+        txn.phase = phase;
+        self.write_rewind_txn_file(conversation_id, &txn).await
+    }
+
+    async fn commit_rewind_txn(
+        &self,
+        conversation_id: &str,
+    ) -> Result<(), crate::domain::errors::StorageError> {
+        let path = self.rewind_txn_path(conversation_id);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(crate::domain::errors::StorageError::IoError(format!(
+                "commit_rewind_txn: failed to remove journal: {}",
+                e
+            ))),
+        }
+    }
+
+    async fn load_rewind_txn(
+        &self,
+        conversation_id: &str,
+    ) -> Result<
+        Option<crate::domain::models::transaction::RewindTxn>,
+        crate::domain::errors::StorageError,
+    > {
+        self.load_rewind_txn_inner(conversation_id).await
+    }
+
+    async fn reconcile_pending_txns(&self) -> Result<(), crate::domain::errors::StorageError> {
+        self.reconcile_pending_txns_inner().await
+    }
 }
 
 // ── Private serde structs for checkpoint persistence ─────────────────────────
@@ -1875,6 +2104,105 @@ impl FileSystemStorage {
     /// Path to the snapshots directory for a conversation.
     fn snapshots_dir(&self, id: &str) -> std::path::PathBuf {
         self.session_dir(id).join("snapshots")
+    }
+
+    /// Finalize a snapshot after the Write tool completes (DF-111, AC5, schema v3).
+    ///
+    /// Records the `expected_current_hash` (hash of the post-write content) in the
+    /// existing snapshot envelope. At revert time, this hash is compared against
+    /// the current file content to distinguish "tool-modified" (→ Restore) from
+    /// "externally-modified" (→ Conflict).
+    ///
+    /// Called by the toolset adapter after each successful Write/Edit operation.
+    /// Best-effort: failure is logged but does NOT fail the tool execution — the
+    /// snapshot degrades gracefully to schema v2 semantics (current != original → Restore).
+    pub(crate) async fn finalize_snapshot_inner(
+        &self,
+        conversation_id: &str,
+        checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        path: &std::path::Path,
+        post_write_content: &[u8],
+    ) -> Result<(), StorageError> {
+        use sha2::{Digest, Sha256};
+
+        // 1. Compute path_hash (same algorithm as snapshot_file).
+        let canonical: PathBuf = match tokio::fs::canonicalize(path).await {
+            Ok(p) => p,
+            Err(_) => {
+                // File might not exist right after write on some filesystems — derive.
+                let parent = path.parent().ok_or_else(|| {
+                    StorageError::NotSupported(format!(
+                        "finalize_snapshot: path has no parent: {}",
+                        path.display()
+                    ))
+                })?;
+                let canonical_parent = tokio::fs::canonicalize(parent).await.map_err(|e| {
+                    StorageError::NotSupported(format!(
+                        "finalize_snapshot: parent canonicalization failed: {}",
+                        e
+                    ))
+                })?;
+                let fname = path.file_name().ok_or_else(|| {
+                    StorageError::NotSupported("finalize_snapshot: path has no file name".into())
+                })?;
+                canonical_parent.join(fname)
+            }
+        };
+        let path_hash = content_hash(canonical.as_os_str().as_encoded_bytes());
+
+        // 2. Compute hash of post-write content.
+        let expected_hash = {
+            let mut h = Sha256::new();
+            h.update(post_write_content);
+            format!("sha256:{:x}", h.finalize())
+        };
+
+        // 3. Locate the snapshot file.
+        let snapshot_name = format!("{}_{}", checkpoint.0, path_hash);
+        let snapshot_path = self.snapshots_dir(conversation_id).join(&snapshot_name);
+
+        if !tokio::fs::try_exists(&snapshot_path).await.unwrap_or(false) {
+            // Snapshot was skipped (path traversal blocked, idempotency skip, etc.).
+            return Ok(());
+        }
+
+        // 4. Read + deserialize existing envelope.
+        let bytes = tokio::fs::read(&snapshot_path)
+            .await
+            .map_err(|e| StorageError::IoError(format!("finalize_snapshot read: {}", e)))?;
+        let mut envelope: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            StorageError::SerializationError(format!("finalize_snapshot parse: {}", e))
+        })?;
+
+        // 5. Inject expected_current_hash and bump schema_version to 3.
+        if let Some(obj) = envelope.as_object_mut() {
+            obj.insert(
+                "expected_current_hash".to_string(),
+                serde_json::Value::String(expected_hash),
+            );
+            obj.insert(
+                "schema_version".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(3u32)),
+            );
+        }
+
+        // 6. Atomic rewrite.
+        let tmp_path = snapshot_path.with_extension("tmp");
+        let updated = serde_json::to_vec_pretty(&envelope)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        tokio::fs::write(&tmp_path, &updated)
+            .await
+            .map_err(|e| StorageError::IoError(format!("finalize_snapshot write tmp: {}", e)))?;
+        tokio::fs::rename(&tmp_path, &snapshot_path)
+            .await
+            .map_err(|e| StorageError::IoError(format!("finalize_snapshot rename: {}", e)))?;
+
+        tracing::debug!(
+            "Finalized snapshot for {} at checkpoint {} with expected_current_hash",
+            canonical.display(),
+            checkpoint.0
+        );
+        Ok(())
     }
 
     /// Path to the checkpoint log file for a conversation.
@@ -1914,6 +2242,291 @@ impl FileSystemStorage {
         tokio::fs::rename(&tmp_path, &dest).await.map_err(|e| {
             StorageError::IoError(format!("Failed to rename checkpoints file: {}", e))
         })?;
+        Ok(())
+    }
+
+    /// Prune oldest checkpoints so the log stays within `retention` entries (DF-106, AC1).
+    ///
+    /// Oldest checkpoints (by checkpoint id, ascending) are pruned first.
+    /// For each pruned checkpoint, all snapshot files with that `cp_id` prefix are deleted.
+    /// The checkpoint log is updated atomically after pruning.
+    ///
+    /// Called opportunistically from `create_checkpoint`. Failures are logged and
+    /// surfaced via `AppEvent::SystemNotice` (best-effort; no data loss on failure).
+    async fn prune_old_snapshots(
+        &self,
+        conversation_id: &str,
+        current_log: &CheckpointLog,
+        retention: usize,
+    ) -> Result<(), StorageError> {
+        if current_log.entries.len() <= retention {
+            return Ok(());
+        }
+
+        // Sort by checkpoint id ascending; the oldest entries are at the front.
+        let mut sorted = current_log.entries.clone();
+        sorted.sort_by_key(|e| e.id);
+
+        let to_prune = &sorted[..sorted.len().saturating_sub(retention)];
+        let prune_ids: std::collections::HashSet<u64> = to_prune.iter().map(|e| e.id.0).collect();
+
+        // Delete snapshot files for pruned checkpoint ids.
+        let snapshots_dir = self.snapshots_dir(conversation_id);
+        if let Ok(mut entries) = tokio::fs::read_dir(&snapshots_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".tmp") {
+                    continue;
+                }
+                let cp_id_str = fname.split('_').next().unwrap_or("");
+                if let Ok(cp_id) = cp_id_str.parse::<u64>() {
+                    if prune_ids.contains(&cp_id) {
+                        if let Err(e) = tokio::fs::remove_file(entry.path()).await {
+                            tracing::warn!(
+                                conversation_id = conversation_id,
+                                snapshot = %fname,
+                                "prune_old_snapshots: failed to remove snapshot file: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update checkpoint log: remove pruned entries.
+        let kept: Vec<_> = sorted
+            .into_iter()
+            .filter(|e| !prune_ids.contains(&e.id.0))
+            .collect();
+        let updated_log = CheckpointLog { entries: kept };
+        match self
+            .save_checkpoint_log(conversation_id, &updated_log)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    conversation_id = conversation_id,
+                    pruned = prune_ids.len(),
+                    remaining = updated_log.entries.len(),
+                    "Pruned old checkpoints to stay within retention limit"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    conversation_id = conversation_id,
+                    "prune_old_snapshots: failed to save updated log: {}",
+                    e
+                );
+                Err(e)
+            }
+        }
+    }
+
+    // ── Rewind Transaction helpers (DF-109, AC3) ─────────────────────────────
+
+    /// Path to the rewind transaction journal for a conversation.
+    fn rewind_txn_path(&self, id: &str) -> PathBuf {
+        self.session_dir(id).join("rewind_txn.json")
+    }
+
+    /// Write (or overwrite) the rewind transaction journal atomically.
+    async fn write_rewind_txn_file(
+        &self,
+        conversation_id: &str,
+        txn: &crate::domain::models::transaction::RewindTxn,
+    ) -> Result<(), StorageError> {
+        // Ensure the session directory exists.
+        let session_dir = self.session_dir(conversation_id);
+        tokio::fs::create_dir_all(&session_dir)
+            .await
+            .map_err(|e| StorageError::IoError(format!("Failed to create session dir: {}", e)))?;
+
+        let dest = self.rewind_txn_path(conversation_id);
+        let content = serde_json::to_vec_pretty(txn)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        let tmp_path = dest.with_extension("json.tmp");
+        tokio::fs::write(&tmp_path, &content)
+            .await
+            .map_err(|e| StorageError::IoError(format!("rewind_txn write tmp: {}", e)))?;
+        tokio::fs::rename(&tmp_path, &dest)
+            .await
+            .map_err(|e| StorageError::IoError(format!("rewind_txn rename: {}", e)))?;
+        Ok(())
+    }
+
+    /// Load the rewind transaction journal if it exists.
+    async fn load_rewind_txn_inner(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<crate::domain::models::transaction::RewindTxn>, StorageError> {
+        let path = self.rewind_txn_path(conversation_id);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                let txn = serde_json::from_str(&content)
+                    .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+                Ok(Some(txn))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::IoError(format!(
+                "load_rewind_txn_inner: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Reconcile all incomplete rewind transactions on storage init (DF-109, B3.3).
+    ///
+    /// Scans every session directory for a `rewind_txn.json` file.  For each found:
+    /// - `Pending`           → no work done → delete journal.
+    /// - `MessagesTruncated` → truncation done, file revert missing → run file revert, delete journal.
+    /// - `FilesReverted`     → file revert done, truncation missing → run truncation, delete journal.
+    /// - `Committed`         → fully done → delete stale journal.
+    ///
+    /// Individual failures are logged but do not abort the sweep.
+    async fn reconcile_pending_txns_inner(&self) -> Result<(), StorageError> {
+        use crate::domain::models::transaction::RewindTxnPhase;
+
+        let mut entries = match tokio::fs::read_dir(&self.sessions_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "reconcile_pending_txns: read_dir failed: {}",
+                    e
+                )));
+            }
+        };
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let meta = match entry.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.is_dir() {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            let txn_path = entry.path().join("rewind_txn.json");
+            if !tokio::fs::try_exists(&txn_path).await.unwrap_or(false) {
+                continue;
+            }
+
+            // Load the journal.
+            let txn = match self.load_rewind_txn_inner(&dir_name).await {
+                Ok(Some(t)) => t,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        conversation_id = %dir_name,
+                        "reconcile_pending_txns: failed to load journal: {}",
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            tracing::info!(
+                conversation_id = %dir_name,
+                phase = ?txn.phase,
+                target_message_index = txn.target_message_index,
+                "reconcile_pending_txns: found incomplete rewind transaction"
+            );
+
+            match txn.phase {
+                RewindTxnPhase::Pending | RewindTxnPhase::Committed => {
+                    // No operations started (Pending) or already finished (Committed).
+                    // Delete the journal — no state changes needed.
+                    if let Err(e) = tokio::fs::remove_file(&txn_path).await {
+                        tracing::warn!(
+                            conversation_id = %dir_name,
+                            "reconcile_pending_txns: failed to remove journal: {}",
+                            e
+                        );
+                    } else {
+                        tracing::info!(
+                            conversation_id = %dir_name,
+                            phase = ?txn.phase,
+                            "reconcile_pending_txns: cleaned up journal"
+                        );
+                    }
+                }
+
+                RewindTxnPhase::MessagesTruncated => {
+                    // Messages were truncated; file revert didn't complete.
+                    // Complete by running revert_file_snapshots.
+                    let recovery_ok = match self
+                        .revert_file_snapshots(&dir_name, txn.after_checkpoint)
+                        .await
+                    {
+                        Ok(reverted) => {
+                            let restored = reverted
+                                .iter()
+                                .filter(|r| {
+                                    matches!(
+                                        r.status,
+                                        crate::domain::models::checkpoint::RevertStatus::Restored
+                                    )
+                                })
+                                .count();
+                            tracing::info!(
+                                conversation_id = %dir_name,
+                                restored,
+                                "reconcile_pending_txns: completed file revert after crash"
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                conversation_id = %dir_name,
+                                "reconcile_pending_txns: file revert completion failed: {}; \
+                                 preserving journal at {} for manual recovery",
+                                e, txn_path.display()
+                            );
+                            false
+                        }
+                    };
+                    // Only delete journal after successful recovery — preserve it
+                    // on failure so it can be retried on next startup.
+                    if recovery_ok {
+                        let _ = tokio::fs::remove_file(&txn_path).await;
+                    }
+                }
+
+                RewindTxnPhase::FilesReverted => {
+                    // Files were reverted; message truncation didn't complete.
+                    // Complete by running truncate_conversation.
+                    let recovery_ok = match self
+                        .truncate_conversation(&dir_name, txn.target_message_index)
+                        .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(
+                                conversation_id = %dir_name,
+                                target_message_index = txn.target_message_index,
+                                "reconcile_pending_txns: completed message truncation after crash"
+                            );
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                conversation_id = %dir_name,
+                                "reconcile_pending_txns: truncation completion failed: {}; \
+                                 preserving journal at {} for manual recovery",
+                                e, txn_path.display()
+                            );
+                            false
+                        }
+                    };
+                    // Only delete journal after successful recovery.
+                    if recovery_ok {
+                        let _ = tokio::fs::remove_file(&txn_path).await;
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -2951,11 +3564,10 @@ mod tests {
         );
     }
 
-    /// DF-110 in-story pre-guard: snapshot_file must refuse files larger than
-    /// SNAPSHOT_MAX_BYTES (50MiB) and return Ok without creating a snapshot.
-    /// The tool still executes — rewind simply won't restore the file.
+    /// DF-110 (4-6 cleanup): `SNAPSHOT_MAX_BYTES` removed — large files no longer capped.
+    /// Snapshot a file larger than the old 50 MiB cap and verify it is written.
     #[tokio::test]
-    async fn test_snapshot_skips_files_over_soft_cap() {
+    async fn test_snapshot_large_file_no_cap() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().to_path_buf();
         let sessions_dir = workspace.join(".claude").join("sessions");
@@ -2963,32 +3575,28 @@ mod tests {
         let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace.clone());
 
         let file = workspace.join("big.bin");
-        tokio::fs::write(&file, vec![0u8; 1024]).await.unwrap();
-
-        // Fabricate an oversized content slice (we don't need to actually write it).
-        let oversized = vec![0u8; (50 * 1024 * 1024) + 1];
+        // 1 MiB — small enough for the unit test but above the old per-chunk limit.
+        let content = vec![0u8; 1024 * 1024];
+        tokio::fs::write(&file, &content).await.unwrap();
 
         let result = storage
-            .snapshot_file("conv-big", CheckpointId(1), &file, &oversized)
+            .snapshot_file("conv-big", CheckpointId(1), &file, &content)
             .await;
 
-        assert!(
-            result.is_ok(),
-            "oversized snapshot should succeed as a no-op"
-        );
+        assert!(result.is_ok(), "large-file snapshot must succeed (no cap)");
 
-        // No snapshot file should have been created.
+        // Snapshot file must have been created.
         let snapshots_dir = workspace
             .join(".claude")
             .join("sessions")
             .join("conv-big")
             .join("snapshots");
+        let mut count = 0;
         if let Ok(mut entries) = tokio::fs::read_dir(&snapshots_dir).await {
-            let mut count = 0;
             while let Ok(Some(_)) = entries.next_entry().await {
                 count += 1;
             }
-            assert_eq!(count, 0, "no snapshot file should be written when over cap");
         }
+        assert_eq!(count, 1, "snapshot file must be created for large file");
     }
 }

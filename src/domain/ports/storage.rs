@@ -5,6 +5,7 @@ use async_trait::async_trait;
 
 use crate::domain::errors::StorageError;
 use crate::domain::models::checkpoint::{CheckpointId, CheckpointMeta, RevertedFile};
+use crate::domain::models::transaction::{RewindTxn, RewindTxnPhase};
 use crate::domain::models::{Conversation, ConversationSummary, SessionMeta};
 
 /// Persistence for conversations and settings.
@@ -163,5 +164,95 @@ pub trait StoragePort: Send + Sync {
         _after_checkpoint: CheckpointId,
     ) -> Result<Vec<(std::path::PathBuf, bool)>, StorageError> {
         Ok(vec![])
+    }
+
+    /// Finalize a snapshot after the Write/Edit tool completes (DF-111, AC5, schema v3).
+    ///
+    /// Records `expected_current_hash` (hash of post-write content) in the snapshot
+    /// envelope. At revert time, this distinguishes "tool-modified" (→ Restore) from
+    /// "externally-modified since tool write" (→ Conflict).
+    ///
+    /// Called by the toolset adapter after each successful Write/Edit operation.
+    /// Default: `Ok(())` — no-op (degrades gracefully when storage doesn't support it).
+    async fn finalize_snapshot(
+        &self,
+        _conversation_id: &str,
+        _checkpoint: CheckpointId,
+        _path: &Path,
+        _post_write_content: &[u8],
+    ) -> Result<(), StorageError> {
+        Ok(()) // no-op is safe — degrades to v2 semantics
+    }
+
+    // ── Rewind Transaction Journal (DF-109, AC3) ─────────────────────────────
+    //
+    // A transaction journal is written atomically before each phase of a rewind
+    // so that a crash mid-operation can be detected and completed or aborted on
+    // next startup.  All methods have default `NotSupported` or no-op
+    // implementations so that `NoOpStorageAdapter` compiles unchanged.
+
+    /// Write the initial `Pending` transaction journal for a rewind operation.
+    ///
+    /// Must be called BEFORE `truncate_conversation` or `revert_file_snapshots`.
+    ///
+    /// Default: `Err(StorageError::NotSupported("begin_rewind_txn"))`.
+    async fn begin_rewind_txn(
+        &self,
+        _conversation_id: &str,
+        _target_message_index: usize,
+        _after_checkpoint: CheckpointId,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::NotSupported("begin_rewind_txn".to_string()))
+    }
+
+    /// Advance the transaction journal to the given phase.
+    ///
+    /// Called after each phase completes (e.g., advance to `MessagesTruncated`
+    /// after `truncate_conversation` returns `Ok`).
+    ///
+    /// Default: `Err(StorageError::NotSupported("write_rewind_phase"))`.
+    async fn write_rewind_phase(
+        &self,
+        _conversation_id: &str,
+        _phase: RewindTxnPhase,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::NotSupported("write_rewind_phase".to_string()))
+    }
+
+    /// Mark the transaction committed and remove the journal file.
+    ///
+    /// Default: `Err(StorageError::NotSupported("commit_rewind_txn"))`.
+    async fn commit_rewind_txn(&self, _conversation_id: &str) -> Result<(), StorageError> {
+        Err(StorageError::NotSupported("commit_rewind_txn".to_string()))
+    }
+
+    /// Load the active transaction journal for a conversation, if any.
+    ///
+    /// Returns `None` if no journal exists (normal state).
+    ///
+    /// Default: `Ok(None)`.
+    async fn load_rewind_txn(
+        &self,
+        _conversation_id: &str,
+    ) -> Result<Option<RewindTxn>, StorageError> {
+        Ok(None)
+    }
+
+    /// Scan all conversations for incomplete rewind journals and either complete
+    /// or abort them.  Called once at storage adapter initialisation.
+    ///
+    /// - `Pending` journal → no operations started → delete journal (no-op).
+    /// - `MessagesTruncated` journal → truncation completed but files not reverted
+    ///   → run `revert_file_snapshots`, then delete journal.
+    /// - `FilesReverted` journal → files reverted but messages not truncated
+    ///   → run `truncate_conversation`, then delete journal.
+    /// - `Committed` journal → already finished → delete stale journal.
+    ///
+    /// Logs results at `INFO` level.  Best-effort: individual failures are logged
+    /// and skipped rather than aborting the entire reconciliation sweep.
+    ///
+    /// Default: `Ok(())` — no-op (degrades gracefully).
+    async fn reconcile_pending_txns(&self) -> Result<(), StorageError> {
+        Ok(())
     }
 }

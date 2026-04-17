@@ -141,6 +141,25 @@ impl ConversationImporter for ClaudeCodeImporter {
                     continue;
                 }
 
+                // DF-138: per-file size limit (~32 MiB) — skip oversized JSONL files.
+                const MAX_JSONL_BYTES: u64 = 32 * 1024 * 1024;
+                match tokio::fs::metadata(&file_path).await {
+                    Ok(m) if m.len() > MAX_JSONL_BYTES => {
+                        tracing::warn!(
+                            path = %file_path.display(),
+                            size_bytes = m.len(),
+                            "Skipping oversized JSONL file during discovery (>{} MiB)",
+                            MAX_JSONL_BYTES / (1024 * 1024)
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to stat {:?}: {} — skipping", file_path, e);
+                        continue;
+                    }
+                    Ok(_) => {}
+                }
+
                 let contents = match tokio::fs::read_to_string(&file_path).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -173,7 +192,7 @@ impl ConversationImporter for ClaudeCodeImporter {
         storage: &dyn StoragePort,
     ) -> Result<ImportResult, StorageError> {
         // --- Idempotency check (AC8) ---
-        if is_already_imported(candidate, storage).await? {
+        if is_already_imported(candidate, storage, self.source_id()).await? {
             return Ok(ImportResult::AlreadyImported);
         }
 
@@ -273,7 +292,7 @@ impl ConversationImporter for ClaudeCodeImporter {
         match meta_opt {
             Some(mut meta) => {
                 meta.imported_from = Some(ImportSource {
-                    source: "claude-code".to_string(),
+                    source: self.source_id().to_string(), // DF-128: use source_id(), not literal
                     original_session_id: candidate.source_session_id.clone(),
                     imported_at: now_unix(),
                 });
@@ -313,17 +332,21 @@ impl ConversationImporter for ClaudeCodeImporter {
 
 /// Check if a candidate has already been imported into `storage`.
 ///
+/// `source_id` is the importer's identifier (e.g., "claude-code"). Using the
+/// importer's `source_id()` prevents hardcoding (DF-129).
+///
 /// O(N × M): acceptable for v1 one-shot migration. See AC8 performance note.
 async fn is_already_imported(
     candidate: &ImportCandidate,
     storage: &dyn StoragePort,
+    source_id: &str,
 ) -> Result<bool, StorageError> {
     let summaries = storage.list_conversations().await?;
     for summary in &summaries {
         match storage.load_session_meta(&summary.id).await {
             Ok(Some(meta)) => {
                 if let Some(ref imp) = meta.imported_from {
-                    if imp.source == "claude-code"
+                    if imp.source == source_id
                         && imp.original_session_id == candidate.source_session_id
                     {
                         return Ok(true);

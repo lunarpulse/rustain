@@ -1364,6 +1364,20 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::ForkConfirm => {
+                                    // DF-096 (assessment): index-based pending_fork_index is
+                                    // safe — no message_id re-validation needed. Reasoning:
+                                    // (a) The event loop is single-threaded per select! branch;
+                                    //     no concurrent mutation of conversation.messages is
+                                    //     possible while this branch executes.
+                                    // (b) Messages are only ever APPENDED (never prepended or
+                                    //     deleted) while the fork overlay is shown. An index
+                                    //     captured at 'f' press time still refers to the same
+                                    //     message when 'y' is pressed even if streaming appended
+                                    //     further messages in between.
+                                    // (c) fork_at_checkpoint re-reads the conversation from
+                                    //     storage, but only to obtain the current tail; the
+                                    //     slice [..=message_index] is unaffected by appends.
+                                    //
                                     // P5 dedup invariant (party-mode review 2026-04-12):
                                     // `.take()` drops pending_fork_index to None BEFORE the
                                     // storage await, so a second 'y' press that lands while
@@ -1545,10 +1559,47 @@ pub async fn run(
                                             target_msg_idx,
                                         ).await;
 
+                                        // DF-109 (AC3): Write transaction journal BEFORE any
+                                        // destructive operation so a crash mid-rewind is
+                                        // recoverable on next startup via reconcile_pending_txns().
+                                        // If the journal cannot be created, abort the rewind —
+                                        // proceeding without crash protection risks data loss.
+                                        if let Err(e) = storage.begin_rewind_txn(
+                                            &conversation.id,
+                                            target_msg_idx,
+                                            target_cp,
+                                        ).await {
+                                            tracing::error!(
+                                                "begin_rewind_txn failed — aborting rewind: {}",
+                                                e
+                                            );
+                                            state.status = StatusState::Flash {
+                                                message: format!("Rewind aborted: could not create recovery journal ({})", e),
+                                                remaining_ms: 5000,
+                                            };
+                                            state.focus = FocusState::Chat;
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
+
                                         // 1. Truncate conversation to the user's selected message
                                         //    index (pure message-level; no checkpoint dependency).
                                         match storage.truncate_conversation(&conversation.id, target_msg_idx).await {
                                             Ok(truncated) => {
+                                                // Advance journal: messages truncated, file revert next.
+                                                // This is a mid-operation update — truncation already
+                                                // happened so we cannot abort. Log as error so the
+                                                // user knows crash protection is degraded.
+                                                if let Err(e) = storage.write_rewind_phase(
+                                                    &conversation.id,
+                                                    crate::domain::models::transaction::RewindTxnPhase::MessagesTruncated,
+                                                ).await {
+                                                    tracing::error!(
+                                                        "write_rewind_phase(MessagesTruncated) failed — crash protection degraded: {}",
+                                                        e
+                                                    );
+                                                }
+
                                                 // 2. Revert files
                                                 let reverted = storage
                                                     .revert_file_snapshots(&conversation.id, target_cp)
@@ -1562,6 +1613,16 @@ pub async fn run(
                                                     .iter()
                                                     .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Conflict { .. }))
                                                     .count();
+
+                                                // Commit transaction journal — both phases done.
+                                                let _ = storage.commit_rewind_txn(&conversation.id)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        tracing::warn!(
+                                                            "commit_rewind_txn failed (non-fatal): {}",
+                                                            e
+                                                        );
+                                                    });
 
                                                 // 3. Update active-tab proxy (AC3 step 3)
                                                 save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);

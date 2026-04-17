@@ -85,9 +85,10 @@ pub async fn run_migrate_with(
         }
     };
 
-    // Filter out already-imported candidates (AC8 — discovery-time idempotency)
+    // Filter out already-imported candidates (AC8 — discovery-time idempotency).
+    // Thread importer.source_id() to avoid hardcoding "claude-code" (DF-128).
     let (candidates, already_imported_count) =
-        filter_already_imported(all_candidates, storage).await;
+        filter_already_imported(all_candidates, storage, importer.source_id()).await;
 
     // AC3: Handle empty discovery
     if candidates.is_empty() {
@@ -102,11 +103,16 @@ pub async fn run_migrate_with(
         return Ok(());
     }
 
-    // Determine source path description for display
+    // Determine source path description for display (DF-132: resolved path, not hardcoded literal).
     let source_desc = path
         .as_ref()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "~/.claude/projects/".to_string());
+        .unwrap_or_else(|| {
+            // Resolve the default path using dirs::home_dir() to show the actual path.
+            dirs::home_dir()
+                .map(|h| h.join(".claude").join("projects").display().to_string())
+                .unwrap_or_else(|| "~/.claude/projects/".to_string())
+        });
 
     // Print discovery table (AC3)
     println!(
@@ -130,7 +136,7 @@ pub async fn run_migrate_with(
         candidates.iter().collect()
     } else if select {
         // AC7: --select interactive selection
-        interactive_select(&candidates)?
+        interactive_select(&candidates, &mut std::io::stdin().lock())?
     } else {
         // Default: show prompt [y/n/s]
         print!("Import all? [y/n/s] (s=select) ");
@@ -145,7 +151,7 @@ pub async fn run_migrate_with(
         }
         match buf.trim() {
             "y" | "Y" => candidates.iter().collect(),
-            "s" | "S" => interactive_select(&candidates)?,
+            "s" | "S" => interactive_select(&candidates, &mut std::io::stdin().lock())?,
             _ => {
                 println!("Import cancelled.");
                 return Ok(());
@@ -242,10 +248,14 @@ fn truncate_display(s: &str, max: usize) -> String {
 
 /// Filter candidates against storage, returning only not-yet-imported ones.
 ///
+/// `source_id` is the importer's identifier (e.g., "claude-code") used to match
+/// previously-imported sessions — avoids hardcoding the literal string (DF-128).
+///
 /// Returns `(new_candidates, already_imported_count)`.
 async fn filter_already_imported(
     candidates: Vec<ImportCandidate>,
     storage: &dyn StoragePort,
+    source_id: &str,
 ) -> (Vec<ImportCandidate>, usize) {
     let summaries = match storage.list_conversations().await {
         Ok(s) => s,
@@ -264,7 +274,7 @@ async fn filter_already_imported(
     for summary in &summaries {
         if let Ok(Some(meta)) = storage.load_session_meta(&summary.id).await {
             if let Some(ref imp) = meta.imported_from {
-                if imp.source == "claude-code" {
+                if imp.source == source_id {
                     already_imported_ids.insert(imp.original_session_id.clone());
                 }
             }
@@ -284,14 +294,19 @@ async fn filter_already_imported(
     (new_candidates, already_count)
 }
 
-/// Interactive per-session selection mode (AC7).
+/// Interactive per-session selection mode (AC7, DF-133).
 ///
-/// Prints the candidate table with checkboxes, reads commands from stdin:
+/// Prints the candidate table with checkboxes, reads commands from `reader`:
 /// - `<N>` → toggle candidate N
 /// - `a` → toggle all
 /// - `c` → confirm selection
 /// - `q` → abort
-fn interactive_select(candidates: &[ImportCandidate]) -> Result<Vec<&ImportCandidate>> {
+///
+/// `reader` is `impl BufRead` so tests can inject mock stdin input.
+pub fn interactive_select<'a, R: BufRead>(
+    candidates: &'a [ImportCandidate],
+    reader: &mut R,
+) -> Result<Vec<&'a ImportCandidate>> {
     let mut selected = vec![false; candidates.len()];
 
     loop {
@@ -310,7 +325,7 @@ fn interactive_select(candidates: &[ImportCandidate]) -> Result<Vec<&ImportCandi
         std::io::stdout().flush().ok();
 
         let mut buf = String::new();
-        let n = std::io::stdin().lock().read_line(&mut buf)?;
+        let n = reader.read_line(&mut buf)?;
         if n == 0 {
             println!("Import cancelled (stdin closed).");
             return Ok(vec![]);
@@ -456,7 +471,8 @@ mod tests {
         let all = importer_adapter.discover(Some(&source_dir)).await.unwrap();
         assert_eq!(all.len(), 2);
 
-        let (new_candidates, already_count) = filter_already_imported(all, &storage).await;
+        let (new_candidates, already_count) =
+            filter_already_imported(all, &storage, "claude-code").await;
 
         assert_eq!(already_count, 1);
         assert_eq!(new_candidates.len(), 1);

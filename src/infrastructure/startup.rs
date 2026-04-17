@@ -185,7 +185,12 @@ pub async fn run() -> Result<()> {
     let sessions_dir = tools_sessions_dir.clone();
     // Downcast to FileSystemStorage to access ensure_dir (concrete method).
     // Mirror the workspace_root configuration from `tools_storage` above.
-    let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace_path.clone());
+    // AC1: CLI --snapshot-retention takes precedence over config file value.
+    let retention = cli
+        .snapshot_retention
+        .or(app_config.snapshot_retention_count);
+    let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace_path.clone())
+        .with_snapshot_retention(retention);
     if let Err(e) = storage.ensure_dir().await {
         tracing::warn!("Failed to create sessions directory: {}", e);
         let _ = domain_tx.send(AppEvent::SystemNotice {
@@ -193,6 +198,14 @@ pub async fn run() -> Result<()> {
             level: NoticeLevel::Warning,
             message: format!("Session persistence unavailable: {}", e),
         });
+    }
+
+    // DF-109 (AC3): Reconcile any rewind transactions that were interrupted by a crash.
+    // Must run before session restoration so that recovered conversations are in a
+    // consistent state when we attempt to load them.
+    use crate::domain::ports::StoragePort as _;
+    if let Err(e) = storage.reconcile_pending_txns().await {
+        tracing::warn!("Failed to reconcile pending rewind transactions: {}", e);
     }
 
     // Session restoration: --new skips restore, --session <id> loads specific session

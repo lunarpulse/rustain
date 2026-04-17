@@ -653,28 +653,47 @@ async fn test_e2e_rewind_conflict_detected_in_preview() {
 
 #[tokio::test]
 async fn test_e2e_rewind_conflict_skips_overwrite() {
-    // Given: a file snapshotted, then externally modified
+    // DF-111 fix (schema v3): Conflict is detected when the file's current hash
+    // differs from `expected_current_hash` (the hash recorded by `finalize_snapshot`
+    // after the tool wrote the file). This indicates an external edit AFTER the tool
+    // write — rewind must NOT overwrite the user's edit.
+    //
+    // Without `finalize_snapshot` (v2 fallback): any hash difference from original
+    // means "tool modified → Restored". The schema v3 path is the only way to
+    // distinguish "tool-modified" from "externally-modified-after-tool-write".
     let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
     let conv = make_conversation_5_messages();
     let conv_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();
 
-    let workspace = tmp.path();
-    let file = workspace.join("conflict2.rs");
-    tokio::fs::write(&file, b"original content").await.unwrap();
+    let file = tmp.path().join("conflict2.rs");
+    let original = b"original content";
+    tokio::fs::write(&file, original).await.unwrap();
 
     let cp = storage.create_checkpoint(&conv_id).await.unwrap();
     storage
-        .snapshot_file(&conv_id, cp, &file, b"original content")
+        .snapshot_file(&conv_id, cp, &file, original)
         .await
         .unwrap();
 
-    // External modification
-    let external_content = b"user edited externally";
+    // Tool writes the file (step 1: tool write).
+    let tool_written = b"tool-written content";
+    tokio::fs::write(&file, tool_written).await.unwrap();
+    // Finalize snapshot records expected_current_hash = hash(tool_written).
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_written)
+        .await
+        .unwrap();
+
+    // External modification AFTER tool write (the conflict case).
+    let external_content = b"user edited externally after tool";
     tokio::fs::write(&file, external_content).await.unwrap();
 
-    // When: revert_file_snapshots
+    // When: revert_file_snapshots — current != expected_current_hash → Conflict
     let reverted = storage
         .revert_file_snapshots(&conv_id, CheckpointId(0))
         .await
@@ -684,7 +703,7 @@ async fn test_e2e_rewind_conflict_skips_overwrite() {
     assert_eq!(reverted.len(), 1);
     assert!(
         matches!(reverted[0].status, RevertStatus::Conflict { .. }),
-        "Externally modified file should produce Conflict status, got {:?}",
+        "Externally modified file (after tool write) must produce Conflict status, got {:?}",
         reverted[0].status
     );
 
@@ -695,7 +714,6 @@ async fn test_e2e_rewind_conflict_skips_overwrite() {
         "Conflict file must not be overwritten; user edits preserved"
     );
 
-    // And: status hint contains "J files skipped"
     let conflicts = reverted
         .iter()
         .filter(|r| matches!(r.status, RevertStatus::Conflict { .. }))
@@ -710,10 +728,7 @@ async fn test_e2e_rewind_conflict_skips_overwrite() {
         "Rewound to message 3. Reverted {} files. \u{26a0} {} files skipped (modified externally).",
         restored, conflicts
     );
-    assert!(
-        msg.contains("0 files"),
-        "Status hint shows 0 reverted for all-conflict case"
-    );
+    assert!(msg.contains("0 files"), "Status hint shows 0 reverted");
     assert!(
         msg.contains("1 files skipped"),
         "Status hint shows 1 skipped"
@@ -722,21 +737,23 @@ async fn test_e2e_rewind_conflict_skips_overwrite() {
 
 #[tokio::test]
 async fn test_e2e_rewind_all_conflicts_truncates_only() {
-    // Given: two files, both externally modified before rewind
+    // DF-111 fix (schema v3): Conflict requires finalize_snapshot + external edit after tool write.
+    // Two files, both tool-written then externally modified → both Conflict.
     let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
     let mut conv = make_conversation_5_messages();
     let conv_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();
 
-    let workspace = tmp.path();
-    let file1 = workspace.join("all_conflict_1.rs");
-    let file2 = workspace.join("all_conflict_2.rs");
+    let file1 = tmp.path().join("all_conflict_1.rs");
+    let file2 = tmp.path().join("all_conflict_2.rs");
     tokio::fs::write(&file1, b"original1").await.unwrap();
     tokio::fs::write(&file2, b"original2").await.unwrap();
 
-    // Snapshot both files
-    // Take checkpoint covering message index 2 (conv has 3 msgs when snapshotting)
+    // Snapshot both files at a 3-message checkpoint.
     conv.messages.truncate(3);
     storage.save_conversation(&conv).await.unwrap();
     let cp = storage.create_checkpoint(&conv_id).await.unwrap();
@@ -749,34 +766,47 @@ async fn test_e2e_rewind_all_conflicts_truncates_only() {
         .await
         .unwrap();
 
-    // Restore full conversation
+    // Restore full conversation.
     let conv_full = make_conversation_5_messages_with_id(conv_id.clone());
     storage.save_conversation(&conv_full).await.unwrap();
 
-    // Externally modify both files
-    tokio::fs::write(&file1, b"externally modified 1")
+    // Tool writes both files, then finalize_snapshot records post-write hashes.
+    let tool_content1 = b"tool written 1";
+    let tool_content2 = b"tool written 2";
+    tokio::fs::write(&file1, tool_content1).await.unwrap();
+    tokio::fs::write(&file2, tool_content2).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file1, tool_content1)
         .await
         .unwrap();
-    tokio::fs::write(&file2, b"externally modified 2")
+    storage
+        .finalize_snapshot(&conv_id, cp, &file2, tool_content2)
         .await
         .unwrap();
 
-    // When: revert to the checkpoint
+    // External modifications AFTER tool write → both files in Conflict state.
+    tokio::fs::write(&file1, b"user modified 1 after tool")
+        .await
+        .unwrap();
+    tokio::fs::write(&file2, b"user modified 2 after tool")
+        .await
+        .unwrap();
+
+    // When: revert file snapshots → all Conflict (current != expected_current_hash).
     let reverted = storage
         .revert_file_snapshots(&conv_id, CheckpointId(0))
         .await
         .unwrap();
 
-    // Then: all files are Conflict
     assert_eq!(reverted.len(), 2);
     assert!(
         reverted
             .iter()
             .all(|r| matches!(r.status, RevertStatus::Conflict { .. })),
-        "All files should be Conflict"
+        "All files should be Conflict (externally modified after tool write)"
     );
 
-    // And: messages are still truncated (revert_to_checkpoint runs independently)
+    // And: message truncation still works independently via revert_to_checkpoint.
     let truncated = storage.revert_to_checkpoint(&conv_id, cp).await.unwrap();
     assert_eq!(
         truncated.messages.len(),
@@ -1159,20 +1189,25 @@ async fn test_storage_snapshot_file_envelope_format() {
         &conv_id,
         "Envelope conversation_id must match"
     );
-    // And: schema_version is 2 (bumped in 4-3b review for D1 Option C — file_existed field)
+    // And: schema_version is 3 (bumped in 4-6 for DF-111 expected_current_hash field)
     assert_eq!(
         envelope["schema_version"].as_u64().unwrap(),
-        2,
-        "Envelope schema_version must be 2"
+        3,
+        "Envelope schema_version must be 3"
     );
-    // And: file_existed is present (D1 Option C)
+    // And: file_existed is present (D1 Option C, from v2)
     assert!(
         envelope.get("file_existed").is_some(),
-        "schema v2 envelope must have file_existed field"
+        "schema v3 envelope must have file_existed field"
     );
     assert!(
         envelope["file_existed"].as_bool().unwrap(),
         "snapshot of existing non-empty file must set file_existed=true"
+    );
+    // And: expected_current_hash is present (null until finalize_snapshot is called)
+    assert!(
+        envelope.get("expected_current_hash").is_some(),
+        "schema v3 envelope must have expected_current_hash field"
     );
 }
 
@@ -1858,5 +1893,559 @@ async fn test_e2e_amend2_forked_conversation_can_be_rewound() {
         src.messages.len(),
         8,
         "source conversation must be untouched by fork-then-rewind on the fork"
+    );
+}
+
+// ── Story 4-6 AC1: Snapshot Retention Policy (DF-106) ────────────────────────
+
+/// AC1: `create_checkpoint` prunes old snapshots when entry count exceeds retention.
+///
+/// Setup: retention = 3; create 4 checkpoints.  After the 4th, the first is pruned.
+#[tokio::test]
+async fn test_snapshot_retention_prunes_old_entries() {
+    let tmp = TempDir::new().unwrap();
+    let storage =
+        FileSystemStorage::new(tmp.path().join("sessions")).with_snapshot_retention(Some(3));
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // Create a workspace file to snapshot so we get real snapshot files on disk.
+    let workspace_file = tmp.path().join("file.rs");
+    tokio::fs::write(&workspace_file, b"content").await.unwrap();
+
+    let storage_with_root = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    )
+    .with_snapshot_retention(Some(3));
+    storage_with_root.save_conversation(&conv).await.unwrap();
+
+    // Create 3 checkpoints and snapshot a file at each.
+    let cp1 = storage_with_root.create_checkpoint(&conv_id).await.unwrap();
+    storage_with_root
+        .snapshot_file(&conv_id, cp1, &workspace_file, b"content")
+        .await
+        .unwrap();
+
+    let cp2 = storage_with_root.create_checkpoint(&conv_id).await.unwrap();
+    storage_with_root
+        .snapshot_file(&conv_id, cp2, &workspace_file, b"content v2")
+        .await
+        .unwrap();
+
+    let cp3 = storage_with_root.create_checkpoint(&conv_id).await.unwrap();
+    storage_with_root
+        .snapshot_file(&conv_id, cp3, &workspace_file, b"content v3")
+        .await
+        .unwrap();
+
+    // Checkpoint log has 3 entries — at the threshold, no pruning yet.
+    let log_before = storage_with_root.list_checkpoints(&conv_id).await.unwrap();
+    assert_eq!(
+        log_before.len(),
+        3,
+        "3 entries should be retained (at limit)"
+    );
+
+    // 4th checkpoint: triggers pruning → log shrinks to 3, cp1 is removed.
+    let cp4 = storage_with_root.create_checkpoint(&conv_id).await.unwrap();
+    let log_after = storage_with_root.list_checkpoints(&conv_id).await.unwrap();
+    assert_eq!(
+        log_after.len(),
+        3,
+        "log must be pruned to retention=3 after 4th cp"
+    );
+    assert!(
+        log_after.iter().all(|e| e.id != cp1),
+        "cp1 (oldest) must have been pruned"
+    );
+    assert!(
+        log_after.iter().any(|e| e.id == cp4),
+        "cp4 (newest) must be retained"
+    );
+
+    // Snapshot file for cp1 should no longer exist on disk.
+    let snapshots_dir = tmp.path().join("sessions").join(&conv_id).join("snapshots");
+    let mut entries = tokio::fs::read_dir(&snapshots_dir).await.unwrap();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let fname = entry.file_name().to_string_lossy().to_string();
+        assert!(
+            !fname.starts_with(&format!("{}_", cp1.0)),
+            "snapshot file for pruned cp1 must have been deleted, found: {fname}"
+        );
+    }
+}
+
+/// AC1: `with_snapshot_retention` lets callers override the default limit.
+#[tokio::test]
+async fn test_snapshot_retention_config_override() {
+    let tmp = TempDir::new().unwrap();
+    // Unlimited (None) — no pruning should happen.
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    )
+    .with_snapshot_retention(None);
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // Create 10 checkpoints.
+    for _ in 0..10 {
+        storage.create_checkpoint(&conv_id).await.unwrap();
+    }
+
+    let log = storage.list_checkpoints(&conv_id).await.unwrap();
+    assert_eq!(
+        log.len(),
+        10,
+        "unlimited retention must keep all checkpoints"
+    );
+}
+
+// ── Story 4-6 AC2: TOCTOU Hardening (DF-107) ─────────────────────────────────
+
+/// AC2: File modified between snapshot-hash and Write execution → Conflict.
+///
+/// Simulates the race: snapshot recorded, then file is overwritten externally,
+/// then revert runs.  The modified file should yield Conflict, not Restored.
+#[tokio::test]
+async fn test_toctou_conflict_detected_and_reported() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("toctou.rs");
+    let original = b"fn original() {}";
+    tokio::fs::write(&file, original).await.unwrap();
+
+    // 1. Snapshot the file (records "original" content + hash).
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, original)
+        .await
+        .unwrap();
+
+    // Finalize the snapshot with "tool-written" content (as the Write tool would).
+    let tool_written = b"fn tool_written() {}";
+    tokio::fs::write(&file, tool_written).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_written)
+        .await
+        .unwrap();
+
+    // 2. Simulate external edit AFTER tool write — the TOCTOU race.
+    let external_edit = b"fn externally_modified_after_tool() {}";
+    tokio::fs::write(&file, external_edit).await.unwrap();
+
+    // 3. Revert: file content != expected_current_hash → Conflict, not Restored.
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .await
+        .unwrap();
+
+    assert_eq!(reverted.len(), 1, "one file should have been processed");
+    assert!(
+        matches!(reverted[0].status, RevertStatus::Conflict { .. }),
+        "externally-modified file must yield Conflict, got: {:?}",
+        reverted[0].status
+    );
+
+    // The file must NOT have been overwritten.
+    let after = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(
+        after, external_edit,
+        "Conflict: file must be left at external-edit content"
+    );
+}
+
+// ── Story 4-6 AC3: Rewind Transaction Primitive (DF-109) ─────────────────────
+
+/// AC3: A partial rewind transaction (`MessagesTruncated` phase) is completed
+/// on next startup via `reconcile_pending_txns`.
+///
+/// This simulates a crash between `truncate_conversation` and
+/// `revert_file_snapshots`: the journal is left at `MessagesTruncated`.
+/// `reconcile_pending_txns` should complete the file revert and remove the journal.
+#[tokio::test]
+async fn test_rewind_transaction_resumes_after_crash() {
+    use rustain::domain::models::transaction::RewindTxnPhase;
+    use rustain::domain::ports::StoragePort as _;
+
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    // Setup: conversation with 5 messages + 1 checkpoint + 1 file snapshot.
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("crash_test.rs");
+    let original = b"fn before_tool() {}";
+    tokio::fs::write(&file, original).await.unwrap();
+
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, original)
+        .await
+        .unwrap();
+
+    // Tool write: update file and finalize snapshot.
+    let tool_written = b"fn after_tool() {}";
+    tokio::fs::write(&file, tool_written).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_written)
+        .await
+        .unwrap();
+
+    // Simulate the truncation phase completing (messages are now 3):
+    storage.truncate_conversation(&conv_id, 2).await.unwrap();
+
+    // Write a journal in the `MessagesTruncated` state (as if crashed before file revert).
+    storage
+        .begin_rewind_txn(&conv_id, 2, CheckpointId(0))
+        .await
+        .unwrap();
+    storage
+        .write_rewind_phase(&conv_id, RewindTxnPhase::MessagesTruncated)
+        .await
+        .unwrap();
+
+    // Verify journal file exists and is in MessagesTruncated state.
+    let txn = storage.load_rewind_txn(&conv_id).await.unwrap();
+    assert!(
+        txn.is_some(),
+        "journal file must exist before reconciliation"
+    );
+    assert_eq!(
+        txn.unwrap().phase,
+        RewindTxnPhase::MessagesTruncated,
+        "journal must be in MessagesTruncated state"
+    );
+
+    // Simulate startup: reconcile_pending_txns runs.
+    storage.reconcile_pending_txns().await.unwrap();
+
+    // After reconciliation:
+    // 1. File should be restored to original content.
+    let file_after = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(
+        file_after, original,
+        "reconciliation must have reverted file to original content"
+    );
+
+    // 2. Journal file should be removed.
+    let txn_after = storage.load_rewind_txn(&conv_id).await.unwrap();
+    assert!(
+        txn_after.is_none(),
+        "journal must be removed after reconciliation completes"
+    );
+}
+
+/// AC3: A `Pending` transaction (no ops done) is cleanly aborted on reconciliation.
+#[tokio::test]
+async fn test_rewind_transaction_pending_aborted_on_reconcile() {
+    use rustain::domain::ports::StoragePort as _;
+
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // Write a Pending journal (nothing was actually done yet).
+    storage
+        .begin_rewind_txn(&conv_id, 2, CheckpointId(0))
+        .await
+        .unwrap();
+
+    // The conversation should still have 5 messages (nothing happened).
+    let conv_before = storage.load_conversation(&conv_id).await.unwrap().unwrap();
+    assert_eq!(conv_before.messages.len(), 5);
+
+    // Reconcile: Pending → just delete journal, no state change.
+    storage.reconcile_pending_txns().await.unwrap();
+
+    // Conversation still has 5 messages.
+    let conv_after = storage.load_conversation(&conv_id).await.unwrap().unwrap();
+    assert_eq!(
+        conv_after.messages.len(),
+        5,
+        "Pending transaction must not change conversation state"
+    );
+
+    // Journal removed.
+    let txn_after = storage.load_rewind_txn(&conv_id).await.unwrap();
+    assert!(
+        txn_after.is_none(),
+        "Pending journal must be removed after reconciliation"
+    );
+}
+
+/// AC3: `commit_rewind_txn` removes the journal file.
+#[tokio::test]
+async fn test_rewind_transaction_commit_removes_journal() {
+    use rustain::domain::ports::StoragePort as _;
+
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // begin → phase → commit lifecycle.
+    storage
+        .begin_rewind_txn(&conv_id, 2, CheckpointId(0))
+        .await
+        .unwrap();
+    assert!(
+        storage.load_rewind_txn(&conv_id).await.unwrap().is_some(),
+        "journal must exist after begin"
+    );
+
+    storage.commit_rewind_txn(&conv_id).await.unwrap();
+    assert!(
+        storage.load_rewind_txn(&conv_id).await.unwrap().is_none(),
+        "journal must be removed after commit"
+    );
+}
+
+// ── Story 4-6 AC4: Streaming Encoder (DF-110) ────────────────────────────────
+
+/// AC4: Snapshot a 100 MiB file via the streaming encoder.
+/// No `SNAPSHOT_MAX_BYTES` cap should reject it. Latency < 5 seconds on local disk
+/// (permissive bound to avoid flakiness on slow CI; the real target is < 2 s).
+#[tokio::test]
+#[ignore = "large file test — run with: cargo test test_streaming_snapshot_100mb_file -- --ignored"]
+async fn test_streaming_snapshot_100mb_file() {
+    use std::time::Instant;
+
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // Generate a 100 MiB file (repeating pattern — compresses badly in base64).
+    let content: Vec<u8> = (0..100 * 1024 * 1024).map(|i| (i % 256) as u8).collect();
+    let file = tmp.path().join("large_file.bin");
+    tokio::fs::write(&file, &content).await.unwrap();
+
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+
+    let start = Instant::now();
+    storage
+        .snapshot_file(&conv_id, cp, &file, &content)
+        .await
+        .expect("100 MiB snapshot must succeed (no hard cap)");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 5,
+        "100 MiB snapshot latency must be < 5 s on local disk, got: {:?}",
+        elapsed
+    );
+}
+
+// ── Story 4-6 AC5: File-Revert Semantics Fix (DF-111) ────────────────────────
+
+/// AC5: Tool-written file is correctly restored on rewind (not falsely Conflict).
+///
+/// Schema v3 path: `expected_current_hash` matches current content → Restored.
+#[tokio::test]
+async fn test_e2e_rewind_restores_tool_modified_file() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("tool_file.rs");
+    let original = b"fn original() {}";
+    tokio::fs::write(&file, original).await.unwrap();
+
+    // Snapshot + tool write + finalize.
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, original)
+        .await
+        .unwrap();
+    let tool_written = b"fn tool_written() {}";
+    tokio::fs::write(&file, tool_written).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_written)
+        .await
+        .unwrap();
+
+    // File on disk matches expected_current_hash → tool modified → Restored.
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .await
+        .unwrap();
+
+    assert_eq!(reverted.len(), 1);
+    assert_eq!(
+        reverted[0].status,
+        RevertStatus::Restored,
+        "tool-modified file must be Restored, got: {:?}",
+        reverted[0].status
+    );
+    let after = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(after, original, "file must be back to original content");
+}
+
+/// AC5: Externally-modified file (after tool write) → Conflict on rewind.
+///
+/// Schema v3: `current != expected_current_hash` → external edit → Conflict.
+#[tokio::test]
+async fn test_e2e_rewind_skips_externally_edited_file() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("ext_modified.rs");
+    let original = b"fn original() {}";
+    tokio::fs::write(&file, original).await.unwrap();
+
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, original)
+        .await
+        .unwrap();
+    let tool_written = b"fn tool_written() {}";
+    tokio::fs::write(&file, tool_written).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_written)
+        .await
+        .unwrap();
+
+    // External edit AFTER tool write.
+    let external = b"fn externally_modified() {}";
+    tokio::fs::write(&file, external).await.unwrap();
+
+    // current != expected_current_hash → Conflict.
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .await
+        .unwrap();
+
+    assert_eq!(reverted.len(), 1);
+    assert!(
+        matches!(reverted[0].status, RevertStatus::Conflict { .. }),
+        "externally-modified file must yield Conflict, got: {:?}",
+        reverted[0].status
+    );
+    // File must NOT be overwritten.
+    let after = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(
+        after, external,
+        "Conflict: file must stay at external content"
+    );
+}
+
+// ── Story 4-6 AC6: Layout Detection Hardening (DF-112) ───────────────────────
+
+/// AC6: An orphaned session directory (no `conversation.json`) is NOT misdetected
+/// as a Directory-layout conversation.
+///
+/// Before the DF-112 fix, `detect_layout` returned `Directory` for any directory,
+/// even those created only for sidecar files (checkpoints, snapshots).
+#[tokio::test]
+async fn test_detect_layout_ignores_sidecar_only_directory() {
+    use rustain::domain::ports::StoragePort as _;
+
+    let tmp = TempDir::new().unwrap();
+    let sessions_dir = tmp.path().join("sessions");
+    tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
+
+    let storage = rustain::adapters::filesystem::FileSystemStorage::new(sessions_dir.clone());
+
+    // Use a flat-format conversation first.
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // Verify it loads as Flat.
+    let loaded = storage.load_conversation(&conv_id).await.unwrap();
+    assert!(loaded.is_some(), "flat conversation must be loadable");
+
+    // Create an orphaned directory with the same ID (e.g., as checkpoints dir does).
+    let orphan_dir = sessions_dir.join(&conv_id);
+    tokio::fs::create_dir_all(&orphan_dir).await.unwrap();
+    // No conversation.json — only sidecar files.
+    tokio::fs::write(orphan_dir.join("checkpoints.json"), b"{}")
+        .await
+        .unwrap();
+
+    // load_conversation must still find the FLAT conversation, not try Directory.
+    let loaded_after = storage.load_conversation(&conv_id).await.unwrap();
+    assert!(
+        loaded_after.is_some(),
+        "flat conversation must still load after orphan dir created"
+    );
+    assert_eq!(
+        loaded_after.unwrap().id,
+        conv_id,
+        "loaded conversation must be the correct flat conversation"
+    );
+}
+
+/// AC6: `truncate_conversation` on a text-only conversation (no checkpoints)
+/// succeeds and returns the correct truncated form.
+#[tokio::test]
+async fn test_truncate_no_checkpoint_empty_text_only() {
+    let tmp = TempDir::new().unwrap();
+    let storage =
+        rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().join("sessions"));
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // No checkpoints created — pure text-only conversation.
+    let result = storage.truncate_conversation(&conv_id, 2).await;
+    assert!(
+        result.is_ok(),
+        "truncate_conversation on text-only conversation must succeed"
+    );
+    let truncated = result.unwrap();
+    assert_eq!(
+        truncated.messages.len(),
+        3,
+        "truncated conversation must have messages[0..=2]"
     );
 }

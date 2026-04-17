@@ -20,6 +20,10 @@ pub struct Cli {
     /// Resume a specific session by ID
     #[arg(long)]
     pub session: Option<String>,
+
+    /// Override snapshot retention count (default: 100, from config)
+    #[arg(long)]
+    pub snapshot_retention: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -388,4 +388,46 @@ mod tests {
         assert!(tm.find_by_conversation(&conv_id).is_some());
         assert!(tm.find_by_conversation("nonexistent").is_none());
     }
+
+    /// DF-084: thinking_buffer must be cleared on session boundary (tab switch).
+    /// Start stream → accumulate thinking → switch tab → assert buffer empty.
+    #[test]
+    fn test_thinking_buffer_cleared_on_tab_switch() {
+        let mut tm = TabManager::new();
+        tm.create_tab(); // now two tabs; active = 1
+
+        // Simulate accumulated thinking on the current tab
+        tm.active_tab_mut()
+            .streaming
+            .thinking_buffer
+            .push_str("Let me think...");
+        assert_eq!(
+            tm.active_tab_mut().streaming.thinking_buffer,
+            "Let me think..."
+        );
+
+        // Switch to previous tab — should clear buffer on departing tab
+        tm.switch_to_prev();
+        // The original tab is now index 1; check its buffer is cleared
+        assert_eq!(tm.tabs()[1].streaming.thinking_buffer, "");
+
+        // Switch back and accumulate again, then use switch_to_next
+        tm.tabs[tm.active_tab_index]
+            .streaming
+            .thinking_buffer
+            .push_str("Another thought");
+        tm.switch_to_next();
+        assert_eq!(tm.tabs()[0].streaming.thinking_buffer, "");
+
+        // Use switch_to_index as well
+        tm.create_tab(); // three tabs
+        let cur = tm.active_tab_index();
+        tm.tabs[cur]
+            .streaming
+            .thinking_buffer
+            .push_str("Index thought");
+        let next = if cur == 0 { 2 } else { 1 };
+        tm.switch_to_index(next + 1); // 1-based
+        assert_eq!(tm.tabs()[cur].streaming.thinking_buffer, "");
+    }
 }

@@ -700,3 +700,81 @@ async fn test_e2e_run_migrate_with_skipped_empty_is_not_a_failure() {
         result.err()
     );
 }
+
+// ── Story 4-6 AC9: Import Hardening (DF-133) ─────────────────────────────────
+
+/// DF-133: `interactive_select` accepts `impl BufRead` for testability.
+///
+/// Inject mock stdin with commands: toggle item 1, confirm → one item selected.
+#[test]
+fn test_interactive_select_with_mock_stdin() {
+    use rustain::adapters::cli::migrate::interactive_select;
+    use rustain::domain::services::import::ImportCandidate;
+    use std::io::BufReader;
+
+    let candidates = vec![
+        ImportCandidate {
+            source_session_id: "sess-1".to_string(),
+            title: "Conversation A".to_string(),
+            created_at: 1700000000,
+            message_count: 3,
+            source_path: std::path::PathBuf::from("/tmp/sess-1.jsonl"),
+        },
+        ImportCandidate {
+            source_session_id: "sess-2".to_string(),
+            title: "Conversation B".to_string(),
+            created_at: 1700000001,
+            message_count: 5,
+            source_path: std::path::PathBuf::from("/tmp/sess-2.jsonl"),
+        },
+    ];
+
+    // Mock stdin: toggle item 1, then confirm.
+    let mock_input = "1\nc\n";
+    let mut reader = BufReader::new(mock_input.as_bytes());
+
+    let selected = interactive_select(&candidates, &mut reader).unwrap();
+    assert_eq!(selected.len(), 1, "Exactly one item should be selected");
+    assert_eq!(
+        selected[0].source_session_id, "sess-1",
+        "Item 1 must be selected after toggle"
+    );
+}
+
+/// DF-133: Aborting with `q` returns empty selection.
+#[test]
+fn test_interactive_select_abort_returns_empty() {
+    use rustain::adapters::cli::migrate::interactive_select;
+    use rustain::domain::services::import::ImportCandidate;
+    use std::io::BufReader;
+
+    let candidates = vec![ImportCandidate {
+        source_session_id: "sess-1".to_string(),
+        title: "Conversation A".to_string(),
+        created_at: 1700000000,
+        message_count: 3,
+        source_path: std::path::PathBuf::from("/tmp/sess-1.jsonl"),
+    }];
+
+    let mock_input = "q\n";
+    let mut reader = BufReader::new(mock_input.as_bytes());
+
+    let selected = interactive_select(&candidates, &mut reader).unwrap();
+    assert_eq!(selected.len(), 0, "Abort (q) must return empty selection");
+}
+
+/// DF-134: Title extraction walks content blocks for block-array user messages.
+#[test]
+fn test_title_extraction_block_array_user_message() {
+    use rustain::domain::services::claude_code_jsonl::extract_candidate_metadata;
+    use std::path::Path;
+
+    // User message with block-array content (not plain text).
+    let jsonl = r#"{"type":"user","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"What is 2+2?"},{"type":"tool_result","tool_use_id":"t1","content":"4"}]}}"#;
+
+    let candidate = extract_candidate_metadata(Path::new("test.jsonl"), jsonl).unwrap();
+    assert_eq!(
+        candidate.title, "What is 2+2?",
+        "Title must be extracted from first Text block in block-array user message"
+    );
+}
