@@ -768,6 +768,9 @@ pub struct TuiState {
     pub needs_redraw: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
+    /// Height of the chat pane viewport (set after each render).
+    /// Used for scroll clamping, message targeting, and status bar display.
+    pub viewport_height: u16,
     pub input_buffer: String,
     pub cursor_position: usize,
     pub status: StatusState,
@@ -930,6 +933,7 @@ impl TuiState {
             needs_redraw: true,
             terminal_width: width,
             terminal_height: height,
+            viewport_height: height.saturating_sub(4),
             input_buffer: String::new(),
             cursor_position: 0,
             status: StatusState::Idle,

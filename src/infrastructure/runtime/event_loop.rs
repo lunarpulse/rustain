@@ -1344,7 +1344,7 @@ pub async fn run(
                                         let fork_message_index = if state.auto_scroll {
                                             conversation.messages.len().saturating_sub(1)
                                         } else {
-                                            let vp = state.terminal_height as usize;
+                                            let vp = state.viewport_height as usize;
                                             let max_off = state.total_content_height.saturating_sub(vp);
                                             let clamped = state.scroll_offset.min(max_off);
                                             let top_line = max_off.saturating_sub(clamped);
@@ -1489,7 +1489,7 @@ pub async fn run(
                                         let target_message_index = if state.auto_scroll {
                                             conversation.messages.len().saturating_sub(1)
                                         } else {
-                                            let vp = state.terminal_height as usize;
+                                            let vp = state.viewport_height as usize;
                                             let max_off = state.total_content_height.saturating_sub(vp);
                                             let clamped = state.scroll_offset.min(max_off);
                                             let top_line = max_off.saturating_sub(clamped);
@@ -1552,12 +1552,17 @@ pub async fn run(
                                         // `truncate_conversation` so the user's selection is
                                         // honored (bug 1b fix). The checkpoint id returned here
                                         // governs which snapshot files are eligible for revert
-                                        // (every cp_id > target_cp gets applied in reverse order).
+                                        // (every cp_id >= target_cp gets applied in reverse order).
                                         let target_cp = resolve_checkpoint_for_message(
                                             &storage,
                                             &conversation.id,
                                             target_msg_idx,
                                         ).await;
+
+                                        tracing::debug!(
+                                            "rewind: target_msg_idx={}, resolved target_cp={}, conv_id={}",
+                                            target_msg_idx, target_cp.0, conversation.id
+                                        );
 
                                         // DF-109 (AC3): Write transaction journal BEFORE any
                                         // destructive operation so a crash mid-rewind is
@@ -1613,6 +1618,17 @@ pub async fn run(
                                                     .iter()
                                                     .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Conflict { .. }))
                                                     .count();
+
+                                                tracing::debug!(
+                                                    "rewind: reverted={}, restored={}, conflicts={}, target_cp={}",
+                                                    reverted.len(), restored, conflicts, target_cp.0
+                                                );
+                                                for r in &reverted {
+                                                    tracing::debug!(
+                                                        "rewind: file={} → {:?}",
+                                                        r.path.display(), r.status
+                                                    );
+                                                }
 
                                                 // Commit transaction journal — both phases done.
                                                 let _ = storage.commit_rewind_txn(&conversation.id)
@@ -2621,7 +2637,7 @@ fn apply_search_rescan(conversation: &Conversation, state: &mut TuiState) {
             target_msg,
             &state.message_boundaries,
             state.total_content_height,
-            state.terminal_height as usize,
+            state.viewport_height as usize,
         );
         state.auto_scroll = state.scroll_offset == 0;
     }
@@ -2801,7 +2817,7 @@ fn apply_search_navigate(state: &mut TuiState, delta: i32) {
         target_msg,
         &state.message_boundaries,
         state.total_content_height,
-        state.terminal_height as usize,
+        state.viewport_height as usize,
     );
     state.auto_scroll = state.scroll_offset == 0;
 
@@ -2867,7 +2883,7 @@ async fn apply_bookmark_toggle(
         state.scroll_offset,
         &state.message_boundaries,
         state.total_content_height,
-        state.terminal_height as usize,
+        state.viewport_height as usize,
         conversation.messages.len(),
     );
 
@@ -2968,7 +2984,7 @@ fn apply_jump_bookmark(tab_manager: &TabManager, state: &mut TuiState) {
         target_msg,
         &state.message_boundaries,
         state.total_content_height,
-        state.terminal_height as usize,
+        state.viewport_height as usize,
     );
     state.auto_scroll = state.scroll_offset == 0;
     state.focus = FocusState::Chat;
@@ -3478,7 +3494,7 @@ async fn apply_open_cross_search_result(
         result.first_match_message_index,
         &state.message_boundaries,
         state.total_content_height,
-        state.terminal_height as usize,
+        state.viewport_height as usize,
     );
     state.auto_scroll = state.scroll_offset == 0;
     state.focus = FocusState::Chat;
@@ -3911,6 +3927,7 @@ fn start_turn(
         tools.clone(),
         conversation.id.clone(),
         storage.clone(),
+        conversation.clone(),
     ));
     *active_turn = Some(handle);
 
@@ -3993,6 +4010,7 @@ fn render(
     let mut msg_bounds: Vec<usize> = Vec::new();
     let mut user_msg_bounds: Vec<usize> = Vec::new();
     let mut focused_tool_id: Option<String> = None;
+    let mut vp_height: u16 = state.viewport_height;
 
     let permission_mode = security.current_mode();
 
@@ -4091,6 +4109,8 @@ fn render(
                 } else {
                     None
                 };
+
+                vp_height = app_layout.chat_pane.height;
 
                 // Story 4-4 AC9: source the bookmark list from the active
                 // tab's session_meta (in-memory mirror of meta.json).
@@ -4369,12 +4389,13 @@ fn render(
     state.message_boundaries = msg_bounds;
     state.user_message_boundaries = user_msg_bounds;
     state.focused_tool_id = focused_tool_id;
+    state.viewport_height = vp_height;
 
     // Resolve pending anchor from resize: use new heights to find correct scroll_offset.
     if let Some(anchor_idx) = state.pending_anchor.take() {
         if anchor_idx < state.block_boundaries.len() {
             let anchor_line = state.block_boundaries[anchor_idx];
-            let vp = state.terminal_height as usize;
+            let vp = state.viewport_height as usize;
             let max_offset = content_height.saturating_sub(vp);
             state.scroll_offset = max_offset.saturating_sub(anchor_line);
             state.auto_scroll = state.scroll_offset == 0;

@@ -1437,10 +1437,20 @@ impl StoragePort for FileSystemStorage {
 
         let snapshots_dir = self.snapshots_dir(conversation_id);
 
+        tracing::debug!(
+            "revert_file_snapshots: conv={}, after_checkpoint={}, snapshots_dir={}",
+            conversation_id,
+            after_checkpoint.0,
+            snapshots_dir.display()
+        );
+
         // 1. Read the snapshots directory. Return empty if it doesn't exist.
         let mut entries = match tokio::fs::read_dir(&snapshots_dir).await {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(
+                    "revert_file_snapshots: snapshots dir not found — nothing to revert"
+                );
                 return Ok(vec![]);
             }
             Err(e) => {
@@ -1470,12 +1480,18 @@ impl StoragePort for FileSystemStorage {
                 .and_then(|(first, rest)| rest.first().map(|h| (*first, *h)))
             {
                 if let Ok(cp_id) = cp_str.parse::<u64>() {
-                    if cp_id > after_checkpoint.0 {
+                    if cp_id >= after_checkpoint.0 {
                         candidates.push((cp_id, hash_str.to_string(), entry.path()));
                     }
                 }
             }
         }
+
+        tracing::debug!(
+            "revert_file_snapshots: found {} candidates (after_checkpoint >= {})",
+            candidates.len(),
+            after_checkpoint.0
+        );
 
         if candidates.is_empty() {
             return Ok(vec![]);
@@ -1484,24 +1500,45 @@ impl StoragePort for FileSystemStorage {
         // 3. Sort descending by cp_id (Amendment 1: reverse chronological order).
         candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // 4. Per-path dedup: for the same path_hash, keep only the LOWEST cp_id entry
-        //    (the oldest original content — the true pre-rewind state).
-        let mut deduped: HashMap<String, (u64, PathBuf)> = HashMap::new();
+        // 4. Per-path dedup: track the LOWEST cp_id (oldest original content for
+        //    restoration) AND the HIGHEST cp_id (most recent tool write — its
+        //    `expected_current_hash` is what the file should look like now).
+        //
+        //    Without tracking the highest, a file modified across multiple
+        //    checkpoints compares the current hash against the FIRST tool write's
+        //    hash — which no longer matches — producing a false "modified externally".
+        //
+        //    Candidates are sorted DESCENDING, so or_insert sees the highest first.
+        struct PathEntry {
+            lowest_cp: u64,
+            restore_from: PathBuf,  // lowest — has original content
+            conflict_from: PathBuf, // highest — has latest expected_current_hash
+        }
+        let mut deduped: HashMap<String, PathEntry> = HashMap::new();
         for (cp_id, path_hash, file_path) in &candidates {
-            let entry = deduped
-                .entry(path_hash.clone())
-                .or_insert((*cp_id, file_path.clone()));
-            if *cp_id < entry.0 {
-                *entry = (*cp_id, file_path.clone());
+            let entry = deduped.entry(path_hash.clone()).or_insert(PathEntry {
+                lowest_cp: *cp_id,
+                restore_from: file_path.clone(),
+                conflict_from: file_path.clone(), // first insert = highest (sorted DESC)
+            });
+            if *cp_id < entry.lowest_cp {
+                entry.lowest_cp = *cp_id;
+                entry.restore_from = file_path.clone();
             }
         }
 
+        tracing::debug!(
+            "revert_file_snapshots: {} unique paths after dedup (from {} candidates)",
+            deduped.len(),
+            candidates.len()
+        );
+
         // 5. Process each surviving snapshot.
         let mut results: Vec<RevertedFile> = Vec::new();
-        for (path_hash, (_, snapshot_path)) in &deduped {
-            let _ = path_hash; // used as key, not needed here
+        for entry in deduped.values() {
+            let snapshot_path = &entry.restore_from;
 
-            // Read the snapshot envelope.
+            // Read the OLDEST snapshot envelope (original content for restoration).
             let envelope_bytes = match tokio::fs::read(snapshot_path).await {
                 Ok(b) => b,
                 Err(e) => {
@@ -1535,6 +1572,38 @@ impl StoragePort for FileSystemStorage {
 
             let file_path = PathBuf::from(&stored_path_str);
 
+            tracing::debug!(
+                "revert_file_snapshots: processing path={}, existed={:?}",
+                stored_path_str,
+                envelope.get("file_existed").and_then(|v| v.as_bool())
+            );
+
+            // For conflict detection, use expected_current_hash from the NEWEST
+            // snapshot (highest cp_id). When a file is modified across multiple
+            // checkpoints, only the newest hash reflects the tool's final state.
+            // Using the oldest snapshot's hash would false-positive on every
+            // multi-checkpoint file.
+            let newest_expected_hash: Option<String> = if entry.conflict_from != entry.restore_from
+            {
+                tokio::fs::read(&entry.conflict_from)
+                    .await
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|e| {
+                        e.get("expected_current_hash")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                    })
+            } else {
+                // Same file — extract from the main envelope.
+                envelope
+                    .get("expected_current_hash")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            };
+
             // Decode the stored content.
             let stored_content =
                 match base64::engine::general_purpose::STANDARD.decode(&stored_content_b64) {
@@ -1549,10 +1618,6 @@ impl StoragePort for FileSystemStorage {
                     }
                 };
 
-            // D1 resolution (Option C): schema v2 envelopes carry an explicit
-            // `file_existed: bool`. Schema v1 envelopes fall back to the legacy
-            // "empty content == absent" heuristic for backward compatibility with
-            // any snapshots already on disk.
             let file_existed_explicit = envelope.get("file_existed").and_then(|v| v.as_bool());
             let file_was_absent_pre_checkpoint = match file_existed_explicit {
                 Some(existed) => !existed,
@@ -1563,46 +1628,40 @@ impl StoragePort for FileSystemStorage {
             let current_read = tokio::fs::read(&file_path).await;
 
             let status = match current_read {
-                Ok(_current_bytes) if file_was_absent_pre_checkpoint => {
-                    // File now exists but didn't exist before checkpoint → delete it.
-                    if let Err(e) = tokio::fs::remove_file(&file_path).await {
-                        tracing::warn!("Failed to delete file {:?}: {}", file_path, e);
+                Ok(current_bytes) if file_was_absent_pre_checkpoint => {
+                    // File now exists but didn't exist before checkpoint → should delete.
+                    let externally_modified = if let Some(ref expected) = newest_expected_hash {
+                        let mut h = Sha256::new();
+                        h.update(&current_bytes);
+                        let current_hash = format!("sha256:{:x}", h.finalize());
+                        current_hash != *expected
+                    } else {
+                        false
+                    };
+
+                    if externally_modified {
+                        let mut h = Sha256::new();
+                        h.update(&current_bytes);
+                        let current_hash = format!("sha256:{:x}", h.finalize());
+                        RevertStatus::Conflict {
+                            expected_hash: newest_expected_hash.unwrap(),
+                            actual_hash: current_hash,
+                        }
+                    } else {
+                        if let Err(e) = tokio::fs::remove_file(&file_path).await {
+                            tracing::warn!("Failed to delete file {:?}: {}", file_path, e);
+                        }
+                        RevertStatus::Restored
                     }
-                    RevertStatus::Restored
                 }
                 Ok(current_bytes) => {
-                    // Compute current hash.
                     let mut h = Sha256::new();
                     h.update(&current_bytes);
                     let current_hash = format!("sha256:{:x}", h.finalize());
 
-                    // DF-111 (AC5) fix: schema v3 envelopes carry `expected_current_hash`
-                    // (hash of the file AFTER the tool write). Compare against that.
-                    //
-                    //   current == expected_current → tool wrote it, nobody changed it since
-                    //     → safe to restore to original → Restored
-                    //   current != expected_current → externally modified since tool write
-                    //     → leave untouched → Conflict
-                    //
-                    // Schema v1/v2 fallback (no expected_current_hash):
-                    //   current == original_hash → file was never modified by the tool
-                    //     (or reverted already) → no-op, mark Restored
-                    //   current != original_hash → file was changed (presumed by tool)
-                    //     → restore to original
-                    //
-                    // NOTE: The pre-4.6 code had this inverted: it restored when
-                    // current == stored (original), and reported Conflict otherwise —
-                    // meaning tool-modified files were never actually reverted.
-                    let expected_current_hash = envelope
-                        .get("expected_current_hash")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty());
-
-                    let should_restore = if let Some(expected) = expected_current_hash {
-                        // Schema v3: current matches what the tool left → safe to restore
-                        current_hash == expected
+                    let should_restore = if let Some(ref expected) = newest_expected_hash {
+                        current_hash == *expected
                     } else {
-                        // Schema v1/v2 fallback: file was changed since snapshot → restore
                         current_hash != stored_hash
                     };
 
@@ -1615,17 +1674,17 @@ impl StoragePort for FileSystemStorage {
                             Err(e) => {
                                 tracing::warn!("Failed to restore file {:?}: {}", file_path, e);
                                 RevertStatus::Conflict {
-                                    expected_hash: expected_current_hash
+                                    expected_hash: newest_expected_hash
+                                        .as_deref()
                                         .unwrap_or(&stored_hash)
                                         .to_string(),
                                     actual_hash: current_hash,
                                 }
                             }
                         }
-                    } else if expected_current_hash.is_some() {
-                        // Schema v3: external modification detected
+                    } else if newest_expected_hash.is_some() {
                         RevertStatus::Conflict {
-                            expected_hash: expected_current_hash.unwrap().to_string(),
+                            expected_hash: newest_expected_hash.unwrap(),
                             actual_hash: current_hash,
                         }
                     } else {
@@ -1662,16 +1721,24 @@ impl StoragePort for FileSystemStorage {
                 }
             };
 
+            tracing::debug!(
+                "revert_file_snapshots: file={} → {:?}",
+                file_path.display(),
+                status
+            );
+
             results.push(RevertedFile {
                 path: file_path,
                 status,
             });
         }
 
-        // 6. Delete ALL snapshot files for cp_id > after_checkpoint (including those
+        tracing::debug!("revert_file_snapshots: returning {} results", results.len());
+
+        // 6. Delete ALL snapshot files for cp_id >= after_checkpoint (including those
         //    that were deduped-out in step 4).
         for (cp_id, _path_hash, file_path) in &candidates {
-            let _ = cp_id; // already filtered to > after_checkpoint above
+            let _ = cp_id; // already filtered to >= after_checkpoint above
             if let Err(e) = tokio::fs::remove_file(file_path).await {
                 tracing::warn!("Failed to delete snapshot file {:?}: {}", file_path, e);
             }
@@ -1722,7 +1789,7 @@ impl StoragePort for FileSystemStorage {
                 .and_then(|(first, rest)| rest.first().map(|h| (*first, *h)))
             {
                 if let Ok(cp_id) = cp_str.parse::<u64>() {
-                    if cp_id > after_checkpoint.0 {
+                    if cp_id >= after_checkpoint.0 {
                         candidates.push((cp_id, hash_str.to_string(), entry.path()));
                     }
                 }
@@ -1733,21 +1800,28 @@ impl StoragePort for FileSystemStorage {
             return Ok(vec![]);
         }
 
-        // Per-path dedup: keep lowest cp_id per path_hash (oldest original content).
-        let mut deduped: HashMap<String, (u64, PathBuf)> = HashMap::new();
+        // Per-path dedup: sort descending first, then track lowest (for path
+        // display) and highest (for conflict detection via expected_current_hash).
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // (lowest_snapshot_path, highest_snapshot_path)
+        let mut deduped: HashMap<String, (PathBuf, PathBuf)> = HashMap::new();
         for (cp_id, path_hash, file_path) in &candidates {
             let entry = deduped
                 .entry(path_hash.clone())
-                .or_insert((*cp_id, file_path.clone()));
-            if *cp_id < entry.0 {
-                *entry = (*cp_id, file_path.clone());
-            }
+                .or_insert((file_path.clone(), file_path.clone()));
+            // or_insert sees highest first (sorted DESC) → entry.1 is already highest.
+            // Update lowest:
+            let _ = cp_id; // used implicitly: later entries have lower cp_id
+            entry.0 = file_path.clone(); // always update — last write wins = lowest
         }
 
-        // For each surviving snapshot, check for conflict (read-only).
+        // For each surviving snapshot, check for conflict using the NEWEST
+        // snapshot's expected_current_hash (read-only).
         let mut results: Vec<(PathBuf, bool)> = Vec::new();
-        for (_cp_id, snapshot_path) in deduped.values() {
-            let envelope_bytes = match tokio::fs::read(snapshot_path).await {
+        for (lowest_path, highest_path) in deduped.values() {
+            // Read the lowest snapshot for path display.
+            let envelope_bytes = match tokio::fs::read(lowest_path).await {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -1761,27 +1835,43 @@ impl StoragePort for FileSystemStorage {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let stored_hash = envelope
-                .get("original_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+
+            // Read expected_current_hash from the NEWEST snapshot so
+            // multi-checkpoint files don't false-positive as "modified externally".
+            let expected_current_hash: Option<String> = if highest_path != lowest_path {
+                tokio::fs::read(highest_path)
+                    .await
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|e| {
+                        e.get("expected_current_hash")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                    })
+            } else {
+                envelope
+                    .get("expected_current_hash")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            };
 
             let file_path = PathBuf::from(&stored_path_str);
 
-            // Check conflict: does the current file hash differ from stored hash?
             let is_conflict = match tokio::fs::read(&file_path).await {
                 Ok(current_bytes) => {
                     let mut h = Sha256::new();
                     h.update(&current_bytes);
                     let current_hash = format!("sha256:{:x}", h.finalize());
-                    current_hash != stored_hash
+                    if let Some(ref expected) = expected_current_hash {
+                        current_hash != *expected
+                    } else {
+                        false // v1/v2: never conflict
+                    }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // File deleted — not a conflict (will be recreated from snapshot)
-                    false
-                }
-                Err(_) => false, // IO error — treat as no conflict
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => false,
             };
 
             results.push((file_path, is_conflict));

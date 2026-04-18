@@ -613,9 +613,12 @@ async fn test_e2e_rewind_fork_instead_does_not_revert_files() {
 
 #[tokio::test]
 async fn test_e2e_rewind_conflict_detected_in_preview() {
-    // Given: a file snapshotted, then externally modified
+    // Given: a file snapshotted, tool writes it, finalized (v3), then externally modified
     let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
     let conv = make_conversation_5_messages();
     let conv_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();
@@ -630,7 +633,15 @@ async fn test_e2e_rewind_conflict_detected_in_preview() {
         .await
         .unwrap();
 
-    // External modification (simulates user editing file outside the agent)
+    // Tool writes the file, then finalize_snapshot records expected_current_hash (v3)
+    let tool_written = b"tool-written content";
+    tokio::fs::write(&file, tool_written).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_written)
+        .await
+        .unwrap();
+
+    // External modification AFTER tool write (simulates user editing file)
     tokio::fs::write(&file, b"externally modified")
         .await
         .unwrap();
@@ -647,7 +658,41 @@ async fn test_e2e_rewind_conflict_detected_in_preview() {
     assert_eq!(path, &file, "Preview path matches the snapshotted file");
     assert!(
         *conflict,
-        "File should be marked conflict=true since it was externally modified"
+        "File should be marked conflict=true since it was externally modified after tool write"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_rewind_v2_preview_no_false_conflict() {
+    // v1/v2 envelopes (no finalize_snapshot) should never flag conflict in preview.
+    let tmp = TempDir::new().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("v2file.rs");
+    tokio::fs::write(&file, b"original").await.unwrap();
+
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, b"original")
+        .await
+        .unwrap();
+
+    // File is modified but NO finalize_snapshot called (v2 envelope)
+    tokio::fs::write(&file, b"modified").await.unwrap();
+
+    let preview_files = storage
+        .list_snapshot_files(&conv_id, CheckpointId(0))
+        .await
+        .unwrap();
+
+    assert_eq!(preview_files.len(), 1);
+    let (_path, conflict) = &preview_files[0];
+    assert!(
+        !*conflict,
+        "v2 envelopes without expected_current_hash should never flag conflict"
     );
 }
 
@@ -859,6 +904,106 @@ async fn test_e2e_rewind_deleted_file_recreated() {
         content, b"was here originally",
         "Recreated file has original content"
     );
+}
+
+// ── Created-file conflict: tool creates file, user edits externally, revert must not delete ──
+
+#[tokio::test]
+async fn test_e2e_rewind_created_file_externally_modified_is_conflict() {
+    // Given: file did NOT exist before checkpoint, tool creates it, user edits externally
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("brand_new.rs");
+    // File does NOT exist yet — snapshot captures absence
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, b"")
+        .await
+        .unwrap();
+
+    // Tool creates the file
+    let tool_content = b"fn main() { println!(\"hello\"); }";
+    tokio::fs::write(&file, tool_content).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_content)
+        .await
+        .unwrap();
+
+    // User externally modifies the created file
+    let user_content = b"fn main() { println!(\"user edit\"); }";
+    tokio::fs::write(&file, user_content).await.unwrap();
+
+    // When: revert — should NOT delete because user modified it
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .await
+        .unwrap();
+
+    // Then: Conflict status, file preserved with user content
+    assert_eq!(reverted.len(), 1);
+    assert!(
+        matches!(reverted[0].status, RevertStatus::Conflict { .. }),
+        "Created file externally modified must produce Conflict, got {:?}",
+        reverted[0].status
+    );
+    assert!(file.exists(), "File must NOT be deleted");
+    let on_disk = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(
+        on_disk, user_content,
+        "User's external edits must be preserved"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_rewind_created_file_unmodified_is_deleted() {
+    // Given: file did NOT exist, tool creates it, nobody edits externally → revert deletes it
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("brand_new2.rs");
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, b"")
+        .await
+        .unwrap();
+
+    // Tool creates the file
+    let tool_content = b"fn main() {}";
+    tokio::fs::write(&file, tool_content).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_content)
+        .await
+        .unwrap();
+
+    // No external modification — file still has tool content
+
+    // When: revert
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .await
+        .unwrap();
+
+    // Then: Restored, file deleted (restoring pre-checkpoint state of "absent")
+    assert_eq!(reverted.len(), 1);
+    assert!(
+        matches!(reverted[0].status, RevertStatus::Restored),
+        "Unmodified created file should be Restored (deleted), got {:?}",
+        reverted[0].status
+    );
+    assert!(!file.exists(), "File should be deleted by revert");
 }
 
 // ── AC6: DF-018 — Overlay Queue Prevents Focus Theft ─────────────────────────
@@ -2374,6 +2519,279 @@ async fn test_e2e_rewind_skips_externally_edited_file() {
     assert_eq!(
         after, external,
         "Conflict: file must stay at external content"
+    );
+}
+
+// ── Multi-checkpoint same file: conflict detection uses newest hash ───────────
+
+/// Regression: when a tool modifies the same file across multiple checkpoints,
+/// the dedup keeps the LOWEST cp_id (oldest original content).  Conflict
+/// detection must use the HIGHEST cp_id's `expected_current_hash` — otherwise
+/// the current file (reflecting the latest tool write) won't match the first
+/// tool write's hash, and the file is falsely reported as "modified externally".
+#[tokio::test]
+async fn test_multi_checkpoint_same_file_no_false_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let file = tmp.path().join("multi_cp.txt");
+
+    // -- CP1: original=A, tool writes B --
+    let content_a = b"version A (original)";
+    tokio::fs::write(&file, content_a).await.unwrap();
+
+    let cp1 = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp1, &file, content_a)
+        .await
+        .unwrap();
+    let content_b = b"version B (tool cp1)";
+    tokio::fs::write(&file, content_b).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp1, &file, content_b)
+        .await
+        .unwrap();
+
+    // -- CP2: original=B, tool writes C --
+    let cp2 = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp2, &file, content_b)
+        .await
+        .unwrap();
+    let content_c = b"version C (tool cp2)";
+    tokio::fs::write(&file, content_c).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp2, &file, content_c)
+        .await
+        .unwrap();
+
+    // -- CP3: original=C, tool writes D --
+    let cp3 = storage.create_checkpoint(&conv_id).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp3, &file, content_c)
+        .await
+        .unwrap();
+    let content_d = b"version D (tool cp3)";
+    tokio::fs::write(&file, content_d).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp3, &file, content_d)
+        .await
+        .unwrap();
+
+    // File on disk = D (latest tool write). Nobody edited it externally.
+
+    // Preview: list_snapshot_files must NOT report conflict.
+    let files = storage
+        .list_snapshot_files(&conv_id, cp1)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(
+        !files[0].1,
+        "multi-checkpoint file must NOT be conflict — no external edit. \
+         Bug: dedup used oldest expected_current_hash instead of newest."
+    );
+
+    // Revert: must restore to version A (original before any tool touched it).
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, cp1)
+        .await
+        .unwrap();
+    assert_eq!(reverted.len(), 1);
+    assert_eq!(
+        reverted[0].status,
+        RevertStatus::Restored,
+        "multi-checkpoint file must be Restored, got: {:?}",
+        reverted[0].status
+    );
+    let on_disk = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(on_disk, content_a, "must restore to original version A");
+}
+
+// ── Production rewind flow: revert at same checkpoint ID ─────────────────────
+
+/// Regression: `revert_file_snapshots(conv_id, cp)` where `cp` is the SAME
+/// checkpoint that created the snapshots.  In production, `resolve_checkpoint_for_message`
+/// returns the checkpoint AT the rewind target — so `revert_file_snapshots` is called
+/// with the checkpoint's own ID as the floor.
+///
+/// Before the `>` → `>=` fix this returned an empty vec (nothing reverted).
+#[tokio::test]
+async fn test_revert_at_same_checkpoint_id_restores_file() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // -- checkpoint 1 --
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    assert_eq!(cp, CheckpointId(1));
+
+    let file = tmp.path().join("same_cp.rs");
+    let original = b"fn before() {}";
+    tokio::fs::write(&file, original).await.unwrap();
+
+    storage
+        .snapshot_file(&conv_id, cp, &file, original)
+        .await
+        .unwrap();
+    let tool_content = b"fn after_tool() {}";
+    tokio::fs::write(&file, tool_content).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_content)
+        .await
+        .unwrap();
+
+    // Production path: revert with the SAME checkpoint ID as the floor.
+    let reverted = storage
+        .revert_file_snapshots(&conv_id, cp) // CheckpointId(1) — NOT CheckpointId(0)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        reverted.len(),
+        1,
+        "must revert exactly 1 file when floor == snapshot cp_id"
+    );
+    assert_eq!(
+        reverted[0].status,
+        RevertStatus::Restored,
+        "file must be Restored, got: {:?}",
+        reverted[0].status
+    );
+    let on_disk = tokio::fs::read(&file).await.unwrap();
+    assert_eq!(
+        on_disk, original,
+        "file content must be back to original after revert"
+    );
+}
+
+/// Same as above but with multiple checkpoints — only the target checkpoint's
+/// snapshots are reverted; earlier checkpoint's files are untouched.
+#[tokio::test]
+async fn test_revert_at_same_checkpoint_id_multi_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    // -- checkpoint 1: earlier turn, different file --
+    let cp1 = storage.create_checkpoint(&conv_id).await.unwrap();
+    assert_eq!(cp1, CheckpointId(1));
+
+    let file_a = tmp.path().join("file_a.rs");
+    let orig_a = b"fn a_original() {}";
+    tokio::fs::write(&file_a, orig_a).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp1, &file_a, orig_a)
+        .await
+        .unwrap();
+    let tool_a = b"fn a_tool() {}";
+    tokio::fs::write(&file_a, tool_a).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp1, &file_a, tool_a)
+        .await
+        .unwrap();
+
+    // -- checkpoint 2: the turn we rewind --
+    let cp2 = storage.create_checkpoint(&conv_id).await.unwrap();
+    assert_eq!(cp2, CheckpointId(2));
+
+    let file_b = tmp.path().join("file_b.rs");
+    let orig_b = b"fn b_original() {}";
+    tokio::fs::write(&file_b, orig_b).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp2, &file_b, orig_b)
+        .await
+        .unwrap();
+    let tool_b = b"fn b_tool() {}";
+    tokio::fs::write(&file_b, tool_b).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp2, &file_b, tool_b)
+        .await
+        .unwrap();
+
+    // Rewind to checkpoint 2 (the production case: floor == cp2).
+    let reverted = storage.revert_file_snapshots(&conv_id, cp2).await.unwrap();
+
+    // Only file_b (checkpoint 2) should be reverted; file_a (checkpoint 1) untouched.
+    assert_eq!(
+        reverted.len(),
+        1,
+        "only checkpoint-2 file must be reverted, got {}",
+        reverted.len()
+    );
+    assert_eq!(
+        reverted[0].status,
+        RevertStatus::Restored,
+        "file_b must be Restored"
+    );
+
+    let b_on_disk = tokio::fs::read(&file_b).await.unwrap();
+    assert_eq!(b_on_disk, orig_b, "file_b must be restored to original");
+
+    let a_on_disk = tokio::fs::read(&file_a).await.unwrap();
+    assert_eq!(
+        a_on_disk, tool_a,
+        "file_a must remain at tool-written content"
+    );
+}
+
+/// Preview (list_snapshot_files) also uses `>=` — verify it lists files at the
+/// same checkpoint ID.
+#[tokio::test]
+async fn test_list_snapshot_files_at_same_checkpoint_id() {
+    let tmp = TempDir::new().unwrap();
+    let storage = rustain::adapters::filesystem::FileSystemStorage::with_workspace_root(
+        tmp.path().join("sessions"),
+        tmp.path().to_path_buf(),
+    );
+
+    let conv = make_conversation_5_messages();
+    let conv_id = conv.id.clone();
+    storage.save_conversation(&conv).await.unwrap();
+
+    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
+    assert_eq!(cp, CheckpointId(1));
+
+    let file = tmp.path().join("preview_test.rs");
+    let original = b"fn preview() {}";
+    tokio::fs::write(&file, original).await.unwrap();
+    storage
+        .snapshot_file(&conv_id, cp, &file, original)
+        .await
+        .unwrap();
+    let tool_content = b"fn preview_after() {}";
+    tokio::fs::write(&file, tool_content).await.unwrap();
+    storage
+        .finalize_snapshot(&conv_id, cp, &file, tool_content)
+        .await
+        .unwrap();
+
+    // list_snapshot_files with floor == snapshot cp_id.
+    let files = storage.list_snapshot_files(&conv_id, cp).await.unwrap();
+
+    assert_eq!(
+        files.len(),
+        1,
+        "preview must list 1 file when floor == snapshot cp_id"
     );
 }
 

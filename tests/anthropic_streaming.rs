@@ -690,6 +690,7 @@ data: {\"type\":\"message_stop\"}\n\
             Arc::new(rustain::adapters::noop::NoOpToolSet),
             "test-conv-id".to_string(),
             Arc::new(rustain::adapters::noop::NoOpStorage),
+            make_conversation(),
         )
         .await;
 

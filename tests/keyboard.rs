@@ -162,6 +162,7 @@ fn test_block_jump_down_at_bottom_noop() {
 fn test_block_jump_up_at_top_noop() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
+    state.viewport_height = 24; // tests use terminal_height as viewport
     state.total_content_height = 100;
     state.block_boundaries = vec![0, 25, 50, 75];
     state.scroll_offset = 76; // at top (max_offset = 100-24 = 76)

@@ -34,7 +34,19 @@ pub async fn run_turn(
     tools: Arc<dyn ToolSetPort>,
     conversation_id: String,
     storage: Arc<dyn StoragePort>,
+    conversation_snapshot: crate::domain::models::Conversation,
 ) {
+    // Persist the conversation before the first API call so that
+    // `create_checkpoint` (called when the API returns tool_use) can load it
+    // from storage. Without this, the first tool call in a new conversation
+    // fails checkpoint creation — snapshots get the sentinel CheckpointId(0)
+    // and are never revertible.
+    if let Err(e) = storage.save_conversation(&conversation_snapshot).await {
+        tracing::warn!(
+            "Pre-turn conversation save failed — checkpoint creation may fail: {}",
+            e
+        );
+    }
     let mut iteration = 0;
     loop {
         iteration += 1;

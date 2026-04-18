@@ -193,7 +193,7 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
             // Anchor-based scroll preservation: find the message index at the
             // top of the viewport using the *old* HeightCache before invalidation.
             if state.scroll_offset > 0 && !state.block_boundaries.is_empty() {
-                let old_vp = state.terminal_height as usize;
+                let old_vp = state.viewport_height as usize;
                 let max_offset = state.total_content_height.saturating_sub(old_vp);
                 let clamped = state.scroll_offset.min(max_offset);
                 let top_line = max_offset.saturating_sub(clamped);
@@ -492,7 +492,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'k' => {
                 let max_offset = state
                     .total_content_height
-                    .saturating_sub(state.terminal_height as usize);
+                    .saturating_sub(state.viewport_height as usize);
                 if state.scroll_offset < max_offset {
                     state.scroll_offset += 1;
                     state.auto_scroll = false;
@@ -514,7 +514,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     &state.block_boundaries,
                     Direction::Down,
                     state.total_content_height,
-                    state.terminal_height as usize,
+                    state.viewport_height as usize,
                 ) {
                     state.scroll_offset = new_offset;
                     state.auto_scroll = new_offset == 0;
@@ -529,7 +529,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     &state.block_boundaries,
                     Direction::Up,
                     state.total_content_height,
-                    state.terminal_height as usize,
+                    state.viewport_height as usize,
                 ) {
                     state.scroll_offset = new_offset;
                     state.auto_scroll = false;
@@ -544,7 +544,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     &state.user_message_boundaries,
                     Direction::Up,
                     state.total_content_height,
-                    state.terminal_height as usize,
+                    state.viewport_height as usize,
                 ) {
                     state.scroll_offset = new_offset;
                     state.auto_scroll = false;
@@ -559,7 +559,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     &state.user_message_boundaries,
                     Direction::Down,
                     state.total_content_height,
-                    state.terminal_height as usize,
+                    state.viewport_height as usize,
                 ) {
                     state.scroll_offset = new_offset;
                     state.auto_scroll = new_offset == 0;
