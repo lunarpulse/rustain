@@ -1,0 +1,41 @@
+[project]
+name = "rustain-tui-tests"
+version = "0.1.0"
+description = "Pexpect-based E2E TUI tests for rustain"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0",
+    "pexpect>=4.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-timeout>=2.2",
+    "pytest-xdist>=3.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "requires_api: test requires a live API key and network access",
+    "slow: test takes >30s (tool execution + AI response)",
+    "story_3_1: Story 3.1 — Multi-line Input & History",
+    "story_3_2: Story 3.2 — Slash Commands & Autocomplete",
+    "story_3_3: Story 3.3 — Command Palette & Which-Key",
+    "story_3_4: Story 3.4 — Image Attachment & Clipboard",
+    "story_3_5: Story 3.5 — Help Overlay & Discoverability",
+    "story_3_6: Story 3.6 — Markdown Rendering",
+    "story_4_3a: Story 4-3a — Fork Conversations",
+    "story_4_3b: Story 4-3b — Rewind with File Snapshot",
+    "story_4_4: Story 4-4 — Search, Bookmarks & Export",
+    "story_4_5: Story 4-5 — History Import",
+    "story_4_6: Story 4-6 — Cleanup & Hardening",
+]
+# Default: skip tests that need a live API unless explicitly requested.
+# Run all:      pytest
+# Skip API:     pytest -m "not requires_api"
+# Single story: pytest -m story_4_3b
+timeout = 120
