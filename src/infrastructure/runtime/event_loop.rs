@@ -1630,18 +1630,10 @@ pub async fn run(
                                             .min(conversation.messages.len().saturating_sub(1))
                                         };
 
-                                        // Find target checkpoint covering this message
-                                        let target_cp = resolve_checkpoint_for_message(
-                                            &storage,
-                                            &conversation.id,
-                                            target_message_index,
-                                        ).await;
-
-                                        // Build preview (read-only, no mutations)
                                         let messages_to_remove = conversation.messages.len()
                                             .saturating_sub(target_message_index + 1);
                                         let files = storage
-                                            .list_snapshot_files(&conversation.id, target_cp)
+                                            .list_snapshot_files(&conversation.id, target_message_index)
                                             .await
                                             .unwrap_or_default();
                                         let files_to_revert: Vec<crate::adapters::tui::state::RevertPreviewItem> = files
@@ -1673,36 +1665,17 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::RewindConfirm => {
-                                    // P5 dedup invariant: .take() before await prevents double-confirm
                                     if let Some(target_msg_idx) = state.pending_rewind_index.take() {
                                         state.rewind_preview = None;
 
-                                        // Resolve the checkpoint floor for FILE snapshots only.
-                                        // Message truncation uses `target_msg_idx` directly via
-                                        // `truncate_conversation` so the user's selection is
-                                        // honored (bug 1b fix). The checkpoint id returned here
-                                        // governs which snapshot files are eligible for revert
-                                        // (every cp_id >= target_cp gets applied in reverse order).
-                                        let target_cp = resolve_checkpoint_for_message(
-                                            &storage,
-                                            &conversation.id,
-                                            target_msg_idx,
-                                        ).await;
-
                                         tracing::debug!(
-                                            "rewind: target_msg_idx={}, resolved target_cp={}, conv_id={}",
-                                            target_msg_idx, target_cp.0, conversation.id
+                                            "rewind: target_msg_idx={}, conv_id={}",
+                                            target_msg_idx, conversation.id
                                         );
 
-                                        // DF-109 (AC3): Write transaction journal BEFORE any
-                                        // destructive operation so a crash mid-rewind is
-                                        // recoverable on next startup via reconcile_pending_txns().
-                                        // If the journal cannot be created, abort the rewind —
-                                        // proceeding without crash protection risks data loss.
                                         if let Err(e) = storage.begin_rewind_txn(
                                             &conversation.id,
                                             target_msg_idx,
-                                            target_cp,
                                         ).await {
                                             tracing::error!(
                                                 "begin_rewind_txn failed — aborting rewind: {}",
@@ -1717,49 +1690,36 @@ pub async fn run(
                                             continue;
                                         }
 
-                                        // 1. Truncate conversation to the user's selected message
-                                        //    index (pure message-level; no checkpoint dependency).
+                                        // 1. Revert files FIRST — needs the checkpoint log to resolve
+                                        //    which snapshots belong to messages above target_msg_idx.
+                                        //    Truncation prunes the log, so revert must run before it.
+                                        let reverted = storage
+                                            .revert_file_snapshots(&conversation.id, target_msg_idx)
+                                            .await
+                                            .unwrap_or_default();
+                                        let restored = reverted
+                                            .iter()
+                                            .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Restored))
+                                            .count();
+                                        let conflicts = reverted
+                                            .iter()
+                                            .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Conflict { .. }))
+                                            .count();
+
+                                        tracing::debug!(
+                                            "rewind: reverted={}, restored={}, conflicts={}, target_msg_idx={}",
+                                            reverted.len(), restored, conflicts, target_msg_idx
+                                        );
+                                        for r in &reverted {
+                                            tracing::debug!(
+                                                "rewind: file={} → {:?}",
+                                                r.path.display(), r.status
+                                            );
+                                        }
+
+                                        // 2. Truncate conversation to the user's selected message index.
                                         match storage.truncate_conversation(&conversation.id, target_msg_idx).await {
                                             Ok(truncated) => {
-                                                // Advance journal: messages truncated, file revert next.
-                                                // This is a mid-operation update — truncation already
-                                                // happened so we cannot abort. Log as error so the
-                                                // user knows crash protection is degraded.
-                                                if let Err(e) = storage.write_rewind_phase(
-                                                    &conversation.id,
-                                                    crate::domain::models::transaction::RewindTxnPhase::MessagesTruncated,
-                                                ).await {
-                                                    tracing::error!(
-                                                        "write_rewind_phase(MessagesTruncated) failed — crash protection degraded: {}",
-                                                        e
-                                                    );
-                                                }
-
-                                                // 2. Revert files
-                                                let reverted = storage
-                                                    .revert_file_snapshots(&conversation.id, target_cp)
-                                                    .await
-                                                    .unwrap_or_default();
-                                                let restored = reverted
-                                                    .iter()
-                                                    .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Restored))
-                                                    .count();
-                                                let conflicts = reverted
-                                                    .iter()
-                                                    .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Conflict { .. }))
-                                                    .count();
-
-                                                tracing::debug!(
-                                                    "rewind: reverted={}, restored={}, conflicts={}, target_cp={}",
-                                                    reverted.len(), restored, conflicts, target_cp.0
-                                                );
-                                                for r in &reverted {
-                                                    tracing::debug!(
-                                                        "rewind: file={} → {:?}",
-                                                        r.path.display(), r.status
-                                                    );
-                                                }
-
                                                 // Commit transaction journal — both phases done.
                                                 let _ = storage.commit_rewind_txn(&conversation.id)
                                                     .await
@@ -3932,31 +3892,6 @@ pub fn rehydrate_historical_images(
             msg_idx += 1;
         }
     }
-}
-
-/// Find the checkpoint ID that covers the given message index.
-///
-/// Returns the checkpoint with the highest ID where `meta.message_index <= target_message_index`.
-/// Falls back to `CheckpointId(0)` when no checkpoint is found (no tool calls were made, or
-/// the conversation has no checkpoint log). A sentinel of 0 means "revert nothing" — callers
-/// should still truncate messages, but file-snapshot reversal will be a no-op since no snapshots
-/// exist with cp_id > 0.
-async fn resolve_checkpoint_for_message(
-    storage: &Arc<dyn StoragePort>,
-    conversation_id: &str,
-    target_message_index: usize,
-) -> crate::domain::models::checkpoint::CheckpointId {
-    use crate::domain::models::checkpoint::CheckpointId;
-    let checkpoints = storage
-        .list_checkpoints(conversation_id)
-        .await
-        .unwrap_or_default();
-    checkpoints
-        .iter()
-        .filter(|c| c.message_index <= target_message_index)
-        .max_by_key(|c| c.id)
-        .map(|c| c.id)
-        .unwrap_or(CheckpointId(0))
 }
 
 fn start_turn(

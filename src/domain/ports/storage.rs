@@ -136,16 +136,21 @@ pub trait StoragePort: Send + Sync {
         Err(StorageError::NotSupported("snapshot_file".to_string()))
     }
 
-    /// Revert all snapshots whose checkpoint id is strictly greater than `after_checkpoint`.
+    /// Revert all file snapshots associated with messages *after* `target_message_index`.
+    ///
+    /// Loads the checkpoint log, collects every checkpoint whose `message_index` is
+    /// strictly greater than `target_message_index`, and reverts all snapshots filed
+    /// under those checkpoints.  This decouples file reversion from checkpoint-ID
+    /// resolution — the caller supplies the user-facing message boundary directly.
+    ///
     /// Returns a `Vec<RevertedFile>` describing the outcome for each file.
-    /// Snapshot files for `cp_id > after_checkpoint` are deleted after a successful revert
-    /// to prevent re-application on a subsequent rewind.
+    /// Consumed snapshot files are deleted to prevent re-application.
     ///
     /// Default: `Err(StorageError::NotSupported("revert_file_snapshots"))`.
     async fn revert_file_snapshots(
         &self,
         _conversation_id: &str,
-        _after_checkpoint: CheckpointId,
+        _target_message_index: usize,
     ) -> Result<Vec<RevertedFile>, StorageError> {
         Err(StorageError::NotSupported(
             "revert_file_snapshots".to_string(),
@@ -153,7 +158,7 @@ pub trait StoragePort: Send + Sync {
     }
 
     /// Read-only preview: list files that would be reverted if `revert_file_snapshots`
-    /// were called with `after_checkpoint`. Returns `(path, is_conflict)` pairs where
+    /// were called with `target_message_index`. Returns `(path, is_conflict)` pairs where
     /// `is_conflict` is true if the file's current content differs from the stored hash
     /// (same detection logic as `revert_file_snapshots`, but no files are modified).
     ///
@@ -161,7 +166,7 @@ pub trait StoragePort: Send + Sync {
     async fn list_snapshot_files(
         &self,
         _conversation_id: &str,
-        _after_checkpoint: CheckpointId,
+        _target_message_index: usize,
     ) -> Result<Vec<(std::path::PathBuf, bool)>, StorageError> {
         Ok(vec![])
     }
@@ -200,7 +205,6 @@ pub trait StoragePort: Send + Sync {
         &self,
         _conversation_id: &str,
         _target_message_index: usize,
-        _after_checkpoint: CheckpointId,
     ) -> Result<(), StorageError> {
         Err(StorageError::NotSupported("begin_rewind_txn".to_string()))
     }

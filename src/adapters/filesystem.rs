@@ -1427,7 +1427,7 @@ impl StoragePort for FileSystemStorage {
     async fn revert_file_snapshots(
         &self,
         conversation_id: &str,
-        after_checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        target_message_index: usize,
     ) -> Result<Vec<crate::domain::models::checkpoint::RevertedFile>, StorageError> {
         use crate::domain::models::checkpoint::{RevertStatus, RevertedFile};
         use base64::Engine as _;
@@ -1437,12 +1437,25 @@ impl StoragePort for FileSystemStorage {
 
         let snapshots_dir = self.snapshots_dir(conversation_id);
 
+        let log = self.load_checkpoint_log(conversation_id).await.unwrap_or_default();
+        let revert_cp_ids: std::collections::HashSet<u64> = log
+            .entries
+            .iter()
+            .filter(|e| e.message_index > target_message_index)
+            .map(|e| e.id.0)
+            .collect();
+
         tracing::debug!(
-            "revert_file_snapshots: conv={}, after_checkpoint={}, snapshots_dir={}",
+            "revert_file_snapshots: conv={}, target_msg_idx={}, revert_cp_ids={:?}, snapshots_dir={}",
             conversation_id,
-            after_checkpoint.0,
+            target_message_index,
+            revert_cp_ids,
             snapshots_dir.display()
         );
+
+        // When revert_cp_ids is empty (e.g. crash recovery after truncation
+        // pruned the log), fall back to reverting ALL remaining snapshots.
+        let revert_all = revert_cp_ids.is_empty();
 
         // 1. Read the snapshots directory. Return empty if it doesn't exist.
         let mut entries = match tokio::fs::read_dir(&snapshots_dir).await {
@@ -1463,7 +1476,8 @@ impl StoragePort for FileSystemStorage {
 
         // 2. Collect snapshot file entries: parse filename to (cp_id, path_hash).
         // Filename format: "{cp_id}_{path_hash}" (no extension).
-        let mut candidates: Vec<(u64, String, PathBuf)> = Vec::new(); // (cp_id, path_hash, path)
+        // Include all when reverting from crash recovery, otherwise filter by set.
+        let mut candidates: Vec<(u64, String, PathBuf)> = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let fname = entry.file_name().to_string_lossy().to_string();
             // Skip temp files left by interrupted writes.
@@ -1480,7 +1494,7 @@ impl StoragePort for FileSystemStorage {
                 .and_then(|(first, rest)| rest.first().map(|h| (*first, *h)))
             {
                 if let Ok(cp_id) = cp_str.parse::<u64>() {
-                    if cp_id >= after_checkpoint.0 {
+                    if revert_all || revert_cp_ids.contains(&cp_id) {
                         candidates.push((cp_id, hash_str.to_string(), entry.path()));
                     }
                 }
@@ -1488,9 +1502,9 @@ impl StoragePort for FileSystemStorage {
         }
 
         tracing::debug!(
-            "revert_file_snapshots: found {} candidates (after_checkpoint >= {})",
+            "revert_file_snapshots: found {} candidates (target_msg_idx={})",
             candidates.len(),
-            after_checkpoint.0
+            target_message_index
         );
 
         if candidates.is_empty() {
@@ -1752,15 +1766,22 @@ impl StoragePort for FileSystemStorage {
     async fn list_snapshot_files(
         &self,
         conversation_id: &str,
-        after_checkpoint: crate::domain::models::checkpoint::CheckpointId,
+        target_message_index: usize,
     ) -> Result<Vec<(std::path::PathBuf, bool)>, StorageError> {
         use sha2::{Digest, Sha256};
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
+
+        let log = self.load_checkpoint_log(conversation_id).await.unwrap_or_default();
+        let revert_cp_ids: HashSet<u64> = log
+            .entries
+            .iter()
+            .filter(|e| e.message_index > target_message_index)
+            .map(|e| e.id.0)
+            .collect();
 
         let snapshots_dir = self.snapshots_dir(conversation_id);
 
-        // Read the snapshots directory.
         let mut entries = match tokio::fs::read_dir(&snapshots_dir).await {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1774,7 +1795,6 @@ impl StoragePort for FileSystemStorage {
             }
         };
 
-        // Collect candidates: (cp_id, path_hash, snapshot_file_path)
         let mut candidates: Vec<(u64, String, PathBuf)> = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let fname = entry.file_name().to_string_lossy().to_string();
@@ -1789,7 +1809,7 @@ impl StoragePort for FileSystemStorage {
                 .and_then(|(first, rest)| rest.first().map(|h| (*first, *h)))
             {
                 if let Ok(cp_id) = cp_str.parse::<u64>() {
-                    if cp_id >= after_checkpoint.0 {
+                    if revert_cp_ids.contains(&cp_id) {
                         candidates.push((cp_id, hash_str.to_string(), entry.path()));
                     }
                 }
@@ -2106,13 +2126,11 @@ impl StoragePort for FileSystemStorage {
         &self,
         conversation_id: &str,
         target_message_index: usize,
-        after_checkpoint: crate::domain::models::checkpoint::CheckpointId,
     ) -> Result<(), crate::domain::errors::StorageError> {
         use crate::domain::models::transaction::{RewindTxn, RewindTxnPhase};
         let txn = RewindTxn {
             conversation_id: conversation_id.to_string(),
             target_message_index,
-            after_checkpoint,
             phase: RewindTxnPhase::Pending,
             created_at: {
                 std::time::SystemTime::now()
@@ -2547,7 +2565,7 @@ impl FileSystemStorage {
                     // Messages were truncated; file revert didn't complete.
                     // Complete by running revert_file_snapshots.
                     let recovery_ok = match self
-                        .revert_file_snapshots(&dir_name, txn.after_checkpoint)
+                        .revert_file_snapshots(&dir_name, txn.target_message_index)
                         .await
                     {
                         Ok(reverted) => {
@@ -3643,7 +3661,7 @@ mod tests {
 
         // Revert any snapshots newer than checkpoint 0 (which is all of them).
         let reverted = storage
-            .revert_file_snapshots("conv-v2", CheckpointId(0))
+            .revert_file_snapshots("conv-v2", 0)
             .await
             .expect("revert should succeed");
 

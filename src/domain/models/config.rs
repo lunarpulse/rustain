@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Application configuration loaded from file + env.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub model: String,
     pub log_level: String,

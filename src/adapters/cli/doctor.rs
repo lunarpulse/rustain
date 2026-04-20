@@ -904,7 +904,7 @@ mod tests {
     async fn test_global_config_valid_toml_wrong_schema() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config_dir = tmp.path().to_path_buf();
-        // Valid TOML but missing required AppConfig fields
+        // Valid TOML but with unknown section — deny_unknown_fields rejects it.
         std::fs::write(config_dir.join("config.toml"), "[section]\nkey = \"value\"").unwrap();
 
         let check = GlobalConfigCheck {

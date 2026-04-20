@@ -11,8 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::checkpoint::CheckpointId;
-
 /// Phase of an in-progress rewind transaction.
 ///
 /// Phases advance monotonically: `Pending → MessagesTruncated → Committed`.
@@ -31,7 +29,7 @@ pub enum RewindTxnPhase {
     /// Recovery: run `truncate_conversation(target_message_index)`.
     FilesReverted,
     /// Messages truncated; file snapshots not yet reverted.
-    /// Recovery: run `revert_file_snapshots(after_checkpoint)`.
+    /// Recovery: run `revert_file_snapshots(target_message_index)`.
     MessagesTruncated,
     /// Both operations completed — transaction committed successfully.
     /// The journal file may be deleted.
@@ -48,11 +46,11 @@ pub enum RewindTxnPhase {
 pub struct RewindTxn {
     /// Conversation being rewound.
     pub conversation_id: String,
-    /// Target message index for `truncate_conversation`.
+    /// Target message index for both `truncate_conversation` and
+    /// `revert_file_snapshots`.  File reversion uses this directly
+    /// (rather than a checkpoint ID) to find all snapshots associated
+    /// with messages being removed.
     pub target_message_index: usize,
-    /// Checkpoint floor for `revert_file_snapshots`.
-    /// All snapshot files with `cp_id > after_checkpoint` will be reverted.
-    pub after_checkpoint: CheckpointId,
     /// Current phase of the transaction.
     pub phase: RewindTxnPhase,
     /// Unix seconds when the transaction was created.
@@ -68,7 +66,6 @@ mod tests {
         let txn = RewindTxn {
             conversation_id: "conv-abc".to_string(),
             target_message_index: 3,
-            after_checkpoint: CheckpointId(2),
             phase: RewindTxnPhase::MessagesTruncated,
             created_at: 1700000000,
         };
@@ -76,7 +73,6 @@ mod tests {
         let decoded: RewindTxn = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.conversation_id, txn.conversation_id);
         assert_eq!(decoded.target_message_index, txn.target_message_index);
-        assert_eq!(decoded.after_checkpoint, txn.after_checkpoint);
         assert_eq!(decoded.phase, txn.phase);
     }
 
@@ -89,11 +85,9 @@ mod tests {
 
     #[test]
     fn test_rewind_txn_pending_is_default_safe() {
-        // Verify Pending represents "no work done" state.
         let txn = RewindTxn {
             conversation_id: "test".to_string(),
             target_message_index: 0,
-            after_checkpoint: CheckpointId(0),
             phase: RewindTxnPhase::Pending,
             created_at: 0,
         };

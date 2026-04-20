@@ -390,7 +390,7 @@ async fn test_e2e_rewind_reverts_files_in_reverse_order() {
 
     // When: revert to checkpoint 0 (before all snapshots)
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -648,7 +648,7 @@ async fn test_e2e_rewind_conflict_detected_in_preview() {
 
     // When: calling list_snapshot_files (the preview read-only path)
     let preview_files = storage
-        .list_snapshot_files(&conv_id, CheckpointId(0))
+        .list_snapshot_files(&conv_id, 0)
         .await
         .unwrap();
 
@@ -684,7 +684,7 @@ async fn test_e2e_rewind_v2_preview_no_false_conflict() {
     tokio::fs::write(&file, b"modified").await.unwrap();
 
     let preview_files = storage
-        .list_snapshot_files(&conv_id, CheckpointId(0))
+        .list_snapshot_files(&conv_id, 0)
         .await
         .unwrap();
 
@@ -740,7 +740,7 @@ async fn test_e2e_rewind_conflict_skips_overwrite() {
 
     // When: revert_file_snapshots — current != expected_current_hash → Conflict
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -839,7 +839,7 @@ async fn test_e2e_rewind_all_conflicts_truncates_only() {
 
     // When: revert file snapshots → all Conflict (current != expected_current_hash).
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -887,7 +887,7 @@ async fn test_e2e_rewind_deleted_file_recreated() {
 
     // When: revert_file_snapshots
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -942,7 +942,7 @@ async fn test_e2e_rewind_created_file_externally_modified_is_conflict() {
 
     // When: revert — should NOT delete because user modified it
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -992,7 +992,7 @@ async fn test_e2e_rewind_created_file_unmodified_is_deleted() {
 
     // When: revert
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -1468,7 +1468,7 @@ async fn test_storage_revert_file_snapshots_dedup_per_path() {
 
     // When: revert to cp 0 (before all snapshots)
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -1530,7 +1530,7 @@ async fn test_storage_revert_file_snapshots_deletes_consumed_snapshots() {
 
     // When: revert_file_snapshots
     let _ = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -1552,7 +1552,7 @@ async fn test_storage_revert_file_snapshots_deletes_consumed_snapshots() {
 
     // And: second call is idempotent (returns empty vec, no panic)
     let second = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
     assert!(
@@ -1990,32 +1990,11 @@ async fn test_e2e_amend2_forked_conversation_can_be_rewound() {
         "fork must copy the eligible checkpoint"
     );
 
-    // Rewind the fork to message index 1.
-    let truncated = storage.truncate_conversation(&new_id, 1).await.unwrap();
-    assert_eq!(
-        truncated.messages.len(),
-        2,
-        "fork rewind to index 1 must keep exactly 2 messages"
-    );
-
-    // The fork's checkpoint log is pruned (cp1 had message_index=2 which is
-    // now beyond the truncation point).
-    let cps_after = storage.list_checkpoints(&new_id).await.unwrap();
-    assert!(
-        cps_after.is_empty(),
-        "checkpoint at message_index=2 must be pruned after truncating fork to index 1"
-    );
-
-    // File snapshot revert runs against the fork — uses the copied snapshot
-    // file. The test mirrors the existing
-    // `test_e2e_rewind_reverts_files_in_reverse_order` pattern: the file
-    // content is unchanged since the snapshot, so the revert succeeds with
-    // status `Restored` and the file ends up at "orig A".
+    // File snapshot revert runs BEFORE truncation in production — the
+    // checkpoint log is still intact so revert can resolve which snapshots
+    // to apply.
     let reverted = storage
-        .revert_file_snapshots(
-            &new_id,
-            rustain::domain::models::checkpoint::CheckpointId(0),
-        )
+        .revert_file_snapshots(&new_id, 0)
         .await
         .unwrap();
     assert!(
@@ -2031,6 +2010,20 @@ async fn test_e2e_amend2_forked_conversation_can_be_rewound() {
 
     let after = tokio::fs::read(&file_a).await.unwrap();
     assert_eq!(after, b"orig A");
+
+    // Now truncate — checkpoint log is pruned after revert.
+    let truncated = storage.truncate_conversation(&new_id, 1).await.unwrap();
+    assert_eq!(
+        truncated.messages.len(),
+        2,
+        "fork rewind to index 1 must keep exactly 2 messages"
+    );
+
+    let cps_after = storage.list_checkpoints(&new_id).await.unwrap();
+    assert!(
+        cps_after.is_empty(),
+        "checkpoint at message_index=2 must be pruned after truncating fork to index 1"
+    );
 
     // Source conversation untouched (still 8 messages).
     let src = storage.load_conversation(&conv_id).await.unwrap().unwrap();
@@ -2194,7 +2187,7 @@ async fn test_toctou_conflict_detected_and_reported() {
 
     // 3. Revert: file content != expected_current_hash → Conflict, not Restored.
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -2260,7 +2253,7 @@ async fn test_rewind_transaction_resumes_after_crash() {
 
     // Write a journal in the `MessagesTruncated` state (as if crashed before file revert).
     storage
-        .begin_rewind_txn(&conv_id, 2, CheckpointId(0))
+        .begin_rewind_txn(&conv_id, 2)
         .await
         .unwrap();
     storage
@@ -2316,7 +2309,7 @@ async fn test_rewind_transaction_pending_aborted_on_reconcile() {
 
     // Write a Pending journal (nothing was actually done yet).
     storage
-        .begin_rewind_txn(&conv_id, 2, CheckpointId(0))
+        .begin_rewind_txn(&conv_id, 2)
         .await
         .unwrap();
 
@@ -2360,7 +2353,7 @@ async fn test_rewind_transaction_commit_removes_journal() {
 
     // begin → phase → commit lifecycle.
     storage
-        .begin_rewind_txn(&conv_id, 2, CheckpointId(0))
+        .begin_rewind_txn(&conv_id, 2)
         .await
         .unwrap();
     assert!(
@@ -2452,7 +2445,7 @@ async fn test_e2e_rewind_restores_tool_modified_file() {
 
     // File on disk matches expected_current_hash → tool modified → Restored.
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -2504,7 +2497,7 @@ async fn test_e2e_rewind_skips_externally_edited_file() {
 
     // current != expected_current_hash → Conflict.
     let reverted = storage
-        .revert_file_snapshots(&conv_id, CheckpointId(0))
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
@@ -2588,7 +2581,7 @@ async fn test_multi_checkpoint_same_file_no_false_conflict() {
     // File on disk = D (latest tool write). Nobody edited it externally.
 
     // Preview: list_snapshot_files must NOT report conflict.
-    let files = storage.list_snapshot_files(&conv_id, cp1).await.unwrap();
+    let files = storage.list_snapshot_files(&conv_id, 0).await.unwrap();
     assert_eq!(files.len(), 1);
     assert!(
         !files[0].1,
@@ -2597,7 +2590,7 @@ async fn test_multi_checkpoint_same_file_no_false_conflict() {
     );
 
     // Revert: must restore to version A (original before any tool touched it).
-    let reverted = storage.revert_file_snapshots(&conv_id, cp1).await.unwrap();
+    let reverted = storage.revert_file_snapshots(&conv_id, 0).await.unwrap();
     assert_eq!(reverted.len(), 1);
     assert_eq!(
         reverted[0].status,
@@ -2648,16 +2641,16 @@ async fn test_revert_at_same_checkpoint_id_restores_file() {
         .await
         .unwrap();
 
-    // Production path: revert with the SAME checkpoint ID as the floor.
+    // Production path: revert with a message index that includes this checkpoint.
     let reverted = storage
-        .revert_file_snapshots(&conv_id, cp) // CheckpointId(1) — NOT CheckpointId(0)
+        .revert_file_snapshots(&conv_id, 0)
         .await
         .unwrap();
 
     assert_eq!(
         reverted.len(),
         1,
-        "must revert exactly 1 file when floor == snapshot cp_id"
+        "must revert exactly 1 file"
     );
     assert_eq!(
         reverted[0].status,
@@ -2672,8 +2665,8 @@ async fn test_revert_at_same_checkpoint_id_restores_file() {
     );
 }
 
-/// Same as above but with multiple checkpoints — only the target checkpoint's
-/// snapshots are reverted; earlier checkpoint's files are untouched.
+/// Rewind to a specific message index — only checkpoints above that index
+/// have their snapshots reverted; earlier checkpoints are untouched.
 #[tokio::test]
 async fn test_revert_at_same_checkpoint_id_multi_checkpoint() {
     let tmp = TempDir::new().unwrap();
@@ -2686,7 +2679,7 @@ async fn test_revert_at_same_checkpoint_id_multi_checkpoint() {
     let conv_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();
 
-    // -- checkpoint 1: earlier turn, different file --
+    // -- checkpoint 1 at message_index 4 --
     let cp1 = storage.create_checkpoint(&conv_id).await.unwrap();
     assert_eq!(cp1, CheckpointId(1));
 
@@ -2704,7 +2697,12 @@ async fn test_revert_at_same_checkpoint_id_multi_checkpoint() {
         .await
         .unwrap();
 
-    // -- checkpoint 2: the turn we rewind --
+    // Add a message so cp2 gets a different message_index.
+    let mut conv2 = storage.load_conversation(&conv_id).await.unwrap().unwrap();
+    conv2.messages.push(make_message(rustain::domain::models::MessageRole::User, "extra message"));
+    storage.save_conversation(&conv2).await.unwrap();
+
+    // -- checkpoint 2 at message_index 5 --
     let cp2 = storage.create_checkpoint(&conv_id).await.unwrap();
     assert_eq!(cp2, CheckpointId(2));
 
@@ -2722,10 +2720,10 @@ async fn test_revert_at_same_checkpoint_id_multi_checkpoint() {
         .await
         .unwrap();
 
-    // Rewind to checkpoint 2 (the production case: floor == cp2).
-    let reverted = storage.revert_file_snapshots(&conv_id, cp2).await.unwrap();
+    // Rewind to message_index 4 — only cp2 (message_index 5) gets reverted.
+    // cp1 (message_index 4) is NOT > 4 so file_a stays at tool content.
+    let reverted = storage.revert_file_snapshots(&conv_id, 4).await.unwrap();
 
-    // Only file_b (checkpoint 2) should be reverted; file_a (checkpoint 1) untouched.
     assert_eq!(
         reverted.len(),
         1,
@@ -2748,8 +2746,8 @@ async fn test_revert_at_same_checkpoint_id_multi_checkpoint() {
     );
 }
 
-/// Preview (list_snapshot_files) also uses `>=` — verify it lists files at the
-/// same checkpoint ID.
+/// Preview (list_snapshot_files) with message-index targeting — verify it lists
+/// files for checkpoints above the target message index.
 #[tokio::test]
 async fn test_list_snapshot_files_at_same_checkpoint_id() {
     let tmp = TempDir::new().unwrap();
@@ -2779,8 +2777,8 @@ async fn test_list_snapshot_files_at_same_checkpoint_id() {
         .await
         .unwrap();
 
-    // list_snapshot_files with floor == snapshot cp_id.
-    let files = storage.list_snapshot_files(&conv_id, cp).await.unwrap();
+    // list_snapshot_files targeting message index 0 — checkpoint at message_index 4 is included.
+    let files = storage.list_snapshot_files(&conv_id, 0).await.unwrap();
 
     assert_eq!(
         files.len(),
