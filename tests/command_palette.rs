@@ -23,7 +23,7 @@ fn test_palette_registry_register_and_query_by_scope() {
         description: "Start new session".to_string(),
         shortcut: None,
         scope: PaletteScope::SlashCommand,
-        action: PaletteAction::ExecuteCommand("new".to_string()),
+        action: PaletteAction::ExecuteCommand("new".to_string(), None),
     });
     reg.register(PaletteEntry {
         name: "gpt-4".to_string(),
@@ -166,13 +166,13 @@ fn test_command_palette_execute_selected() {
         description: "New".to_string(),
         shortcut: None,
         scope: PaletteScope::SlashCommand,
-        action: PaletteAction::ExecuteCommand("new".to_string()),
+        action: PaletteAction::ExecuteCommand("new".to_string(), None),
     }];
 
     let action = state.execute_selected();
     assert_eq!(
         action,
-        Some(PaletteAction::ExecuteCommand("new".to_string()))
+        Some(PaletteAction::ExecuteCommand("new".to_string(), None))
     );
 }
 
@@ -733,7 +733,7 @@ fn test_palette_enter_executes_command() {
         description: "New".to_string(),
         shortcut: None,
         scope: PaletteScope::SlashCommand,
-        action: PaletteAction::ExecuteCommand("new".to_string()),
+        action: PaletteAction::ExecuteCommand("new".to_string(), None),
     }];
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));

@@ -1,6 +1,7 @@
 //! Concrete SecurityPort adapter.
 //! Wraps blocklist, path validation, and permission prompt flow via oneshot channels.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -15,8 +16,6 @@ use crate::domain::models::{
 };
 use crate::domain::ports::SecurityPort;
 
-/// SecurityPort implementation with blocklist enforcement, workspace boundary checks,
-/// and permission prompt flow via oneshot channels.
 pub struct SecurityAdapter {
     workspace_path: PathBuf,
     blocked_commands: Vec<String>,
@@ -24,6 +23,9 @@ pub struct SecurityAdapter {
     mode: Arc<AtomicU8>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     pub allowed_rules: RwLock<Vec<PermissionRule>>,
+    /// In-memory session-level auto-allow set (AC4). Keyed by tool_name.
+    /// NOT persisted to settings.json. Cleared on process exit.
+    session_allowed_tools: RwLock<HashSet<String>>,
 }
 
 impl SecurityAdapter {
@@ -58,6 +60,7 @@ impl SecurityAdapter {
             mode: Arc::new(AtomicU8::new(PermissionMode::Normal as u8)),
             event_tx,
             allowed_rules: RwLock::new(Vec::new()),
+            session_allowed_tools: RwLock::new(HashSet::new()),
         }
     }
 
@@ -176,6 +179,20 @@ impl SecurityAdapter {
         *allowed = rules;
     }
 
+    /// Register a tool as session-allowed (for testing).
+    #[allow(dead_code)]
+    pub async fn add_session_allowed(&self, tool_name: &str) {
+        let mut session = self.session_allowed_tools.write().await;
+        session.insert(tool_name.to_string());
+    }
+
+    /// Check if a tool is in the session-allow set (for testing).
+    #[allow(dead_code)]
+    pub async fn is_session_allowed(&self, tool_name: &str) -> bool {
+        let session = self.session_allowed_tools.read().await;
+        session.contains(tool_name)
+    }
+
     /// Validate a shell command against the blocklist.
     fn validate_command(&self, command: &str) -> Result<(), PermissionError> {
         let command_lower = command.to_lowercase();
@@ -231,6 +248,9 @@ impl SecurityAdapter {
             self.workspace_path.join(path)
         };
 
+        let workspace_canonical = std::fs::canonicalize(&self.workspace_path)
+            .unwrap_or_else(|_| self.workspace_path.clone());
+
         // Use canonicalize if the path exists, otherwise canonicalize the parent
         // to resolve symlinks even for non-existent paths (AC7, DF-010).
         let resolved = match std::fs::canonicalize(&absolute) {
@@ -240,6 +260,13 @@ impl SecurityAdapter {
                 if let Some(parent) = absolute.parent() {
                     match std::fs::canonicalize(parent) {
                         Ok(canon_parent) => {
+                            // DF-108: verify parent is inside workspace BEFORE joining
+                            // (catches parent-is-symlink-to-outside at the source).
+                            if !canon_parent.starts_with(&workspace_canonical) {
+                                return Err(PermissionError::WorkspaceViolation(
+                                    "Parent directory resolves outside workspace".to_string(),
+                                ));
+                            }
                             if let Some(file_name) = absolute.file_name() {
                                 let resolved = canon_parent.join(file_name);
                                 // Re-verify joined path remains within parent directory
@@ -249,7 +276,32 @@ impl SecurityAdapter {
                                         "Path traversal detected via symlink".to_string(),
                                     ));
                                 }
-                                resolved
+                                // DF-108: re-canonicalize after join to catch symlink swap.
+                                // If the file does not yet exist (ENOENT) that's fine — we rely
+                                // on the already-verified canon_parent containment above.
+                                // If canonicalize fails for any OTHER reason, or if the final
+                                // path resolves outside the workspace, reject.
+                                match std::fs::canonicalize(&resolved) {
+                                    Ok(final_resolved) => {
+                                        if !final_resolved.starts_with(&workspace_canonical) {
+                                            return Err(PermissionError::WorkspaceViolation(
+                                                "Symlink escape detected".to_string(),
+                                            ));
+                                        }
+                                        final_resolved
+                                    }
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                        // File doesn't exist yet — parent containment guarantees
+                                        // the joined path is inside workspace.
+                                        resolved
+                                    }
+                                    Err(_) => {
+                                        return Err(PermissionError::WorkspaceViolation(
+                                            "Path resolution failed — rejecting for safety"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
                             } else {
                                 canon_parent
                             }
@@ -285,9 +337,6 @@ impl SecurityAdapter {
         }
 
         // Check if within workspace
-        let workspace_canonical = std::fs::canonicalize(&self.workspace_path)
-            .unwrap_or_else(|_| self.workspace_path.clone());
-
         if resolved.starts_with(&workspace_canonical) {
             Ok(PathAccessType::Workspace)
         } else {
@@ -356,12 +405,20 @@ impl SecurityPort for SecurityAdapter {
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) -> Result<ApprovalDecision, PermissionError> {
-        // YOLO mode: auto-approve everything
+        // Defensive Yolo short-circuit (chain handles mode gating but keep safety net)
         if self.current_mode() == PermissionMode::Yolo {
             return Ok(ApprovalDecision::Allow);
         }
 
-        // Normal mode: check AlwaysAllow rules first
+        // Check session-allow set (AC4) — in-memory, not persisted
+        {
+            let session = self.session_allowed_tools.read().await;
+            if session.contains(tool_name) {
+                return Ok(ApprovalDecision::Allow);
+            }
+        }
+
+        // Check AlwaysAllow rules (persisted)
         {
             let rules = self.allowed_rules.read().await;
             if Self::matches_allowed_rule(&rules, tool_name, tool_input) {
@@ -382,8 +439,15 @@ impl SecurityPort for SecurityAdapter {
 
         let decision = rx.await.map_err(|_| PermissionError::Cancelled)?;
 
+        // Handle SessionAllow: register in session set, do NOT persist (AC4)
+        if matches!(decision, ApprovalDecision::SessionAllow) {
+            let mut session = self.session_allowed_tools.write().await;
+            session.insert(tool_name.to_string());
+            return Ok(ApprovalDecision::Allow);
+        }
+
         // Handle AlwaysAllow: add rule and persist
-        if decision == ApprovalDecision::AlwaysAllow {
+        if matches!(decision, ApprovalDecision::AlwaysAllow) {
             let rule = Self::build_rule(tool_name, tool_input);
             let mut rules = self.allowed_rules.write().await;
             rules.push(rule);
@@ -395,8 +459,11 @@ impl SecurityPort for SecurityAdapter {
 
     fn current_mode(&self) -> PermissionMode {
         match self.mode.load(Ordering::Acquire) {
+            0 => PermissionMode::Normal,
             1 => PermissionMode::Yolo,
-            _ => PermissionMode::Normal, // Default to most restrictive mode for unknown values
+            2 => PermissionMode::Plan,
+            3 => PermissionMode::AutoEdit,
+            _ => PermissionMode::Normal,
         }
     }
 
@@ -404,6 +471,8 @@ impl SecurityPort for SecurityAdapter {
         let val = match mode {
             PermissionMode::Normal => 0u8,
             PermissionMode::Yolo => 1u8,
+            PermissionMode::Plan => 2u8,
+            PermissionMode::AutoEdit => 3u8,
         };
         self.mode.store(val, Ordering::Release);
     }

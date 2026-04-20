@@ -87,8 +87,10 @@ class Search:
 class Permission:
     """Keys for tool permission prompts."""
     ALLOW = "y"
-    DENY = "n"
+    SESSION_ALLOW = "s"
     ALWAYS_ALLOW = "a"
+    DENY = "n"
+    DENY_FEEDBACK = "f"
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────

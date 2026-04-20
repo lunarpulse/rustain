@@ -24,8 +24,8 @@ pub enum PaletteScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum PaletteAction {
-    /// Execute a slash command by name (e.g., "new").
-    ExecuteCommand(String),
+    /// Execute a slash command by name with optional args (e.g., ("mode", Some("plan"))).
+    ExecuteCommand(String, Option<String>),
     /// Insert a mention at cursor position (e.g., "@path/to/file").
     InsertMention(String),
     /// Switch to a model by ID (stub for Epic 7).

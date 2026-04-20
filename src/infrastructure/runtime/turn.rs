@@ -261,8 +261,14 @@ pub async fn run_turn(
                                         is_error: true,
                                     }
                                 }
+                                PermissionDecision::DenyWithFeedback(feedback) => {
+                                    crate::domain::models::ToolResult {
+                                        tool_use_id: tc.id.clone(),
+                                        content: permission_chain::format_feedback_message(&feedback),
+                                        is_error: true,
+                                    }
+                                }
                                 PermissionDecision::Cancel => {
-                                    // User cancelled — stop the turn
                                     let _ = event_tx.send(AppEvent::ProviderChunk {
                                         conversation_id: conversation_id.clone(),
                                         chunk: StreamChunk::TurnComplete {

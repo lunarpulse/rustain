@@ -72,7 +72,7 @@ fn test_e2e_palette_result_format() {
         description: "Start new session".to_string(),
         shortcut: Some("Ctrl+N".to_string()),
         scope: PaletteScope::SlashCommand,
-        action: PaletteAction::ExecuteCommand("new".to_string()),
+        action: PaletteAction::ExecuteCommand("new".to_string(), None),
     }];
 
     h.render();

@@ -28,7 +28,7 @@ class TestRewindTrigger:
         assert tui.file_exists("rewind_cancel.txt")
 
         tui.chat_mode()
-        tui.scroll_up(5)
+        tui.jump_top()
         tui.rewind_cancel()
 
         # File must still exist — rewind was cancelled.
@@ -44,45 +44,45 @@ class TestRewindTrigger:
 class TestRewindRevert:
     """AC2 + AC3: Checkpoint is created before tool execution; rewind reverts files."""
 
-    def test_rewind_deletes_tool_created_file(self, tui: RustainTUI):
+    def test_rewind_deletes_tool_created_file(self, tui_write_only: RustainTUI):
         """Tool creates a new file. Rewind deletes it (file didn't exist before)."""
-        tui.send_message("Write the text 'hello rewind' to rewind_created.txt")
+        tui_write_only.send_message("Write the text 'hello rewind' to rewind_created.txt")
         # Tools are auto-allowed via .claude/settings.json in temp workspace.
-        tui.wait_for_idle()
-        assert tui.file_exists("rewind_created.txt")
+        tui_write_only.wait_for_idle()
+        assert tui_write_only.file_exists("rewind_created.txt")
 
-        tui.chat_mode()
-        tui.scroll_up(5)
-        tui.rewind()
+        tui_write_only.chat_mode()
+        tui_write_only.jump_top()
+        tui_write_only.rewind()
 
-        assert not tui.file_exists("rewind_created.txt"), (
+        assert not tui_write_only.file_exists("rewind_created.txt"), (
             "Tool-created file must be deleted after rewind"
         )
 
         # Verify logs show checkpoint + snapshot + revert
-        tui.assert_log_contains(r"Created checkpoint \d+")
-        tui.assert_log_contains(r"Snapshotted file.*rewind_created\.txt")
-        tui.assert_log_contains(r"revert_file_snapshots.*found \d+ candidates")
+        tui_write_only.assert_log_contains(r"Created checkpoint \d+")
+        tui_write_only.assert_log_contains(r"Snapshotted file.*rewind_created\.txt")
+        tui_write_only.assert_log_contains(r"revert_file_snapshots.*found \d+ candidates")
 
-    def test_rewind_restores_modified_file(self, tui: RustainTUI):
+    def test_rewind_restores_modified_file(self, tui_write_only: RustainTUI):
         """Tool modifies an existing file. Rewind restores original content."""
         original = "original content before tool\n"
-        tui.write_file("rewind_modify.txt", original)
+        tui_write_only.write_file("rewind_modify.txt", original)
 
-        tui.send_message(
+        tui_write_only.send_message(
             "Replace the contents of rewind_modify.txt with 'MODIFIED BY TOOL'"
         )
         # Tools are auto-allowed via .claude/settings.json in temp workspace.
-        tui.wait_for_idle()
+        tui_write_only.wait_for_idle()
 
-        modified = tui.file_content("rewind_modify.txt")
+        modified = tui_write_only.file_content("rewind_modify.txt")
         assert modified != original, "Tool must have modified the file"
 
-        tui.chat_mode()
-        tui.scroll_up(5)
-        tui.rewind()
+        tui_write_only.chat_mode()
+        tui_write_only.jump_top()
+        tui_write_only.rewind()
 
-        restored = tui.file_content("rewind_modify.txt")
+        restored = tui_write_only.file_content("rewind_modify.txt")
         assert restored == original, (
             f"File must be restored to original.\n"
             f"  Expected: {original!r}\n"
@@ -106,7 +106,7 @@ class TestRewindForkInstead:
         assert tui.file_exists("rewind_fork.txt")
 
         tui.chat_mode()
-        tui.scroll_up(5)
+        tui.jump_top()
         tui.rewind_fork_instead()
 
         # File must still exist — fork doesn't revert.
@@ -122,29 +122,29 @@ class TestRewindForkInstead:
 class TestRewindConflict:
     """AC5: Externally modified files are detected as conflicts."""
 
-    def test_externally_modified_file_not_overwritten(self, tui: RustainTUI):
+    def test_externally_modified_file_not_overwritten(self, tui_write_only: RustainTUI):
         """If user edits a tool-written file before rewind, it becomes a conflict."""
-        tui.write_file("conflict_test.txt", "original\n")
+        tui_write_only.write_file("conflict_test.txt", "original\n")
 
-        tui.send_message(
+        tui_write_only.send_message(
             "Replace the contents of conflict_test.txt with 'TOOL WROTE THIS'"
         )
         # Tools are auto-allowed via .claude/settings.json in temp workspace.
-        tui.wait_for_idle()
+        tui_write_only.wait_for_idle()
 
         # Externally modify the file AFTER the tool wrote it
-        tui.write_file("conflict_test.txt", "USER EDITED EXTERNALLY")
+        tui_write_only.write_file("conflict_test.txt", "USER EDITED EXTERNALLY")
 
-        tui.chat_mode()
-        tui.scroll_up(5)
-        tui.rewind()
+        tui_write_only.chat_mode()
+        tui_write_only.jump_top()
+        tui_write_only.rewind()
 
         # File must keep the user's external edit (conflict = skip overwrite)
-        content = tui.file_content("conflict_test.txt")
+        content = tui_write_only.file_content("conflict_test.txt")
         assert content == "USER EDITED EXTERNALLY", (
             f"Conflict file must keep user's edit, got: {content!r}"
         )
-        tui.assert_log_contains(r"Conflict")
+        tui_write_only.assert_log_contains(r"Conflict")
 
 
 # ── Multi-checkpoint: no false conflict ──────────────────────────────────────
@@ -156,44 +156,44 @@ class TestMultiCheckpointRewind:
     """Regression: file modified by tools across multiple turns must NOT
     show as 'modified externally' on rewind."""
 
-    def test_multi_turn_modify_then_rewind(self, tui: RustainTUI):
+    def test_multi_turn_modify_then_rewind(self, tui_write_only: RustainTUI):
         """Tool modifies a file twice in separate turns. Rewind restores original."""
         original = "version A (original)\n"
-        tui.write_file("multi_turn.txt", original)
+        tui_write_only.write_file("multi_turn.txt", original)
 
         # First tool modification
-        tui.send_message(
+        tui_write_only.send_message(
             "Replace the contents of multi_turn.txt with 'version B (turn 1)'"
         )
-        tui.wait_for_idle()
+        tui_write_only.wait_for_idle()
 
         # Second tool modification (new turn, new checkpoint)
-        tui.send_message(
+        tui_write_only.send_message(
             "Replace the contents of multi_turn.txt with 'version C (turn 2)'"
         )
-        tui.wait_for_idle()
+        tui_write_only.wait_for_idle()
 
         # File should now be at version C
-        content = tui.file_content("multi_turn.txt")
+        content = tui_write_only.file_content("multi_turn.txt")
         assert "C" in content or "turn 2" in content or content != original, (
             f"Tool must have modified file twice, got: {content!r}"
         )
 
         # Rewind to before both modifications
-        tui.chat_mode()
-        tui.jump_top()
-        tui.rewind()
+        tui_write_only.chat_mode()
+        tui_write_only.jump_top()
+        tui_write_only.rewind()
 
         # Key assertion: file must be RESTORED (not skipped as "conflict").
         # The exact content depends on which checkpoint the scroll position
         # targeted — but it must NOT be the latest tool write (version C)
         # and must NOT be flagged as a conflict.
-        restored = tui.file_content("multi_turn.txt")
+        restored = tui_write_only.file_content("multi_turn.txt")
         assert restored != content, (
             f"Rewind must change the file — got same content as before rewind: {restored!r}"
         )
-        tui.assert_log_contains(r"Restored")
-        tui.assert_log_not_contains(
+        tui_write_only.assert_log_contains(r"Restored")
+        tui_write_only.assert_log_not_contains(
             r"Conflict.*multi_turn\.txt",
             msg="Multi-checkpoint file must NOT be flagged as conflict"
         )

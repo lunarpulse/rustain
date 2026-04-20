@@ -46,7 +46,8 @@ pub use notice::{
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
 pub use permission::{
-    ApprovalDecision, FileOperation, PathAccessType, PermissionMode, PermissionRule,
+    ApprovalDecision, FileOperation, PathAccessType, PermissionMode, PermissionRule, ToolRisk,
+    risk_for_builtin,
 };
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};

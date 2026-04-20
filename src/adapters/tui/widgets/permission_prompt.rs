@@ -44,15 +44,17 @@ fn tool_display(tool_name: &str, tool_input: &serde_json::Value) -> String {
 /// Render permission prompt lines for inline display in the chat pane.
 /// Returns a Vec of Line objects to be appended to the rendered output.
 ///
-/// Visual spec:
+/// Visual spec (5-action, 3-line):
 /// ```text
-/// ┃ Bash: cargo test --all                              ┃
-/// ┃ [y] Allow  [n] Deny  [a] Always allow               ┃
+/// ┃ Bash: cargo test --all              [3 more queued] ┃
+/// ┃ [y] Allow  [s] Session  [a] Always                  ┃
+/// ┃ [n] Deny   [f] Deny + feedback                      ┃
 /// ```
 pub fn render_permission_lines<'a>(
     tool_name: &str,
     tool_input: &serde_json::Value,
     theme: &'a Theme,
+    queue_len: usize,
 ) -> Vec<Line<'a>> {
     let display = tool_display(tool_name, tool_input);
     let border_style = Style::default()
@@ -61,8 +63,8 @@ pub fn render_permission_lines<'a>(
 
     let mut lines = Vec::new();
 
-    // Line 1: tool name + command
-    lines.push(Line::from(vec![
+    // Line 1: tool name + command + optional queue indicator (AC6)
+    let mut line1_spans = vec![
         Span::styled("┃ ", border_style),
         Span::styled(
             format!("{}: ", tool_name),
@@ -71,19 +73,36 @@ pub fn render_permission_lines<'a>(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(display, Style::default().fg(theme.colors.fg_primary)),
-        Span::styled(" ┃", border_style),
-    ]));
+    ];
+    if queue_len > 0 {
+        line1_spans.push(Span::styled(
+            format!("  [{} more queued]", queue_len),
+            Style::default().fg(theme.colors.fg_secondary),
+        ));
+    }
+    line1_spans.push(Span::styled(" ┃", border_style));
+    lines.push(Line::from(line1_spans));
 
-    // Line 2: action keys
+    // Line 2: [y] Allow  [s] Session  [a] Always
     lines.push(Line::from(vec![
         Span::styled("┃ ", border_style),
         Span::styled("[y]", Style::default().fg(theme.colors.success)),
         Span::styled(" Allow  ", Style::default().fg(theme.colors.fg_secondary)),
-        Span::styled("[n]", Style::default().fg(theme.colors.error)),
-        Span::styled(" Deny  ", Style::default().fg(theme.colors.fg_secondary)),
+        Span::styled("[s]", Style::default().fg(theme.colors.accent)),
+        Span::styled(" Session  ", Style::default().fg(theme.colors.fg_secondary)),
         Span::styled("[a]", Style::default().fg(theme.colors.warning)),
+        Span::styled(" Always", Style::default().fg(theme.colors.fg_secondary)),
+        Span::styled(" ┃", border_style),
+    ]));
+
+    // Line 3: [n] Deny   [f] Deny + feedback
+    lines.push(Line::from(vec![
+        Span::styled("┃ ", border_style),
+        Span::styled("[n]", Style::default().fg(theme.colors.error)),
+        Span::styled(" Deny   ", Style::default().fg(theme.colors.fg_secondary)),
+        Span::styled("[f]", Style::default().fg(theme.colors.auto_sent_border)),
         Span::styled(
-            " Always allow",
+            " Deny + feedback",
             Style::default().fg(theme.colors.fg_secondary),
         ),
         Span::styled(" ┃", border_style),
@@ -92,21 +111,49 @@ pub fn render_permission_lines<'a>(
     lines
 }
 
-/// Compute the rendered height of a permission prompt.
+/// Compute the rendered height of a permission prompt (3 lines).
 #[allow(dead_code)]
 pub fn permission_prompt_height() -> usize {
-    2 // tool line + action keys line
+    3
 }
 
-/// Render a blocked command notice in the chat stream.
-/// NOTE: AC5 blocked notices currently render via tool_block.rs error state
-/// (bold red ┃ + ✗ + reason), which provides richer context (tool name, elapsed).
-/// This standalone variant is available for non-tool-block blocked notices.
+/// Render feedback input lines for the deny-with-feedback mini-input (AC5).
 ///
 /// Visual spec:
 /// ```text
-/// ┃ ✗ Command blocked: dangerous pattern 'rm -rf /'     ┃
+/// ┃ Feedback: <text>▋                                    ┃
+/// ┃ [Enter] send  [Esc] cancel                           ┃
 /// ```
+pub fn render_feedback_input_lines<'a>(buffer: &str, theme: &'a Theme) -> Vec<Line<'a>> {
+    let border_style = Style::default()
+        .fg(theme.colors.auto_sent_border)
+        .add_modifier(Modifier::BOLD);
+
+    vec![
+        // Line 1: Feedback: <buffer>▋
+        Line::from(vec![
+            Span::styled("┃ ", border_style),
+            Span::styled("Feedback: ", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled(
+                buffer.to_string(),
+                Style::default().fg(theme.colors.fg_primary),
+            ),
+            Span::styled("▋", Style::default().fg(theme.colors.fg_primary)),
+            Span::styled(" ┃", border_style),
+        ]),
+        // Line 2: [Enter] send  [Esc] cancel
+        Line::from(vec![
+            Span::styled("┃ ", border_style),
+            Span::styled("[Enter]", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled(" send  ", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled("[Esc]", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled(" cancel", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled(" ┃", border_style),
+        ]),
+    ]
+}
+
+/// Render a blocked command notice in the chat stream.
 #[allow(dead_code)]
 pub fn render_blocked_notice_lines<'a>(reason: &str, theme: &'a Theme) -> Vec<Line<'a>> {
     let border_style = Style::default()
@@ -134,14 +181,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_permission_prompt_renders_two_lines() {
+    fn test_permission_prompt_renders_three_lines() {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let lines = render_permission_lines(
             "Bash",
             &serde_json::json!({"command": "cargo test"}),
             &theme,
+            0,
         );
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3);
 
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line1.contains("Bash"));
@@ -149,13 +197,74 @@ mod tests {
 
         let line2: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line2.contains("[y]"));
-        assert!(line2.contains("[n]"));
+        assert!(line2.contains("[s]"));
         assert!(line2.contains("[a]"));
+
+        let line3: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line3.contains("[n]"));
+        assert!(line3.contains("[f]"));
     }
 
     #[test]
     fn test_permission_prompt_height() {
-        assert_eq!(permission_prompt_height(), 2);
+        assert_eq!(permission_prompt_height(), 3);
+    }
+
+    #[test]
+    fn test_permission_prompt_five_action_glyphs() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines =
+            render_permission_lines("Bash", &serde_json::json!({"command": "ls"}), &theme, 0);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("[y]"), "missing [y] glyph");
+        assert!(all_text.contains("[s]"), "missing [s] glyph");
+        assert!(all_text.contains("[a]"), "missing [a] glyph");
+        assert!(all_text.contains("[n]"), "missing [n] glyph");
+        assert!(all_text.contains("[f]"), "missing [f] glyph");
+    }
+
+    #[test]
+    fn test_permission_prompt_queue_indicator_present() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines =
+            render_permission_lines("Bash", &serde_json::json!({"command": "ls"}), &theme, 3);
+        let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            line1.contains("[3 more queued]"),
+            "queue indicator missing: {}",
+            line1
+        );
+    }
+
+    #[test]
+    fn test_permission_prompt_queue_indicator_absent_when_zero() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines =
+            render_permission_lines("Bash", &serde_json::json!({"command": "ls"}), &theme, 0);
+        let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !line1.contains("more queued"),
+            "queue indicator should be absent: {}",
+            line1
+        );
+    }
+
+    #[test]
+    fn test_feedback_input_renders_two_lines() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines = render_feedback_input_lines("don't delete", &theme);
+        assert_eq!(lines.len(), 2);
+        let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line1.contains("Feedback:"));
+        assert!(line1.contains("don't delete"));
+        assert!(line1.contains("▋"), "cursor marker missing");
+        let line2: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line2.contains("[Enter]"));
+        assert!(line2.contains("[Esc]"));
     }
 
     #[test]

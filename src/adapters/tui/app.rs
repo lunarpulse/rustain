@@ -26,6 +26,18 @@ pub enum InputAction {
     PermissionDeny,
     /// Permission prompt: user pressed a.
     PermissionAlwaysAllow,
+    /// Permission prompt: user pressed s (AC4 — session allow).
+    PermissionSessionAllow,
+    /// Permission prompt: user pressed f (AC5 — deny + feedback).
+    PermissionDenyFeedback,
+    /// Feedback input: user typed a character (AC5).
+    FeedbackInputChar(char),
+    /// Feedback input: user pressed backspace (AC5).
+    FeedbackInputBackspace,
+    /// Feedback input: user pressed enter (AC5).
+    FeedbackInputSubmit,
+    /// Feedback input: user pressed Esc (AC5 — cancel feedback, restore prompt).
+    FeedbackInputCancel,
     /// Feedback block: user pressed r to retry.
     FeedbackRetry,
     /// AskUserQuestion: user submitted their answer.
@@ -366,14 +378,65 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return InputAction::Consumed;
     }
 
-    // Permission prompt focus: only y/n/a are handled, all others ignored
+    // Permission prompt focus: y/n/a/s/f are handled, chat-scroll keys pass through
+    // to the chat pane (AC6), all others ignored.
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
-        return match c {
-            'y' => InputAction::PermissionAllow,
-            'n' => InputAction::PermissionDeny,
-            'a' => InputAction::PermissionAlwaysAllow,
-            _ => InputAction::Consumed, // Ignore all other keys
-        };
+        match c {
+            'y' => return InputAction::PermissionAllow,
+            'n' => return InputAction::PermissionDeny,
+            'a' => return InputAction::PermissionAlwaysAllow,
+            's' => return InputAction::PermissionSessionAllow,
+            'f' => return InputAction::PermissionDenyFeedback,
+            // AC6: chat-scroll preserved while the prompt is up
+            'j' => {
+                if state.scroll_offset > 0 {
+                    state.scroll_offset -= 1;
+                    state.auto_scroll = state.scroll_offset == 0;
+                    state.needs_redraw = true;
+                }
+                return InputAction::Consumed;
+            }
+            'k' => {
+                let max_offset = state
+                    .total_content_height
+                    .saturating_sub(state.viewport_height as usize);
+                if state.scroll_offset < max_offset {
+                    state.scroll_offset += 1;
+                    state.auto_scroll = false;
+                    state.needs_redraw = true;
+                }
+                return InputAction::Consumed;
+            }
+            'G' => {
+                state.scroll_offset = 0;
+                state.auto_scroll = true;
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+            'g' => {
+                let max_offset = state
+                    .total_content_height
+                    .saturating_sub(state.viewport_height as usize);
+                state.scroll_offset = max_offset;
+                state.auto_scroll = false;
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+            _ => return InputAction::Consumed,
+        }
+    }
+
+    // Permission feedback input focus (AC5): printable chars + backspace handled.
+    // Reject control characters, tab, and newline (spec: single-line, multi-line disallowed).
+    if state.focus
+        == FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::PermissionFeedback,
+        ))
+    {
+        if c.is_control() || c == '\t' || c == '\n' || c == '\r' {
+            return InputAction::Consumed;
+        }
+        return InputAction::FeedbackInputChar(c);
     }
 
     // AskUserQuestion focus: type into question input buffer
@@ -408,9 +471,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             // Without this, the ENTER handler below (DomainKey::Enter arm) consumes
             // the submit and the command never dispatches.
             if state.autocomplete.active {
-                if matches!(state.autocomplete.kind, AutocompleteKind::SlashCommand)
-                    && c == ' '
-                {
+                if matches!(state.autocomplete.kind, AutocompleteKind::SlashCommand) && c == ' ' {
                     state.autocomplete.dismiss();
                     // Fall through to normal character insertion below.
                 } else {
@@ -828,7 +889,21 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match key {
             DomainKey::Esc => InputAction::PermissionDeny,
-            _ => InputAction::Consumed, // Ignore all other special keys
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Permission feedback input: Enter/Backspace/Esc (AC5)
+    if state.focus
+        == FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::PermissionFeedback,
+        ))
+    {
+        return match key {
+            DomainKey::Enter => InputAction::FeedbackInputSubmit,
+            DomainKey::Backspace => InputAction::FeedbackInputBackspace,
+            DomainKey::Esc => InputAction::FeedbackInputCancel,
+            _ => InputAction::Consumed,
         };
     }
 
@@ -1396,6 +1471,13 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /mode plan|normal|autoedit|yolo: switch permission mode (AC9)
+            if cmd_name == "mode" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // User-defined command: submit with command context
             let remainder = raw_args.to_string();
             state.resolved_mentions.clear();
@@ -1680,7 +1762,7 @@ fn dispatch_palette_action(
     use crate::domain::models::palette::PaletteAction;
 
     match action {
-        PaletteAction::ExecuteCommand(name) => InputAction::ExecuteCommand { name, args: None },
+        PaletteAction::ExecuteCommand(name, args) => InputAction::ExecuteCommand { name, args },
         PaletteAction::InsertMention(path) => {
             // Insert @path at cursor position, return to input focus
             let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);

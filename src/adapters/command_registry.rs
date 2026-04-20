@@ -45,6 +45,13 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            // Built-in: /mode plan|normal|autoedit|yolo — Story 5-0b AC9
+            SlashCommandDef {
+                name: "mode".to_string(),
+                description: "Set permission mode (plan, normal, autoedit, yolo)".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

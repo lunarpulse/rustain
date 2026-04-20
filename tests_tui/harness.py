@@ -18,6 +18,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -121,6 +122,12 @@ class RustainTUI:
     workspace: Path | None = None
     """Override workspace directory. Defaults to a temporary directory."""
 
+    allowed_tools: list[str] | None = None
+    """Override the AlwaysAllow list in the temp workspace settings.json.
+    None → default set (Read, Write, Edit, Bash, Glob, Grep).
+    Empty list → no tools pre-allowed (permission prompts for everything).
+    """
+
     timeout: float = 60.0
     """pexpect timeout for expect() calls."""
 
@@ -151,8 +158,13 @@ class RustainTUI:
             # common tools so tests don't hang on permission prompts.
             settings_dir = self._workspace_path / ".claude"
             settings_dir.mkdir(parents=True, exist_ok=True)
+            allow_list = (
+                self.allowed_tools
+                if self.allowed_tools is not None
+                else ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+            )
             (settings_dir / "settings.json").write_text(
-                '{"permissions":{"allow":["Read","Write","Edit","Bash","Glob","Grep"]}}\n'
+                json.dumps({"permissions": {"allow": allow_list}}) + "\n"
             )
         else:
             self._workspace_path = self.workspace
@@ -437,6 +449,66 @@ class RustainTUI:
         time.sleep(wait_before)
         self.send(Permission.ALWAYS_ALLOW)
         time.sleep(2.0)
+
+    def session_allow_permission(
+        self, wait_before: float = PERMISSION_WAIT
+    ) -> None:
+        """Press 's' to session-allow the tool permission (AC4).
+
+        Auto-approves all queued requests for the same tool type.
+        Not persisted — only lasts for the process lifetime.
+        """
+        time.sleep(wait_before)
+        self.send(Permission.SESSION_ALLOW)
+        self.wait_for_screen_not_contains("[y] Allow", timeout=3.0)
+
+    def deny_with_feedback(
+        self, feedback: str, wait_before: float = PERMISSION_WAIT
+    ) -> None:
+        """Press 'f', type feedback text, and submit (AC5).
+
+        Opens the deny-with-feedback mini-input, types the given text,
+        presses Enter, and asserts the feedback block appears.
+        """
+        time.sleep(wait_before)
+        self.send(Permission.DENY_FEEDBACK)
+        self.wait_for_screen("Feedback:", timeout=3.0)
+        for ch in feedback:
+            self.send(ch)
+            time.sleep(0.05)
+        self.send(ENTER)
+        self.wait_for_screen(
+            f'Tool denied. User feedback: "{feedback}"', timeout=5.0
+        )
+
+    def set_permission_mode(self, mode: str) -> None:
+        """Switch permission mode via Ctrl+P → mode: <mode> (AC9).
+
+        Valid modes: plan, normal, autoedit, yolo.
+
+        Waits for the status-bar flash emitted by the SetPermissionMode handler
+        (``Permission mode: <Mode>`` for plan/normal/autoedit, or the YOLO
+        warning for yolo) so the test fails loudly if the mode actually did not
+        change — previously this just waited for ``mode.lower()`` anywhere on
+        screen, which could match unrelated text.
+        """
+        self.send(CTRL_P)
+        time.sleep(0.3)
+        for ch in f"mode: {mode}":
+            self.send(ch)
+            time.sleep(0.05)
+        self.send(ENTER)
+        arg = mode.lower()
+        expected = {
+            "plan": "Permission mode: Plan",
+            "normal": "Permission mode: Normal",
+            "autoedit": "Permission mode: AutoEdit",
+            "auto": "Permission mode: AutoEdit",
+            "yolo": "YOLO mode active",
+        }.get(arg)
+        if expected is None:
+            raise ValueError(f"Unknown permission mode: {mode}")
+        self.wait_for_screen(expected, timeout=3.0)
 
     def wait_for_idle(self, seconds: float = TURN_COMPLETE_WAIT) -> None:
         """Wait for the AI turn to complete (text streaming + tool execution).

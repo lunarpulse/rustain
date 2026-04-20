@@ -791,7 +791,8 @@ fn test_e2e_fork_widget_truncates_long_utf8_safely() {
 
 #[test]
 fn test_e2e_fork_blocked_during_permission_overlay() {
-    // DF-018: 'f' key is consumed by the Permission overlay, not passed through to Chat
+    // DF-018: 'f' key in Permission overlay now triggers PermissionDenyFeedback (AC5),
+    // not ForkAtMessage. Updated from the old behavior where 'f' was consumed silently.
     let mut state = TuiState::new(80, 24);
     state.focus = rustain::domain::models::FocusState::Overlay(OverlayType::Confirmation(
         ConfirmationType::Permission,
@@ -801,17 +802,16 @@ fn test_e2e_fork_blocked_during_permission_overlay() {
     let event = DomainInputEvent::KeyPress('f');
     let action = handle_input(&mut state, &event);
 
-    // 'f' is not a valid permission key (y/n/a), so it should be consumed (not produce ForkAtMessage)
+    // 'f' now triggers deny-with-feedback (AC5), NOT fork
     assert_ne!(
         action,
         InputAction::ForkAtMessage,
         "'f' in Permission overlay must NOT produce ForkAtMessage (DF-018)"
     );
-    // It should be consumed by the permission overlay handler
     assert_eq!(
         action,
-        InputAction::Consumed,
-        "'f' in Permission overlay should be Consumed"
+        InputAction::PermissionDenyFeedback,
+        "'f' in Permission overlay should produce PermissionDenyFeedback (AC5)"
     );
 }
 

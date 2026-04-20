@@ -22,6 +22,13 @@ pub struct PendingPermission {
     pub response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
+/// State for the permission feedback mini-input (AC5).
+pub struct FeedbackInputState {
+    pub buffer: String,
+    pub cursor: usize,
+    pub pending_permission: PendingPermission,
+}
+
 /// Queue for permission requests that arrive while another is being displayed.
 #[derive(Default)]
 pub struct PermissionQueue {
@@ -40,6 +47,20 @@ impl PermissionQueue {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Drain all queued requests matching the given tool_name (AC4 batch sweep).
+    /// Returns the drained requests for auto-responding.
+    pub fn drain_matching(&mut self, tool_name: &str) -> Vec<PendingPermission> {
+        let (matching, remaining): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.queue)
+            .into_iter()
+            .partition(|p| p.tool_name == tool_name);
+        self.queue = remaining;
+        matching.into_iter().collect()
     }
 }
 
@@ -801,10 +822,12 @@ pub struct TuiState {
     /// Currently focused tool block id (set by chat pane render when a tool block
     /// is at the top of the viewport after J/K navigation).
     pub focused_tool_id: Option<String>,
-    /// Pending permission request awaiting user y/n/a response.
+    /// Pending permission request awaiting user y/n/a/s/f response.
     pub pending_permission: Option<PendingPermission>,
     /// Queue for additional permission requests that arrive while one is displayed.
     pub permission_queue: PermissionQueue,
+    /// Active feedback input state (AC5 — deny with feedback mini-input).
+    pub pending_feedback_input: Option<FeedbackInputState>,
     /// Active retry state for provider error recovery.
     pub retry_state: Option<RetryState>,
     /// Feedback blocks displayed in conversation, keyed by block ID.
@@ -953,6 +976,7 @@ impl TuiState {
             focused_tool_id: None,
             pending_permission: None,
             permission_queue: PermissionQueue::default(),
+            pending_feedback_input: None,
             retry_state: None,
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,

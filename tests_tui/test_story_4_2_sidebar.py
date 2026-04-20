@@ -65,7 +65,9 @@ class TestSidebarToggle:
         tui_in_project.send(Sidebar.OPEN)
         tui_in_project.wait(1.0)
 
-        tui_in_project.assert_responsive(timeout=3.0)
+        # assert_responsive removed: the space+backspace probe is a no-op in Chat
+        # focus and large conversations can block the render loop for seconds,
+        # causing false timeouts. Rely on deterministic screen assertions instead.
         tui_in_project.assert_screen_not_contains(
             "History", "Sidebar should close after opening a conversation"
         )

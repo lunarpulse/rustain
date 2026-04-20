@@ -236,6 +236,7 @@ fn test_permission_prompt_in_full_layout() {
                 "Bash",
                 &serde_json::json!({"command": "rm -rf /tmp/test"}),
                 &theme,
+                0,
             );
             let prompt_height = prompt_lines.len() as u16;
             let prompt_area = Rect {

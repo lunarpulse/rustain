@@ -44,6 +44,8 @@ pub enum DeleteConfirmTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfirmationType {
     Permission,
+    /// Permission feedback mini-input (AC5).
+    PermissionFeedback,
     Question,
     /// Delete confirmation for sidebar conversations (AC5, AC6).
     DeleteConfirmation(DeleteConfirmTarget),

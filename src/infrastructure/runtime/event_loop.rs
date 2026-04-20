@@ -28,9 +28,9 @@ use crate::domain::models::tab::TabManager;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, RetryState,
-    SessionManager, SessionState, StatusState, StreamChunk, StreamingState, UserMessage,
-    apply_chunk, generate_conversation_id, next_delay,
+    FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, PermissionMode,
+    RetryState, SessionManager, SessionState, StatusState, StreamChunk, StreamingState,
+    UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
@@ -369,6 +369,11 @@ pub async fn run(
                                     state.should_quit = true;
                                 }
                                 InputAction::CancelOrQuit => {
+                                    // Cancel active feedback input flow first (AC5)
+                                    if let Some(fi) = state.pending_feedback_input.take() {
+                                        let _ = fi.pending_permission.response_tx.send(ApprovalDecision::Deny);
+                                        state.focus = FocusState::Input;
+                                    }
                                     // Explicitly deny any pending permission before aborting
                                     if let Some(pending) = state.pending_permission.take() {
                                         let _ = pending.response_tx.send(ApprovalDecision::Deny);
@@ -443,6 +448,87 @@ pub async fn run(
                                     if let Some(pending) = state.pending_permission.take() {
                                         let _ = pending.response_tx.send(ApprovalDecision::AlwaysAllow);
                                         advance_permission_queue(&mut state);
+                                    }
+                                }
+                                InputAction::PermissionSessionAllow => {
+                                    if let Some(pending) = state.pending_permission.take() {
+                                        let tool_name = pending.tool_name.clone();
+                                        let _ = pending.response_tx.send(ApprovalDecision::SessionAllow);
+                                        // Batch sweep: drain matching queued requests (AC4)
+                                        let drained = state.permission_queue.drain_matching(&tool_name);
+                                        for queued in drained {
+                                            let _ = queued.response_tx.send(ApprovalDecision::Allow);
+                                        }
+                                        advance_permission_queue(&mut state);
+                                    }
+                                }
+                                InputAction::PermissionDenyFeedback => {
+                                    if let Some(pending) = state.pending_permission.take() {
+                                        use crate::adapters::tui::state::FeedbackInputState;
+                                        state.pending_feedback_input = Some(FeedbackInputState {
+                                            buffer: String::new(),
+                                            cursor: 0,
+                                            pending_permission: pending,
+                                        });
+                                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                            ConfirmationType::PermissionFeedback,
+                                        ));
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::FeedbackInputChar(c) => {
+                                    if let Some(ref mut fi) = state.pending_feedback_input {
+                                        // Cap feedback buffer to prevent unbounded paste into
+                                        // tool-result message sent to the LLM (AC5).
+                                        const MAX_FEEDBACK_LEN: usize = 2048;
+                                        if fi.buffer.len() + c.len_utf8() <= MAX_FEEDBACK_LEN {
+                                            fi.buffer.push(c);
+                                            fi.cursor += 1;
+                                            state.needs_redraw = true;
+                                        }
+                                    }
+                                }
+                                InputAction::FeedbackInputBackspace => {
+                                    if let Some(ref mut fi) = state.pending_feedback_input {
+                                        if fi.cursor > 0 {
+                                            fi.buffer.pop();
+                                            fi.cursor -= 1;
+                                            state.needs_redraw = true;
+                                        }
+                                    }
+                                }
+                                InputAction::FeedbackInputSubmit => {
+                                    if let Some(fi) = state.pending_feedback_input.take() {
+                                        if fi.buffer.is_empty() {
+                                            let _ = fi.pending_permission.response_tx.send(ApprovalDecision::Deny);
+                                        } else {
+                                            let feedback = fi.buffer.clone();
+                                            let _ = fi.pending_permission.response_tx.send(
+                                                ApprovalDecision::DenyWithFeedback { feedback: feedback.clone() },
+                                            );
+                                            // Emit FeedbackBlock into chat stream (AC5).
+                                            // Escape embedded `"` so the quoted-display format
+                                            // stays unambiguous even if the user typed a quote.
+                                            let fb_id = generate_conversation_id();
+                                            let fb = FeedbackBlock {
+                                                id: fb_id.clone(),
+                                                level: crate::domain::models::FeedbackLevel::Warning,
+                                                message: crate::domain::services::permission_chain::format_feedback_message(&feedback),
+                                                actions: vec![],
+                                            };
+                                            state.feedback_blocks.insert(fb_id.clone(), fb);
+                                        }
+                                        advance_permission_queue(&mut state);
+                                    }
+                                }
+                                InputAction::FeedbackInputCancel => {
+                                    if let Some(fi) = state.pending_feedback_input.take() {
+                                        // Restore the permission prompt (AC5 — Esc cancels feedback, permission still pending)
+                                        state.pending_permission = Some(fi.pending_permission);
+                                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                            ConfirmationType::Permission,
+                                        ));
+                                        state.needs_redraw = true;
                                     }
                                 }
                                 InputAction::FeedbackRetry => {
@@ -528,6 +614,44 @@ pub async fn run(
                                             &mut state,
                                         )
                                         .await;
+                                    } else if cmd_name == "mode" {
+                                        // /mode plan|normal|autoedit|yolo — AC9
+                                        // Bare `/mode` shows the current mode instead of silently resetting.
+                                        match cmd_arg.map(|s| s.trim().to_ascii_lowercase()) {
+                                            None => {
+                                                let current = match security.current_mode() {
+                                                    PermissionMode::Plan => "Plan",
+                                                    PermissionMode::Normal => "Normal",
+                                                    PermissionMode::AutoEdit => "AutoEdit",
+                                                    PermissionMode::Yolo => "YOLO",
+                                                };
+                                                if !matches!(state.status, StatusState::Flash { .. }) {
+                                                    state.status_before_flash = Some(state.status.clone());
+                                                }
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Current mode: {} — use /mode <plan|normal|autoedit|yolo> to switch", current),
+                                                    remaining_ms: state.theme.timing.status_flash_ms,
+                                                };
+                                                state.needs_redraw = true;
+                                            }
+                                            Some(arg) => {
+                                                let mode = crate::domain::services::permission_chain::parse_mode_arg(
+                                                    Some(arg.as_str()),
+                                                );
+                                                if let Some(m) = mode {
+                                                    domain_tx.send(AppEvent::SetPermissionMode(m)).ok();
+                                                } else {
+                                                    if !matches!(state.status, StatusState::Flash { .. }) {
+                                                        state.status_before_flash = Some(state.status.clone());
+                                                    }
+                                                    state.status = StatusState::Flash {
+                                                        message: format!("Unknown mode: {}. Use plan, normal, autoedit, or yolo", arg),
+                                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                                    };
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
+                                        }
                                     } else if cmd_name == "new" {
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
@@ -1082,7 +1206,9 @@ pub async fn run(
                                     if let Some(conv_id) = resolved_id {
                                         // Check if already open in a tab
                                         if conv_id == conversation.id {
-                                            // Already active — just switch focus
+                                            // Already active — just switch focus and close sidebar
+                                            state.sidebar_visible = false;
+                                            state.sidebar_panel = None;
                                             state.focus = FocusState::Chat;
                                             state.needs_redraw = true;
                                         } else if tab_manager.find_by_conversation(&conv_id).is_some() {
@@ -1098,6 +1224,8 @@ pub async fn run(
                                                 }
                                                 session_index.set_active(Some(&conv_id));
                                             }
+                                            state.sidebar_visible = false;
+                                            state.sidebar_panel = None;
                                             state.focus = FocusState::Chat;
                                             state.needs_redraw = true;
                                         } else {
@@ -1120,6 +1248,8 @@ pub async fn run(
                                                     // Update session_index
                                                     session_index.set_open(&conv_id, true);
                                                     session_index.set_active(Some(&conv_id));
+                                                    state.sidebar_visible = false;
+                                                    state.sidebar_panel = None;
                                                     state.focus = FocusState::Chat;
                                                     state.needs_redraw = true;
                                                 }
@@ -2291,7 +2421,9 @@ pub async fn run(
                             // TODO: Add pending_permission to TabState in future refactor
                             tracing::warn!("Permission request for background tab {} queued", conversation_id);
                             // For now, treat as active tab (temporary until full multi-tab permission state)
-                            if state.pending_permission.is_some() {
+                            // Queue if another prompt is already visible OR if the feedback input
+                            // is holding a wrapped pending permission (otherwise we'd overwrite it).
+                            if state.pending_permission.is_some() || state.pending_feedback_input.is_some() {
                                 state.permission_queue.push(new_pending);
                             } else {
                                 state.pending_permission = Some(new_pending);
@@ -2306,14 +2438,31 @@ pub async fn run(
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
                         let mode_str = match mode {
-                            crate::domain::models::PermissionMode::Normal => "Normal",
-                            crate::domain::models::PermissionMode::Yolo => "YOLO",
+                            PermissionMode::Plan => "Plan",
+                            PermissionMode::Normal => "Normal",
+                            PermissionMode::AutoEdit => "AutoEdit",
+                            PermissionMode::Yolo => "YOLO",
                         };
-                        state.status_before_flash = Some(state.status.clone());
-                        state.status = StatusState::Flash {
-                            message: format!("Permission mode: {}", mode_str),
-                            remaining_ms: state.theme.timing.status_flash_ms,
-                        };
+                        // Only capture status_before_flash if current state isn't already a Flash —
+                        // prevents rapid mode switches from burying the pre-flash Idle state under
+                        // another Flash as the revert target.
+                        if !matches!(state.status, StatusState::Flash { .. }) {
+                            state.status_before_flash = Some(state.status.clone());
+                        }
+                        if matches!(mode, PermissionMode::Yolo) {
+                            // AC7: Yolo mode warning stays until mode changes — use u64::MAX so
+                            // the tick-based Flash expiry never decrements to zero. Transitioning
+                            // out of Yolo replaces status with the new mode's flash (below).
+                            state.status = StatusState::Flash {
+                                message: "⚠ YOLO mode active — all tools auto-approved".to_string(),
+                                remaining_ms: u64::MAX,
+                            };
+                        } else {
+                            state.status = StatusState::Flash {
+                                message: format!("Permission mode: {}", mode_str),
+                                remaining_ms: state.theme.timing.status_flash_ms,
+                            };
+                        }
                         state.needs_redraw = true;
                     }
                     AppEvent::RetryMessage { content: text, .. } => {
@@ -2504,9 +2653,13 @@ pub async fn run(
                     state.needs_redraw = true;
                 }
 
-                // Flash message expiry: decrement remaining_ms each tick
+                // Flash message expiry: decrement remaining_ms each tick.
+                // remaining_ms == u64::MAX is a sticky sentinel (used by YOLO warning, AC7) —
+                // it never expires; only a mode change or CancelOrQuit replaces it.
                 if let StatusState::Flash { remaining_ms, .. } = &mut state.status {
-                    if *remaining_ms <= tick_ms {
+                    if *remaining_ms == u64::MAX {
+                        // sticky — do nothing
+                    } else if *remaining_ms <= tick_ms {
                         // Flash expired — revert to previous status or Idle
                         state.status = state.status_before_flash.take().unwrap_or(StatusState::Idle);
                         state.needs_redraw = true;
@@ -4021,6 +4174,8 @@ fn render(
         ref tool_block_states,
         ref feedback_blocks,
         ref pending_permission,
+        ref permission_queue,
+        ref pending_feedback_input,
         ref ask_user_question,
         ref theme,
         ref status,
@@ -4200,13 +4355,31 @@ fn render(
                     }
                 }
 
-                // Render permission prompt at bottom of chat pane if pending
-                if let Some(pending) = pending_permission {
+                // Render permission prompt or feedback input at bottom of chat pane
+                if let Some(ref feedback_input) = *pending_feedback_input {
+                    use crate::adapters::tui::widgets::permission_prompt;
+                    let prompt_lines = permission_prompt::render_feedback_input_lines(
+                        &feedback_input.buffer,
+                        theme,
+                    );
+                    let prompt_height = prompt_lines.len() as u16;
+                    let prompt_area = ratatui::prelude::Rect {
+                        x: app_layout.chat_pane.x,
+                        y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                            - prompt_height.min(app_layout.chat_pane.height),
+                        width: app_layout.chat_pane.width,
+                        height: prompt_height.min(app_layout.chat_pane.height),
+                    };
+                    let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
+                    frame.render_widget(ratatui::widgets::Clear, prompt_area);
+                    frame.render_widget(paragraph, prompt_area);
+                } else if let Some(pending) = pending_permission {
                     use crate::adapters::tui::widgets::permission_prompt;
                     let prompt_lines = permission_prompt::render_permission_lines(
                         &pending.tool_name,
                         &pending.tool_input,
                         theme,
+                        permission_queue.len(),
                     );
                     let prompt_height = prompt_lines.len() as u16;
                     let prompt_area = ratatui::prelude::Rect {

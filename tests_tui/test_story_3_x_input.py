@@ -41,7 +41,9 @@ class TestMultilineInput:
         tui.wait_for_idle()
 
         tui.send_message(msg_b)
-        tui.wait_for_screen(msg_b)
+        assert tui.wait_for_screen(msg_b), (
+            f"Second message '{msg_b}' should appear in chat pane"
+        )
         tui.wait_for_idle()
 
         tui.chat_mode()
@@ -51,17 +53,19 @@ class TestMultilineInput:
         screen_before_up = tui.get_screen_text()
 
         tui.send(UP)
+        tui.wait(0.5)  # Wait for the 250ms render tick to fire
 
         screen_after_up = tui.get_screen_text()
         assert screen_after_up != screen_before_up, (
             "Screen should change after UP key — history recall modifies the input box"
         )
-        assert msg_a in screen_after_up, (
-            f"Recalled message '{msg_a}' should be visible after UP key"
+        # History is LIFO: one UP recalls the most recent entry (msg_b).
+        assert msg_b in screen_after_up, (
+            f"Recalled message '{msg_b}' should be visible after UP key"
         )
 
         tui.send(DOWN)
-        tui.wait(0.3)
+        tui.wait(0.5)  # Wait for render tick
         screen_after_down = tui.get_screen_text()
         assert screen_after_down != screen_after_up, (
             "Screen should change after DOWN key — input box should be cleared"

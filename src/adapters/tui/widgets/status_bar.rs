@@ -46,12 +46,21 @@ pub fn render(
 
     // Permission mode (second segment)
     let mode_text = match permission_mode {
+        PermissionMode::Plan => "PLAN",
         PermissionMode::Normal => "Normal",
+        PermissionMode::AutoEdit => "AUTOEDIT",
         PermissionMode::Yolo => "YOLO",
     };
     left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
     left_spans.push(match permission_mode {
+        PermissionMode::Plan => {
+            Span::styled(mode_text.to_string(), Style::default().fg(Color::Blue))
+        }
         PermissionMode::Normal => Span::styled(mode_text.to_string(), Style::default().fg(fg)),
+        PermissionMode::AutoEdit => Span::styled(
+            mode_text.to_string(),
+            Style::default().fg(theme.colors.accent),
+        ),
         PermissionMode::Yolo => Span::styled(
             mode_text.to_string(),
             Style::default()

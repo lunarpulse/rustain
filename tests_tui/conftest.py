@@ -91,19 +91,52 @@ def tui_in_project(build_binary):
     harness.stop()
 
 
+@pytest.fixture
+def tui_strict(build_binary):
+    """Provide a RustainTUI with NO AlwaysAllow rules.
+
+    Like ``tui`` but the temp workspace's settings.json only contains
+    safe (read-only) tools.  Use this to test permission prompts for
+    Standard/Elevated tools like Bash, Write, Edit.
+    """
+    harness = RustainTUI(fresh=True, build=False, allowed_tools=["Read", "Glob", "Grep"])
+    harness.start()
+    yield harness
+    harness.stop()
+
+
+@pytest.fixture
+def tui_write_only(build_binary):
+    """Provide a RustainTUI that only auto-allows Read/Write (no Bash/Edit).
+
+    Use this for rewind/snapshot tests where the model must use the Write
+    tool so that file snapshots are created.  Bash bypasses snapshotting.
+    """
+    harness = RustainTUI(fresh=True, build=False, allowed_tools=["Read", "Write", "Glob", "Grep"])
+    harness.start()
+    yield harness
+    harness.stop()
+
+
 @pytest.fixture(autouse=True)
 def _reset_tui_state(request):
     """After each test, send Esc to close any open overlays and return to
     a known state.  Only applies to tests that used a ``tui`` or
     ``tui_in_project`` fixture.
+
+    The fixture value is captured *before* yield (during setup) so it is
+    still available during teardown — after the ``tui`` fixture's own
+    finalizer has run, ``request.getfixturevalue()`` raises AssertionError.
     """
+    tui_fixtures = {"tui", "tui_in_project", "tui_strict"}
+    active = tui_fixtures.intersection(request.fixturenames)
+    tui_instance = None
+    if active:
+        try:
+            tui_instance = request.getfixturevalue(next(iter(active)))
+        except Exception:
+            pass
     yield
-    tui_fixtures = {"tui", "tui_in_project"}
-    if not tui_fixtures.intersection(request.fixturenames):
-        return
-    tui_instance = request.getfixturevalue(
-        next(iter(tui_fixtures.intersection(request.fixturenames)))
-    )
     if tui_instance is None:
         return
     try:

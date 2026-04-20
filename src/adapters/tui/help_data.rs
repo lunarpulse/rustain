@@ -184,6 +184,41 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
             ],
         },
         HelpCategory {
+            name: "PERMISSIONS",
+            bindings: vec![
+                HelpBinding {
+                    key: "y",
+                    description: "Allow tool call (this time only)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "s",
+                    description: "Session allow — auto-approve this tool for the session",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "a",
+                    description: "Always allow — persist approval to settings",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "n",
+                    description: "Deny tool call",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "f",
+                    description: "Deny + feedback — provide text guidance to the LLM",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/mode",
+                    description: "Switch permission mode (plan, normal, autoedit, yolo)",
+                    available: true,
+                },
+            ],
+        },
+        HelpCategory {
             name: "CLIPBOARD & IMAGES",
             bindings: vec![
                 HelpBinding {

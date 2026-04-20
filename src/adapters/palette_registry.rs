@@ -50,7 +50,7 @@ impl PaletteRegistry {
                 description: cmd.description.clone(),
                 shortcut: None,
                 scope: PaletteScope::SlashCommand,
-                action: PaletteAction::ExecuteCommand(cmd.name.clone()),
+                action: PaletteAction::ExecuteCommand(cmd.name.clone(), None),
             });
         }
 
@@ -103,6 +103,33 @@ impl PaletteRegistry {
             scope: PaletteScope::All,
             action: PaletteAction::PasteImageFromClipboard,
         });
+
+        // Permission mode entries (Story 5-0b AC9)
+        for (mode_name, mode_arg, mode_desc) in [
+            ("mode: plan", "plan", "Plan mode — read-only tools only"),
+            (
+                "mode: normal",
+                "normal",
+                "Normal mode — approve Standard/Elevated tools",
+            ),
+            (
+                "mode: autoedit",
+                "autoedit",
+                "AutoEdit mode — auto-allow Write/Edit",
+            ),
+            ("mode: yolo", "yolo", "YOLO mode — all tools auto-approved"),
+        ] {
+            self.entries.push(PaletteEntry {
+                name: mode_name.to_string(),
+                description: mode_desc.to_string(),
+                shortcut: None,
+                scope: PaletteScope::SlashCommand,
+                action: PaletteAction::ExecuteCommand(
+                    "mode".to_string(),
+                    Some(mode_arg.to_string()),
+                ),
+            });
+        }
 
         self.populated_from_discovered = cr_discovered;
     }
@@ -402,11 +429,12 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 2 slash commands (/new, /export — Story 4-4) + 6 built-ins (version, new tab,
-        // close tab, toggle sidebar, delete all, paste image from clipboard) = 8
-        assert_eq!(reg.all_entries().len(), 8);
+        // 3 slash commands (/new, /export, /mode) + 4 mode palette entries +
+        // 6 built-ins (version, new tab, close tab, toggle sidebar, delete all, paste image from clipboard) = 13
+        assert_eq!(reg.all_entries().len(), 13);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "/mode"));
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
         assert!(reg.all_entries().iter().any(|e| e.name == "new tab"));
         assert!(reg.all_entries().iter().any(|e| e.name == "close tab"));
@@ -418,6 +446,6 @@ mod tests {
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 8);
+        assert_eq!(reg.all_entries().len(), 13);
     }
 }

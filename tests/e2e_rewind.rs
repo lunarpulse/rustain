@@ -2588,10 +2588,7 @@ async fn test_multi_checkpoint_same_file_no_false_conflict() {
     // File on disk = D (latest tool write). Nobody edited it externally.
 
     // Preview: list_snapshot_files must NOT report conflict.
-    let files = storage
-        .list_snapshot_files(&conv_id, cp1)
-        .await
-        .unwrap();
+    let files = storage.list_snapshot_files(&conv_id, cp1).await.unwrap();
     assert_eq!(files.len(), 1);
     assert!(
         !files[0].1,
@@ -2600,10 +2597,7 @@ async fn test_multi_checkpoint_same_file_no_false_conflict() {
     );
 
     // Revert: must restore to version A (original before any tool touched it).
-    let reverted = storage
-        .revert_file_snapshots(&conv_id, cp1)
-        .await
-        .unwrap();
+    let reverted = storage.revert_file_snapshots(&conv_id, cp1).await.unwrap();
     assert_eq!(reverted.len(), 1);
     assert_eq!(
         reverted[0].status,

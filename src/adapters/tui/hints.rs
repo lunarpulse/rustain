@@ -28,7 +28,10 @@ pub fn contextual_hint(
                         .to_string(),
                 )
             } else {
-                Some("Tip: Press ? for help, Ctrl+P for commands".to_string())
+                Some(
+                    "Tip: Press ? for help, Ctrl+P for commands, /mode to switch permission mode"
+                        .to_string(),
+                )
             }
         }
         FocusState::Chat => Some("Tip: j/k to scroll, i to type, ? for help".to_string()),
