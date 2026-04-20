@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pytest>=8.0",
     "pexpect>=4.9",
+    "pyte>=0.8,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,7 @@ markers = [
     "story_4_4: Story 4-4 — Search, Bookmarks & Export",
     "story_4_5: Story 4-5 — History Import",
     "story_4_6: Story 4-6 — Cleanup & Hardening",
+    "story_5_0: Story 5-0 — Python TUI Contract Test Infrastructure",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

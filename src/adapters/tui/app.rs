@@ -400,24 +400,37 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 
     match state.focus {
         FocusState::Input => {
-            // When autocomplete is active, intercept characters to update filter
+            // When autocomplete is active, intercept characters to update filter.
+            // Exception: a space in SlashCommand mode terminates the command name
+            // and begins arguments (e.g. `/export file.md`). Slash-command names
+            // cannot contain spaces — the parser uses `split_whitespace().next()` —
+            // so dismissing here lets ENTER submit `/cmd args` as a whole.
+            // Without this, the ENTER handler below (DomainKey::Enter arm) consumes
+            // the submit and the command never dispatches.
             if state.autocomplete.active {
-                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
-                state.input_buffer.insert(byte_pos, c);
-                state.cursor_position += 1;
-                // Extract filter text: everything after the trigger character
-                let trigger = state.autocomplete.trigger_position;
-                let filter: String = state
-                    .input_buffer
-                    .chars()
-                    .skip(trigger + 1)
-                    .take(state.cursor_position.saturating_sub(trigger + 1))
-                    .collect();
-                // Signal that autocomplete filter needs updating
-                // The actual filtering is done by the event loop which has access to registries
-                state.autocomplete.filter_text = filter;
-                state.needs_redraw = true;
-                return InputAction::Consumed;
+                if matches!(state.autocomplete.kind, AutocompleteKind::SlashCommand)
+                    && c == ' '
+                {
+                    state.autocomplete.dismiss();
+                    // Fall through to normal character insertion below.
+                } else {
+                    let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
+                    state.input_buffer.insert(byte_pos, c);
+                    state.cursor_position += 1;
+                    // Extract filter text: everything after the trigger character
+                    let trigger = state.autocomplete.trigger_position;
+                    let filter: String = state
+                        .input_buffer
+                        .chars()
+                        .skip(trigger + 1)
+                        .take(state.cursor_position.saturating_sub(trigger + 1))
+                        .collect();
+                    // Signal that autocomplete filter needs updating
+                    // The actual filtering is done by the event loop which has access to registries
+                    state.autocomplete.filter_text = filter;
+                    state.needs_redraw = true;
+                    return InputAction::Consumed;
+                }
             }
 
             // Detect '/' at position 0 → trigger slash command autocomplete
@@ -504,6 +517,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'G' => {
                 state.scroll_offset = 0;
                 state.auto_scroll = true;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            // g = jump to top (mirror of G). Sets scroll_offset to its max so
+            // the first message is visible; auto_scroll off so the view doesn't
+            // snap back to the bottom on the next render. Required for
+            // jump-to-top-then-rewind flows (Story 4-3b + Story 5-0 contract tests).
+            'g' => {
+                let max_offset = state
+                    .total_content_height
+                    .saturating_sub(state.viewport_height as usize);
+                state.scroll_offset = max_offset;
+                state.auto_scroll = false;
                 state.needs_redraw = true;
                 InputAction::Consumed
             }
@@ -1687,6 +1713,7 @@ fn dispatch_palette_action(
         }
         PaletteAction::NewTab => InputAction::NewTab,
         PaletteAction::CloseTab => InputAction::CloseTab,
+        PaletteAction::ToggleSidebar => InputAction::ToggleSidebar,
         PaletteAction::DeleteAllConversations => InputAction::DeleteAllConversations,
         PaletteAction::PasteImageFromClipboard => InputAction::RequestClipboardPaste,
         PaletteAction::Noop => {

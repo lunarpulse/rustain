@@ -26,3 +26,29 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  tui-tests:
+    name: Python TUI Tests
+    runs-on: ubuntu-latest
+    needs: [check]
+    defaults:
+      run:
+        working-directory: rustain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rustain binary
+        run: cargo build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python TUI test dependencies
+        run: pip install -e "./tests_tui[dev]"
+
+      - name: Run non-API Python TUI tests
+        run: pytest tests_tui/ -m "not requires_api" --timeout=120 -v

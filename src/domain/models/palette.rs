@@ -46,6 +46,9 @@ pub enum PaletteAction {
     DeleteAllConversations,
     /// Paste image (or text) from the system clipboard.
     PasteImageFromClipboard,
+    /// Toggle the conversation history sidebar (Ctrl+H).
+    // Covers: FR107, UX-DR20
+    ToggleSidebar,
     /// No-op — target feature not yet implemented.
     Noop,
 }

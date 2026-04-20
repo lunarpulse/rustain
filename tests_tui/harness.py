@@ -1,4 +1,4 @@
-"""RustainTUI — pexpect harness for E2E TUI testing.
+"""RustainTUI — pexpect + pyte harness for E2E TUI testing.
 
 Usage::
 
@@ -29,9 +29,10 @@ from pathlib import Path
 from typing import Iterator
 
 import pexpect
+import pyte
 
 from keys import (
-    ESC, ENTER, CTRL_C, CTRL_F, CTRL_H, CTRL_T,
+    ESC, ENTER, CTRL_C, CTRL_F, CTRL_H, CTRL_P, CTRL_T,
     Chat, Confirm, Permission, Sidebar,
 )
 
@@ -43,9 +44,11 @@ BINARY = PROJECT_ROOT / "target" / "debug" / "rustain"
 ENV_FILE = PROJECT_ROOT / ".env"
 LOG_DIR = Path.home() / ".rustain"
 
-# Terminal dimensions for the spawned PTY
+# Terminal dimensions for the spawned PTY.
+# TERM_COLS must be >= SIDEBAR_MIN_WIDTH (120, see src/adapters/tui/layout.rs)
+# so sidebar-focused tests can actually show the History panel.
 TERM_ROWS = 30
-TERM_COLS = 100
+TERM_COLS = 130
 
 # Timing defaults (seconds)
 STARTUP_WAIT = 3.0
@@ -84,7 +87,8 @@ def _build_binary() -> Path:
     )
     if result.returncode != 0:
         raise RuntimeError(f"cargo build failed:\n{result.stderr}")
-    assert BINARY.exists(), f"Binary not found at {BINARY}"
+    if not BINARY.exists():
+        raise RuntimeError(f"Binary not found at {BINARY}")
     return BINARY
 
 
@@ -126,6 +130,8 @@ class RustainTUI:
     )
     _workspace_path: Path | None = field(default=None, init=False, repr=False)
     _log_line_offset: int = field(default=0, init=False, repr=False)
+    _screen: pyte.Screen | None = field(default=None, init=False, repr=False)
+    _stream: pyte.Stream | None = field(default=None, init=False, repr=False)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -161,6 +167,11 @@ class RustainTUI:
         if self.fresh:
             args.append("--new")
 
+        # Initialize pyte virtual terminal — use Stream (str) since pexpect
+        # is configured with encoding="utf-8" which returns str, not bytes.
+        self._screen = pyte.Screen(TERM_COLS, TERM_ROWS)
+        self._stream = pyte.Stream(self._screen)
+
         self._child = pexpect.spawn(
             args[0],
             args=args[1:],
@@ -171,7 +182,11 @@ class RustainTUI:
             dimensions=(TERM_ROWS, TERM_COLS),
         )
 
-        time.sleep(STARTUP_WAIT)
+        # Wait for TUI to be fully ready (status bar shows "Ready" in idle state)
+        # instead of a fixed sleep. Falls back gracefully if polling times out.
+        if not self.wait_for_screen("Ready", timeout=STARTUP_WAIT * 5):
+            # Brief fallback pause if we couldn't detect Ready within 15s
+            time.sleep(0.5)
         return self
 
     def stop(self) -> None:
@@ -197,13 +212,15 @@ class RustainTUI:
 
     @property
     def child(self) -> pexpect.spawn:
-        assert self._child is not None, "TUI not started — call .start() first"
+        if self._child is None:
+            raise RuntimeError("TUI not started — call .start() first")
         return self._child
 
     @property
     def wp(self) -> Path:
         """Workspace path."""
-        assert self._workspace_path is not None
+        if self._workspace_path is None:
+            raise RuntimeError("Workspace path not set — TUI not started")
         return self._workspace_path
 
     def send(self, data: str) -> None:
@@ -223,6 +240,143 @@ class RustainTUI:
     def wait(self, seconds: float) -> None:
         """Sleep for a fixed duration."""
         time.sleep(seconds)
+
+    # ── pyte Screen Integration ──────────────────────────────────────────
+
+    def _sync_screen(self) -> None:
+        """Drain all available PTY output into the pyte screen buffer.
+
+        Pattern: drain-then-assert. Call before any screen content check.
+        Uses read_nonblocking() to avoid blocking the test thread.
+        """
+        if self._stream is None:
+            raise RuntimeError("pyte stream not initialized — call .start() first")
+        if self._child is None or not self._child.isalive():
+            raise RuntimeError("TUI process is not alive — cannot sync screen")
+        while True:
+            try:
+                data = self.child.read_nonblocking(size=4096, timeout=0.1)
+                if data:
+                    self._stream.feed(data)
+                else:
+                    break
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                break
+            except UnicodeDecodeError as exc:
+                raise RuntimeError(
+                    f"UnicodeDecodeError feeding pyte stream: {exc}"
+                ) from exc
+
+    def get_screen_text(self) -> str:
+        """Return the full terminal screen content as a single string.
+
+        Drains the PTY buffer into pyte before reading. Lines are joined
+        with newlines. pyte strips ANSI styling — only plain text is returned.
+        """
+        self._sync_screen()
+        if self._screen is None:
+            raise RuntimeError("pyte screen not initialized — call .start() first")
+        return "\n".join(self._screen.display)
+
+    def assert_screen_contains(self, text: str, msg: str = "") -> None:
+        """Assert that ``text`` appears anywhere on the current screen.
+
+        Drains the PTY buffer first, then checks the rendered terminal state.
+        Assert on **key visible text**, not exact layout or ANSI codes.
+        """
+        screen_text = self.get_screen_text()
+        assert text in screen_text, (
+            f"Expected '{text}' on screen. {msg}\n"
+            f"Screen content:\n{screen_text}"
+        )
+
+    def assert_screen_not_contains(self, text: str, msg: str = "") -> None:
+        """Assert that ``text`` does NOT appear anywhere on the current screen."""
+        screen_text = self.get_screen_text()
+        assert text not in screen_text, (
+            f"Expected '{text}' NOT on screen. {msg}\n"
+            f"Screen content:\n{screen_text}"
+        )
+
+    def wait_for_screen(
+        self,
+        text: str,
+        timeout: float = TURN_COMPLETE_WAIT,
+        poll_interval: float = 0.5,
+    ) -> bool:
+        """Poll the pyte screen buffer until ``text`` appears or timeout.
+
+        Returns ``True`` if text found within timeout, ``False`` on timeout.
+        Prefer this over ``wait_for_idle()`` when expected screen content is
+        deterministic (UI state changes, overlay open/close, startup).
+        Keep ``wait_for_idle()`` for unpredictable AI response content.
+        """
+        if not text:
+            raise ValueError("wait_for_screen: text must not be empty")
+        if poll_interval <= 0:
+            raise ValueError(f"wait_for_screen: poll_interval must be positive, got {poll_interval}")
+        elapsed = 0.0
+        while elapsed < timeout:
+            if text in self.get_screen_text():
+                return True
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        return False
+
+    def wait_for_screen_not_contains(
+        self,
+        text: str,
+        timeout: float = 5.0,
+        poll_interval: float = 0.5,
+    ) -> bool:
+        """Poll the pyte screen buffer until ``text`` disappears or timeout.
+
+        Returns ``True`` if text disappeared within timeout, ``False`` on timeout.
+        Use for overlay dismissal, sidebar close, and other negative conditions
+        where a fixed ``wait(0.3)`` is racy on loaded CI runners.
+        """
+        if not text:
+            raise ValueError("wait_for_screen_not_contains: text must not be empty")
+        if poll_interval <= 0:
+            raise ValueError(f"wait_for_screen_not_contains: poll_interval must be positive, got {poll_interval}")
+        elapsed = 0.0
+        while elapsed < timeout:
+            if text not in self.get_screen_text():
+                return True
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        return False
+
+    def assert_responsive(self, timeout: float = 3.0) -> None:
+        """Verify the TUI process is alive AND accepting input.
+
+        Sends a state-neutral probe (space + backspace) and polls for any
+        screen change within *timeout*. Raises ``RuntimeError`` if the
+        process is dead, ``TimeoutError`` if alive but unresponsive.
+        The probe is reversible — it does not alter committed application state.
+        """
+        if self._child is None:
+            raise RuntimeError("TUI not started — call .start() first")
+        if not self._child.isalive():
+            raise RuntimeError("TUI process is not alive")
+
+        screen_before = self.get_screen_text()
+
+        self._child.send(" ")
+        self._child.send("\x7f")
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            if not self._child.isalive():
+                raise RuntimeError("TUI process died during responsiveness check")
+            screen_after = self.get_screen_text()
+            if screen_after != screen_before:
+                return
+
+        raise TimeoutError(
+            f"TUI did not respond to probe within {timeout}s — likely frozen"
+        )
 
     # ── High-level Actions ───────────────────────────────────────────────
 
@@ -285,7 +439,12 @@ class RustainTUI:
         time.sleep(2.0)
 
     def wait_for_idle(self, seconds: float = TURN_COMPLETE_WAIT) -> None:
-        """Wait for the AI turn to complete (text streaming + tool execution)."""
+        """Wait for the AI turn to complete (text streaming + tool execution).
+
+        Fallback for cases where expected screen content is unknown (e.g.,
+        waiting for arbitrary AI responses). Prefer ``wait_for_screen()``
+        when you know what text should appear.
+        """
         time.sleep(seconds)
 
     def rewind(self) -> None:
@@ -339,8 +498,19 @@ class RustainTUI:
         time.sleep(0.5)
 
     def toggle_sidebar(self) -> None:
-        """Toggle sidebar (Ctrl+H)."""
-        self.send(CTRL_H)
+        """Toggle sidebar via command palette.
+
+        Uses the palette route ("toggle sidebar" → Enter) instead of the raw
+        Ctrl+H byte (\x08) which crossterm decodes as KeyCode::Backspace in a
+        standard PTY — preventing the ToggleSidebar action from firing.
+        """
+        self.send(CTRL_P)
+        self.wait_for_screen("Command Palette", timeout=3.0)
+        for c in "toggle sidebar":
+            self.send(c)
+            time.sleep(0.05)
+        self.wait_for_screen("toggle sidebar", timeout=2.0)
+        self.send(ENTER)
         time.sleep(0.5)
 
     def new_tab(self) -> None:
@@ -353,6 +523,17 @@ class RustainTUI:
         assert 1 <= n <= 9
         self.send(str(n))
         time.sleep(0.3)
+
+    def close_tab(self) -> None:
+        """Close the active tab via the command palette (close tab action)."""
+        self.send(CTRL_P)
+        self.wait_for_screen("Command Palette", timeout=3.0)
+        for c in "close tab":
+            self.send(c)
+            time.sleep(0.05)
+        self.wait_for_screen("close tab", timeout=2.0)
+        self.send(ENTER)
+        time.sleep(0.5)
 
     def toggle_bookmark(self) -> None:
         """Toggle bookmark on focused message (m). Must be in Chat focus."""
@@ -394,6 +575,42 @@ class RustainTUI:
         p = self.file_path(relative)
         if p.exists():
             p.unlink()
+
+    # ── Export Assertions ────────────────────────────────────────────────
+
+    def _exports_dir(self) -> Path:
+        """.rustain/exports/ subdirectory under the workspace."""
+        return self.wp / ".rustain" / "exports"
+
+    def export_file_exists(self, filename: str) -> bool:
+        """Check if an exported file exists under .rustain/exports/.
+
+        /export <name> writes to {workspace}/.rustain/exports/<name>,
+        NOT to the workspace root.
+        """
+        return (self._exports_dir() / filename).exists()
+
+    def wait_for_export_file(
+        self, filename: str, timeout: float = 10.0, poll_interval: float = 0.25
+    ) -> bool:
+        """Poll .rustain/exports/<filename> until it exists or timeout.
+
+        Prefer this over a fixed ``wait(...)`` after /export — the write is
+        routed through ``spawn_blocking`` and may trail the command submit
+        by more than a couple of seconds under load. Returns True on found.
+        """
+        path = self._exports_dir() / filename
+        elapsed = 0.0
+        while elapsed < timeout:
+            if path.exists():
+                return True
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        return False
+
+    def export_file_content(self, filename: str) -> str:
+        """Read the content of an exported file from .rustain/exports/."""
+        return (self._exports_dir() / filename).read_text()
 
     # ── Log Inspection ───────────────────────────────────────────────────
 
@@ -441,11 +658,22 @@ class RustainTUI:
         return self.wp / ".claude" / "sessions"
 
     def session_ids(self) -> list[str]:
-        """List all session IDs in the workspace."""
+        """List all session IDs in the workspace.
+
+        Handles both storage layouts:
+        - Directory layout (with images): {sessions_dir}/{id}/ directory
+        - Flat layout (text-only):        {sessions_dir}/{id}.meta.json file
+        """
         sd = self.sessions_dir()
         if not sd.exists():
             return []
-        return [d.name for d in sd.iterdir() if d.is_dir()]
+        ids: set[str] = set()
+        for entry in sd.iterdir():
+            if entry.is_dir():
+                ids.add(entry.name)                          # directory layout
+            elif entry.name.endswith(".meta.json"):
+                ids.add(entry.name[: -len(".meta.json")])   # flat layout
+        return list(ids)
 
     def checkpoints_exist(self, session_id: str | None = None) -> bool:
         """Check if any session has a checkpoints.json file."""

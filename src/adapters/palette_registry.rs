@@ -80,6 +80,13 @@ impl PaletteRegistry {
             action: PaletteAction::CloseTab,
         });
         self.entries.push(PaletteEntry {
+            name: "toggle sidebar".to_string(),
+            description: "Toggle conversation history sidebar".to_string(),
+            shortcut: Some("Ctrl+H".to_string()),
+            scope: PaletteScope::All,
+            action: PaletteAction::ToggleSidebar,
+        });
+        self.entries.push(PaletteEntry {
             name: "delete all conversations".to_string(),
             description: "Delete all saved conversations (requires confirmation)".to_string(),
             shortcut: None,
@@ -395,9 +402,9 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 2 slash commands (/new, /export — Story 4-4) + 5 built-ins (version, new tab,
-        // close tab, delete all, paste image from clipboard) = 7
-        assert_eq!(reg.all_entries().len(), 7);
+        // 2 slash commands (/new, /export — Story 4-4) + 6 built-ins (version, new tab,
+        // close tab, toggle sidebar, delete all, paste image from clipboard) = 8
+        assert_eq!(reg.all_entries().len(), 8);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
@@ -411,6 +418,6 @@ mod tests {
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 7);
+        assert_eq!(reg.all_entries().len(), 8);
     }
 }

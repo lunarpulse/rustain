@@ -58,7 +58,8 @@ def build_binary():
     )
     if result.returncode != 0:
         pytest.fail(f"cargo build failed:\n{result.stderr}")
-    assert BINARY.exists(), f"Binary not at {BINARY}"
+    if not BINARY.exists():
+        pytest.fail(f"Binary not at {BINARY}")
 
 
 @pytest.fixture
@@ -88,6 +89,30 @@ def tui_in_project(build_binary):
     harness.start()
     yield harness
     harness.stop()
+
+
+@pytest.fixture(autouse=True)
+def _reset_tui_state(request):
+    """After each test, send Esc to close any open overlays and return to
+    a known state.  Only applies to tests that used a ``tui`` or
+    ``tui_in_project`` fixture.
+    """
+    yield
+    tui_fixtures = {"tui", "tui_in_project"}
+    if not tui_fixtures.intersection(request.fixturenames):
+        return
+    tui_instance = request.getfixturevalue(
+        next(iter(tui_fixtures.intersection(request.fixturenames)))
+    )
+    if tui_instance is None:
+        return
+    try:
+        from keys import ESC
+        for _ in range(3):
+            tui_instance.send(ESC)
+        tui_instance.wait_for_screen("Ready", timeout=2.0)
+    except Exception:
+        pass
 
 
 @pytest.fixture
