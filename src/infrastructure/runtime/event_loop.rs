@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
 use crate::adapters::palette_registry::PaletteRegistry;
+use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::layout;
@@ -28,9 +29,9 @@ use crate::domain::models::tab::TabManager;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, PermissionMode,
-    RetryState, SessionManager, SessionState, StatusState, StreamChunk, StreamingState,
-    UserMessage, apply_chunk, generate_conversation_id, next_delay,
+    FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, NoticeLevel,
+    PermissionMode, RetryState, SessionManager, SessionState, StatusState, StreamChunk,
+    StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
@@ -117,6 +118,13 @@ pub async fn run(
     // Lazy-initialized command registry (NFR10: not scanned at startup)
     let mut command_registry = CommandRegistry::new();
 
+    // Shared slot for background skill discovery (Story 5-1 AC6).
+    // `tokio::sync::Mutex` is required because the slot is written from a tokio task
+    // and read from the async event loop — `std::sync::Mutex` can stall the runtime
+    // if contended across .await boundaries.
+    let skill_registry_slot: Arc<tokio::sync::Mutex<Option<SkillRegistry>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // Lazy-initialized palette registry (populated on first Ctrl+P)
     let mut palette_registry = PaletteRegistry::new();
 
@@ -182,6 +190,47 @@ pub async fn run(
                 return Ok(());
             }
         }
+    }
+
+    // Story 5-1 AC6: Spawn skill discovery as background task after first frame.
+    // `SkillRegistry::discover` performs blocking filesystem I/O, so it runs on
+    // a `spawn_blocking` thread to avoid stalling the async runtime (P7).
+    {
+        let tx = domain_tx.clone();
+        let slot = skill_registry_slot.clone();
+        let ws = workspace_path.clone();
+        let disabled = config.skills.disabled.clone();
+        let home = dirs::home_dir();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                BACKGROUND_TASK_TIMEOUT,
+                tokio::task::spawn_blocking(move || {
+                    SkillRegistry::discover(&ws, home.as_deref(), &disabled)
+                }),
+            )
+            .await;
+            let (registry_opt, log_msgs) = handle_scan_result(result);
+            for msg in &log_msgs {
+                tracing::warn!("{}", msg);
+            }
+            match registry_opt {
+                Some(registry) => {
+                    let count = registry.skills().len();
+                    let warnings = registry.warnings_count();
+                    {
+                        let mut g = slot.lock().await;
+                        *g = Some(registry);
+                    }
+                    let _ = tx.send(AppEvent::SkillsDiscovered { count, warnings });
+                }
+                None => {
+                    let _ = tx.send(AppEvent::SkillsDiscovered {
+                        count: 0,
+                        warnings: 0,
+                    });
+                }
+            }
+        });
     }
 
     loop {
@@ -264,8 +313,12 @@ pub async fn run(
                                 );
                             }
 
-                            // P4: Only re-populate autocomplete when filter text actually changed
-                            if state.autocomplete.active && state.autocomplete.filter_text != last_autocomplete_filter {
+                            // P4: Only re-populate autocomplete when filter text actually changed,
+                            // or when suggestions are empty (first open after skill discovery).
+                            if state.autocomplete.active
+                                && (state.autocomplete.filter_text != last_autocomplete_filter
+                                    || state.autocomplete.suggestions.is_empty())
+                            {
                                 last_autocomplete_filter = state.autocomplete.filter_text.clone();
                                 populate_autocomplete_suggestions(
                                     &mut state,
@@ -981,6 +1034,15 @@ pub async fn run(
                                             state.needs_redraw = true;
                                         }
                                     }
+                                }
+                                InputAction::SkillSelected { name: _ } => {
+                                    // Story 5-1 AC4: placeholder — activation deferred to Story 5.2
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: None,
+                                        level: NoticeLevel::Info,
+                                        message: "Skill activation not yet implemented (Story 5.2)".to_string(),
+                                    });
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::NewTab => {
                                     // Abort any active streaming on this tab before saving,
@@ -2597,6 +2659,44 @@ pub async fn run(
                         // currently all peeks are applied to the active tab.
                         state.search_state.peek_highlight = None;
                         state.needs_redraw = true;
+                    }
+                    AppEvent::SkillsDiscovered { count, warnings } => {
+                        // Story 5-1 AC6 — background skill discovery complete.
+                        {
+                            let mut slot = skill_registry_slot.lock().await;
+                            if let Some(registry) = slot.take() {
+                                state.replace_skill_registry(registry);
+                            }
+                        }
+                        state.needs_redraw = true;
+                        // AC6: if the user already has `/` autocomplete open when
+                        // discovery finishes, refresh suggestions so newly
+                        // discovered skills appear immediately.
+                        if state.autocomplete.active {
+                            last_autocomplete_filter.clear();
+                            populate_autocomplete_suggestions(
+                                &mut state,
+                                &mut command_registry,
+                                &workspace_path,
+                            );
+                        }
+                        if count > 0 {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Info,
+                                message: format!("Loaded {} skills", count),
+                            });
+                        }
+                        if warnings > 0 {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Warning,
+                                message: format!(
+                                    "{} skills failed validation (see log)",
+                                    warnings
+                                ),
+                            });
+                        }
                     }
                     _ => {
                         state.needs_redraw = true;
@@ -4606,13 +4706,10 @@ fn populate_autocomplete_suggestions(
                 command_registry.discover_into(workspace_path);
             }
             let filtered = command_registry.filter(&state.autocomplete.filter_text);
-            state.autocomplete.suggestions = filtered
-                .into_iter()
-                .map(|cmd| AutocompleteSuggestion::SlashCommand {
-                    name: cmd.name.clone(),
-                    description: cmd.description.clone(),
-                })
-                .collect();
+            let skill_results = state.skill_registry.filter(&state.autocomplete.filter_text);
+
+            state.autocomplete.suggestions =
+                build_slash_suggestions_ordered(&filtered, &skill_results);
             // Reset selection if suggestions changed
             if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
                 state.autocomplete.selected_index = 0;
@@ -4638,6 +4735,71 @@ fn populate_autocomplete_suggestions(
             }
         }
     }
+}
+
+/// Handle the result of a background skill scan, returning the optional registry
+/// and any warning messages to log. Extracted from the spawn block for testability
+/// (Story 5-1 P18 — timeout/panic paths were previously untested).
+pub fn handle_scan_result(
+    result: Result<Result<SkillRegistry, tokio::task::JoinError>, tokio::time::error::Elapsed>,
+) -> (Option<SkillRegistry>, Vec<String>) {
+    match result {
+        Ok(Ok(registry)) => (Some(registry), vec![]),
+        Ok(Err(join_err)) => (
+            None,
+            vec![format!("Skill discovery task panicked: {}", join_err)],
+        ),
+        Err(_) => (
+            None,
+            vec![format!(
+                "Skill discovery timed out after {}s",
+                BACKGROUND_TASK_TIMEOUT.as_secs()
+            )],
+        ),
+    }
+}
+
+/// Merge filtered slash-command and skill results into a single ordered
+/// autocomplete list. Order (Story 5-1 AC4): built-in commands first,
+/// then skills (alphabetical), then user-defined commands (alphabetical).
+pub fn build_slash_suggestions_ordered(
+    command_results: &[&crate::adapters::command_registry::SlashCommandDef],
+    skill_results: &[&crate::domain::models::SkillDef],
+) -> Vec<crate::domain::models::autocomplete::AutocompleteSuggestion> {
+    use crate::adapters::command_registry::CommandSource;
+    use crate::domain::models::autocomplete::AutocompleteSuggestion;
+
+    let mut suggestions: Vec<AutocompleteSuggestion> = Vec::new();
+
+    // 1. Built-in commands (preserve registry order)
+    for cmd in command_results {
+        if matches!(cmd.source, CommandSource::BuiltIn) {
+            suggestions.push(AutocompleteSuggestion::SlashCommand {
+                name: cmd.name.clone(),
+                description: cmd.description.clone(),
+            });
+        }
+    }
+
+    // 2. Skills (already alphabetical via SkillRegistry::filter)
+    for s in skill_results {
+        suggestions.push(AutocompleteSuggestion::Skill {
+            name: s.name.clone(),
+            description: s.description.clone(),
+        });
+    }
+
+    // 3. User-defined commands
+    for cmd in command_results {
+        if matches!(cmd.source, CommandSource::UserDefined { .. }) {
+            suggestions.push(AutocompleteSuggestion::SlashCommand {
+                name: cmd.name.clone(),
+                description: cmd.description.clone(),
+            });
+        }
+    }
+
+    suggestions
 }
 
 /// Populate command palette filtered entries from the registry.

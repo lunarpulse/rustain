@@ -513,32 +513,33 @@ class RustainTUI:
     def wait_for_idle(self, seconds: float = TURN_COMPLETE_WAIT) -> None:
         """Wait for the AI turn to complete (text streaming + tool execution).
 
-        Fallback for cases where expected screen content is unknown (e.g.,
-        waiting for arbitrary AI responses). Prefer ``wait_for_screen()``
-        when you know what text should appear.
+        Polls the screen for the "Ready" status indicator which appears when
+        the turn finishes. Falls back to a fixed sleep if polling fails, so
+        existing tests that pass arbitrary ``seconds`` continue to work.
         """
-        time.sleep(seconds)
+        if not self.wait_for_screen("Ready", timeout=seconds):
+            time.sleep(1.0)
 
     def rewind(self) -> None:
         """Trigger rewind (R) and confirm (y). Must be in Chat focus."""
         self.send(Chat.REWIND)
-        time.sleep(1.0)
+        self.wait_for_screen("Rewind", timeout=5.0)
         self.send(Confirm.YES)
-        time.sleep(REWIND_SETTLE)
+        self.wait_for_screen("Rewound to message", timeout=REWIND_SETTLE * 2)
 
     def rewind_fork_instead(self) -> None:
         """Trigger rewind (R) and choose fork-instead (f)."""
         self.send(Chat.REWIND)
-        time.sleep(1.0)
+        self.wait_for_screen("Rewind", timeout=5.0)
         self.send(Confirm.FORK_INSTEAD)
-        time.sleep(REWIND_SETTLE)
+        self.wait_for_screen_not_contains("Rewind", timeout=REWIND_SETTLE)
 
     def rewind_cancel(self) -> None:
         """Trigger rewind (R) and cancel (n)."""
         self.send(Chat.REWIND)
-        time.sleep(1.0)
+        self.wait_for_screen("Rewind", timeout=5.0)
         self.send(Confirm.NO)
-        time.sleep(0.5)
+        self.wait_for_screen_not_contains("Rewind", timeout=2.0)
 
     def fork(self) -> None:
         """Trigger fork (f) and confirm (y). Must be in Chat focus."""

@@ -12,6 +12,7 @@ mod permission;
 pub mod project_context;
 mod session;
 pub mod session_meta;
+mod skill;
 mod stream;
 pub mod tab;
 mod tools;
@@ -54,6 +55,10 @@ pub use session::{SessionId, SessionManager, SessionState};
 #[allow(unused_imports)]
 pub use session_meta::{
     ImportSource, SessionMeta, extract_title_from_first_message, now_unix, shorten_text,
+};
+#[allow(unused_imports)]
+pub use skill::{
+    MAX_SKILL_FILE_SIZE, SkillDef, SkillSource, SkillValidationError, validate_skill_frontmatter,
 };
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};

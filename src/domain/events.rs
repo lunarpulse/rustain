@@ -86,6 +86,8 @@ pub enum AppEvent {
     /// No `conversation_id` — view-update per Amendment 3. `tab_id` targets
     /// the specific tab whose peek highlight should clear.
     PeekHighlightExpired { tab_id: usize },
+    /// Skill discovery complete (Story 5-1 AC6).
+    SkillsDiscovered { count: usize, warnings: usize },
 }
 
 /// Event wrapping a tool execution result.

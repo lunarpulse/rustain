@@ -53,6 +53,8 @@ pub enum InputAction {
         text: String,
         command: Option<String>,
     },
+    /// Skill selected from autocomplete (Story 5-1 AC4 placeholder).
+    SkillSelected { name: String },
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -1528,12 +1530,14 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
         }
         // Tab or Enter selects the current suggestion
         DomainKey::Tab | DomainKey::Enter => {
-            if let Some(suggestion) = state.autocomplete.selected().cloned() {
-                apply_autocomplete_selection(state, &suggestion);
-            }
+            let action = if let Some(suggestion) = state.autocomplete.selected().cloned() {
+                apply_autocomplete_selection(state, &suggestion)
+            } else {
+                None
+            };
             state.autocomplete.dismiss();
             state.needs_redraw = true;
-            InputAction::Consumed
+            action.unwrap_or(InputAction::Consumed)
         }
         // Esc dismisses the popup
         DomainKey::Esc => {
@@ -1595,7 +1599,7 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
 fn apply_autocomplete_selection(
     state: &mut TuiState,
     suggestion: &crate::domain::models::autocomplete::AutocompleteSuggestion,
-) {
+) -> Option<InputAction> {
     use crate::adapters::tui::state::ResolvedMention;
     use crate::domain::models::autocomplete::AutocompleteSuggestion;
 
@@ -1612,6 +1616,13 @@ fn apply_autocomplete_selection(
                 .collect();
             state.input_buffer = format!("{}/{}{}", before, name, after);
             state.cursor_position = trigger + 1 + name.chars().count();
+            None
+        }
+        AutocompleteSuggestion::Skill { name, .. } => {
+            // Story 5-1 AC4: clear input and emit placeholder notice
+            state.input_buffer.clear();
+            state.cursor_position = 0;
+            Some(InputAction::SkillSelected { name: name.clone() })
         }
         AutocompleteSuggestion::FilePath { path, .. } => {
             // Replace everything from trigger to cursor with "@<path>"
@@ -1629,6 +1640,7 @@ fn apply_autocomplete_selection(
                     .resolved_mentions
                     .push(ResolvedMention { path: path.clone() });
             }
+            None
         }
     }
 }

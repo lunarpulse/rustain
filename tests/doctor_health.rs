@@ -736,10 +736,19 @@ async fn test_workspace_config_permissions_null_integration() {
 
 // Covers: FR98 (doctor health), FR97 (init wizard)
 #[tokio::test]
-async fn test_global_config_valid_toml_wrong_schema_integration() {
+async fn test_global_config_valid_toml_wrong_field_type_integration() {
+    // Story 5-1 Task 3.5 removed `#[serde(deny_unknown_fields)]` to keep
+    // configs forward-compatible as new sections are added (skills, agents,
+    // profiles…). So "unknown section" is no longer a failure mode here —
+    // we exercise field-type mismatch instead, which still must surface as
+    // "invalid config format".
     let tmp = tempfile::TempDir::new().unwrap();
     let config_dir = tmp.path().to_path_buf();
-    std::fs::write(config_dir.join("config.toml"), "[section]\nkey = \"value\"").unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "log_max_size_mb = \"not-a-number\"",
+    )
+    .unwrap();
 
     let check = GlobalConfigCheck {
         config_dir: Some(config_dir),
@@ -747,4 +756,24 @@ async fn test_global_config_valid_toml_wrong_schema_integration() {
     let result = check.run().await;
     assert_eq!(result.status, CheckStatus::Fail);
     assert!(result.message.contains("invalid config format"));
+}
+
+#[tokio::test]
+async fn test_global_config_unknown_section_is_forward_compatible_integration() {
+    // Story 5-1 Task 3.5: unknown top-level TOML sections MUST pass — adding
+    // a new section in a future rustain release cannot break users pinned
+    // to an older binary sharing the same team config.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().to_path_buf();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        "[future_section]\nkey = \"value\"",
+    )
+    .unwrap();
+
+    let check = GlobalConfigCheck {
+        config_dir: Some(config_dir),
+    };
+    let result = check.run().await;
+    assert_eq!(result.status, CheckStatus::Pass);
 }

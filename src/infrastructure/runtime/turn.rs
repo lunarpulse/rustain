@@ -264,7 +264,9 @@ pub async fn run_turn(
                                 PermissionDecision::DenyWithFeedback(feedback) => {
                                     crate::domain::models::ToolResult {
                                         tool_use_id: tc.id.clone(),
-                                        content: permission_chain::format_feedback_message(&feedback),
+                                        content: permission_chain::format_feedback_message(
+                                            &feedback,
+                                        ),
                                         is_error: true,
                                     }
                                 }

@@ -12,4 +12,5 @@ pub enum AutocompleteKind {
 pub enum AutocompleteSuggestion {
     SlashCommand { name: String, description: String },
     FilePath { path: String, is_dir: bool },
+    Skill { name: String, description: String },
 }

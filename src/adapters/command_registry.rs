@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::domain::services::frontmatter;
+
 /// Source of a slash command — built-in or user-defined.
 #[derive(Debug, Clone)]
 pub enum CommandSource {
@@ -194,7 +196,7 @@ fn parse_command_file(path: &Path) -> Option<SlashCommandDef> {
     }
     let content = std::fs::read_to_string(path).ok()?;
 
-    let (description, body) = parse_frontmatter_and_content(&content);
+    let (description, body) = parse_command_description_and_body(&content);
 
     Some(SlashCommandDef {
         name,
@@ -208,31 +210,11 @@ fn parse_command_file(path: &Path) -> Option<SlashCommandDef> {
 
 /// Parse optional YAML frontmatter for `description:` field.
 /// Returns (description, full_content_after_frontmatter).
-fn parse_frontmatter_and_content(content: &str) -> (String, String) {
-    if let Some(after_first) = content
-        .strip_prefix("---\r\n")
-        .or_else(|| content.strip_prefix("---\n"))
-    {
-        if let Some(end_idx) = after_first.find("\n---") {
-            let frontmatter = &after_first[..end_idx];
-            let body_start = end_idx + 4; // skip "\n---"
-            let body = after_first[body_start..]
-                .trim_start_matches(['\n', '\r'])
-                .to_string();
-
-            // Extract description from frontmatter
-            let description = frontmatter
-                .lines()
-                .find_map(|line| {
-                    let trimmed = line.trim();
-                    trimmed
-                        .strip_prefix("description:")
-                        .map(|rest| rest.trim().to_string())
-                })
-                .unwrap_or_default();
-
-            return (description, body);
-        }
+fn parse_command_description_and_body(content: &str) -> (String, String) {
+    if let Some((frontmatter_text, body)) = frontmatter::parse_frontmatter(content) {
+        let description =
+            frontmatter::extract_field(frontmatter_text, "description").unwrap_or_default();
+        return (description, body.to_string());
     }
 
     // No frontmatter — use first non-empty line as description

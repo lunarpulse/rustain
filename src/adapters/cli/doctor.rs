@@ -901,11 +901,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_global_config_valid_toml_wrong_schema() {
+    async fn test_global_config_valid_toml_wrong_field_type() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config_dir = tmp.path().to_path_buf();
-        // Valid TOML but with unknown section — deny_unknown_fields rejects it.
-        std::fs::write(config_dir.join("config.toml"), "[section]\nkey = \"value\"").unwrap();
+        // Valid TOML but with a type mismatch on a known field — serde rejects
+        // because `log_max_size_mb` expects an unsigned integer.
+        // (Story 5-1 removed `deny_unknown_fields`, so unknown sections no
+        // longer fail here; we now exercise the field-type path instead.)
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "log_max_size_mb = \"not-a-number\"",
+        )
+        .unwrap();
 
         let check = GlobalConfigCheck {
             config_dir: Some(config_dir),
@@ -913,6 +920,26 @@ mod tests {
         let result = check.run().await;
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(result.message.contains("invalid config format"));
+    }
+
+    #[tokio::test]
+    async fn test_global_config_unknown_section_is_forward_compatible() {
+        // Story 5-1 Task 3.5: unknown top-level TOML sections must NOT fail
+        // validation — new features (skills, agents, profiles…) are added
+        // incrementally, so shared team configs cannot require lockstep upgrades.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_dir = tmp.path().to_path_buf();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[some_future_section]\nkey = \"value\"",
+        )
+        .unwrap();
+
+        let check = GlobalConfigCheck {
+            config_dir: Some(config_dir),
+        };
+        let result = check.run().await;
+        assert_eq!(result.status, CheckStatus::Pass);
     }
 
     #[tokio::test]

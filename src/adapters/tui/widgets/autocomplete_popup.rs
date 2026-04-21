@@ -136,6 +136,21 @@ fn format_suggestion<'a>(suggestion: &AutocompleteSuggestion, theme: &Theme) -> 
             ));
             ListItem::new(line)
         }
+        AutocompleteSuggestion::Skill { name, description } => {
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("/{}", name),
+                    Style::default()
+                        .fg(theme.colors.fg_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", description),
+                    Style::default().fg(theme.colors.fg_secondary),
+                ),
+            ]);
+            ListItem::new(line)
+        }
     }
 }
 

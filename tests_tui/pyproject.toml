@@ -36,6 +36,7 @@ markers = [
     "story_4_6: Story 4-6 — Cleanup & Hardening",
     "story_5_0: Story 5-0 — Python TUI Contract Test Infrastructure",
     "story_5_0b: Story 5-0b — Permission System Redesign",
+    "story_5_1: Story 5-1 — Agent Skills Discovery & Catalog",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

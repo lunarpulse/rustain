@@ -91,7 +91,10 @@ async fn test_permission_queue_batch_sweep_drains_matching_and_responds() {
 
     // Write request is still pending — its receiver is still live, not resolved
     assert!(
-        matches!(write_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+        matches!(
+            write_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
         "Write request must not have been swept"
     );
 }

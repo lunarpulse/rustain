@@ -1437,7 +1437,10 @@ impl StoragePort for FileSystemStorage {
 
         let snapshots_dir = self.snapshots_dir(conversation_id);
 
-        let log = self.load_checkpoint_log(conversation_id).await.unwrap_or_default();
+        let log = self
+            .load_checkpoint_log(conversation_id)
+            .await
+            .unwrap_or_default();
         let revert_cp_ids: std::collections::HashSet<u64> = log
             .entries
             .iter()
@@ -1772,7 +1775,10 @@ impl StoragePort for FileSystemStorage {
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
 
-        let log = self.load_checkpoint_log(conversation_id).await.unwrap_or_default();
+        let log = self
+            .load_checkpoint_log(conversation_id)
+            .await
+            .unwrap_or_default();
         let revert_cp_ids: HashSet<u64> = log
             .entries
             .iter()

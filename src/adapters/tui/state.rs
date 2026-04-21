@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
+use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::ImageAttachment;
@@ -942,6 +943,8 @@ pub struct TuiState {
     /// Cleared on confirm / cancel / Esc.
     // Covers: Story 4-4 AC12
     pub pending_export: Option<(std::path::PathBuf, String)>,
+    /// Skill registry — populated by background discovery task (Story 5-1 AC6).
+    pub skill_registry: SkillRegistry,
 }
 
 impl TuiState {
@@ -1014,6 +1017,11 @@ impl TuiState {
             bookmark_list_count: 0,
             bookmark_undo_buffer: None,
             pending_export: None,
+            skill_registry: SkillRegistry::new(),
         }
+    }
+
+    pub fn replace_skill_registry(&mut self, registry: SkillRegistry) {
+        self.skill_registry = registry;
     }
 }

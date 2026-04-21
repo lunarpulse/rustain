@@ -1,12 +1,27 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub disabled: Vec<String>,
+}
+
 /// Application configuration loaded from file + env.
+///
+/// NOTE (Story 5-1 Task 3.5): we intentionally do NOT use
+/// `#[serde(deny_unknown_fields)]`. Skills (Story 5-1), agents (Story 5-4),
+/// and future profile/provider config blocks will be added incrementally;
+/// rejecting unknown top-level keys would force users to upgrade rustain in
+/// lockstep with any shared team config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppConfig {
+    #[serde(default = "AppConfig::default_model")]
     pub model: String,
+    #[serde(default = "AppConfig::default_log_level")]
     pub log_level: String,
+    #[serde(default = "AppConfig::default_log_max_size_mb")]
     pub log_max_size_mb: u64,
+    #[serde(default = "AppConfig::default_log_retain_count")]
     pub log_retain_count: usize,
     /// Maximum number of checkpoints to retain per conversation.
     /// Older checkpoints (and their file snapshots) are pruned when a new
@@ -15,9 +30,23 @@ pub struct AppConfig {
     /// Config key: `[storage] snapshot_retention_count`. Default: 100.
     #[serde(default = "AppConfig::default_snapshot_retention_count")]
     pub snapshot_retention_count: Option<usize>,
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 impl AppConfig {
+    fn default_model() -> String {
+        "claude-sonnet-4-6".to_string()
+    }
+    fn default_log_level() -> String {
+        "info".to_string()
+    }
+    fn default_log_max_size_mb() -> u64 {
+        10
+    }
+    fn default_log_retain_count() -> usize {
+        3
+    }
     fn default_snapshot_retention_count() -> Option<usize> {
         Some(100)
     }
@@ -31,6 +60,7 @@ impl Default for AppConfig {
             log_max_size_mb: 10,
             log_retain_count: 3,
             snapshot_retention_count: Some(100),
+            skills: SkillsConfig::default(),
         }
     }
 }
