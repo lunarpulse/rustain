@@ -7,7 +7,7 @@ use crate::domain::models::{
 };
 use crate::domain::services::frontmatter;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SkillRegistry {
     skills: Vec<SkillDef>,
     all_skills: Vec<SkillDef>,
@@ -32,6 +32,30 @@ impl SkillRegistry {
             all_skills: Vec::new(),
             warnings_count: 0,
             discovered: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn from_disabled(all: Vec<SkillDef>) -> Self {
+        Self {
+            skills: Vec::new(),
+            all_skills: all,
+            warnings_count: 0,
+            discovered: true,
+        }
+    }
+
+    /// Pre-populate the registry with explicit skills — primarily used by
+    /// integration tests that exercise `activate_by_name` without invoking
+    /// filesystem discovery. `all_skills` mirrors `skills` so `is_skill_disabled`
+    /// behaves correctly.
+    #[allow(dead_code)]
+    pub fn from_skills(skills: Vec<SkillDef>) -> Self {
+        Self {
+            skills: skills.clone(),
+            all_skills: skills,
+            warnings_count: 0,
+            discovered: true,
         }
     }
 
@@ -347,6 +371,18 @@ fn parse_skill_file(
             return ScanOutcome::Invalid;
         }
     };
+
+    #[cfg(feature = "skills-validation")]
+    {
+        if let Err(e) = crate::domain::services::skills_validation::validate(path) {
+            tracing::warn!(
+                "Skill '{}' excluded: skills-ref-rs validation failed: {}",
+                path.display(),
+                e
+            );
+            return ScanOutcome::Invalid;
+        }
+    }
 
     ScanOutcome::Valid(SkillDef {
         name,

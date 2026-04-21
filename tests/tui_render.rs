@@ -59,6 +59,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     None,
                     state.multiline_mode,
                     None, // current_hint
+                    0,
                 );
                 input_box::render(
                     frame,

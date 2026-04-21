@@ -27,6 +27,17 @@ jobs:
       - name: Test
         run: cargo test
 
+  skills-validation:
+    name: Skills Validation Feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test with skills-validation feature
+        run: cargo test --features skills-validation
+
   tui-tests:
     name: Python TUI Tests
     runs-on: ubuntu-latest

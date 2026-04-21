@@ -23,8 +23,18 @@ pub trait ToolSetPort: Send + Sync {
     /// any tool in that turn is dispatched.  Every file-writing tool (`Write`, `Edit`)
     /// must call `storage.snapshot_file()` with this context before mutating the file.
     ///
+    /// `activation_depth` is the maximum activation depth across active skills for
+    /// this conversation (0 if none active). `activate_skill` tool calls use this as
+    /// the caller depth so that `MAX_SKILL_ACTIVATION_DEPTH` is enforced across
+    /// model-driven chains.
+    ///
     /// Default: no-op.  `NoOpToolSet` and test doubles inherit this default.
-    async fn set_execution_context(&self, _conversation_id: String, _checkpoint: CheckpointId) {
+    async fn set_execution_context(
+        &self,
+        _conversation_id: String,
+        _checkpoint: CheckpointId,
+        _activation_depth: u8,
+    ) {
         // no-op default
     }
 

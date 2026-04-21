@@ -26,6 +26,9 @@ pub struct SecurityAdapter {
     /// In-memory session-level auto-allow set (AC4). Keyed by tool_name.
     /// NOT persisted to settings.json. Cleared on process exit.
     session_allowed_tools: RwLock<HashSet<String>>,
+    /// Active skill directories that are readable regardless of workspace boundary (AC7).
+    /// Session-scoped; canonical paths; read-only access.
+    active_skill_dirs: std::sync::RwLock<HashSet<PathBuf>>,
 }
 
 impl SecurityAdapter {
@@ -61,6 +64,7 @@ impl SecurityAdapter {
             event_tx,
             allowed_rules: RwLock::new(Vec::new()),
             session_allowed_tools: RwLock::new(HashSet::new()),
+            active_skill_dirs: std::sync::RwLock::new(HashSet::new()),
         }
     }
 
@@ -230,7 +234,11 @@ impl SecurityAdapter {
     }
 
     /// Validate a file path against workspace boundaries and blocklist.
-    fn validate_path(&self, path: &Path) -> Result<PathAccessType, PermissionError> {
+    fn validate_path(
+        &self,
+        path: &Path,
+        op: FileOperation,
+    ) -> Result<PathAccessType, PermissionError> {
         // Check for path traversal using component analysis (not substring matching)
         if path
             .components()
@@ -339,6 +347,18 @@ impl SecurityAdapter {
         // Check if within workspace
         if resolved.starts_with(&workspace_canonical) {
             Ok(PathAccessType::Workspace)
+        } else if op == FileOperation::Read {
+            // AC7: Check active skill directories for read access
+            if let Ok(dirs) = self.active_skill_dirs.read() {
+                for skill_dir in dirs.iter() {
+                    if resolved.starts_with(skill_dir) {
+                        return Ok(PathAccessType::Workspace);
+                    }
+                }
+            }
+            Err(PermissionError::WorkspaceViolation(
+                "Path outside workspace".to_string(),
+            ))
         } else {
             Err(PermissionError::WorkspaceViolation(
                 "Path outside workspace".to_string(),
@@ -395,9 +415,23 @@ impl SecurityPort for SecurityAdapter {
     fn check_workspace_access(
         &self,
         path: &Path,
-        _op: FileOperation,
+        op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
-        self.validate_path(path)
+        self.validate_path(path, op)
+    }
+
+    fn add_active_skill_dir(&self, dir: PathBuf) {
+        let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if let Ok(mut dirs) = self.active_skill_dirs.write() {
+            dirs.insert(canonical);
+        }
+    }
+
+    fn remove_active_skill_dir(&self, dir: &Path) {
+        let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if let Ok(mut dirs) = self.active_skill_dirs.write() {
+            dirs.remove(&canonical);
+        }
     }
 
     async fn request_permission(
@@ -600,6 +634,72 @@ mod tests {
             err_msg.contains("outside workspace") || err_msg.contains("traversal"),
             "Error should indicate path traversal: {}",
             err_msg
+        );
+    }
+
+    // Story 5-2 AC7: when a skill directory is registered via
+    // `add_active_skill_dir`, Read access to paths inside that directory is
+    // allowed even if it lies outside the workspace. Removing the entry must
+    // revoke that access, and Write remains denied regardless.
+    #[test]
+    fn test_active_skill_dir_grants_read_then_revokes_on_remove() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let skill_root = tempfile::TempDir::new().unwrap(); // deliberately outside workspace
+        let skill_dir = skill_root.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_file = skill_dir.join("helper.md");
+        std::fs::write(&skill_file, "content").unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let adapter = SecurityAdapter::new(workspace.path().to_path_buf(), tx);
+
+        // Baseline: path outside workspace denied for both Read and Write.
+        assert!(
+            adapter
+                .check_workspace_access(&skill_file, FileOperation::Read)
+                .is_err(),
+            "skill file must be denied before the dir is registered"
+        );
+        assert!(
+            adapter
+                .check_workspace_access(&skill_file, FileOperation::Write)
+                .is_err()
+        );
+
+        // Register the skill dir — Read should now succeed.
+        adapter.add_active_skill_dir(skill_dir.clone());
+        let read = adapter.check_workspace_access(&skill_file, FileOperation::Read);
+        assert!(
+            read.is_ok(),
+            "active skill dir should grant Read access to its files (AC7); got {:?}",
+            read
+        );
+
+        // Write stays denied — AC7 only grants Read scope.
+        let write = adapter.check_workspace_access(&skill_file, FileOperation::Write);
+        assert!(
+            write.is_err(),
+            "active skill dir must NOT grant Write access (AC7); got {:?}",
+            write
+        );
+
+        // A sibling file outside the registered skill dir stays denied.
+        let sibling = skill_root.path().join("not-a-skill.md");
+        std::fs::write(&sibling, "x").unwrap();
+        assert!(
+            adapter
+                .check_workspace_access(&sibling, FileOperation::Read)
+                .is_err(),
+            "only files under the registered skill dir are granted access"
+        );
+
+        // Remove the dir — Read should revert to denied.
+        adapter.remove_active_skill_dir(&skill_dir);
+        assert!(
+            adapter
+                .check_workspace_access(&skill_file, FileOperation::Read)
+                .is_err(),
+            "removing the skill dir must revoke Read access"
         );
     }
 

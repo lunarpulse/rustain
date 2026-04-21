@@ -79,6 +79,7 @@ default = ["anthropic", "clipboard"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 openai = []
+skills-validation = []
 
 [profile.release]
 lto = true

@@ -691,6 +691,7 @@ data: {\"type\":\"message_stop\"}\n\
             "test-conv-id".to_string(),
             Arc::new(rustain::adapters::noop::NoOpStorage),
             make_conversation(),
+            None,
         )
         .await;
 

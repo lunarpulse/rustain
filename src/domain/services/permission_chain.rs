@@ -2,9 +2,10 @@
 //! Pure orchestration: calls port traits, no I/O itself.
 
 use crate::domain::models::{
-    ApprovalDecision, FileOperation, PermissionMode, ToolRisk, risk_for_builtin,
+    ActiveSkill, ApprovalDecision, FileOperation, PermissionMode, ToolRisk, risk_for_builtin,
 };
 use crate::domain::ports::SecurityPort;
+use std::collections::HashSet;
 
 /// Result of a permission chain check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +74,7 @@ pub fn mode_risk_outcome(mode: PermissionMode, risk: ToolRisk) -> Option<bool> {
 /// Check permission for a tool call through the full chain.
 ///
 /// Steps:
-/// 1. Tool restriction check (agent allowed_tools — pass-through for now)
+/// 1. Tool restriction check (active skill allowed_tools)
 /// 2. Blocklist check (Bash tool only)
 /// 3. Workspace restriction (file tools — Read/Write)
 /// 3.5 Mode × risk gating (AC1, AC7)
@@ -82,8 +83,15 @@ pub async fn check(
     security: &dyn SecurityPort,
     tool_name: &str,
     input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
 ) -> PermissionDecision {
-    // Step 1: Tool restriction (no subagents yet — pass-through)
+    // Step 1: Tool restriction (active skill allowed_tools)
+    // activate_skill is always allowed (carve-out for skill chaining)
+    if tool_name != "activate_skill" {
+        if let Some(deny_reason) = check_allowed_tools(tool_name, active_skills) {
+            return PermissionDecision::Deny(deny_reason);
+        }
+    }
 
     // Step 2: Blocklist check (Bash tool only)
     if tool_name == "Bash" {
@@ -168,6 +176,48 @@ fn extract_file_path(
     };
     let path = input.get("file_path").and_then(|v| v.as_str())?;
     Some((path.to_string(), op))
+}
+
+/// Check if the tool is allowed by the active skills' `allowed_tools`.
+/// Returns `Some(deny_reason)` if denied, `None` if allowed or no constraints.
+fn check_allowed_tools(tool_name: &str, active_skills: Option<&[ActiveSkill]>) -> Option<String> {
+    let skills = active_skills?;
+    let constrained: Vec<&Vec<String>> = skills
+        .iter()
+        .filter_map(|s| s.allowed_tools.as_ref())
+        .collect();
+    if constrained.is_empty() {
+        return None;
+    }
+    let mut iter = constrained.iter();
+    let first = iter.next()?;
+    let mut effective: HashSet<String> = first.iter().cloned().collect();
+    for set in iter {
+        let other: HashSet<String> = set.iter().cloned().collect();
+        effective = effective.intersection(&other).cloned().collect();
+    }
+    if effective.contains(tool_name) {
+        return None;
+    }
+    let mut names: Vec<String> = effective.into_iter().collect();
+    names.sort();
+    let constrained_skill_names: Vec<&str> = skills
+        .iter()
+        .filter(|s| s.allowed_tools.is_some())
+        .map(|s| s.name.as_str())
+        .collect();
+    let noun = if constrained_skill_names.len() == 1 {
+        "skill"
+    } else {
+        "skills"
+    };
+    Some(format!(
+        "Tool '{}' not allowed by {} '{}'. Allowed: [{}]",
+        tool_name,
+        noun,
+        constrained_skill_names.join(", "),
+        names.join(", ")
+    ))
 }
 
 // Tests moved to tests/security.rs to satisfy domain purity conformance test.

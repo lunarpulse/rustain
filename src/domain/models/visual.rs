@@ -56,6 +56,10 @@ pub enum ConfirmationType {
     /// Export overwrite confirmation (Story 4-4 AC12) —
     /// shown only in explicit-path mode when the target file already exists.
     ExportOverwrite(PathBuf),
+    /// Skill trust prompt (Story 5-2 AC4) — y/n/i for workspace-tier skill activation.
+    SkillTrust,
+    /// Skill trust inspection mode (Story 5-2 AC4) — view file contents, Esc returns to prompt.
+    SkillTrustInspect,
 }
 
 /// Overlay types for modal focus targets.

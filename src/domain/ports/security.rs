@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
@@ -34,6 +34,14 @@ pub trait SecurityPort: Send + Sync {
 
     /// Update the permission mode (interior mutability).
     fn set_mode(&self, mode: PermissionMode);
+
+    /// Register a skill directory as a readable path for the current session (Story 5-2 AC7).
+    /// Called on `activate`, paired with `remove_active_skill_dir` on deactivation.
+    /// Default impl is a no-op for adapters that don't enforce workspace boundaries.
+    fn add_active_skill_dir(&self, _dir: PathBuf) {}
+
+    /// Remove a skill directory from the per-session readable-paths set (Story 5-2 AC7).
+    fn remove_active_skill_dir(&self, _dir: &Path) {}
 
     // v0.5+: fn check_tool_restriction(&self, tool_name: &str, agent_tools: Option<&[String]>) -> Result<(), PermissionError> { Ok(()) }
     // v0.5+: fn add_allowed_rule(&self, rule: PermissionRule);

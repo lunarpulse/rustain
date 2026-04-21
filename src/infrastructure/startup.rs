@@ -9,6 +9,7 @@ use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::project_context_loader::ProjectContextLoader;
 use crate::adapters::security_adapter::SecurityAdapter;
+use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
@@ -126,10 +127,11 @@ pub async fn run() -> Result<()> {
         tools_sessions_dir.clone(),
         workspace_path.clone(),
     ));
-    let tools: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
-        workspace_path.clone(),
-        Arc::clone(&tools_storage),
-    ));
+    let skill_activator = Arc::new(SkillActivator::new());
+    skill_activator.set_event_tx(domain_tx.clone()).await;
+    let mut tools_adapter = ToolSetAdapter::new(workspace_path.clone(), Arc::clone(&tools_storage));
+    tools_adapter.set_activator(Arc::clone(&skill_activator));
+    let tools: Arc<dyn ToolSetPort> = Arc::new(tools_adapter);
 
     // 5c. Discover and load project context
     let context_loader = ProjectContextLoader::new(workspace_path.clone());
@@ -313,6 +315,7 @@ pub async fn run() -> Result<()> {
         workspace_path,
         restored_conversation,
         recovery_prompt,
+        skill_activator,
     )
     .await;
 

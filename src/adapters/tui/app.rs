@@ -53,8 +53,15 @@ pub enum InputAction {
         text: String,
         command: Option<String>,
     },
-    /// Skill selected from autocomplete (Story 5-1 AC4 placeholder).
-    SkillSelected { name: String },
+    /// Skill selected from autocomplete (Story 5-2 AC8).
+    #[allow(dead_code)]
+    SkillSelected { name: String, arguments: String },
+    /// Skill trust prompt: user pressed y (Story 5-2 AC4).
+    SkillTrustAccept,
+    /// Skill trust prompt: user pressed n (Story 5-2 AC4).
+    SkillTrustDecline,
+    /// Skill trust prompt: user pressed i to inspect skill file (Story 5-2 AC4).
+    SkillTrustInspect,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -439,6 +446,44 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             return InputAction::Consumed;
         }
         return InputAction::FeedbackInputChar(c);
+    }
+
+    // Skill trust prompt focus: y/n/i (Story 5-2 AC4)
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust)) {
+        match c {
+            'y' => return InputAction::SkillTrustAccept,
+            'n' => return InputAction::SkillTrustDecline,
+            'i' => return InputAction::SkillTrustInspect,
+            'j' => {
+                if state.scroll_offset > 0 {
+                    state.scroll_offset -= 1;
+                    state.auto_scroll = state.scroll_offset == 0;
+                    state.needs_redraw = true;
+                }
+                return InputAction::Consumed;
+            }
+            'k' => {
+                let max_offset = state
+                    .total_content_height
+                    .saturating_sub(state.viewport_height as usize);
+                if state.scroll_offset < max_offset {
+                    state.scroll_offset += 1;
+                    state.auto_scroll = false;
+                    state.needs_redraw = true;
+                }
+                return InputAction::Consumed;
+            }
+            _ => return InputAction::Consumed,
+        }
+    }
+
+    // Skill trust inspect mode: all char keys consumed (read-only view)
+    if state.focus
+        == FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::SkillTrustInspect,
+        ))
+    {
+        return InputAction::Consumed;
     }
 
     // AskUserQuestion focus: type into question input buffer
@@ -891,6 +936,32 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
         return match key {
             DomainKey::Esc => InputAction::PermissionDeny,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Skill trust prompt: Esc → Decline (Story 5-2 AC4)
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust)) {
+        return match key {
+            DomainKey::Esc => InputAction::SkillTrustDecline,
+            _ => InputAction::Consumed,
+        };
+    }
+
+    // Skill trust inspect mode: Esc returns to trust prompt (Story 5-2 AC4)
+    if state.focus
+        == FocusState::Overlay(OverlayType::Confirmation(
+            ConfirmationType::SkillTrustInspect,
+        ))
+    {
+        return match key {
+            DomainKey::Esc => {
+                state.skill_trust_inspect_mode = false;
+                state.focus =
+                    FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
             _ => InputAction::Consumed,
         };
     }
@@ -1480,6 +1551,22 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /deactivate [name]: deactivate active skill(s) — Story 5-2 AC5
+            if cmd_name == "deactivate" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // Discovered skill name → activate via ExecuteCommand so the event loop
+            // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
+            // user-defined-command SubmitWithContext if the name is NOT a skill.
+            if state.skill_registry.find(&cmd_name).is_some() {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // User-defined command: submit with command context
             let remainder = raw_args.to_string();
             state.resolved_mentions.clear();
@@ -1619,10 +1706,10 @@ fn apply_autocomplete_selection(
             None
         }
         AutocompleteSuggestion::Skill { name, .. } => {
-            // Story 5-1 AC4: clear input and emit placeholder notice
-            state.input_buffer.clear();
-            state.cursor_position = 0;
-            Some(InputAction::SkillSelected { name: name.clone() })
+            // Story 5-2 AC8: insert /{name} with trailing space so user can type arguments
+            state.input_buffer = format!("/{} ", name);
+            state.cursor_position = state.input_buffer.chars().count();
+            None
         }
         AutocompleteSuggestion::FilePath { path, .. } => {
             // Replace everything from trigger to cursor with "@<path>"

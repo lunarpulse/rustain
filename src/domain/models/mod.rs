@@ -58,7 +58,9 @@ pub use session_meta::{
 };
 #[allow(unused_imports)]
 pub use skill::{
-    MAX_SKILL_FILE_SIZE, SkillDef, SkillSource, SkillValidationError, validate_skill_frontmatter,
+    ActiveSkill, MAX_SKILL_ACTIVATION_DEPTH, MAX_SKILL_FILE_SIZE, SkillActivationError,
+    SkillActivationOutcome, SkillActivationSet, SkillDef, SkillSource, SkillTrustResponse,
+    SkillValidationError, validate_skill_frontmatter,
 };
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};

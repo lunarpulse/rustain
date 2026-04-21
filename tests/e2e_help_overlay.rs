@@ -353,6 +353,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 None,
                 false,
                 Some("Tip: j/k to scroll, i to type, ? for help"),
+                0,
             );
         })
         .unwrap();

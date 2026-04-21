@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
 use crate::adapters::palette_registry::PaletteRegistry;
+use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
@@ -57,6 +58,7 @@ pub async fn run(
     workspace_path: std::path::PathBuf,
     restored_conversation: Option<Conversation>,
     recovery_prompt: Option<(String, u32)>,
+    skill_activator: Arc<SkillActivator>,
 ) -> Result<()> {
     let size = terminal.size()?;
     let capability = detect_color_capability();
@@ -393,24 +395,26 @@ pub async fn run(
                                             state.needs_redraw = true;
                                         }
                                     } else {
-                                        start_turn(
-                                            &send_text,
-                                            all_images,
-                                            &mut conversation,
-                                            &mut streaming,
-                                            &mut state,
-                                            &mut _active_turn,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            &security,
-                                            &tools,
-                                            &persona,
-                                            &workspace_path,
-                                            &mut session_manager,
-                                            &fs_storage,
-                                            &storage,
-                                        );
+                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                         start_turn(
+                                             &send_text,
+                                             all_images,
+                                             &mut conversation,
+                                             &mut streaming,
+                                             &mut state,
+                                             &mut _active_turn,
+                                             &provider,
+                                             config,
+                                             &domain_tx,
+                                             &security,
+                                             &tools,
+                                             &persona,
+                                             &workspace_path,
+                                             &mut session_manager,
+                                             &fs_storage,
+                                             &storage,
+                                             _skill_snap,
+                                         );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -435,6 +439,14 @@ pub async fn run(
                                     // Deny all queued permission requests
                                     while let Some(queued) = state.permission_queue.pop() {
                                         let _ = queued.response_tx.send(ApprovalDecision::Deny);
+                                    }
+                                    // Decline any pending skill trust prompt
+                                    if let Some(pending) = state.pending_skill_trust.take() {
+                                        let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
+                                        state.focus = FocusState::Input;
+                                    }
+                                    while let Some(queued) = state.skill_trust_queue.pop_front() {
+                                        let _ = queued.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
                                     }
                                     if streaming.is_streaming {
                                         // AC12: Finalize active tool calls with [aborted] before clearing
@@ -583,6 +595,52 @@ pub async fn run(
                                         ));
                                         state.needs_redraw = true;
                                     }
+                                }
+                                InputAction::SkillTrustAccept => {
+                                    // H2: defensive guard — ignore stray keypresses when no prompt
+                                    // is pending (race: key arrives after prompt already resolved).
+                                    if state.pending_skill_trust.is_none() {
+                                        continue;
+                                    }
+                                    if let Some(pending) = state.pending_skill_trust.take() {
+                                        let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Accepted);
+                                    }
+                                    advance_skill_trust_queue(&mut state);
+                                }
+                                InputAction::SkillTrustDecline => {
+                                    // H2: defensive guard — see SkillTrustAccept above.
+                                    if state.pending_skill_trust.is_none() {
+                                        continue;
+                                    }
+                                    if let Some(pending) = state.pending_skill_trust.take() {
+                                        let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
+                                    }
+                                    advance_skill_trust_queue(&mut state);
+                                }
+                                InputAction::SkillTrustInspect => {
+                                    // H2 defensive guard — inspect has no effect when no prompt is pending.
+                                    if state.pending_skill_trust.is_none() {
+                                        continue;
+                                    }
+                                    // H5: cache the file body via spawn_blocking on first press
+                                    // so the render path never blocks on disk I/O.
+                                    if let Some(ref mut pending) = state.pending_skill_trust {
+                                        if pending.inspect_content.is_none() {
+                                            let path = pending.skill_file.clone();
+                                            let content = tokio::task::spawn_blocking(move || {
+                                                std::fs::read_to_string(&path)
+                                                    .unwrap_or_else(|_| "(file read error)".to_string())
+                                            })
+                                            .await
+                                            .unwrap_or_else(|_| "(file read error)".to_string());
+                                            pending.inspect_content = Some(content);
+                                        }
+                                    }
+                                    state.skill_trust_inspect_mode = true;
+                                    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                        ConfirmationType::SkillTrustInspect,
+                                    ));
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::FeedbackRetry => {
                                     // Clear the feedback block and retry the last user message
@@ -738,6 +796,7 @@ pub async fn run(
                                             usage: None,
                                             fork_source: None,
                                         };
+                                        skill_activator.on_new_conversation(&conversation.id).await;
                                         // Reset TUI state
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
@@ -768,6 +827,35 @@ pub async fn run(
                                         while turn_queue.dequeue().is_some() {}
                                         if let Some(handle) = _active_turn.take() {
                                             handle.abort();
+                                        }
+                                    } else if cmd_name == "deactivate" {
+                                        // /deactivate [name] — Story 5-2 AC5
+                                        let conv_id = conversation.id.clone();
+                                        if let Some(ref target) = cmd_arg {
+                                            let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                                conversation_id: conv_id,
+                                                name: format!("__deactivate__{}", target),
+                                                arguments: String::new(),
+                                            });
+                                        } else {
+                                            let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                                conversation_id: conv_id,
+                                                name: "__deactivate_all__".to_string(),
+                                                arguments: String::new(),
+                                            });
+                                        }
+                                    } else {
+                                        // Check if command matches a discovered skill name (Story 5-2 AC8)
+                                        if state.skill_registry.find(cmd_name).is_some() {
+                                            let conv_id = conversation.id.clone();
+                                            let args_text = cmd_arg
+                                                .map(|s| s.trim().to_string())
+                                                .unwrap_or_default();
+                                            let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                                conversation_id: conv_id,
+                                                name: cmd_name.to_string(),
+                                                arguments: args_text,
+                                            });
                                         }
                                     }
                                 }
@@ -826,6 +914,7 @@ pub async fn run(
                                             state.needs_redraw = true;
                                         }
                                     } else {
+                                        let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                         start_turn(
                                             &full_text,
                                             all_images,
@@ -843,6 +932,7 @@ pub async fn run(
                                             &mut session_manager,
                                             &fs_storage,
                                             &storage,
+                                            _skill_snap,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -1035,14 +1125,13 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                InputAction::SkillSelected { name: _ } => {
-                                    // Story 5-1 AC4: placeholder — activation deferred to Story 5.2
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
-                                        conversation_id: None,
-                                        level: NoticeLevel::Info,
-                                        message: "Skill activation not yet implemented (Story 5.2)".to_string(),
+                                InputAction::SkillSelected { name, arguments } => {
+                                    let conv_id = conversation.id.clone();
+                                    let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                        conversation_id: conv_id,
+                                        name,
+                                        arguments,
                                     });
-                                    state.needs_redraw = true;
                                 }
                                 InputAction::NewTab => {
                                     // Abort any active streaming on this tab before saving,
@@ -1172,7 +1261,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -1194,7 +1283,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1208,7 +1297,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1226,7 +1315,7 @@ pub async fn run(
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1281,7 +1370,7 @@ pub async fn run(
                                                 let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1297,7 +1386,8 @@ pub async fn run(
                                                     // Save current tab state first
                                                     save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                                     // Create new tab and load the conversation into it
-                                                    tab_manager.create_tab();
+                                    tab_manager.create_tab();
+                                    skill_activator.on_new_conversation(&tab_manager.active_tab().conversation.id).await;
                                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     // Overwrite the fresh conversation with the loaded one
                                                     conversation = loaded_conv;
@@ -1411,7 +1501,7 @@ pub async fn run(
                                                     let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage);
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -2179,6 +2269,7 @@ pub async fn run(
 
                                     // Auto-send queued messages
                                     if let Some(queued_msg) = turn_queue.dequeue() {
+                                        let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                         start_turn(
                                             &queued_msg.content,
                                             queued_msg.images,
@@ -2196,6 +2287,7 @@ pub async fn run(
                                             &mut session_manager,
                                             &fs_storage,
                                             &storage,
+                                            _skill_snap,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -2490,6 +2582,7 @@ pub async fn run(
                     AppEvent::RetryMessage { content: text, .. } => {
                         // Delayed retry arrived — start the turn now (no images on retry)
                         state.status = StatusState::Streaming;
+                        let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                         start_turn(
                             &text,
                             vec![],
@@ -2507,6 +2600,7 @@ pub async fn run(
                             &mut session_manager,
                             &fs_storage,
                             &storage,
+                            _skill_snap,
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
@@ -2661,10 +2755,10 @@ pub async fn run(
                         state.needs_redraw = true;
                     }
                     AppEvent::SkillsDiscovered { count, warnings } => {
-                        // Story 5-1 AC6 — background skill discovery complete.
                         {
                             let mut slot = skill_registry_slot.lock().await;
                             if let Some(registry) = slot.take() {
+                                skill_activator.set_registry(registry.clone()).await;
                                 state.replace_skill_registry(registry);
                             }
                         }
@@ -2697,6 +2791,189 @@ pub async fn run(
                                 ),
                             });
                         }
+                    }
+                    AppEvent::AskActivateSkill { conversation_id, name, arguments } => {
+                        if name.starts_with("__deactivate_all__") {
+                            let deactivated = skill_activator.deactivate_all(&conversation_id).await;
+                            for active in &deactivated {
+                                security.remove_active_skill_dir(&active.directory);
+                            }
+                            state.active_skill_count = skill_activator
+                                .active_count(&conversation_id)
+                                .await;
+                            let msg = if deactivated.is_empty() {
+                                "No active skills to deactivate".to_string()
+                            } else {
+                                let names: Vec<&str> = deactivated.iter().map(|s| s.name.as_str()).collect();
+                                format!("Deactivated {} skill(s): [{}]", names.len(), names.join(", "))
+                            };
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation_id.clone()),
+                                level: NoticeLevel::Info,
+                                message: msg,
+                            });
+                        } else if let Some(stripped) = name.strip_prefix("__deactivate__") {
+                            match skill_activator.deactivate(&conversation_id, stripped).await {
+                                Some(deactivated) => {
+                                    security.remove_active_skill_dir(&deactivated.directory);
+                                    state.active_skill_count = skill_activator
+                                        .active_count(&conversation_id)
+                                        .await;
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: format!("Deactivated skill '{}'", deactivated.name),
+                                    });
+                                }
+                                None => {
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: format!("Skill '{}' is not active", stripped),
+                                    });
+                                }
+                            }
+                        } else {
+                            let def = skill_activator.lookup_skill(&name).await;
+                            let def = match def {
+                                Some(d) => d,
+                                None => {
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id.clone()),
+                                        level: NoticeLevel::Error,
+                                        message: format!("Skill '{}' not found", name),
+                                    });
+                                    state.needs_redraw = true;
+                                    continue;
+                                }
+                            };
+
+                            let needs_trust = def.source != crate::domain::models::SkillSource::GlobalAgents
+                                && !skill_activator.is_trusted(&conversation_id, &def.file).await;
+
+                            if needs_trust {
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                let trust_state = crate::adapters::tui::state::SkillTrustState {
+                                    skill_name: name.clone(),
+                                    skill_file: def.file.clone(),
+                                    response_tx: tx,
+                                    inspect_content: None,
+                                };
+                                if state.pending_skill_trust.is_some() {
+                                    state.skill_trust_queue.push_back(trust_state);
+                                } else {
+                                    state.pending_skill_trust = Some(trust_state);
+                                    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                        ConfirmationType::SkillTrust,
+                                    ));
+                                }
+                                state.needs_redraw = true;
+
+                                // `rx.await` resolves when the user presses y/n — the Input
+                                // handlers (SkillTrustAccept/SkillTrustDecline) have already
+                                // called `advance_skill_trust_queue` for us (H2), so we just
+                                // react to the response here.
+                                let resp = rx.await;
+                                match resp {
+                                    Ok(crate::domain::models::SkillTrustResponse::Accepted) => {
+                                        skill_activator.mark_trusted(&conversation_id, def.file.clone()).await;
+                                    }
+                                    Ok(crate::domain::models::SkillTrustResponse::Declined) | Err(_) => {
+                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation_id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: format!("Skill '{}' not trusted — activation declined", name),
+                                        });
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // H6: Re-validate that the active conversation still matches the
+                            // one the user was prompted for. The user may have switched tabs
+                            // during `rx.await` — if so, skip activation + turn kickoff
+                            // (start_turn would run against the wrong conversation).
+                            if conversation.id != conversation_id {
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation_id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: format!(
+                                        "Skill '{}' trust recorded, but activation was skipped because the conversation changed during the prompt",
+                                        name
+                                    ),
+                                });
+                                state.needs_redraw = true;
+                                continue;
+                            }
+
+                            match skill_activator.activate(&def, arguments.clone(), &conversation_id, 0).await {
+                                Ok(active) => {
+                                    security.add_active_skill_dir(active.directory.clone());
+                                    state.active_skill_count = skill_activator
+                                        .active_count(&conversation_id)
+                                        .await;
+                                    let args_trimmed = arguments.trim();
+                                    let user_msg = format!("ARGUMENTS: {}", args_trimmed);
+                                    let snap = skill_activator
+                                        .snapshot_for_turn(&conversation.id)
+                                        .await;
+                                    start_turn(
+                                        &user_msg,
+                                        Vec::new(),
+                                        &mut conversation,
+                                        &mut streaming,
+                                        &mut state,
+                                        &mut _active_turn,
+                                        &provider,
+                                        config,
+                                        &domain_tx,
+                                        &security,
+                                        &tools,
+                                        &persona,
+                                        &workspace_path,
+                                        &mut session_manager,
+                                        &fs_storage,
+                                        &storage,
+                                        snap,
+                                    );
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: format!("Skill '{}' activated", active.name),
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id.clone()),
+                                        level: NoticeLevel::Error,
+                                        message: e.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SkillTrustPrompt { skill_name, skill_file, response_tx } => {
+                        // Model-driven activation path: the SkillActivator emits this event
+                        // when a workspace-tier skill requires trust (Story 5-2 AC9).
+                        // Promote the carried oneshot sender into pending_skill_trust so
+                        // the existing y/n/i input actions consume it.
+                        let trust_state = crate::adapters::tui::state::SkillTrustState {
+                            skill_name,
+                            skill_file,
+                            response_tx,
+                            inspect_content: None,
+                        };
+                        if state.pending_skill_trust.is_some() {
+                            state.skill_trust_queue.push_back(trust_state);
+                        } else {
+                            state.pending_skill_trust = Some(trust_state);
+                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                                ConfirmationType::SkillTrust,
+                            ));
+                        }
+                        state.needs_redraw = true;
                     }
                     _ => {
                         state.needs_redraw = true;
@@ -4011,6 +4288,7 @@ fn start_turn(
     session_manager: &mut SessionManager,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
     storage: &Arc<dyn StoragePort>,
+    activation_set: Option<crate::domain::models::SkillActivationSet>,
 ) {
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
@@ -4090,11 +4368,44 @@ fn start_turn(
         });
     }
 
-    let tool_defs = tools.available_tools();
+    let all_tool_defs = tools.available_tools();
+    let persona_prompt = persona.system_prompt(workspace_path);
+    let empty_set = crate::domain::models::SkillActivationSet::new();
+    let activation = activation_set.as_ref().unwrap_or(&empty_set);
+    let system_prompt = crate::domain::services::skill_context::assemble_system_prompt(
+        &persona_prompt,
+        activation,
+        workspace_path,
+    );
+    let tool_defs = match activation.effective_allowed_tools() {
+        Some(allowed) => {
+            let mut filtered: Vec<_> = all_tool_defs
+                .into_iter()
+                .filter(|t| allowed.contains(&t.name) || t.name == "activate_skill")
+                .collect();
+            if !filtered.iter().any(|t| t.name == "activate_skill") {
+                let act_tool = crate::domain::models::ToolDefinition {
+                    name: "activate_skill".to_string(),
+                    description: "Activate an Agent Skill to gain its procedural instructions and tool restrictions. Arg: name of the skill to activate (must match a discovered skill).".to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Skill name (exact match, case-sensitive)" },
+                            "arguments": { "type": "string", "description": "Optional trailing arguments passed to the skill" }
+                        },
+                        "required": ["name"]
+                    }),
+                };
+                filtered.push(act_tool);
+            }
+            filtered
+        }
+        None => all_tool_defs,
+    };
     let options = CompletionOptions {
         model: config.model.clone(),
         max_tokens: 8192,
-        system_prompt: persona.system_prompt(workspace_path),
+        system_prompt,
         temperature: None,
         tools: tool_defs,
     };
@@ -4116,6 +4427,7 @@ fn start_turn(
         conversation.id.clone(),
         storage.clone(),
         conversation.clone(),
+        activation_set,
     ));
     *active_turn = Some(handle);
 
@@ -4177,6 +4489,19 @@ fn advance_permission_queue(state: &mut TuiState) {
     state.needs_redraw = true;
 }
 
+fn advance_skill_trust_queue(state: &mut TuiState) {
+    if let Some(next) = state.skill_trust_queue.pop_front() {
+        state.pending_skill_trust = Some(next);
+        state.skill_trust_inspect_mode = false;
+        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));
+    } else {
+        state.pending_skill_trust = None;
+        state.skill_trust_inspect_mode = false;
+        state.focus = FocusState::Input;
+    }
+    state.needs_redraw = true;
+}
+
 /// Render the full TUI frame.
 #[allow(clippy::too_many_arguments)]
 fn render(
@@ -4211,6 +4536,9 @@ fn render(
         ref pending_permission,
         ref permission_queue,
         ref pending_feedback_input,
+        ref pending_skill_trust,
+        ref skill_trust_queue,
+        skill_trust_inspect_mode,
         ref ask_user_question,
         ref theme,
         ref status,
@@ -4429,6 +4757,52 @@ fn render(
                     frame.render_widget(paragraph, prompt_area);
                 }
 
+                // Render skill trust prompt at bottom of chat pane (Story 5-2 AC4)
+                if let Some(ref trust) = *pending_skill_trust {
+                    use crate::adapters::tui::widgets::skill_trust_prompt;
+                    if skill_trust_inspect_mode {
+                        // H5: read from the pre-cached body populated when the user pressed `i`
+                        // (populated via spawn_blocking in the SkillTrustInspect handler).
+                        // Never read from disk on the render path.
+                        let fallback = "(loading…)".to_string();
+                        let content = trust.inspect_content.as_ref().unwrap_or(&fallback);
+                        let prompt_lines = skill_trust_prompt::render_inspect_lines(
+                            &trust.skill_name,
+                            content,
+                            20,
+                            theme,
+                        );
+                        let prompt_height = prompt_lines.len() as u16;
+                        let prompt_area = ratatui::prelude::Rect {
+                            x: app_layout.chat_pane.x,
+                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                                - prompt_height.min(app_layout.chat_pane.height),
+                            width: app_layout.chat_pane.width,
+                            height: prompt_height.min(app_layout.chat_pane.height),
+                        };
+                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
+                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
+                        frame.render_widget(paragraph, prompt_area);
+                    } else {
+                        let prompt_lines = skill_trust_prompt::render_trust_lines(
+                            &trust.skill_name,
+                            theme,
+                            skill_trust_queue.len(),
+                        );
+                        let prompt_height = prompt_lines.len() as u16;
+                        let prompt_area = ratatui::prelude::Rect {
+                            x: app_layout.chat_pane.x,
+                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                                - prompt_height.min(app_layout.chat_pane.height),
+                            width: app_layout.chat_pane.width,
+                            height: prompt_height.min(app_layout.chat_pane.height),
+                        };
+                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
+                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
+                        frame.render_widget(paragraph, prompt_area);
+                    }
+                }
+
                 // Render AskUserQuestion card at bottom of chat pane if active
                 if let Some(aq) = ask_user_question {
                     use crate::adapters::tui::widgets::ask_user_question;
@@ -4537,6 +4911,7 @@ fn render(
                     session_title,
                     multiline_mode,
                     current_hint.as_deref(),
+                    state.active_skill_count,
                 );
                 input_box::render(
                     frame,

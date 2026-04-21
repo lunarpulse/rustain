@@ -47,6 +47,13 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            // Built-in: /deactivate — Story 5-2 AC5
+            SlashCommandDef {
+                name: "deactivate".to_string(),
+                description: "Deactivate all active skills in this conversation".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
             // Built-in: /mode plan|normal|autoedit|yolo — Story 5-0b AC9
             SlashCommandDef {
                 name: "mode".to_string(),

@@ -15,6 +15,7 @@ pub mod input_box;
 pub mod permission_prompt;
 pub mod reverse_search;
 pub mod search_bar;
+pub mod skill_trust_prompt;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod tool_block;

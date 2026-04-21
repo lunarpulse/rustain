@@ -22,6 +22,7 @@ async fn test_safe_bash_command_allowed() {
         &security,
         "Bash",
         &serde_json::json!({"command": "echo hello"}),
+        None,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -34,6 +35,7 @@ async fn test_read_allowed_with_noop() {
         &security,
         "Read",
         &serde_json::json!({"file_path": "./src/main.rs"}),
+        None,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -46,6 +48,7 @@ async fn test_blocked_command_denied_even_with_allow_permission() {
         &adapter,
         "Bash",
         &serde_json::json!({"command": "rm -rf /"}),
+        None,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -58,6 +61,7 @@ async fn test_workspace_violation_denied() {
         &adapter,
         "Read",
         &serde_json::json!({"file_path": "/etc/passwd"}),
+        None,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -76,6 +80,7 @@ async fn test_multiple_tool_calls_sequential() {
         &adapter,
         "Bash",
         &serde_json::json!({"command": "echo hello"}),
+        None,
     )
     .await;
     assert_eq!(r1, PermissionDecision::Allow);
@@ -84,6 +89,7 @@ async fn test_multiple_tool_calls_sequential() {
         &adapter,
         "Bash",
         &serde_json::json!({"command": "rm -rf /"}),
+        None,
     )
     .await;
     assert!(matches!(r2, PermissionDecision::Deny(_)));
@@ -97,6 +103,7 @@ async fn test_yolo_mode_still_blocks_dangerous() {
         &adapter,
         "Bash",
         &serde_json::json!({"command": "rm -rf /"}),
+        None,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -118,6 +125,7 @@ async fn test_normal_mode_always_allow_match() {
         &adapter,
         "Bash",
         &serde_json::json!({"command": "cargo test"}),
+        None,
     )
     .await;
     assert_eq!(result, PermissionDecision::AlwaysAllow);
@@ -207,39 +215,60 @@ impl rustain::domain::ports::SecurityPort for MockSecurity {
 #[tokio::test]
 async fn test_mode_risk_plan_safe_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::Plan);
-    let result =
-        permission_chain::check(&sec, "Read", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Read",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
 }
 
 #[tokio::test]
 async fn test_mode_risk_plan_standard_denies() {
     let sec = MockSecurity::new(PermissionMode::Plan);
-    let result =
-        permission_chain::check(&sec, "Write", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Write",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
 }
 
 #[tokio::test]
 async fn test_mode_risk_plan_elevated_denies() {
     let sec = MockSecurity::new(PermissionMode::Plan);
-    let result = permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"})).await;
+    let result =
+        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None).await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
 }
 
 #[tokio::test]
 async fn test_mode_risk_normal_safe_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::Normal);
-    let result =
-        permission_chain::check(&sec, "Read", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Read",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
 }
 
 #[tokio::test]
 async fn test_mode_risk_normal_standard_prompts() {
     let sec = MockSecurity::new(PermissionMode::Normal);
-    let result =
-        permission_chain::check(&sec, "Write", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Write",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
     assert_eq!(
         sec.prompt_call_count(),
@@ -251,7 +280,8 @@ async fn test_mode_risk_normal_standard_prompts() {
 #[tokio::test]
 async fn test_mode_risk_normal_elevated_prompts() {
     let sec = MockSecurity::new(PermissionMode::Normal);
-    let result = permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"})).await;
+    let result =
+        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None).await;
     assert_eq!(result, PermissionDecision::Allow);
     assert_eq!(
         sec.prompt_call_count(),
@@ -263,16 +293,26 @@ async fn test_mode_risk_normal_elevated_prompts() {
 #[tokio::test]
 async fn test_mode_risk_autoedit_safe_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::AutoEdit);
-    let result =
-        permission_chain::check(&sec, "Read", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Read",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
 }
 
 #[tokio::test]
 async fn test_mode_risk_autoedit_standard_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::AutoEdit);
-    let result =
-        permission_chain::check(&sec, "Write", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Write",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
     assert_eq!(
         sec.prompt_call_count(),
@@ -284,7 +324,8 @@ async fn test_mode_risk_autoedit_standard_auto_allows() {
 #[tokio::test]
 async fn test_mode_risk_autoedit_elevated_prompts() {
     let sec = MockSecurity::new(PermissionMode::AutoEdit);
-    let result = permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"})).await;
+    let result =
+        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None).await;
     assert_eq!(result, PermissionDecision::Allow);
     assert_eq!(
         sec.prompt_call_count(),
@@ -296,23 +337,34 @@ async fn test_mode_risk_autoedit_elevated_prompts() {
 #[tokio::test]
 async fn test_mode_risk_yolo_safe_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::Yolo);
-    let result =
-        permission_chain::check(&sec, "Read", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Read",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
 }
 
 #[tokio::test]
 async fn test_mode_risk_yolo_standard_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::Yolo);
-    let result =
-        permission_chain::check(&sec, "Write", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Write",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
 }
 
 #[tokio::test]
 async fn test_mode_risk_yolo_elevated_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::Yolo);
-    let result = permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"})).await;
+    let result =
+        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None).await;
     assert_eq!(
         sec.prompt_call_count(),
         0,
@@ -529,6 +581,7 @@ async fn test_deny_with_feedback_propagates() {
             &adapter,
             "Bash",
             &serde_json::json!({"command": "cargo test"}),
+            None,
         )
         .await
     });
@@ -662,6 +715,7 @@ async fn test_blocklist_overrides_yolo_conformance() {
         &adapter,
         "Bash",
         &serde_json::json!({"command": "rm -rf /"}),
+        None,
     )
     .await;
     assert!(
@@ -700,8 +754,13 @@ async fn test_mode_switch_preserves_session_allow() {
 #[tokio::test]
 async fn test_plan_mode_blocks_standard_tools() {
     let sec = MockSecurity::new(PermissionMode::Plan);
-    let result =
-        permission_chain::check(&sec, "Write", &serde_json::json!({"file_path": "a.rs"})).await;
+    let result = permission_chain::check(
+        &sec,
+        "Write",
+        &serde_json::json!({"file_path": "a.rs"}),
+        None,
+    )
+    .await;
     match result {
         PermissionDecision::Deny(reason) => {
             assert!(

@@ -1,6 +1,6 @@
 use crate::domain::models::tab::ConversationId;
 use crate::domain::models::{
-    ApprovalDecision, NoticeLevel, PermissionMode, StreamChunk, ToolResult,
+    ApprovalDecision, NoticeLevel, PermissionMode, SkillTrustResponse, StreamChunk, ToolResult,
 };
 use crate::domain::services::cross_search::CrossSearchResult;
 
@@ -88,6 +88,23 @@ pub enum AppEvent {
     PeekHighlightExpired { tab_id: usize },
     /// Skill discovery complete (Story 5-1 AC6).
     SkillsDiscovered { count: usize, warnings: usize },
+    /// Request to activate a skill (Story 5-2 AC8/AC9).
+    AskActivateSkill {
+        conversation_id: ConversationId,
+        name: String,
+        arguments: String,
+    },
+    /// Skill trust prompt for workspace-tier skills (Story 5-2 AC4).
+    /// Event loop creates oneshot, TUI displays prompt, user responds y/n/i.
+    ///
+    /// Contract: consumers awaiting `response_tx` MUST treat `RecvError`
+    /// (sender dropped without send — TUI shutdown / panic) as an implicit
+    /// `Declined` with an Info-level feedback block, NOT as a silent hang.
+    SkillTrustPrompt {
+        skill_name: String,
+        skill_file: std::path::PathBuf,
+        response_tx: tokio::sync::oneshot::Sender<SkillTrustResponse>,
+    },
 }
 
 /// Event wrapping a tool execution result.

@@ -226,12 +226,14 @@ def test_disabled_skill_hidden_from_autocomplete(build_binary, tmp_path):
 
 @pytest.mark.story_5_1
 def test_skill_selection_shows_placeholder_notice(build_binary, tmp_path):
-    """AC4: Selecting a skill from autocomplete emits placeholder activation notice.
+    """AC4: Selecting a skill from autocomplete triggers skill activation flow.
 
     Uses a skill name that is unlikely to prefix-match any built-in command
     (e.g. ``zzz-test-skill``) and narrows the autocomplete filter so the
-    skill is the ONLY entry. Pressing Enter then deterministically selects
-    that skill, regardless of how many built-in commands exist.
+    skill is the ONLY entry. Pressing Enter selects the skill from
+    autocomplete (inserting ``/zzz-test-skill `` into the input buffer);
+    a second Enter submits the command. For workspace-tier skills this
+    surfaces the trust prompt (Story 5-2 AC4).
     """
     # Name chosen so a narrow filter uniquely identifies this skill.
     skill_name = "zzz-test-skill"
@@ -252,13 +254,18 @@ def test_skill_selection_shows_placeholder_notice(build_binary, tmp_path):
             skill_name, msg="Filtered skill should appear as the sole autocomplete entry"
         )
 
+        # First ENTER: accept the autocomplete suggestion.
         tui.send(ENTER)
         time.sleep(0.5)
 
-        tui.assert_screen_contains(
-            "Skill activation not yet implemented",
-            msg="Selecting a skill should show placeholder notice",
-        )
+        # Second ENTER: submit the skill command.
+        tui.send(ENTER)
+
+        # Workspace-tier skills require trust confirmation before activation.
+        assert tui.wait_for_screen(
+            "Trust and enable this skill",
+            timeout=5.0,
+        ), "Workspace skill should trigger trust prompt after submission"
     finally:
         tui.stop()
 

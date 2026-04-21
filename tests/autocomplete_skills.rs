@@ -176,3 +176,36 @@ fn test_autocomplete_empty_skill_catalog_no_regression() {
         "empty catalog must not inject any Skill suggestions"
     );
 }
+
+#[test]
+fn test_autocomplete_skill_selection_inserts_prefix_not_clears() {
+    let skill = mk_skill("review", "Reviews code", SkillSource::WorkspaceAgents);
+    let suggestions = build_slash_suggestions_ordered(&[], &[&skill]);
+
+    assert_eq!(suggestions.len(), 1);
+    match &suggestions[0] {
+        AutocompleteSuggestion::Skill { name, .. } => {
+            assert_eq!(name, "review");
+        }
+        other => panic!("Expected Skill suggestion, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_skill_name_with_arguments_in_suggestion() {
+    let skill = mk_skill(
+        "deploy",
+        "Deploys the project",
+        SkillSource::WorkspaceAgents,
+    );
+    let suggestions = build_slash_suggestions_ordered(&[], &[&skill]);
+
+    assert_eq!(suggestions.len(), 1);
+    match &suggestions[0] {
+        AutocompleteSuggestion::Skill { name, description } => {
+            assert_eq!(name, "deploy");
+            assert_eq!(description, "Deploys the project");
+        }
+        other => panic!("Expected Skill suggestion, got {:?}", other),
+    }
+}

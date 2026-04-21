@@ -30,6 +30,17 @@ pub struct FeedbackInputState {
     pub pending_permission: PendingPermission,
 }
 
+/// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
+pub struct SkillTrustState {
+    pub skill_name: String,
+    pub skill_file: std::path::PathBuf,
+    pub response_tx: tokio::sync::oneshot::Sender<crate::domain::models::SkillTrustResponse>,
+    /// Cached file content for inspect mode. Populated asynchronously via
+    /// `spawn_blocking` on the first `i` press so the render path never blocks
+    /// on disk I/O (Story 5-2 H5).
+    pub inspect_content: Option<String>,
+}
+
 /// Queue for permission requests that arrive while another is being displayed.
 #[derive(Default)]
 pub struct PermissionQueue {
@@ -839,6 +850,12 @@ pub struct TuiState {
     pub ask_user_question: Option<AskUserQuestionState>,
     /// Oneshot sender for AskUserQuestion responses.
     pub question_response_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    /// Pending skill trust prompt state (Story 5-2 AC4).
+    pub pending_skill_trust: Option<SkillTrustState>,
+    /// Queue for additional skill trust prompts that arrive while one is displayed.
+    pub skill_trust_queue: VecDeque<SkillTrustState>,
+    /// Whether the skill trust prompt is in inspection mode.
+    pub skill_trust_inspect_mode: bool,
     /// Whether project context files were loaded (for status bar indicator).
     pub has_project_context: bool,
     /// Session-scoped input history for Up/Down and Ctrl+R.
@@ -945,6 +962,9 @@ pub struct TuiState {
     pub pending_export: Option<(std::path::PathBuf, String)>,
     /// Skill registry — populated by background discovery task (Story 5-1 AC6).
     pub skill_registry: SkillRegistry,
+    /// Active-skill count for the current conversation — rendered in the status bar (AC12).
+    /// Updated by the event loop after `activate`/`deactivate` succeeds so `render` stays sync.
+    pub active_skill_count: usize,
 }
 
 impl TuiState {
@@ -985,6 +1005,9 @@ impl TuiState {
             active_feedback_id: None,
             ask_user_question: None,
             question_response_tx: None,
+            pending_skill_trust: None,
+            skill_trust_queue: VecDeque::new(),
+            skill_trust_inspect_mode: false,
             has_project_context: false,
             input_history: InputHistory::new(),
             multiline_mode: false,
@@ -1018,6 +1041,7 @@ impl TuiState {
             bookmark_undo_buffer: None,
             pending_export: None,
             skill_registry: SkillRegistry::new(),
+            active_skill_count: 0,
         }
     }
 

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::adapters::skill_activation::SkillActivator;
 use crate::domain::errors::ToolError;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{ToolDefinition, ToolResult};
@@ -25,6 +26,10 @@ use crate::domain::ports::{StoragePort, ToolSetPort};
 struct ToolExecutionContext {
     conversation_id: String,
     checkpoint: CheckpointId,
+    /// Maximum activation depth across skills active in this conversation —
+    /// used as `caller_depth` when the model invokes the `activate_skill` tool
+    /// so that `MAX_SKILL_ACTIVATION_DEPTH` is enforced across chained activations.
+    activation_depth: u8,
 }
 
 /// ToolSetPort implementation with Bash, Read, Write tools.
@@ -35,6 +40,9 @@ pub struct ToolSetAdapter {
     /// Active checkpoint context for the current tool-executing turn.
     /// Set by `set_execution_context` before any tools run; cleared between turns.
     current_context: Mutex<Option<ToolExecutionContext>>,
+    /// Optional skill activator for `activate_skill` tool execution.
+    #[allow(dead_code)]
+    activator: Option<Arc<SkillActivator>>,
 }
 
 impl ToolSetAdapter {
@@ -44,7 +52,13 @@ impl ToolSetAdapter {
             write_locks: Arc::new(Mutex::new(HashMap::new())),
             storage,
             current_context: Mutex::new(None),
+            activator: None,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_activator(&mut self, activator: Arc<SkillActivator>) {
+        self.activator = Some(activator);
     }
 
     async fn execute_bash(&self, input: &serde_json::Value) -> Result<ToolResult, ToolError> {
@@ -385,6 +399,24 @@ impl ToolSetPort for ToolSetAdapter {
                     "required": ["file_path", "content"]
                 }),
             },
+            ToolDefinition {
+                name: "activate_skill".to_string(),
+                description: "Activate an Agent Skill to gain its procedural instructions and tool restrictions. Arg: name of the skill to activate (must match a discovered skill).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Skill name (exact match, case-sensitive)"
+                        },
+                        "arguments": {
+                            "type": "string",
+                            "description": "Optional trailing arguments passed to the skill"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            },
         ]
     }
 
@@ -397,16 +429,97 @@ impl ToolSetPort for ToolSetAdapter {
             "Bash" | "bash" => self.execute_bash(&input).await,
             "Read" | "read" => self.execute_read(&input).await,
             "Write" | "write" => self.execute_write(&input, "").await,
+            "activate_skill" => self.execute_activate_skill(&input).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
     }
 
     /// Set the active checkpoint context for file snapshotting (Story 4-3b, AC2).
-    async fn set_execution_context(&self, conversation_id: String, checkpoint: CheckpointId) {
+    async fn set_execution_context(
+        &self,
+        conversation_id: String,
+        checkpoint: CheckpointId,
+        activation_depth: u8,
+    ) {
         *self.current_context.lock().await = Some(ToolExecutionContext {
             conversation_id,
             checkpoint,
+            activation_depth,
         });
+    }
+}
+
+impl ToolSetAdapter {
+    async fn execute_activate_skill(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        let name = input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed("Missing 'name' parameter".into()))?;
+
+        let arguments = input
+            .get("arguments")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let activator = self
+            .activator
+            .as_ref()
+            .ok_or_else(|| ToolError::ExecutionFailed("Skill activator not configured".into()))?;
+
+        let (conv_id, caller_depth) = {
+            let context = self.current_context.lock().await;
+            context
+                .as_ref()
+                .map(|c| (c.conversation_id.clone(), c.activation_depth))
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "Skill activation requires an active conversation context".into(),
+                    )
+                })?
+        };
+
+        let result = activator
+            .activate_by_name(name, arguments, &conv_id, caller_depth)
+            .await;
+
+        match result {
+            Ok(crate::domain::models::SkillActivationOutcome::Activated(_)) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Skill '{}' activated.", name),
+                is_error: false,
+            }),
+            Ok(crate::domain::models::SkillActivationOutcome::TrustDeclined(n)) => {
+                // Decision 4: decline is a user choice, not an error. Surface it
+                // to the model as an informational tool result so the model can
+                // adjust its plan without treating it as a failure.
+                Ok(ToolResult {
+                    tool_use_id: String::new(),
+                    content: format!("Skill '{}' not trusted — activation declined.", n),
+                    is_error: false,
+                })
+            }
+            Err(crate::domain::models::SkillActivationError::NotFound(n)) => {
+                let names = activator.discovered_skill_names().await;
+                Ok(ToolResult {
+                    tool_use_id: String::new(),
+                    content: format!(
+                        "Skill not found: {}. Discovered skills: [{}]",
+                        n,
+                        names.join(", ")
+                    ),
+                    is_error: true,
+                })
+            }
+            Err(e) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: e.to_string(),
+                is_error: true,
+            }),
+        }
     }
 }
 
@@ -547,7 +660,7 @@ mod tests {
 
         // Create a checkpoint and set context.
         let cp = storage.create_checkpoint(&conv_id).await.unwrap();
-        adapter.set_execution_context(conv_id.clone(), cp).await;
+        adapter.set_execution_context(conv_id.clone(), cp, 0).await;
 
         // Write an existing file — should snapshot first.
         let file = tmp.path().join("existing.txt");

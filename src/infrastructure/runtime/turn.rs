@@ -35,6 +35,7 @@ pub async fn run_turn(
     conversation_id: String,
     storage: Arc<dyn StoragePort>,
     conversation_snapshot: crate::domain::models::Conversation,
+    activation_set: Option<crate::domain::models::SkillActivationSet>,
 ) {
     // Persist the conversation before the first API call so that
     // `create_checkpoint` (called when the API returns tool_use) can load it
@@ -178,8 +179,26 @@ pub async fn run_turn(
                                 CheckpointId(0)
                             }
                         };
+                        // Caller depth = max depth of skills active in this conversation
+                        // (0 if none). When the model invokes `activate_skill`, this is
+                        // passed to `activate_by_name` so MAX_SKILL_ACTIVATION_DEPTH caps
+                        // chains (Story 5-2 AC9).
+                        let caller_depth = activation_set
+                            .as_ref()
+                            .map(|s| {
+                                s.active_skills()
+                                    .iter()
+                                    .map(|a| a.activation_depth)
+                                    .max()
+                                    .unwrap_or(0)
+                            })
+                            .unwrap_or(0);
                         tools
-                            .set_execution_context(conversation_id.clone(), checkpoint)
+                            .set_execution_context(
+                                conversation_id.clone(),
+                                checkpoint,
+                                caller_depth,
+                            )
                             .await;
 
                         let mut tool_result_messages = Vec::new();
@@ -236,9 +255,15 @@ pub async fn run_turn(
                                 continue;
                             }
 
-                            let decision =
-                                permission_chain::check(security.as_ref(), &tc.name, &tc.input)
-                                    .await;
+                            let active_skills: Option<&[crate::domain::models::ActiveSkill]> =
+                                activation_set.as_ref().map(|s| s.active_skills());
+                            let decision = permission_chain::check(
+                                security.as_ref(),
+                                &tc.name,
+                                &tc.input,
+                                active_skills,
+                            )
+                            .await;
 
                             let result = match decision {
                                 PermissionDecision::Allow | PermissionDecision::AlwaysAllow => {

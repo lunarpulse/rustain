@@ -9,6 +9,7 @@ pub mod palette_registry;
 pub mod persona_adapter;
 pub mod project_context_loader;
 pub mod security_adapter;
+pub mod skill_activation;
 pub mod skill_registry;
 pub mod toolset_adapter;
 pub mod tui;

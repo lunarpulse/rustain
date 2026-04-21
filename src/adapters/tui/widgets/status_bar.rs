@@ -23,6 +23,7 @@ pub fn render(
     session_title: Option<&str>,
     multiline_mode: bool,
     current_hint: Option<&str>,
+    active_skill_count: usize,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -98,6 +99,14 @@ pub fn render(
             Style::default()
                 .fg(theme.colors.accent)
                 .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Active skill count (AC12: suppressed when zero)
+    if active_skill_count > 0 {
+        left_spans.push(Span::styled(
+            format!("{}Skills: {} active", sep, active_skill_count),
+            Style::default().fg(theme.colors.accent),
         ));
     }
 

@@ -78,6 +78,7 @@ fn render_status_bar_ml(
                 session_title,
                 multiline_mode,
                 None, // current_hint
+                0,
             );
         })
         .unwrap();
