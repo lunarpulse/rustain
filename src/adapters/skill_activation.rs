@@ -8,14 +8,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    ActiveSkill, ConversationId, SkillActivationError, SkillActivationOutcome, SkillActivationSet,
-    SkillDef, SkillSource,
-    SkillTrustResponse, MAX_SKILL_ACTIVATION_DEPTH, MAX_SKILL_FILE_SIZE,
+    ActiveSkill, ConversationId, MAX_SKILL_ACTIVATION_DEPTH, MAX_SKILL_FILE_SIZE,
+    SkillActivationError, SkillActivationOutcome, SkillActivationSet, SkillDef, SkillSource,
+    SkillTrustResponse,
 };
 
 #[allow(dead_code)]
@@ -95,27 +95,28 @@ impl SkillActivator {
 
         let file_path = def.file.clone();
         let skill_name = def.name.clone();
-        let read_result = tokio::task::spawn_blocking(move || -> Result<String, SkillActivationError> {
-            if !file_path.exists() {
-                return Err(SkillActivationError::FileMissing {
-                    name: skill_name.clone(),
-                    path: file_path.clone(),
-                });
-            }
-            let metadata = std::fs::metadata(&file_path).map_err(|e| {
-                SkillActivationError::BodyReadFailed(format!("metadata error: {}", e))
-            })?;
-            if metadata.len() > MAX_SKILL_FILE_SIZE {
-                return Err(SkillActivationError::FileTooLarge {
-                    name: skill_name.clone(),
-                    size: metadata.len(),
-                });
-            }
-            read_body_after_frontmatter(&file_path)
-                .map_err(|e| SkillActivationError::BodyReadFailed(e.to_string()))
-        })
-        .await
-        .map_err(|e| SkillActivationError::BodyReadFailed(format!("spawn error: {}", e)))?;
+        let read_result =
+            tokio::task::spawn_blocking(move || -> Result<String, SkillActivationError> {
+                if !file_path.exists() {
+                    return Err(SkillActivationError::FileMissing {
+                        name: skill_name.clone(),
+                        path: file_path.clone(),
+                    });
+                }
+                let metadata = std::fs::metadata(&file_path).map_err(|e| {
+                    SkillActivationError::BodyReadFailed(format!("metadata error: {}", e))
+                })?;
+                if metadata.len() > MAX_SKILL_FILE_SIZE {
+                    return Err(SkillActivationError::FileTooLarge {
+                        name: skill_name.clone(),
+                        size: metadata.len(),
+                    });
+                }
+                read_body_after_frontmatter(&file_path)
+                    .map_err(|e| SkillActivationError::BodyReadFailed(e.to_string()))
+            })
+            .await
+            .map_err(|e| SkillActivationError::BodyReadFailed(format!("spawn error: {}", e)))?;
         let body = read_result?;
 
         let active_skill = ActiveSkill {
@@ -182,9 +183,7 @@ impl SkillActivator {
                     response_tx: resp_tx,
                 })
                 .map_err(|_| {
-                    SkillActivationError::BodyReadFailed(
-                        "trust-prompt channel closed".to_string(),
-                    )
+                    SkillActivationError::BodyReadFailed("trust-prompt channel closed".to_string())
                 })?;
                 match resp_rx.await {
                     Ok(SkillTrustResponse::Accepted) => {

@@ -141,15 +141,24 @@ impl Default for SkillActivationSet {
 pub enum SkillActivationError {
     NotFound(String),
     Disabled(String),
-    DepthExceeded { depth: u8, max: u8 },
+    DepthExceeded {
+        depth: u8,
+        max: u8,
+    },
     /// Skill file was discovered but has since been removed. Carries the skill
     /// `name` so the canonical AC1 message (`✗ Skill '{name}' file no longer exists at '{path}'`)
     /// can be rendered without requiring the adapter to look up the name separately.
-    FileMissing { name: String, path: PathBuf },
+    FileMissing {
+        name: String,
+        path: PathBuf,
+    },
     /// Skill file exceeds `MAX_SKILL_FILE_SIZE`. Carries the skill `name` so the
     /// canonical AC1 message (`✗ Skill '{name}' exceeds 1 MiB — refusing to load`)
     /// can be rendered by the adapter/UI layer.
-    FileTooLarge { name: String, size: u64 },
+    FileTooLarge {
+        name: String,
+        size: u64,
+    },
     BodyReadFailed(String),
 }
 
@@ -589,7 +598,8 @@ mod tests {
         assert_eq!(set.active_skills()[0].body, "v2");
         assert_eq!(set.active_skills()[0].arguments, "--new");
         assert_eq!(
-            set.active_skills()[0].activation_depth, 1,
+            set.active_skills()[0].activation_depth,
+            1,
             "depth preserved from original activation per AC10"
         );
     }

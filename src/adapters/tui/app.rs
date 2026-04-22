@@ -52,6 +52,7 @@ pub enum InputAction {
     SubmitWithContext {
         text: String,
         command: Option<String>,
+        command_args: Option<String>,
     },
     /// Skill selected from autocomplete (Story 5-2 AC8).
     #[allow(dead_code)]
@@ -1568,11 +1569,16 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                 };
             }
             // User-defined command: submit with command context
-            let remainder = raw_args.to_string();
+            let command_args = if raw_args.is_empty() {
+                None
+            } else {
+                Some(raw_args.to_string())
+            };
             state.resolved_mentions.clear();
             return InputAction::SubmitWithContext {
-                text: remainder,
+                text: String::new(),
                 command: Some(cmd_name),
+                command_args,
             };
         }
     }
@@ -1583,6 +1589,7 @@ fn submit_message(state: &mut TuiState) -> InputAction {
         return InputAction::SubmitWithContext {
             text,
             command: None,
+            command_args: None,
         };
     }
 

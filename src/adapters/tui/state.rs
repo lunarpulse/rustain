@@ -1084,7 +1084,9 @@ mod tests {
     fn make_pending(name: &str) -> PendingSkillActivation {
         PendingSkillActivation {
             skill_name: name.to_string(),
-            skill_file: std::path::PathBuf::from("/test/skills").join(name).join("SKILL.md"),
+            skill_file: std::path::PathBuf::from("/test/skills")
+                .join(name)
+                .join("SKILL.md"),
             arguments: String::new(),
             conversation_id: crate::domain::models::tab::ConversationId::new(),
         }
@@ -1104,8 +1106,14 @@ mod tests {
 
         state.pending_activation = Some(pending);
         assert!(state.pending_activation.is_some());
-        assert_eq!(state.pending_activation.as_ref().unwrap().skill_name, "reviewer");
-        assert_eq!(state.pending_activation.as_ref().unwrap().conversation_id, cid);
+        assert_eq!(
+            state.pending_activation.as_ref().unwrap().skill_name,
+            "reviewer"
+        );
+        assert_eq!(
+            state.pending_activation.as_ref().unwrap().conversation_id,
+            cid
+        );
 
         let taken = state.pending_activation.take();
         assert!(taken.is_some());
@@ -1139,7 +1147,10 @@ mod tests {
         assert!(taken_user.is_some());
         assert_eq!(taken_user.unwrap().skill_name, "user-skill");
         assert!(state.pending_skill_trust.is_some());
-        assert_eq!(state.pending_skill_trust.as_ref().unwrap().skill_name, "model-skill");
+        assert_eq!(
+            state.pending_skill_trust.as_ref().unwrap().skill_name,
+            "model-skill"
+        );
     }
 
     #[test]
@@ -1172,7 +1183,7 @@ mod tests {
             ),
         );
 
-        if let Some(pending) = state.pending_activation.take() {
+        if let Some(_pending) = state.pending_activation.take() {
             if state.pending_skill_trust.is_none() {
                 state.focus = crate::domain::models::FocusState::Input;
                 state.skill_trust_inspect_mode = false;
@@ -1197,6 +1208,9 @@ mod tests {
         } else {
             state.pending_activation = Some(second);
         }
-        assert_eq!(state.pending_activation.as_ref().unwrap().skill_name, "first");
+        assert_eq!(
+            state.pending_activation.as_ref().unwrap().skill_name,
+            "first"
+        );
     }
 }

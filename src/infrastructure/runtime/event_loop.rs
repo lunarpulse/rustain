@@ -933,14 +933,34 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                InputAction::SubmitWithContext { text, command } => {
+                                InputAction::SubmitWithContext { text, command, command_args } => {
                                     // Build context-enriched message
                                     let mut context_prefix = String::new();
 
                                     // Resolve command context if present
                                     if let Some(ref cmd_name) = command {
-                                        if let Some(cmd_ctx) = resolve_command_context(cmd_name, &command_registry) {
-                                            context_prefix.push_str(&message_builder::build_command_context_prefix(&cmd_ctx));
+                                        let (cmd_ctx, cmd_errors) = resolve_command_context(
+                                            cmd_name,
+                                            command_args.as_deref(),
+                                            &workspace_path,
+                                            security.as_ref(),
+                                            &command_registry,
+                                        );
+                                        if let Some(ctx) = cmd_ctx {
+                                            context_prefix.push_str(&message_builder::build_command_context_prefix(&ctx));
+                                        }
+                                        for err in &cmd_errors {
+                                            let fb = FeedbackBlock {
+                                                id: generate_conversation_id(),
+                                                message: format!(
+                                                    "Command '/{}' references missing file: {}",
+                                                    cmd_name, err.raw_path
+                                                ),
+                                                level: FeedbackLevel::Warning,
+                                                actions: vec![],
+                                            };
+                                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                                            state.needs_redraw = true;
                                         }
                                     }
 
@@ -4939,7 +4959,10 @@ fn render(
                     use crate::adapters::tui::widgets::skill_trust_prompt;
                     if skill_trust_inspect_mode {
                         let fallback = "(loading…)".to_string();
-                        let content = state.pending_activation_inspect_content.as_ref().unwrap_or(&fallback);
+                        let content = state
+                            .pending_activation_inspect_content
+                            .as_ref()
+                            .unwrap_or(&fallback);
                         let prompt_lines = skill_trust_prompt::render_inspect_lines(
                             &pending.skill_name,
                             content,
@@ -4958,11 +4981,8 @@ fn render(
                         frame.render_widget(ratatui::widgets::Clear, prompt_area);
                         frame.render_widget(paragraph, prompt_area);
                     } else {
-                        let prompt_lines = skill_trust_prompt::render_trust_lines(
-                            &pending.skill_name,
-                            theme,
-                            0,
-                        );
+                        let prompt_lines =
+                            skill_trust_prompt::render_trust_lines(&pending.skill_name, theme, 0);
                         let prompt_height = prompt_lines.len() as u16;
                         let prompt_area = ratatui::prelude::Rect {
                             x: app_layout.chat_pane.x,
@@ -5293,9 +5313,12 @@ fn populate_autocomplete_suggestions(
 
     match state.autocomplete.kind {
         AutocompleteKind::SlashCommand => {
-            // Lazy-load command discovery on first slash
-            if !command_registry.is_discovered() {
-                command_registry.discover_into(workspace_path);
+            // AC5: re-scan on popup open only (when filter_text is empty, meaning
+            // the popup just transitioned from closed to open on the `/` keystroke).
+            // Filter-as-you-type uses the cached registry.
+            if state.autocomplete.filter_text.is_empty() {
+                command_registry.refresh(workspace_path);
+                command_registry.warn_skill_shadows(&state.skill_registry);
             }
             let filtered = command_registry.filter(&state.autocomplete.filter_text);
             let skill_results = state.skill_registry.filter(&state.autocomplete.filter_text);
@@ -5402,9 +5425,10 @@ fn populate_palette_entries(
     palette_registry: &mut PaletteRegistry,
     workspace_path: &std::path::Path,
 ) {
-    // Ensure command registry is discovered (lazy-load)
+    // Ensure command registry is discovered
     if !command_registry.is_discovered() {
-        command_registry.discover_into(workspace_path);
+        command_registry.refresh(workspace_path);
+        command_registry.warn_skill_shadows(&state.skill_registry);
     }
 
     // Populate palette from command registry (cached, only rebuilds if discovery state changed)
@@ -5605,14 +5629,38 @@ fn resolve_file_context(
 /// Resolve a user-defined slash command's content.
 fn resolve_command_context(
     cmd_name: &str,
+    command_args: Option<&str>,
+    workspace: &std::path::Path,
+    security: &dyn crate::domain::ports::SecurityPort,
     command_registry: &CommandRegistry,
-) -> Option<message_builder::ResolvedCommandContext> {
-    let cmd_def = command_registry.find(cmd_name)?;
-    let content = cmd_def.content.as_ref()?;
-    Some(message_builder::ResolvedCommandContext {
-        name: cmd_name.to_string(),
-        content: content.clone(),
-    })
+) -> (
+    Option<message_builder::ResolvedCommandContext>,
+    Vec<crate::adapters::command_registry::FileRefError>,
+) {
+    use crate::adapters::command_registry;
+    use crate::domain::services::command_interpolation;
+
+    let cmd_def = match command_registry.find(cmd_name) {
+        Some(d) => d,
+        None => return (None, vec![]),
+    };
+    let content = match cmd_def.content.as_ref() {
+        Some(c) => c,
+        None => return (None, vec![]),
+    };
+
+    let args = command_args.unwrap_or("");
+    let interpolated = command_interpolation::substitute_command_args(content, args);
+    let (resolved_body, file_errors) =
+        command_registry::resolve_file_refs(&interpolated, workspace, security);
+
+    (
+        Some(message_builder::ResolvedCommandContext {
+            name: cmd_name.to_string(),
+            content: resolved_body,
+        }),
+        file_errors,
+    )
 }
 
 #[cfg(test)]

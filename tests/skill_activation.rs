@@ -251,9 +251,9 @@ async fn test_trust_prompt_required_for_workspace_tier_model_driven() {
     let activator = std::sync::Arc::new(SkillActivator::new());
     activator.on_new_conversation("conv-1").await;
     activator
-        .set_registry(rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![
-            def.clone(),
-        ]))
+        .set_registry(
+            rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![def.clone()]),
+        )
         .await;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -290,7 +290,9 @@ async fn test_trust_prompt_required_for_workspace_tier_model_driven() {
     assert!(
         matches!(
             result,
-            Ok(rustain::domain::models::SkillActivationOutcome::Activated(_))
+            Ok(rustain::domain::models::SkillActivationOutcome::Activated(
+                _
+            ))
         ),
         "activation should proceed after Accept; got {:?}",
         result
@@ -311,9 +313,9 @@ async fn test_trust_declined_returns_error_model_driven() {
     let activator = std::sync::Arc::new(SkillActivator::new());
     activator.on_new_conversation("conv-1").await;
     activator
-        .set_registry(rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![
-            def.clone(),
-        ]))
+        .set_registry(
+            rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![def.clone()]),
+        )
         .await;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -360,9 +362,9 @@ async fn test_trust_bypassed_for_global_tier_model_driven() {
     let activator = std::sync::Arc::new(SkillActivator::new());
     activator.on_new_conversation("conv-1").await;
     activator
-        .set_registry(rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![
-            def.clone(),
-        ]))
+        .set_registry(
+            rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![def.clone()]),
+        )
         .await;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -660,9 +662,9 @@ async fn test_trust_session_sticky_after_accept() {
     let activator = std::sync::Arc::new(SkillActivator::new());
     activator.on_new_conversation("conv-1").await;
     activator
-        .set_registry(rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![
-            def.clone(),
-        ]))
+        .set_registry(
+            rustain::adapters::skill_registry::SkillRegistry::from_skills(vec![def.clone()]),
+        )
         .await;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
@@ -690,7 +692,9 @@ async fn test_trust_session_sticky_after_accept() {
         .await;
     assert!(matches!(
         result,
-        Ok(rustain::domain::models::SkillActivationOutcome::Activated(_))
+        Ok(rustain::domain::models::SkillActivationOutcome::Activated(
+            _
+        ))
     ));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())

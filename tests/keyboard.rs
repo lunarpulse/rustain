@@ -716,6 +716,7 @@ fn test_user_command_submits_with_context() {
         InputAction::SubmitWithContext {
             text: "".to_string(),
             command: Some("deploy-staging".to_string()),
+            command_args: None,
         }
     );
 }
