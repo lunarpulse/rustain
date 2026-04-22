@@ -105,6 +105,19 @@ pub enum AppEvent {
         skill_file: std::path::PathBuf,
         response_tx: tokio::sync::oneshot::Sender<SkillTrustResponse>,
     },
+    /// Completes a user-driven skill activation after the user responds to the
+    /// trust prompt (Story 5-2 deadlock fix). Emitted by Branch 1's
+    /// `SkillTrustAccept`/`SkillTrustDecline` handlers; consumed by Branch 2.
+    ///
+    /// `trusted: false` means the user declined — Branch 2 emits a decline
+    /// notice and does nothing else.
+    CompleteSkillActivation {
+        conversation_id: ConversationId,
+        skill_name: String,
+        skill_file: std::path::PathBuf,
+        arguments: String,
+        trusted: bool,
+    },
 }
 
 /// Event wrapping a tool execution result.

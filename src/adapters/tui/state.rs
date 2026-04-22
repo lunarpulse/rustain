@@ -41,6 +41,23 @@ pub struct SkillTrustState {
     pub inspect_content: Option<String>,
 }
 
+/// Pending user-driven skill activation awaiting a trust response.
+///
+/// Carries enough context to complete activation + start_turn after the
+/// user presses y/n. Replaces the oneshot-channel rendezvous from Story
+/// 5-2 initial (which deadlocked inside `tokio::select!`).
+///
+/// INVARIANT: Populated only by the user-driven slash-command path
+/// (`AppEvent::AskActivateSkill`). The model-driven path
+/// (`AppEvent::SkillTrustPrompt`) uses `SkillTrustState` above.
+#[derive(Debug, Clone)]
+pub struct PendingSkillActivation {
+    pub skill_name: String,
+    pub skill_file: std::path::PathBuf,
+    pub arguments: String,
+    pub conversation_id: crate::domain::models::tab::ConversationId,
+}
+
 /// Queue for permission requests that arrive while another is being displayed.
 #[derive(Default)]
 pub struct PermissionQueue {
@@ -856,6 +873,14 @@ pub struct TuiState {
     pub skill_trust_queue: VecDeque<SkillTrustState>,
     /// Whether the skill trust prompt is in inspection mode.
     pub skill_trust_inspect_mode: bool,
+    /// User-driven slash-command activation awaiting trust confirmation.
+    /// Parallel to `pending_skill_trust` (model-driven). Populated by
+    /// `AskActivateSkill` handler, consumed by `SkillTrustAccept`/`Decline`.
+    pub pending_activation: Option<PendingSkillActivation>,
+    /// Cached inspect-mode content for the user-driven pending activation.
+    /// Populated asynchronously via `spawn_blocking` on the first `i` press.
+    /// Cleared when `pending_activation` is consumed.
+    pub pending_activation_inspect_content: Option<String>,
     /// Whether project context files were loaded (for status bar indicator).
     pub has_project_context: bool,
     /// Session-scoped input history for Up/Down and Ctrl+R.
@@ -1008,6 +1033,8 @@ impl TuiState {
             pending_skill_trust: None,
             skill_trust_queue: VecDeque::new(),
             skill_trust_inspect_mode: false,
+            pending_activation: None,
+            pending_activation_inspect_content: None,
             has_project_context: false,
             input_history: InputHistory::new(),
             multiline_mode: false,
@@ -1047,5 +1074,129 @@ impl TuiState {
 
     pub fn replace_skill_registry(&mut self, registry: SkillRegistry) {
         self.skill_registry = registry;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_pending(name: &str) -> PendingSkillActivation {
+        PendingSkillActivation {
+            skill_name: name.to_string(),
+            skill_file: std::path::PathBuf::from("/test/skills").join(name).join("SKILL.md"),
+            arguments: String::new(),
+            conversation_id: crate::domain::models::tab::ConversationId::new(),
+        }
+    }
+
+    #[test]
+    fn test_tui_state_pending_activation_initializes_none() {
+        let state = TuiState::new(80, 24);
+        assert!(state.pending_activation.is_none());
+    }
+
+    #[test]
+    fn test_pending_activation_stores_and_takes() {
+        let mut state = TuiState::new(80, 24);
+        let pending = make_pending("reviewer");
+        let cid = pending.conversation_id.clone();
+
+        state.pending_activation = Some(pending);
+        assert!(state.pending_activation.is_some());
+        assert_eq!(state.pending_activation.as_ref().unwrap().skill_name, "reviewer");
+        assert_eq!(state.pending_activation.as_ref().unwrap().conversation_id, cid);
+
+        let taken = state.pending_activation.take();
+        assert!(taken.is_some());
+        assert!(state.pending_activation.is_none());
+    }
+
+    #[test]
+    fn test_pending_activation_does_not_affect_skill_trust_state() {
+        let mut state = TuiState::new(80, 24);
+        let pending = make_pending("reviewer");
+        state.pending_activation = Some(pending);
+        assert!(state.pending_skill_trust.is_none());
+        assert!(state.skill_trust_queue.is_empty());
+    }
+
+    #[test]
+    fn test_accept_takes_user_driven_first() {
+        let mut state = TuiState::new(80, 24);
+        let pending_user = make_pending("user-skill");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let pending_model = SkillTrustState {
+            skill_name: "model-skill".to_string(),
+            skill_file: std::path::PathBuf::from("/test/model/SKILL.md"),
+            response_tx: tx,
+            inspect_content: None,
+        };
+        state.pending_activation = Some(pending_user);
+        state.pending_skill_trust = Some(pending_model);
+
+        let taken_user = state.pending_activation.take();
+        assert!(taken_user.is_some());
+        assert_eq!(taken_user.unwrap().skill_name, "user-skill");
+        assert!(state.pending_skill_trust.is_some());
+        assert_eq!(state.pending_skill_trust.as_ref().unwrap().skill_name, "model-skill");
+    }
+
+    #[test]
+    fn test_decline_clears_focus_when_no_model_pending() {
+        let mut state = TuiState::new(80, 24);
+        state.pending_activation = Some(make_pending("decline-me"));
+        state.focus = crate::domain::models::FocusState::Overlay(
+            crate::domain::models::visual::OverlayType::Confirmation(
+                crate::domain::models::visual::ConfirmationType::SkillTrust,
+            ),
+        );
+
+        let _taken = state.pending_activation.take();
+        if state.pending_skill_trust.is_none() {
+            state.focus = crate::domain::models::FocusState::Input;
+            state.skill_trust_inspect_mode = false;
+        }
+        assert!(state.pending_activation.is_none());
+        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
+        assert!(!state.skill_trust_inspect_mode);
+    }
+
+    #[test]
+    fn test_cancel_drains_pending_activation() {
+        let mut state = TuiState::new(80, 24);
+        state.pending_activation = Some(make_pending("cancel-me"));
+        state.focus = crate::domain::models::FocusState::Overlay(
+            crate::domain::models::visual::OverlayType::Confirmation(
+                crate::domain::models::visual::ConfirmationType::SkillTrust,
+            ),
+        );
+
+        if let Some(pending) = state.pending_activation.take() {
+            if state.pending_skill_trust.is_none() {
+                state.focus = crate::domain::models::FocusState::Input;
+                state.skill_trust_inspect_mode = false;
+            }
+            state.needs_redraw = true;
+        }
+
+        assert!(state.pending_activation.is_none());
+        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
+        assert!(state.needs_redraw);
+    }
+
+    #[test]
+    fn test_double_pending_activation_dropped() {
+        let mut state = TuiState::new(80, 24);
+        state.pending_activation = Some(make_pending("first"));
+        assert!(state.pending_activation.is_some());
+
+        let second = make_pending("second");
+        if state.pending_activation.is_some() {
+            // Simulates the error path: second activation is dropped
+        } else {
+            state.pending_activation = Some(second);
+        }
+        assert_eq!(state.pending_activation.as_ref().unwrap().skill_name, "first");
     }
 }

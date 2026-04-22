@@ -24,6 +24,13 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
+      - name: Event loop invariant check
+        run: |
+          if grep -nP '^\s*let\s+\w+\s*=\s*rx\.await' src/infrastructure/runtime/event_loop.rs; then
+              echo "ERROR: rx.await inside event_loop.rs — see module invariant docs"
+              exit 1
+          fi
+
       - name: Test
         run: cargo test
 

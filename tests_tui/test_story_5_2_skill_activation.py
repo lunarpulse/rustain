@@ -39,15 +39,23 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
 
 
 def submit_slash(t: RustainTUI, cmd: str, delay: float = CHAR_DELAY) -> None:
-    """Type ``cmd`` + trailing space + ENTER to dispatch a slash command.
+    """Type ``cmd`` and dispatch it as a slash command.
 
-    The trailing space dismisses the command palette (so ENTER is no longer
-    consumed as a completion-accept) while the parser trims it out, leaving
-    the command with ``args: None``.
+    The TUI autocomplete intercepts the first Enter to accept the matching
+    suggestion (rewriting the buffer and dismissing autocomplete).  A second
+    Enter then submits through the normal handler.  This double-Enter pattern
+    is the only reliable way to submit a slash command that has an
+    autocomplete match — the autocomplete unconditionally captures Enter/Tab
+    when active, consuming the event without submitting.
+
+    ``submit_message`` parses via ``split_whitespace().next()`` which trims
+    the trailing space injected by ``apply_autocomplete_selection``, so the
+    command name is extracted correctly.
     """
     type_slowly(t, cmd, delay)
-    t.send(" ")
-    time.sleep(0.1)
+    time.sleep(0.2)
+    t.send("\r")
+    time.sleep(0.3)
     t.send("\r")
 
 
@@ -101,14 +109,6 @@ def test_skill_appears_in_slash_autocomplete(tmp_path):
 
 
 @pytest.mark.story_5_2
-@pytest.mark.skip(
-    reason="Driving the /<skill-name> submit path through pyte+pexpect is flaky: "
-    "the slash-command autocomplete intercepts Enter to accept the completion "
-    "rather than submitting the message, so the trust prompt never fires. The "
-    "underlying trust-gate logic is covered by three Rust integration tests in "
-    "`tests/skill_activation.rs::test_trust_*_model_driven`. Re-enable once "
-    "the harness grows a helper that emits a dismiss-then-submit gesture."
-)
 def test_workspace_skill_triggers_trust_prompt(tmp_path):
     """AC4: activating a workspace-tier skill shows the trust prompt with canonical text."""
     ws = tmp_path / "ws"
@@ -123,7 +123,6 @@ def test_workspace_skill_triggers_trust_prompt(tmp_path):
 
 
 @pytest.mark.story_5_2
-@pytest.mark.skip(reason="Depends on trust-prompt appearance — see test_workspace_skill_triggers_trust_prompt")
 def test_trust_prompt_decline_via_n_key(tmp_path):
     """AC4: pressing ``n`` on the trust prompt aborts activation and emits the decline notice."""
     ws = tmp_path / "ws"
@@ -137,7 +136,6 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
 
 
 @pytest.mark.story_5_2
-@pytest.mark.skip(reason="Depends on trust-prompt appearance — see test_workspace_skill_triggers_trust_prompt")
 def test_trust_prompt_decline_via_esc(tmp_path):
     """AC4: Esc on the trust prompt is equivalent to ``n`` (decline)."""
     ws = tmp_path / "ws"
@@ -151,7 +149,6 @@ def test_trust_prompt_decline_via_esc(tmp_path):
 
 
 @pytest.mark.story_5_2
-@pytest.mark.skip(reason="Depends on trust-prompt appearance — see test_workspace_skill_triggers_trust_prompt")
 def test_trust_prompt_inspect_shows_file_content(tmp_path):
     """AC4: pressing ``i`` on the trust prompt opens inspect overlay with file contents."""
     ws = tmp_path / "ws"

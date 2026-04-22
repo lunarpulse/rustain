@@ -1,3 +1,17 @@
+//! # Event Loop Invariant
+//!
+//! No `.await` inside a `tokio::select!` branch of this loop may depend on
+//! a future event produced by the same loop. Every `.await` must resolve
+//! via something external: network, file I/O, timer, or a channel whose
+//! sender lives in a SPAWNED task (not in the select body).
+//!
+//! Violations cause a self-deadlock: the loop parks awaiting a signal
+//! that can only be produced by a branch that cannot fire while the loop
+//! is parked. Symptom: the TUI freezes; only SIGKILL recovers.
+//!
+//! See `5-2-appendix-trust-deadlock-analysis.md` for the 2026-04-21
+//! incident that introduced this invariant.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -448,6 +462,23 @@ pub async fn run(
                                     while let Some(queued) = state.skill_trust_queue.pop_front() {
                                         let _ = queued.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
                                     }
+                                    // Drain user-driven pending activation (Story 5-2 deadlock fix).
+                                    if let Some(pending) = state.pending_activation.take() {
+                                        state.pending_activation_inspect_content = None;
+                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            conversation_id: Some(pending.conversation_id),
+                                            level: NoticeLevel::Info,
+                                            message: format!(
+                                                "Skill '{}' activation cancelled",
+                                                pending.skill_name
+                                            ),
+                                        });
+                                        if state.pending_skill_trust.is_none() {
+                                            state.focus = FocusState::Input;
+                                            state.skill_trust_inspect_mode = false;
+                                        }
+                                        state.needs_redraw = true;
+                                    }
                                     if streaming.is_streaming {
                                         // AC12: Finalize active tool calls with [aborted] before clearing
                                         for (_, tc) in streaming.active_tool_calls.iter_mut() {
@@ -597,34 +628,75 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::SkillTrustAccept => {
-                                    // H2: defensive guard — ignore stray keypresses when no prompt
-                                    // is pending (race: key arrives after prompt already resolved).
-                                    if state.pending_skill_trust.is_none() {
-                                        continue;
-                                    }
-                                    if let Some(pending) = state.pending_skill_trust.take() {
+                                    let handled = if let Some(pending) = state.pending_activation.take() {
+                                        state.pending_activation_inspect_content = None;
+                                        skill_activator
+                                            .mark_trusted(&pending.conversation_id, pending.skill_file.clone())
+                                            .await;
+                                        let _ = domain_tx.send(AppEvent::CompleteSkillActivation {
+                                            conversation_id: pending.conversation_id,
+                                            skill_name: pending.skill_name,
+                                            skill_file: pending.skill_file,
+                                            arguments: pending.arguments,
+                                            trusted: true,
+                                        });
+                                        if state.pending_skill_trust.is_none() {
+                                            state.focus = FocusState::Input;
+                                            state.skill_trust_inspect_mode = false;
+                                        }
+                                        state.needs_redraw = true;
+                                        true
+                                    } else if let Some(pending) = state.pending_skill_trust.take() {
                                         let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Accepted);
+                                        true
+                                    } else {
+                                        tracing::error!("SkillTrustAccept received with no pending trust state");
+                                        false
+                                    };
+                                    if handled && state.pending_skill_trust.is_none() {
+                                        advance_skill_trust_queue(&mut state);
                                     }
-                                    advance_skill_trust_queue(&mut state);
                                 }
                                 InputAction::SkillTrustDecline => {
-                                    // H2: defensive guard — see SkillTrustAccept above.
-                                    if state.pending_skill_trust.is_none() {
-                                        continue;
-                                    }
-                                    if let Some(pending) = state.pending_skill_trust.take() {
+                                    let handled = if let Some(pending) = state.pending_activation.take() {
+                                        state.pending_activation_inspect_content = None;
+                                        let _ = domain_tx.send(AppEvent::CompleteSkillActivation {
+                                            conversation_id: pending.conversation_id,
+                                            skill_name: pending.skill_name,
+                                            skill_file: pending.skill_file,
+                                            arguments: pending.arguments,
+                                            trusted: false,
+                                        });
+                                        if state.pending_skill_trust.is_none() {
+                                            state.focus = FocusState::Input;
+                                            state.skill_trust_inspect_mode = false;
+                                        }
+                                        state.needs_redraw = true;
+                                        true
+                                    } else if let Some(pending) = state.pending_skill_trust.take() {
                                         let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
+                                        true
+                                    } else {
+                                        tracing::error!("SkillTrustDecline received with no pending trust state");
+                                        false
+                                    };
+                                    if handled && state.pending_skill_trust.is_none() {
+                                        advance_skill_trust_queue(&mut state);
                                     }
-                                    advance_skill_trust_queue(&mut state);
                                 }
                                 InputAction::SkillTrustInspect => {
-                                    // H2 defensive guard — inspect has no effect when no prompt is pending.
-                                    if state.pending_skill_trust.is_none() {
-                                        continue;
-                                    }
-                                    // H5: cache the file body via spawn_blocking on first press
-                                    // so the render path never blocks on disk I/O.
-                                    if let Some(ref mut pending) = state.pending_skill_trust {
+                                    if let Some(pending) = &state.pending_activation {
+                                        if state.pending_activation_inspect_content.is_none() {
+                                            let path = pending.skill_file.clone();
+                                            let content = tokio::task::spawn_blocking(move || {
+                                                std::fs::read_to_string(&path)
+                                                    .unwrap_or_else(|_| "(file read error)".to_string())
+                                            })
+                                            .await
+                                            .unwrap_or_else(|_| "(file read error)".to_string());
+                                            state.pending_activation_inspect_content = Some(content);
+                                        }
+                                    } else if let Some(ref mut pending) = state.pending_skill_trust {
                                         if pending.inspect_content.is_none() {
                                             let path = pending.skill_file.clone();
                                             let content = tokio::task::spawn_blocking(move || {
@@ -635,6 +707,8 @@ pub async fn run(
                                             .unwrap_or_else(|_| "(file read error)".to_string());
                                             pending.inspect_content = Some(content);
                                         }
+                                    } else {
+                                        continue;
                                     }
                                     state.skill_trust_inspect_mode = true;
                                     state.focus = FocusState::Overlay(OverlayType::Confirmation(
@@ -2852,42 +2926,36 @@ pub async fn run(
                                 && !skill_activator.is_trusted(&conversation_id, &def.file).await;
 
                             if needs_trust {
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                let trust_state = crate::adapters::tui::state::SkillTrustState {
+                                let pending = crate::adapters::tui::state::PendingSkillActivation {
                                     skill_name: name.clone(),
                                     skill_file: def.file.clone(),
-                                    response_tx: tx,
-                                    inspect_content: None,
+                                    arguments: arguments.clone(),
+                                    conversation_id: conversation_id.clone(),
                                 };
-                                if state.pending_skill_trust.is_some() {
-                                    state.skill_trust_queue.push_back(trust_state);
+
+                                if state.pending_activation.is_some() {
+                                    tracing::error!(
+                                        skill = %name,
+                                        existing = ?state.pending_activation.as_ref().map(|p| &p.skill_name),
+                                        "second user-driven skill trust prompt while one is already pending; dropping"
+                                    );
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: format!(
+                                            "Skill '{}' activation dropped — resolve the current trust prompt first",
+                                            name
+                                        ),
+                                    });
                                 } else {
-                                    state.pending_skill_trust = Some(trust_state);
+                                    state.pending_activation = Some(pending);
                                     state.focus = FocusState::Overlay(OverlayType::Confirmation(
                                         ConfirmationType::SkillTrust,
                                     ));
+                                    state.skill_trust_inspect_mode = false;
+                                    state.needs_redraw = true;
                                 }
-                                state.needs_redraw = true;
-
-                                // `rx.await` resolves when the user presses y/n — the Input
-                                // handlers (SkillTrustAccept/SkillTrustDecline) have already
-                                // called `advance_skill_trust_queue` for us (H2), so we just
-                                // react to the response here.
-                                let resp = rx.await;
-                                match resp {
-                                    Ok(crate::domain::models::SkillTrustResponse::Accepted) => {
-                                        skill_activator.mark_trusted(&conversation_id, def.file.clone()).await;
-                                    }
-                                    Ok(crate::domain::models::SkillTrustResponse::Declined) | Err(_) => {
-                                        let _ = domain_tx.send(AppEvent::SystemNotice {
-                                            conversation_id: Some(conversation_id.clone()),
-                                            level: NoticeLevel::Info,
-                                            message: format!("Skill '{}' not trusted — activation declined", name),
-                                        });
-                                        state.needs_redraw = true;
-                                        continue;
-                                    }
-                                }
+                                continue;
                             }
 
                             // H6: Re-validate that the active conversation still matches the
@@ -2972,6 +3040,114 @@ pub async fn run(
                             state.focus = FocusState::Overlay(OverlayType::Confirmation(
                                 ConfirmationType::SkillTrust,
                             ));
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::CompleteSkillActivation {
+                        conversation_id,
+                        skill_name,
+                        skill_file,
+                        arguments,
+                        trusted,
+                    } => {
+                        if !trusted {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation_id.clone()),
+                                level: NoticeLevel::Info,
+                                message: format!(
+                                    "Skill '{}' not trusted — activation declined",
+                                    skill_name
+                                ),
+                            });
+                            state.needs_redraw = true;
+                            continue;
+                        }
+
+                        if conversation.id != conversation_id {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation_id.clone()),
+                                level: NoticeLevel::Info,
+                                message: format!(
+                                    "Skill '{}' trust recorded, but activation was skipped because the conversation changed during the prompt",
+                                    skill_name
+                                ),
+                            });
+                            state.needs_redraw = true;
+                            continue;
+                        }
+
+                        let def = match skill_activator.lookup_skill(&skill_name).await {
+                            Some(d) => d,
+                            None => {
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation_id.clone()),
+                                    level: NoticeLevel::Error,
+                                    message: format!(
+                                        "Skill '{}' no longer available (removed during trust prompt)",
+                                        skill_name
+                                    ),
+                                });
+                                state.needs_redraw = true;
+                                continue;
+                            }
+                        };
+
+                        if def.file != skill_file {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation_id.clone()),
+                                level: NoticeLevel::Info,
+                                message: format!(
+                                    "Skill '{}' changed location during trust prompt — activation skipped",
+                                    skill_name
+                                ),
+                            });
+                            state.needs_redraw = true;
+                            continue;
+                        }
+
+                        match skill_activator.activate(&def, arguments.clone(), &conversation_id, 0).await {
+                            Ok(active) => {
+                                security.add_active_skill_dir(active.directory.clone());
+                                state.active_skill_count = skill_activator
+                                    .active_count(&conversation_id)
+                                    .await;
+                                let args_trimmed = arguments.trim();
+                                let user_msg = format!("ARGUMENTS: {}", args_trimmed);
+                                let snap = skill_activator
+                                    .snapshot_for_turn(&conversation.id)
+                                    .await;
+                                start_turn(
+                                    &user_msg,
+                                    Vec::new(),
+                                    &mut conversation,
+                                    &mut streaming,
+                                    &mut state,
+                                    &mut _active_turn,
+                                    &provider,
+                                    config,
+                                    &domain_tx,
+                                    &security,
+                                    &tools,
+                                    &persona,
+                                    &workspace_path,
+                                    &mut session_manager,
+                                    &fs_storage,
+                                    &storage,
+                                    snap,
+                                );
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation_id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: format!("Skill '{}' activated", active.name),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation_id.clone()),
+                                    level: NoticeLevel::Error,
+                                    message: format!("Skill '{}' activation failed: {}", skill_name, e),
+                                });
+                            }
                         }
                         state.needs_redraw = true;
                     }
@@ -4539,6 +4715,7 @@ fn render(
         ref pending_skill_trust,
         ref skill_trust_queue,
         skill_trust_inspect_mode,
+        ref pending_activation,
         ref ask_user_question,
         ref theme,
         ref status,
@@ -4758,7 +4935,47 @@ fn render(
                 }
 
                 // Render skill trust prompt at bottom of chat pane (Story 5-2 AC4)
-                if let Some(ref trust) = *pending_skill_trust {
+                if let Some(ref pending) = *pending_activation {
+                    use crate::adapters::tui::widgets::skill_trust_prompt;
+                    if skill_trust_inspect_mode {
+                        let fallback = "(loading…)".to_string();
+                        let content = state.pending_activation_inspect_content.as_ref().unwrap_or(&fallback);
+                        let prompt_lines = skill_trust_prompt::render_inspect_lines(
+                            &pending.skill_name,
+                            content,
+                            20,
+                            theme,
+                        );
+                        let prompt_height = prompt_lines.len() as u16;
+                        let prompt_area = ratatui::prelude::Rect {
+                            x: app_layout.chat_pane.x,
+                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                                - prompt_height.min(app_layout.chat_pane.height),
+                            width: app_layout.chat_pane.width,
+                            height: prompt_height.min(app_layout.chat_pane.height),
+                        };
+                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
+                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
+                        frame.render_widget(paragraph, prompt_area);
+                    } else {
+                        let prompt_lines = skill_trust_prompt::render_trust_lines(
+                            &pending.skill_name,
+                            theme,
+                            0,
+                        );
+                        let prompt_height = prompt_lines.len() as u16;
+                        let prompt_area = ratatui::prelude::Rect {
+                            x: app_layout.chat_pane.x,
+                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
+                                - prompt_height.min(app_layout.chat_pane.height),
+                            width: app_layout.chat_pane.width,
+                            height: prompt_height.min(app_layout.chat_pane.height),
+                        };
+                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
+                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
+                        frame.render_widget(paragraph, prompt_area);
+                    }
+                } else if let Some(ref trust) = *pending_skill_trust {
                     use crate::adapters::tui::widgets::skill_trust_prompt;
                     if skill_trust_inspect_mode {
                         // H5: read from the pre-cached body populated when the user pressed `i`
@@ -5797,5 +6014,25 @@ mod tests {
             messages[3].images.is_empty(),
             "turn-2 user message has no image ref"
         );
+    }
+
+    #[test]
+    fn test_no_rx_await_in_event_loop_source() {
+        let source = include_str!("event_loop.rs");
+        let pat = "\x72\x78\x2E\x61\x77\x61\x69\x74";
+        for (i, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("//!") {
+                continue;
+            }
+            if trimmed.starts_with("fn test_no_rx_await") {
+                break;
+            }
+            assert!(
+                !trimmed.contains(pat),
+                "event_loop.rs line {}: event loop invariant violation",
+                i + 1,
+            );
+        }
     }
 }
