@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
+use crate::adapters::agent_registry::AgentRegistry;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
@@ -987,9 +988,14 @@ pub struct TuiState {
     pub pending_export: Option<(std::path::PathBuf, String)>,
     /// Skill registry — populated by background discovery task (Story 5-1 AC6).
     pub skill_registry: SkillRegistry,
-    /// Active-skill count for the current conversation — rendered in the status bar (AC12).
-    /// Updated by the event loop after `activate`/`deactivate` succeeds so `render` stays sync.
     pub active_skill_count: usize,
+    pub agent_registry: AgentRegistry,
+    pub agent_suggestions: Vec<AutocompleteSuggestion>,
+    pub active_agent_name: Option<String>,
+    /// Pending agent activation queued while background discovery is in-flight.
+    /// Set by `submit_message` when registry is not yet discovered;
+    /// consumed by `AgentsDiscovered` handler in the event loop.
+    pub pending_agent_activation: Option<(String, Option<String>)>,
 }
 
 impl TuiState {
@@ -1069,11 +1075,43 @@ impl TuiState {
             pending_export: None,
             skill_registry: SkillRegistry::new(),
             active_skill_count: 0,
+            agent_registry: AgentRegistry::new(),
+            agent_suggestions: Vec::new(),
+            active_agent_name: None,
+            pending_agent_activation: None,
         }
     }
 
     pub fn replace_skill_registry(&mut self, registry: SkillRegistry) {
         self.skill_registry = registry;
+    }
+
+    pub fn replace_agent_registry(&mut self, registry: AgentRegistry) {
+        self.agent_registry = registry;
+    }
+
+    pub fn refresh_agent_suggestions(&mut self) {
+        use crate::domain::models::autocomplete::AutocompleteSuggestion;
+        let filter = self.autocomplete.filter_text.to_lowercase();
+        let agents = self.agent_registry.filter(&filter);
+        let has_agents = !agents.is_empty();
+        let mut suggestions: Vec<AutocompleteSuggestion> =
+            vec![AutocompleteSuggestion::AgentMention {
+                name: "default".to_string(),
+                description: if has_agents {
+                    "Clear active agent — return to project-context persona".to_string()
+                } else {
+                    "No custom agents discovered — type @Agents/default to clear any active agent"
+                        .to_string()
+                },
+            }];
+        for def in agents {
+            suggestions.push(AutocompleteSuggestion::AgentMention {
+                name: def.name.clone(),
+                description: def.description.clone(),
+            });
+        }
+        self.agent_suggestions = suggestions;
     }
 }
 

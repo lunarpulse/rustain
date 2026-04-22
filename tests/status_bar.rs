@@ -79,6 +79,7 @@ fn render_status_bar_ml(
                 multiline_mode,
                 None, // current_hint
                 0,
+                None,
             );
         })
         .unwrap();
@@ -261,5 +262,129 @@ fn test_status_bar_compact_width() {
     assert!(
         text.contains("Normal"),
         "Compact status bar should still show permission mode"
+    );
+}
+
+// Covers: Story 5.4 AC7 — active agent visible in status bar
+#[test]
+fn test_status_bar_shows_active_agent() {
+    let backend = TestBackend::new(80, 1);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::dark();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            status_bar::render(
+                frame,
+                area,
+                "sonnet-4-6",
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                false,
+                None,
+                false,
+                None,
+                0,
+                Some("code-reviewer"),
+            );
+        })
+        .unwrap();
+
+    let text = common::buffer_text(&terminal);
+    assert!(
+        text.contains("Agent: code-reviewer"),
+        "Status bar should show active agent name, got: {:?}",
+        text.trim()
+    );
+}
+
+// Covers: Story 5.4 AC7 — no agent segment when none active
+#[test]
+fn test_status_bar_hides_agent_when_none() {
+    let backend = TestBackend::new(80, 1);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::dark();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            status_bar::render(
+                frame,
+                area,
+                "sonnet-4-6",
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                false,
+                None,
+                false,
+                None,
+                0,
+                None,
+            );
+        })
+        .unwrap();
+
+    let text = common::buffer_text(&terminal);
+    assert!(
+        !text.contains("Agent:"),
+        "Status bar should NOT show 'Agent:' when no agent is active, got: {:?}",
+        text.trim()
+    );
+}
+
+// Covers: Story 5.4 AC7 — agent name truncated at 24 chars
+#[test]
+fn test_status_bar_agent_name_truncated() {
+    let backend = TestBackend::new(80, 1);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = Theme::dark();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            status_bar::render(
+                frame,
+                area,
+                "sonnet-4-6",
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                false,
+                None,
+                false,
+                None,
+                0,
+                Some("a-very-long-agent-name-that-exceeds-twenty-four"),
+            );
+        })
+        .unwrap();
+
+    let text = common::buffer_text(&terminal);
+    assert!(
+        text.contains("Agent:"),
+        "Status bar should show truncated agent name, got: {:?}",
+        text.trim()
+    );
+    assert!(
+        !text.contains("a-very-long-agent-name-that-exceeds-twenty-four"),
+        "Status bar should truncate long agent name"
     );
 }

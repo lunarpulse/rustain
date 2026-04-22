@@ -85,9 +85,14 @@ pub enum AppEvent {
     /// Fired 1500 ms after the highlight was set by `OpenCrossSearchResult`.
     /// No `conversation_id` — view-update per Amendment 3. `tab_id` targets
     /// the specific tab whose peek highlight should clear.
-    PeekHighlightExpired { tab_id: usize },
+    PeekHighlightExpired {
+        tab_id: usize,
+    },
     /// Skill discovery complete (Story 5-1 AC6).
-    SkillsDiscovered { count: usize, warnings: usize },
+    SkillsDiscovered {
+        count: usize,
+        warnings: usize,
+    },
     /// Request to activate a skill (Story 5-2 AC8/AC9).
     AskActivateSkill {
         conversation_id: ConversationId,
@@ -117,6 +122,14 @@ pub enum AppEvent {
         skill_file: std::path::PathBuf,
         arguments: String,
         trusted: bool,
+    },
+    AgentsDiscovered {
+        count: usize,
+        warnings: usize,
+    },
+    AgentThenSubmit {
+        conversation_id: ConversationId,
+        text: String,
     },
 }
 

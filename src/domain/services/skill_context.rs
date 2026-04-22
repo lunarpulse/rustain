@@ -100,15 +100,35 @@ pub fn render_skill_block(active: &ActiveSkill, workspace_root: &Path) -> String
     block
 }
 
+#[allow(dead_code)]
 pub fn assemble_system_prompt(
     persona_prompt: &str,
     activation_set: &SkillActivationSet,
     workspace_root: &Path,
 ) -> String {
+    assemble_system_prompt_with_agent(persona_prompt, None, activation_set, workspace_root)
+}
+
+pub fn assemble_system_prompt_with_agent(
+    persona_prompt: &str,
+    agent_body: Option<&str>,
+    activation_set: &SkillActivationSet,
+    workspace_root: &Path,
+) -> String {
+    let base = match agent_body {
+        Some(body) if !body.trim().is_empty() => body,
+        _ => {
+            if agent_body.is_some() {
+                tracing::debug!("Agent has empty body; using persona prompt as base");
+            }
+            persona_prompt
+        }
+    };
+
     if activation_set.is_empty() {
-        return persona_prompt.to_string();
+        return base.to_string();
     }
-    let mut prompt = persona_prompt.trim_end().to_string();
+    let mut prompt = base.trim_end().to_string();
     for skill in activation_set.active_skills() {
         prompt.push_str("\n\n");
         prompt.push_str(&render_skill_block(skill, workspace_root));
@@ -224,6 +244,68 @@ mod tests {
         let set = SkillActivationSet::new();
         let prompt = assemble_system_prompt("my persona", &set, Path::new("/ws"));
         assert_eq!(prompt, "my persona");
+    }
+
+    #[test]
+    fn agent_body_replaces_persona() {
+        let set = SkillActivationSet::new();
+        let prompt = assemble_system_prompt_with_agent(
+            "my persona",
+            Some("agent system prompt"),
+            &set,
+            Path::new("/ws"),
+        );
+        assert_eq!(prompt, "agent system prompt");
+    }
+
+    #[test]
+    fn agent_empty_body_falls_back_to_persona() {
+        let set = SkillActivationSet::new();
+        let prompt =
+            assemble_system_prompt_with_agent("my persona", Some("   "), &set, Path::new("/ws"));
+        assert_eq!(prompt, "my persona");
+    }
+
+    #[test]
+    fn agent_none_body_uses_persona() {
+        let set = SkillActivationSet::new();
+        let prompt = assemble_system_prompt_with_agent("my persona", None, &set, Path::new("/ws"));
+        assert_eq!(prompt, "my persona");
+    }
+
+    #[test]
+    fn agent_with_skills_composes() {
+        let mut set = SkillActivationSet::new();
+        set.push(make_skill(
+            "alpha",
+            "skill-body",
+            "",
+            SkillSource::GlobalAgents,
+        ));
+        let prompt = assemble_system_prompt_with_agent(
+            "my persona",
+            Some("agent body"),
+            &set,
+            Path::new("/ws"),
+        );
+        assert!(prompt.starts_with("agent body"));
+        assert!(prompt.contains("<skill name=\"alpha\""));
+        assert!(prompt.contains("skill-body"));
+    }
+
+    #[test]
+    fn no_agent_with_skills_matches_original() {
+        let mut set = SkillActivationSet::new();
+        set.push(make_skill(
+            "alpha",
+            "skill-body",
+            "",
+            SkillSource::GlobalAgents,
+        ));
+        let with_agent =
+            assemble_system_prompt_with_agent("my persona", None, &set, Path::new("/ws"));
+        let original = assemble_system_prompt("my persona", &set, Path::new("/ws"));
+        assert_eq!(with_agent, original);
     }
 
     #[test]

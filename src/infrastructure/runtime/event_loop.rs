@@ -73,6 +73,7 @@ pub async fn run(
     restored_conversation: Option<Conversation>,
     recovery_prompt: Option<(String, u32)>,
     skill_activator: Arc<SkillActivator>,
+    agent_activator: Arc<crate::adapters::agent_activation::AgentActivator>,
 ) -> Result<()> {
     let size = terminal.size()?;
     let capability = detect_color_capability();
@@ -140,6 +141,9 @@ pub async fn run(
     // if contended across .await boundaries.
     let skill_registry_slot: Arc<tokio::sync::Mutex<Option<SkillRegistry>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+    let agent_registry_slot: Arc<
+        tokio::sync::Mutex<Option<crate::adapters::agent_registry::AgentRegistry>>,
+    > = Arc::new(tokio::sync::Mutex::new(None));
 
     // Lazy-initialized palette registry (populated on first Ctrl+P)
     let mut palette_registry = PaletteRegistry::new();
@@ -243,6 +247,57 @@ pub async fn run(
                     let _ = tx.send(AppEvent::SkillsDiscovered {
                         count: 0,
                         warnings: 0,
+                    });
+                }
+            }
+        });
+    }
+
+    // Story 5.4 AC8: Spawn agent discovery as background task after first frame.
+    {
+        let tx = domain_tx.clone();
+        let ws = workspace_path.clone();
+        let activator = agent_activator.clone();
+        let agent_slot = agent_registry_slot.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                BACKGROUND_TASK_TIMEOUT,
+                tokio::task::spawn_blocking(move || {
+                    crate::adapters::agent_registry::AgentRegistry::discover(&ws)
+                }),
+            )
+            .await;
+            match result {
+                Ok(Ok(reg)) => {
+                    let count = reg.agents().len();
+                    let warnings = reg.warnings_count();
+                    {
+                        let mut slot = agent_slot.lock().await;
+                        *slot = Some(reg.clone());
+                    }
+                    activator.set_registry(reg).await;
+                    let _ = tx.send(AppEvent::AgentsDiscovered { count, warnings });
+                }
+                Ok(Err(join_err)) => {
+                    tracing::warn!("Agent discovery panicked: {}", join_err);
+                    let _ = tx.send(AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: NoticeLevel::Warning,
+                        message: format!("Custom agent discovery failed: {}", join_err),
+                    });
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Agent discovery timed out after {:?}",
+                        BACKGROUND_TASK_TIMEOUT
+                    );
+                    let _ = tx.send(AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: NoticeLevel::Warning,
+                        message: format!(
+                            "Custom agent discovery timed out after {:?}",
+                            BACKGROUND_TASK_TIMEOUT
+                        ),
                     });
                 }
             }
@@ -410,25 +465,27 @@ pub async fn run(
                                         }
                                     } else {
                                          let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
-                                         start_turn(
-                                             &send_text,
-                                             all_images,
-                                             &mut conversation,
-                                             &mut streaming,
-                                             &mut state,
-                                             &mut _active_turn,
-                                             &provider,
-                                             config,
-                                             &domain_tx,
-                                             &security,
-                                             &tools,
-                                             &persona,
-                                             &workspace_path,
-                                             &mut session_manager,
-                                             &fs_storage,
-                                             &storage,
-                                             _skill_snap,
-                                         );
+                                         let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                          start_turn(
+                                              &send_text,
+                                              all_images,
+                                              &mut conversation,
+                                              &mut streaming,
+                                              &mut state,
+                                              &mut _active_turn,
+                                              &provider,
+                                              config,
+                                              &domain_tx,
+                                              &security,
+                                              &tools,
+                                              &persona,
+                                              &workspace_path,
+                                              &mut session_manager,
+                                              &fs_storage,
+                                              &storage,
+                                              _skill_snap,
+                                              _agent_snap,
+                                          );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -871,6 +928,8 @@ pub async fn run(
                                             fork_source: None,
                                         };
                                         skill_activator.on_new_conversation(&conversation.id).await;
+                                        agent_activator.on_new_conversation(&conversation.id).await;
+                                        state.active_agent_name = None;
                                         // Reset TUI state
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
@@ -1009,6 +1068,7 @@ pub async fn run(
                                         }
                                     } else {
                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                        let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                         start_turn(
                                             &full_text,
                                             all_images,
@@ -1027,6 +1087,7 @@ pub async fn run(
                                             &fs_storage,
                                             &storage,
                                             _skill_snap,
+                                            _agent_snap,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -1297,6 +1358,7 @@ pub async fn run(
                                     tab_manager.create_tab();
                                     // Load new tab state into proxies (fresh tab, never has queued messages)
                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                    state.active_agent_name = None;
                                     // Update sidebar: mark new conversation open/active
                                     session_index.set_open(&conversation.id, true);
                                     session_index.set_active(Some(&conversation.id));
@@ -1351,11 +1413,13 @@ pub async fn run(
                                         }
                                         // Close the tab (TabManager adjusts active index)
                                         tab_manager.close_tab(tab_id);
+                                        agent_activator.on_tab_closed(&closing_conv_id).await;
                                         // Load the new active tab into proxies
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -1375,9 +1439,10 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_next();
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1389,9 +1454,10 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_prev();
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1407,9 +1473,10 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.switch_to_index(n);
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1462,9 +1529,10 @@ pub async fn run(
                                             if let Some(idx) = tab_manager.tabs().iter().position(|t| t.conversation.id == conv_id) {
                                                 tab_manager.switch_to_index(idx + 1); // 1-based
                                                 let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1482,6 +1550,7 @@ pub async fn run(
                                                     // Create new tab and load the conversation into it
                                     tab_manager.create_tab();
                                     skill_activator.on_new_conversation(&tab_manager.active_tab().conversation.id).await;
+                                    agent_activator.on_new_conversation(&tab_manager.active_tab().conversation.id).await;
                                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     // Overwrite the fresh conversation with the loaded one
                                                     conversation = loaded_conv;
@@ -1593,9 +1662,10 @@ pub async fn run(
                                                     }
                                                     tab_manager.close_tab(tab_id);
                                                     let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap); }
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -2258,6 +2328,93 @@ pub async fn run(
                                 InputAction::CancelExportOverwrite => {
                                     apply_cancel_export_overwrite(&mut state);
                                 }
+                                InputAction::SetActiveAgent { name, then_submit } => {
+                                    let conv_id = conversation.id.clone();
+                                    let prior = agent_activator.active_agent_name(&conv_id).await;
+                                    match agent_activator.activate(&conv_id, &name).await {
+                                        Ok(_active) => {
+                                            state.active_agent_name = Some(name.clone());
+                                            let notice_msg = if let Some(prior_name) = prior {
+                                                format!("Active agent: {} (was {})", name, prior_name)
+                                            } else {
+                                                format!("Active agent: {}", name)
+                                            };
+                                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: notice_msg,
+                                            });
+                                            if let Some(text) = then_submit {
+                                                let _ = domain_tx.send(AppEvent::AgentThenSubmit {
+                                                    conversation_id: conv_id,
+                                                    text,
+                                                });
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let level = match e {
+                                                crate::adapters::agent_activation::AgentActivationError::FileMissing { .. } | crate::adapters::agent_activation::AgentActivationError::FileTooLarge { .. } => crate::domain::models::NoticeLevel::Error,
+                                                _ => crate::domain::models::NoticeLevel::Warning,
+                                            };
+                                            if matches!(e, crate::adapters::agent_activation::AgentActivationError::OutsideWorkspace(..)) {
+                                                state.agent_registry.remove(&name);
+                                            }
+                                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id),
+                                                level,
+                                                message: format!("Agent activation failed: {}", e),
+                                            });
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ClearActiveAgent { then_submit } => {
+                                    let conv_id = conversation.id.clone();
+                                    let had_agent = agent_activator.active_agent_name(&conv_id).await.is_some();
+                                    agent_activator.deactivate(&conv_id).await;
+                                    state.active_agent_name = None;
+                                    let notice_msg = if had_agent {
+                                        "Active agent cleared — using project-context persona".to_string()
+                                    } else {
+                                        "No active agent".to_string()
+                                    };
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conv_id.clone()),
+                                        level: crate::domain::models::NoticeLevel::Info,
+                                        message: notice_msg,
+                                    });
+                                    if let Some(text) = then_submit {
+                                        let _ = domain_tx.send(AppEvent::AgentThenSubmit {
+                                            conversation_id: conv_id,
+                                            text,
+                                        });
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::AgentDiscoveryPending { name, then_submit } => {
+                                    state.pending_agent_activation =
+                                        Some((name.clone(), then_submit));
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level: crate::domain::models::NoticeLevel::Info,
+                                        message: format!(
+                                            "Agent '{}' will activate when discovery completes — please wait",
+                                            name
+                                        ),
+                                    });
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::UnknownAgent(name) => {
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level: crate::domain::models::NoticeLevel::Warning,
+                                        message: format!(
+                                            "Unknown agent: '{}'. Type @Agents/ to see available agents.",
+                                            name
+                                        ),
+                                    });
+                                    state.needs_redraw = true;
+                                }
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
                         }
@@ -2364,6 +2521,7 @@ pub async fn run(
                                     // Auto-send queued messages
                                     if let Some(queued_msg) = turn_queue.dequeue() {
                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                        let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                         start_turn(
                                             &queued_msg.content,
                                             queued_msg.images,
@@ -2382,6 +2540,7 @@ pub async fn run(
                                             &fs_storage,
                                             &storage,
                                             _skill_snap,
+                                            _agent_snap,
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -2479,6 +2638,70 @@ pub async fn run(
                                     conversation.session_id.clone(),
                                 );
                                 tracing::info!("Session invalidated due to auth error, will rebuild on next message");
+                            }
+
+                            // Patch #23: one-shot model fallback when provider rejects agent model (AC6).
+                            if matches!(level, crate::domain::models::NoticeLevel::Error)
+                                && state.active_agent_name.is_some()
+                            {
+                                let lower = msg.to_lowercase();
+                                let looks_like_model_error = lower.contains("model")
+                                    && (lower.contains("not found")
+                                        || lower.contains("does not exist")
+                                        || lower.contains("model_not_found")
+                                        || lower.contains("invalid_request_error"));
+                                if looks_like_model_error {
+                                    let agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                    let agent_model = agent_snap
+                                        .as_ref()
+                                        .and_then(|a| a.model.as_ref())
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    if !agent_model.is_empty() && agent_model != config.model {
+                                        // Find and remove the last user message so start_turn re-adds it
+                                        let last_user_text = conversation
+                                            .messages
+                                            .iter()
+                                            .rev()
+                                            .find(|m| m.role == MessageRole::User)
+                                            .map(|m| m.content.clone());
+                                        if let (Some(text), Some(mut fallback_agent)) = (last_user_text, agent_snap) {
+                                            if let Some(pos) = conversation.messages.iter().rposition(|m| m.role == MessageRole::User) {
+                                                conversation.messages.truncate(pos);
+                                            }
+                                            fallback_agent.model = None;
+                                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message: format!(
+                                                    "Agent '{}' specifies unknown model '{}' — falling back to default '{}'",
+                                                    fallback_agent.name, agent_model, config.model
+                                                ),
+                                            });
+                                            let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                            start_turn(
+                                                &text,
+                                                vec![],
+                                                &mut conversation,
+                                                &mut streaming,
+                                                &mut state,
+                                                &mut _active_turn,
+                                                &provider,
+                                                config,
+                                                &domain_tx,
+                                                &security,
+                                                &tools,
+                                                &persona,
+                                                &workspace_path,
+                                                &mut session_manager,
+                                                &fs_storage,
+                                                &storage,
+                                                _skill_snap,
+                                                Some(fallback_agent),
+                                            );
+                                        }
+                                    }
+                                }
                             }
 
                             // Only reset streaming state for Error/Warning notices.
@@ -2677,6 +2900,7 @@ pub async fn run(
                         // Delayed retry arrived — start the turn now (no images on retry)
                         state.status = StatusState::Streaming;
                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                        let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                         start_turn(
                             &text,
                             vec![],
@@ -2695,6 +2919,7 @@ pub async fn run(
                             &fs_storage,
                             &storage,
                             _skill_snap,
+                            _agent_snap,
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
@@ -2886,6 +3111,131 @@ pub async fn run(
                             });
                         }
                     }
+                    AppEvent::AgentsDiscovered { count, warnings } => {
+                        {
+                            let mut slot = agent_registry_slot.lock().await;
+                            if let Some(registry) = slot.take() {
+                                state.replace_agent_registry(registry);
+                            }
+                        }
+                        state.refresh_agent_suggestions();
+                        state.needs_redraw = true;
+                        if state.autocomplete.active {
+                            last_autocomplete_filter.clear();
+                            populate_autocomplete_suggestions(
+                                &mut state,
+                                &mut command_registry,
+                                &workspace_path,
+                            );
+                        }
+                        if count > 0 {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Info,
+                                message: format!("Discovered {} custom agent(s) in .claude/agents/", count),
+                            });
+                        }
+                        if warnings > 0 {
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Warning,
+                                message: format!(
+                                    "{} agent file(s) excluded due to validation errors — see logs",
+                                    warnings
+                                ),
+                            });
+                        }
+                        // Patch #11: retry pending agent activation queued before discovery
+                        if let Some((pending_name, then_submit)) =
+                            state.pending_agent_activation.take()
+                        {
+                            if state.agent_registry.find(&pending_name).is_some() {
+                                let conv_id = conversation.id.clone();
+                                let prior = agent_activator.active_agent_name(&conv_id).await;
+                                match agent_activator.activate(&conv_id, &pending_name).await {
+                                    Ok(_active) => {
+                                        state.active_agent_name = Some(pending_name.clone());
+                                        let notice_msg = if let Some(prior_name) = prior {
+                                            format!(
+                                                "Active agent: {} (was {})",
+                                                pending_name, prior_name
+                                            )
+                                        } else {
+                                            format!("Active agent: {}", pending_name)
+                                        };
+                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            conversation_id: Some(conv_id.clone()),
+                                            level: crate::domain::models::NoticeLevel::Info,
+                                            message: notice_msg,
+                                        });
+                                        if let Some(text) = then_submit {
+                                            let _ = domain_tx.send(AppEvent::AgentThenSubmit {
+                                                conversation_id: conv_id,
+                                                text,
+                                            });
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let level = match e {
+                                            crate::adapters::agent_activation::AgentActivationError::FileMissing { .. }
+                                            | crate::adapters::agent_activation::AgentActivationError::FileTooLarge { .. } => {
+                                                crate::domain::models::NoticeLevel::Error
+                                            }
+                                            _ => crate::domain::models::NoticeLevel::Warning,
+                                        };
+                                        if matches!(
+                                            e,
+                                            crate::adapters::agent_activation::AgentActivationError::OutsideWorkspace(..)
+                                        ) {
+                                            state.agent_registry.remove(&pending_name);
+                                        }
+                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            conversation_id: Some(conv_id),
+                                            level,
+                                            message: format!("Agent activation failed: {}", e),
+                                        });
+                                    }
+                                }
+                                state.needs_redraw = true;
+                            } else {
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: crate::domain::models::NoticeLevel::Warning,
+                                    message: format!(
+                                        "Unknown agent: '{}'. Type @Agents/ to see available agents.",
+                                        pending_name
+                                    ),
+                                });
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                    AppEvent::AgentThenSubmit { conversation_id, text } => {
+                        if conversation.id == *conversation_id && !streaming.is_streaming {
+                            let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                            let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                            start_turn(
+                                &text,
+                                Vec::new(),
+                                &mut conversation,
+                                &mut streaming,
+                                &mut state,
+                                &mut _active_turn,
+                                &provider,
+                                config,
+                                &domain_tx,
+                                &security,
+                                &tools,
+                                &persona,
+                                &workspace_path,
+                                &mut session_manager,
+                                &fs_storage,
+                                &storage,
+                                _skill_snap,
+                                _agent_snap,
+                            );
+                        }
+                    }
                     AppEvent::AskActivateSkill { conversation_id, name, arguments } => {
                         if name.starts_with("__deactivate_all__") {
                             let deactivated = skill_activator.deactivate_all(&conversation_id).await;
@@ -3006,6 +3356,7 @@ pub async fn run(
                                     let snap = skill_activator
                                         .snapshot_for_turn(&conversation.id)
                                         .await;
+                                    let agent_snap = agent_activator.snapshot(&conversation.id).await;
                                     start_turn(
                                         &user_msg,
                                         Vec::new(),
@@ -3024,6 +3375,7 @@ pub async fn run(
                                         &fs_storage,
                                         &storage,
                                         snap,
+                                        agent_snap,
                                     );
                                     let _ = domain_tx.send(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
@@ -3136,6 +3488,7 @@ pub async fn run(
                                 let snap = skill_activator
                                     .snapshot_for_turn(&conversation.id)
                                     .await;
+                                let agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 start_turn(
                                     &user_msg,
                                     Vec::new(),
@@ -3154,6 +3507,7 @@ pub async fn run(
                                     &fs_storage,
                                     &storage,
                                     snap,
+                                    agent_snap,
                                 );
                                 let _ = domain_tx.send(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
@@ -4485,6 +4839,7 @@ fn start_turn(
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
     storage: &Arc<dyn StoragePort>,
     activation_set: Option<crate::domain::models::SkillActivationSet>,
+    agent_snapshot: Option<crate::domain::models::ActiveAgent>,
 ) {
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
@@ -4568,12 +4923,34 @@ fn start_turn(
     let persona_prompt = persona.system_prompt(workspace_path);
     let empty_set = crate::domain::models::SkillActivationSet::new();
     let activation = activation_set.as_ref().unwrap_or(&empty_set);
-    let system_prompt = crate::domain::services::skill_context::assemble_system_prompt(
+    let agent_body = agent_snapshot.as_ref().map(|a| a.body.as_str());
+    let system_prompt = crate::domain::services::skill_context::assemble_system_prompt_with_agent(
         &persona_prompt,
+        agent_body,
         activation,
         workspace_path,
     );
-    let tool_defs = match activation.effective_allowed_tools() {
+    let all_tool_names: Vec<String> = all_tool_defs.iter().map(|t| t.name.clone()).collect();
+    let agent_filter = agent_snapshot
+        .as_ref()
+        .and_then(|a| a.effective_tool_filter(&all_tool_names));
+    let skill_filter = activation.effective_allowed_tools();
+    let combined: Option<std::collections::HashSet<String>> = match (agent_filter, skill_filter) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(s)) => Some(s),
+        (Some(a), Some(s)) => Some(a.intersection(&s).cloned().collect()),
+    };
+    if let Some(ref allowed) = combined {
+        if allowed.is_empty() {
+            let _ = domain_tx.send(AppEvent::SystemNotice {
+                conversation_id: Some(conversation.id.clone()),
+                level: crate::domain::models::NoticeLevel::Warning,
+                message: "Active agent and skill tool filters are disjoint — no tools available for this turn".to_string(),
+            });
+        }
+    }
+    let tool_defs = match combined {
         Some(allowed) => {
             let mut filtered: Vec<_> = all_tool_defs
                 .into_iter()
@@ -4598,8 +4975,15 @@ fn start_turn(
         }
         None => all_tool_defs,
     };
+    let model = agent_snapshot
+        .as_ref()
+        .and_then(|a| {
+            let m = a.model.as_ref()?;
+            if m.is_empty() { None } else { Some(m.clone()) }
+        })
+        .unwrap_or_else(|| config.model.clone());
     let options = CompletionOptions {
-        model: config.model.clone(),
+        model,
         max_tokens: 8192,
         system_prompt,
         temperature: None,
@@ -5149,6 +5533,7 @@ fn render(
                     multiline_mode,
                     current_hint.as_deref(),
                     state.active_skill_count,
+                    state.active_agent_name.as_deref(),
                 );
                 input_box::render(
                     frame,
@@ -5344,6 +5729,15 @@ fn populate_autocomplete_suggestions(
                     is_dir: f.is_dir,
                 })
                 .collect();
+            if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+            }
+        }
+        AutocompleteKind::AgentMention => {
+            state.refresh_agent_suggestions();
+            let suggestions = state.agent_suggestions.clone();
+            state.autocomplete.suggestions = suggestions;
             if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
                 state.autocomplete.selected_index = 0;
                 state.autocomplete.scroll_offset = 0;

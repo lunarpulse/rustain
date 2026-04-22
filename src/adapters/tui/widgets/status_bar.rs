@@ -24,6 +24,7 @@ pub fn render(
     multiline_mode: bool,
     current_hint: Option<&str>,
     active_skill_count: usize,
+    active_agent_name: Option<&str>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -106,6 +107,23 @@ pub fn render(
     if active_skill_count > 0 {
         left_spans.push(Span::styled(
             format!("{}Skills: {} active", sep, active_skill_count),
+            Style::default().fg(theme.colors.accent),
+        ));
+    }
+
+    // Active agent (Story 5.4 AC7: show name when active, suppress when none)
+    if let Some(name) = active_agent_name {
+        let truncated = if name.len() > 24 {
+            let mut end = 24;
+            while !name.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &name[..end])
+        } else {
+            name.to_string()
+        };
+        left_spans.push(Span::styled(
+            format!("{}Agent: {}", sep, truncated),
             Style::default().fg(theme.colors.accent),
         ));
     }

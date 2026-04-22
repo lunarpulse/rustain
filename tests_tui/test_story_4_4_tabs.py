@@ -55,11 +55,10 @@ class TestMultiTab:
         # Switch to tab 2 — should show empty/welcome state
         tui.switch_tab(2)
         tui.wait(0.5)
-        # Tab 2 is fresh with no messages — empty state shows
-        # (Tab 1 message should no longer be visible)
-        tui.assert_screen_not_contains(
-            "Tab 1 message",
-            "Tab 1 message should not be visible when Tab 2 is active",
+        # Tab 2 is fresh with no messages — welcome screen shows
+        tui.assert_screen_contains(
+            "Welcome to Rustain",
+            "Tab 2 should show welcome screen since it has no messages",
         )
 
 

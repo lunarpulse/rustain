@@ -407,6 +407,7 @@ fn test_tui_renders_with_theme_colors() {
                     state.multiline_mode,
                     None, // current_hint
                     0,
+                    None,
                 );
             }
         })

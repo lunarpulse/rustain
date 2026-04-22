@@ -1,3 +1,5 @@
+pub mod agent_activation;
+pub mod agent_registry;
 pub mod cli;
 pub mod clipboard_adapter;
 pub mod command_registry;

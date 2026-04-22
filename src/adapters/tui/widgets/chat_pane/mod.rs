@@ -495,8 +495,8 @@ pub fn render_with_search(
         focused_tool_id: None,
     };
 
-    // Empty state: no messages and not streaming
-    if conversation.messages.is_empty() && !streaming.is_streaming {
+    // Empty state: no messages and not streaming and no feedback blocks
+    if conversation.messages.is_empty() && !streaming.is_streaming && feedback_blocks.is_empty() {
         empty_state::render(frame, area, theme);
         return empty;
     }

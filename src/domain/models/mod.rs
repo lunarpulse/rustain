@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod autocomplete;
 pub mod checkpoint;
 mod completion;
@@ -23,6 +24,11 @@ pub mod visual;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
+#[allow(unused_imports)]
+pub use agent::{
+    ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
+    validate_agent_frontmatter,
+};
 #[allow(unused_imports)]
 pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
 #[allow(unused_imports)]

@@ -18,6 +18,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
     let title = match state.kind {
         AutocompleteKind::SlashCommand => " Commands ",
         AutocompleteKind::FileMention => " Files ",
+        AutocompleteKind::AgentMention => " Agents @ ",
     };
 
     if state.suggestions.is_empty() {
@@ -140,6 +141,21 @@ fn format_suggestion<'a>(suggestion: &AutocompleteSuggestion, theme: &Theme) -> 
             let line = Line::from(vec![
                 Span::styled(
                     format!("/{}", name),
+                    Style::default()
+                        .fg(theme.colors.fg_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", description),
+                    Style::default().fg(theme.colors.fg_secondary),
+                ),
+            ]);
+            ListItem::new(line)
+        }
+        AutocompleteSuggestion::AgentMention { name, description } => {
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("@Agents/{}", name),
                     Style::default()
                         .fg(theme.colors.fg_primary)
                         .add_modifier(Modifier::BOLD),

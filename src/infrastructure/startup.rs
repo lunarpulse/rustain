@@ -129,6 +129,9 @@ pub async fn run() -> Result<()> {
     ));
     let skill_activator = Arc::new(SkillActivator::new());
     skill_activator.set_event_tx(domain_tx.clone()).await;
+    let agent_activator = Arc::new(crate::adapters::agent_activation::AgentActivator::new(
+        Arc::clone(&security),
+    ));
     let mut tools_adapter = ToolSetAdapter::new(workspace_path.clone(), Arc::clone(&tools_storage));
     tools_adapter.set_activator(Arc::clone(&skill_activator));
     let tools: Arc<dyn ToolSetPort> = Arc::new(tools_adapter);
@@ -316,6 +319,7 @@ pub async fn run() -> Result<()> {
         restored_conversation,
         recovery_prompt,
         skill_activator,
+        agent_activator,
     )
     .await;
 

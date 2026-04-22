@@ -38,6 +38,7 @@ markers = [
     "story_5_0b: Story 5-0b — Permission System Redesign",
     "story_5_1: Story 5-1 — Agent Skills Discovery & Catalog",
     "story_5_2: Story 5-2 — Agent Skills Progressive Disclosure & Execution",
+    "story_5_4: Story 5-4 — Custom Agents",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

@@ -46,7 +46,10 @@ pub enum InputAction {
     /// `args` carries an optional trailing argument for commands that support
     /// one — e.g., `/export meeting-notes.md` → `args: Some("meeting-notes.md")`.
     /// Empty / whitespace-only arguments are normalized to `None` by the parser.
-    ExecuteCommand { name: String, args: Option<String> },
+    ExecuteCommand {
+        name: String,
+        args: Option<String>,
+    },
     /// Submit message with file context and/or command context.
     /// Contains (user_text, resolved_mentions, command_name_if_any).
     SubmitWithContext {
@@ -56,7 +59,10 @@ pub enum InputAction {
     },
     /// Skill selected from autocomplete (Story 5-2 AC8).
     #[allow(dead_code)]
-    SkillSelected { name: String, arguments: String },
+    SkillSelected {
+        name: String,
+        arguments: String,
+    },
     /// Skill trust prompt: user pressed y (Story 5-2 AC4).
     SkillTrustAccept,
     /// Skill trust prompt: user pressed n (Story 5-2 AC4).
@@ -203,6 +209,21 @@ pub enum InputAction {
     /// the pending content and flash "Export cancelled".
     // Covers: Story 4-4, AC12
     CancelExportOverwrite,
+    SetActiveAgent {
+        name: String,
+        then_submit: Option<String>,
+    },
+    ClearActiveAgent {
+        then_submit: Option<String>,
+    },
+    #[allow(dead_code)]
+    UnknownAgent(String),
+    /// Agent mention submitted before background discovery finished.
+    /// The name and optional trailing text are queued in TuiState.
+    AgentDiscoveryPending {
+        name: String,
+        then_submit: Option<String>,
+    },
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -536,7 +557,18 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         .collect();
                     // Signal that autocomplete filter needs updating
                     // The actual filtering is done by the event loop which has access to registries
-                    state.autocomplete.filter_text = filter;
+                    state.autocomplete.filter_text = if state.autocomplete.kind
+                        == AutocompleteKind::FileMention
+                        && filter == "Agents/"
+                    {
+                        state.autocomplete.kind = AutocompleteKind::AgentMention;
+                        String::new()
+                    } else if state.autocomplete.kind == AutocompleteKind::AgentMention {
+                        let after_slash = filter.strip_prefix("Agents/").unwrap_or(&filter);
+                        after_slash.to_string()
+                    } else {
+                        filter
+                    };
                     state.needs_redraw = true;
                     return InputAction::Consumed;
                 }
@@ -1497,13 +1529,49 @@ fn insert_newline(state: &mut TuiState) {
 /// Submit the current input buffer as a message.
 // Covers: UX-DR77
 fn submit_message(state: &mut TuiState) -> InputAction {
-    let text = std::mem::take(&mut state.input_buffer);
+    let text = state.input_buffer.clone();
     state.input_history.push(text.clone());
     state.input_history.reset_navigation();
     state.cursor_position = 0;
     state.input_scroll_offset = 0;
     state.autocomplete.dismiss();
     state.needs_redraw = true;
+
+    let trimmed = text.trim_start();
+    if let Some(after_at) = trimmed.strip_prefix("@Agents/") {
+        let name_end = after_at
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(after_at.len());
+        let agent_name = &after_at[..name_end];
+        let trailing = after_at[name_end..].trim();
+        let then_submit = if trailing.is_empty() {
+            None
+        } else {
+            Some(trailing.to_string())
+        };
+
+        if agent_name == "default" {
+            state.input_buffer.clear();
+            return InputAction::ClearActiveAgent { then_submit };
+        }
+        if state.agent_registry.find(agent_name).is_none() {
+            if !state.agent_registry.is_discovered() {
+                state.pending_agent_activation =
+                    Some((agent_name.to_string(), then_submit.clone()));
+                return InputAction::AgentDiscoveryPending {
+                    name: agent_name.to_string(),
+                    then_submit,
+                };
+            }
+            return InputAction::UnknownAgent(agent_name.to_string());
+        }
+        state.input_buffer.clear();
+        return InputAction::SetActiveAgent {
+            name: agent_name.to_string(),
+            then_submit,
+        };
+    }
+    state.input_buffer.clear();
 
     // Check if this is a slash command
     if let Some(after_slash) = text.strip_prefix('/') {
@@ -1670,7 +1738,20 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                         .skip(trigger + 1)
                         .take(state.cursor_position.saturating_sub(trigger + 1))
                         .collect();
-                    state.autocomplete.filter_text = filter;
+                    if state.autocomplete.kind == AutocompleteKind::AgentMention
+                        && !filter.starts_with("Agents/")
+                    {
+                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                    }
+                    let filter_text = if state.autocomplete.kind == AutocompleteKind::AgentMention {
+                        filter
+                            .strip_prefix("Agents/")
+                            .unwrap_or(&filter)
+                            .to_string()
+                    } else {
+                        filter
+                    };
+                    state.autocomplete.filter_text = filter_text;
                     state.needs_redraw = true;
                 }
                 InputAction::Consumed
@@ -1716,6 +1797,17 @@ fn apply_autocomplete_selection(
             // Story 5-2 AC8: insert /{name} with trailing space so user can type arguments
             state.input_buffer = format!("/{} ", name);
             state.cursor_position = state.input_buffer.chars().count();
+            None
+        }
+        AutocompleteSuggestion::AgentMention { name, .. } => {
+            let before: String = state.input_buffer.chars().take(trigger).collect();
+            let after: String = state
+                .input_buffer
+                .chars()
+                .skip(state.cursor_position)
+                .collect();
+            state.input_buffer = format!("{}@Agents/{}{}", before, name, after);
+            state.cursor_position = trigger + 8 + name.chars().count();
             None
         }
         AutocompleteSuggestion::FilePath { path, .. } => {
@@ -2534,5 +2626,151 @@ mod tests {
         assert_eq!(state.bookmark_list_selected, 2);
         let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Up));
         assert_eq!(state.bookmark_list_selected, 1);
+    }
+
+    // ── Story 5.4: Agent dispatch tests ─────────────────────────────────────
+
+    #[test]
+    fn test_submit_at_agents_name_emits_set_active_agent() {
+        let mut state = make_state();
+        state.agent_registry = crate::adapters::agent_registry::AgentRegistry::from_agents(vec![
+            crate::domain::models::AgentDef {
+                name: "code-reviewer".to_string(),
+                description: "Reviews code".to_string(),
+                file: std::path::PathBuf::from("/tmp/.claude/agents/code-reviewer.md"),
+                allowed_tools: None,
+                exclude_tools: None,
+                model: None,
+            },
+        ]);
+        state.input_buffer = "@Agents/code-reviewer".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = submit_message(&mut state);
+        assert!(
+            matches!(&action, InputAction::SetActiveAgent { name, then_submit: None } if name == "code-reviewer"),
+            "Expected SetActiveAgent for code-reviewer, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn test_submit_at_agents_default_emits_clear_active_agent() {
+        let mut state = make_state();
+        state.input_buffer = "@Agents/default".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = submit_message(&mut state);
+        assert!(
+            matches!(action, InputAction::ClearActiveAgent { then_submit: None }),
+            "Expected ClearActiveAgent, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn test_submit_at_agents_with_trailing_text_emits_both() {
+        let mut state = make_state();
+        state.agent_registry = crate::adapters::agent_registry::AgentRegistry::from_agents(vec![
+            crate::domain::models::AgentDef {
+                name: "code-reviewer".to_string(),
+                description: "Reviews code".to_string(),
+                file: std::path::PathBuf::from("/tmp/.claude/agents/code-reviewer.md"),
+                allowed_tools: None,
+                exclude_tools: None,
+                model: None,
+            },
+        ]);
+        state.input_buffer = "@Agents/code-reviewer review src/auth.rs".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = submit_message(&mut state);
+        assert!(
+            matches!(&action, InputAction::SetActiveAgent { name, then_submit: Some(text) } if name == "code-reviewer" && text == "review src/auth.rs"),
+            "Expected SetActiveAgent with trailing text, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn test_submit_at_agents_unknown_name_emits_unknown_agent() {
+        use crate::adapters::agent_registry::AgentRegistry;
+        let mut state = make_state();
+        state.agent_registry = AgentRegistry::from_agents(vec![]);
+        state.input_buffer = "@Agents/no-such-agent".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = submit_message(&mut state);
+        assert!(
+            matches!(action, InputAction::UnknownAgent(ref name) if name == "no-such-agent"),
+            "Expected UnknownAgent, got {:?}",
+            action
+        );
+        // Buffer should be preserved for user correction
+        assert_eq!(state.input_buffer, "@Agents/no-such-agent");
+    }
+
+    #[test]
+    fn test_submit_at_agents_undiscovered_registry_queues_pending() {
+        use crate::adapters::agent_registry::AgentRegistry;
+        let mut state = make_state();
+        // Default registry from make_state is from_agents(vec![]) which is discovered=true.
+        // Replace with undiscovered registry.
+        state.agent_registry = AgentRegistry::new();
+        state.input_buffer = "@Agents/foo".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = submit_message(&mut state);
+        assert!(
+            matches!(
+                &action,
+                InputAction::AgentDiscoveryPending { name, then_submit: None } if name == "foo"
+            ),
+            "Expected AgentDiscoveryPending, got {:?}",
+            action
+        );
+        assert_eq!(
+            state.pending_agent_activation,
+            Some(("foo".to_string(), None))
+        );
+    }
+
+    #[test]
+    fn test_at_agents_mid_buffer_is_literal_text() {
+        let mut state = make_state();
+        state.input_buffer = "say @Agents/foo".to_string();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = submit_message(&mut state);
+        assert!(
+            matches!(action, InputAction::SubmitMessage { .. }),
+            "Expected normal SubmitMessage when @Agents/ is mid-buffer, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn test_typing_at_agents_slash_switches_autocomplete_kind() {
+        let mut state = make_state();
+        // Type '@'
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        // Type 'Agents/'
+        for c in "Agents/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::AgentMention);
+        assert_eq!(state.autocomplete.filter_text, "");
+    }
+
+    #[test]
+    fn test_backspace_past_slash_returns_to_file_mention() {
+        let mut state = make_state();
+        // Type '@Agents/'
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
+        for c in "Agents/".chars() {
+            let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::AgentMention);
+        // Backspace once to delete '/'
+        let _ = handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Backspace),
+        );
+        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
     }
 }

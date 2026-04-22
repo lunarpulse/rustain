@@ -266,6 +266,7 @@ impl TestHarness {
                         multiline_mode,
                         None, // current_hint
                         0,
+                        None,
                     );
 
                     input_box::render(
