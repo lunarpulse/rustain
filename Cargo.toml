@@ -73,6 +73,9 @@ pretty_assertions = "1"
 mockito = "1"
 serial_test = "3"
 async-trait = "0.1"
+# Epic 6 scaffolding (sprint-change-proposal-2026-04-24):
+# - insta: TUI snapshot testing for widgets (story 6-0d PlanApprovalCard; future widgets)
+insta = { version = "1.41", features = ["yaml"] }
 
 [features]
 default = ["anthropic", "clipboard"]
