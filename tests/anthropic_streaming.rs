@@ -670,9 +670,13 @@ data: {\"type\":\"message_stop\"}\n\
 
         let security = Arc::new(rustain::adapters::noop::NoOpSecurity);
         let tools = Arc::new(rustain::adapters::noop::NoOpToolSet);
+        let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+            16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence)
+        );
         let tool_scheduler = rustain::domain::services::tool_scheduler::ToolScheduler::new(
             security.clone(),
             tools.clone(),
+            approval_runtime,
             16,
         );
         rustain::infrastructure::runtime::turn::run_turn(

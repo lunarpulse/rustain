@@ -7,6 +7,7 @@
 //! - AC6: RawEvent projection from AppEvent
 //! - AC8: AppState construction and wiring
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -20,7 +21,8 @@ use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent, RawEventKi
 
 #[test]
 fn test_app_state_honors_raw_capacity() {
-    let (app_state, _domain_rx) = AppState::new(64);
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(64, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let (app_state, _domain_rx) = AppState::new(64, approval_runtime);
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
     let _raw_rx = app_state.event_bus.subscribe_raw();
@@ -28,7 +30,8 @@ fn test_app_state_honors_raw_capacity() {
 
 #[test]
 fn test_app_state_session_cancel_is_root_token() {
-    let (app_state, _domain_rx) = AppState::new(16);
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let (app_state, _domain_rx) = AppState::new(16, approval_runtime);
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());
 }

@@ -83,6 +83,8 @@ pub struct ColorTokens {
     pub tool_status_success: Color,
     pub tool_status_error: Color,
     pub tool_status_cancelled: Color,
+    /// Subagent attribution prefix color (AC11).
+    pub subagent_attribution: Color,
 }
 
 /// Spacing tokens for layout calculations.
@@ -236,6 +238,7 @@ impl Theme {
                 tool_status_success: Color::Rgb(0, 200, 0),
                 tool_status_error: Color::Rgb(255, 100, 100),
                 tool_status_cancelled: Color::Rgb(155, 155, 155),
+                subagent_attribution: Color::Cyan,
             },
             spacing: SpacingTokens {
                 none: 0,
@@ -435,6 +438,7 @@ impl ColorTokens {
         self.tool_status_success = mapper(self.tool_status_success);
         self.tool_status_error = mapper(self.tool_status_error);
         self.tool_status_cancelled = mapper(self.tool_status_cancelled);
+        self.subagent_attribution = mapper(self.subagent_attribution);
     }
 }
 

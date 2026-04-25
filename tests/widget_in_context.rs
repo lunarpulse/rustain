@@ -21,6 +21,7 @@ use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, FocusState, MessageRole,
     PermissionMode, StatusState, StopReason, StreamingState, ToolCallInfo,
 };
+use rustain::domain::models::tool_call::ApprovalSource;
 
 fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
     Conversation {
@@ -236,8 +237,9 @@ fn test_permission_prompt_in_full_layout() {
             );
 
             let prompt_lines = permission_prompt::render_permission_lines(
+                &ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
                 "Bash",
-                &serde_json::json!({"command": "rm -rf /tmp/test"}),
+                "rm -rf /tmp/test",
                 &theme,
                 0,
             );

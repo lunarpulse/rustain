@@ -12,8 +12,9 @@ use rustain::domain::models::tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
 use rustain::domain::models::{
-    ApprovalDecision, FileOperation, PathAccessType, PermissionMode, ToolDefinition, ToolResult,
+    FileOperation, PathAccessType, PermissionMode, ToolDefinition, ToolResult,
 };
+use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::ports::{SecurityPort, ToolSetPort};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use async_trait::async_trait;
@@ -82,7 +83,8 @@ fn ac1_enum_shape_and_serde_round_trip() {
 async fn ac2_scheduler_api_surface() {
     let security: Arc<dyn SecurityPort> = Arc::new(YoloSecurity);
     let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet { delay_ms: 0, parallel_safe: true });
-    let sched = ToolScheduler::new(security, tools, 16);
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let mut rx = sched.subscribe();
 
     let req = ToolCallRequest {
@@ -133,12 +135,33 @@ async fn ac3_transition_happy_path() {
 
 #[tokio::test]
 async fn ac3_transition_with_approval() {
-    // Normal mode + Elevated risk (Sleep is treated as Elevated in risk_for_builtin
-    // unless it's a known tool; our mock uses "Sleep" which is not a built-in,
-    // so risk_for_builtin returns ToolRisk::Standard. In Normal mode, Standard
-    // requires prompt (mode_risk_outcome returns None).)
-    let (sched, mut rx) = make_test_scheduler(PermissionMode::Normal, 0);
-    let result = run_one(&sched, "Sleep", serde_json::json!({})).await;
+    // Normal mode + Elevated risk (Sleep is unknown => Elevated => Prompt)
+    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
+        mode: PermissionMode::Normal,
+    });
+    let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet {
+        delay_ms: 0,
+        parallel_safe: true,
+    });
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime.clone(), 16);
+    let mut rx = sched.subscribe();
+
+    // Subscribe to approval events BEFORE spawning run_one
+    let mut events = approval_runtime.subscribe();
+    let sched2 = sched.clone();
+    let handle = tokio::spawn(async move {
+        run_one(&sched2, "Sleep", serde_json::json!({})).await
+    });
+
+    let event = events.recv().await.unwrap();
+    let id = match event {
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        _ => panic!("expected Requested event"),
+    };
+    approval_runtime.resolve(&id, rustain::domain::models::ApprovalOutcome::Once).await;
+
+    let result = handle.await.unwrap();
     assert!(matches!(result, ToolCall::Success { .. }));
     assert_sequence(
         &mut rx,
@@ -152,7 +175,8 @@ async fn ac3_transition_invalid_input_fails_fast() {
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
         mode: PermissionMode::Yolo,
     });
-    let sched = ToolScheduler::new(security, tools, 16);
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let mut rx = sched.subscribe();
     let result = run_one(&sched, "Sleep", serde_json::json!({})).await;
     assert!(matches!(result, ToolCall::Error { .. }));
@@ -175,7 +199,8 @@ async fn ac3_transition_cancel_during_execute() {
         started: started.clone(),
     });
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity { mode: PermissionMode::Yolo });
-    let sched = ToolScheduler::new(security, tools, 64);
+    let approval_runtime = ApprovalRuntime::new(64, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 64);
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     let req = ToolCallRequest {
@@ -215,7 +240,8 @@ async fn ac3_transition_cancel_during_approval() {
         delay_ms: 0,
         parallel_safe: true,
     });
-    let sched = ToolScheduler::new(security, tools, 16);
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
@@ -245,14 +271,32 @@ async fn ac3_transition_cancel_during_approval() {
 
 #[tokio::test]
 async fn ac3_transition_user_rejection_with_feedback() {
-    let security: Arc<dyn SecurityPort> = Arc::new(DenyFeedbackSecurity);
+    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
+        mode: PermissionMode::Normal,
+    });
     let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet {
         delay_ms: 0,
         parallel_safe: true,
     });
-    let sched = ToolScheduler::new(security, tools, 16);
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime.clone(), 16);
     let mut rx = sched.subscribe();
-    let result = run_one(&sched, "Sleep", serde_json::json!({})).await;
+
+    // Subscribe to approval events BEFORE spawning run_one
+    let mut events = approval_runtime.subscribe();
+    let sched2 = sched.clone();
+    let handle = tokio::spawn(async move {
+        run_one(&sched2, "Sleep", serde_json::json!({})).await
+    });
+
+    let event = events.recv().await.unwrap();
+    let id = match event {
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        _ => panic!("expected Requested event"),
+    };
+    approval_runtime.resolve(&id, rustain::domain::models::ApprovalOutcome::Reject { feedback: Some("nope".into()) }).await;
+
+    let result = handle.await.unwrap();
     assert!(matches!(result, ToolCall::Error { .. }));
     if let ToolCall::Error { error, .. } = &result {
         assert!(
@@ -310,7 +354,8 @@ async fn ac4_sequential_when_any_unsafe() {
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
         mode: PermissionMode::Yolo,
     });
-    let sched = ToolScheduler::new(security, tools, 16);
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let batch: Vec<ToolCallRequest> = (0..3)
         .map(|i| ToolCallRequest {
             id: format!("tc-{}", i),
@@ -378,8 +423,32 @@ async fn ac6_policy_deny_emits_error() {
 
 #[tokio::test]
 async fn ac6_policy_ask_routes_to_approval_runtime() {
-    let (sched, mut rx) = make_test_scheduler(PermissionMode::Normal, 0);
-    let result = run_one(&sched, "Sleep", serde_json::json!({})).await;
+    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
+        mode: PermissionMode::Normal,
+    });
+    let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet {
+        delay_ms: 0,
+        parallel_safe: true,
+    });
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime.clone(), 16);
+    let mut rx = sched.subscribe();
+
+    // Subscribe to approval events BEFORE spawning run_one
+    let mut events = approval_runtime.subscribe();
+    let sched2 = sched.clone();
+    let handle = tokio::spawn(async move {
+        run_one(&sched2, "Sleep", serde_json::json!({})).await
+    });
+
+    let event = events.recv().await.unwrap();
+    let id = match event {
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        _ => panic!("expected Requested event"),
+    };
+    approval_runtime.resolve(&id, rustain::domain::models::ApprovalOutcome::Once).await;
+
+    let result = handle.await.unwrap();
     assert!(matches!(result, ToolCall::Success { .. }));
     assert_sequence(
         &mut rx,
@@ -416,7 +485,8 @@ fn make_test_scheduler(
         delay_ms,
         parallel_safe: true,
     });
-    let sched = ToolScheduler::new(security, tools, 16);
+    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let rx = sched.subscribe();
     (sched, rx)
 }
@@ -486,13 +556,6 @@ impl SecurityPort for MockSecurity {
     ) -> Result<PathAccessType, PermissionError> {
         Ok(PathAccessType::Workspace)
     }
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<ApprovalDecision, PermissionError> {
-        Ok(ApprovalDecision::Allow)
-    }
     fn current_mode(&self) -> PermissionMode {
         self.mode
     }
@@ -518,13 +581,6 @@ impl SecurityPort for DenyFeedbackSecurity {
     ) -> Result<PathAccessType, PermissionError> {
         Ok(PathAccessType::Workspace)
     }
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<ApprovalDecision, PermissionError> {
-        Ok(ApprovalDecision::DenyWithFeedback { feedback: "nope".to_string() })
-    }
     fn current_mode(&self) -> PermissionMode {
         PermissionMode::Normal
     }
@@ -542,14 +598,6 @@ impl SecurityPort for DelaySecurity {
         _op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
         Ok(PathAccessType::Workspace)
-    }
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<ApprovalDecision, PermissionError> {
-        tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-        Ok(ApprovalDecision::Allow)
     }
     fn current_mode(&self) -> PermissionMode {
         self.mode
@@ -570,13 +618,6 @@ impl SecurityPort for YoloSecurity {
         _op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
         Ok(PathAccessType::Workspace)
-    }
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<ApprovalDecision, PermissionError> {
-        Ok(ApprovalDecision::Allow)
     }
     fn current_mode(&self) -> PermissionMode {
         PermissionMode::Yolo

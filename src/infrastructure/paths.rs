@@ -12,7 +12,13 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 /// Resolve the `~/.config/rustain/` config directory, creating it if it doesn't exist.
+/// Override with `RUSTAIN_CONFIG_DIR` env var for testing/CI.
 pub fn config_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RUSTAIN_CONFIG_DIR") {
+        let path = PathBuf::from(dir);
+        std::fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
     let dir = dirs::config_dir()
         .context("Could not determine config directory")?
         .join("rustain");

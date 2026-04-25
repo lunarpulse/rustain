@@ -3,8 +3,10 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::theme::Theme;
+use crate::domain::models::tool_call::ApprovalSource;
 
 /// Extract a short summary of the tool input for display.
+#[cfg(test)]
 fn tool_display(tool_name: &str, tool_input: &serde_json::Value) -> String {
     match tool_name {
         "Bash" | "bash" => tool_input
@@ -51,29 +53,52 @@ fn tool_display(tool_name: &str, tool_input: &serde_json::Value) -> String {
 /// ┃ [n] Deny   [f] Deny + feedback                      ┃
 /// ```
 pub fn render_permission_lines<'a>(
+    source: &ApprovalSource,
     tool_name: &str,
-    tool_input: &serde_json::Value,
+    tool_input: &str,
     theme: &'a Theme,
     queue_len: usize,
 ) -> Vec<Line<'a>> {
-    let display = tool_display(tool_name, tool_input);
+    let display = if tool_input.is_empty() {
+        String::new()
+    } else {
+        tool_input.to_string()
+    };
+
+    // Subagent/background prefix (AC11)
+    let prefix = match source {
+        ApprovalSource::ForegroundSubagent { subagent_type, .. } => {
+            format!("[subagent: {}] ", subagent_type)
+        }
+        ApprovalSource::BackgroundAgent { subagent_type, .. } => {
+            format!("[background: {}] ", subagent_type)
+        }
+        ApprovalSource::ForegroundTurn { .. } => String::new(),
+    };
+
     let border_style = Style::default()
         .fg(theme.colors.permission_border)
         .add_modifier(Modifier::BOLD);
 
     let mut lines = Vec::new();
 
-    // Line 1: tool name + command + optional queue indicator (AC6)
+    // Line 1: optional prefix + tool name + command + optional queue indicator (AC6)
     let mut line1_spans = vec![
         Span::styled("┃ ", border_style),
-        Span::styled(
-            format!("{}: ", tool_name),
-            Style::default()
-                .fg(theme.colors.tool_name)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(display, Style::default().fg(theme.colors.fg_primary)),
     ];
+    if !prefix.is_empty() {
+        line1_spans.push(Span::styled(
+            prefix,
+            Style::default().fg(theme.colors.subagent_attribution),
+        ));
+    }
+    line1_spans.push(Span::styled(
+        format!("{}: ", tool_name),
+        Style::default()
+            .fg(theme.colors.tool_name)
+            .add_modifier(Modifier::BOLD),
+    ));
+    line1_spans.push(Span::styled(display, Style::default().fg(theme.colors.fg_primary)));
     if queue_len > 0 {
         line1_spans.push(Span::styled(
             format!("  [{} more queued]", queue_len),
@@ -179,16 +204,12 @@ pub fn render_blocked_notice_lines<'a>(reason: &str, theme: &'a Theme) -> Vec<Li
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::tool_call::ApprovalSource;
 
     #[test]
     fn test_permission_prompt_renders_three_lines() {
         let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines = render_permission_lines(
-            "Bash",
-            &serde_json::json!({"command": "cargo test"}),
-            &theme,
-            0,
-        );
+        let lines =             render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "cargo test", &theme, 0);
         assert_eq!(lines.len(), 3);
 
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -214,7 +235,7 @@ mod tests {
     fn test_permission_prompt_five_action_glyphs() {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let lines =
-            render_permission_lines("Bash", &serde_json::json!({"command": "ls"}), &theme, 0);
+            render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "ls", &theme, 0);
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -231,7 +252,7 @@ mod tests {
     fn test_permission_prompt_queue_indicator_present() {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let lines =
-            render_permission_lines("Bash", &serde_json::json!({"command": "ls"}), &theme, 3);
+            render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "ls", &theme, 3);
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             line1.contains("[3 more queued]"),
@@ -244,7 +265,7 @@ mod tests {
     fn test_permission_prompt_queue_indicator_absent_when_zero() {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let lines =
-            render_permission_lines("Bash", &serde_json::json!({"command": "ls"}), &theme, 0);
+            render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "ls", &theme, 0);
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             !line1.contains("more queued"),

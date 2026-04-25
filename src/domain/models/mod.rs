@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod approval;
 pub mod autocomplete;
 pub mod checkpoint;
 mod completion;
@@ -55,8 +56,10 @@ pub use notice::{
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
+pub use approval::{ApprovalOutcome, ApprovalScope};
+#[allow(unused_imports)]
 pub use permission::{
-    ApprovalDecision, FileOperation, PathAccessType, PermissionMode, PermissionRule, ToolRisk,
+    FileOperation, PathAccessType, PermissionMode, ToolRisk,
     risk_for_builtin,
 };
 #[allow(unused_imports)]

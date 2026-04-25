@@ -131,5 +131,5 @@ Selective — provider adapters, tools, MCP only:
 - **Capability Provider Architecture:** Protocol-agnostic extensibility. Future protocols = implement one trait
 - **Ownership topology:** Hierarchical ownership + peer networking + self-destruct-on-abandonment
 - **Event loop:** `tokio::select!` on unified `AppEvent` channel
-- **Permission bridge:** `oneshot` channel between streaming task and UI
+- **ApprovalRuntime pub/sub:** `tokio::sync::broadcast` channel between `ToolScheduler` and TUI event loop; `ApprovalRuntime` holds pending requests and session auto-allow set; resolves via `oneshot` per request
 - **Tracing:** routed to `~/.rustain/rustain.log` (stdout owned by ratatui)

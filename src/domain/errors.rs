@@ -43,6 +43,9 @@ pub enum DomainError {
     #[error(transparent)]
     TurnQueue(#[from] TurnQueueError),
 
+    #[error(transparent)]
+    ApprovalPersistence(#[from] ApprovalPersistenceError),
+
     #[error("Startup error: {0}")]
     Startup(String),
 
@@ -209,4 +212,17 @@ pub enum ClipboardError {
     Backend(String),
     #[error("clipboard read timed out")]
     Timeout,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ApprovalPersistenceError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("TOML deserialization error: {0}")]
+    Toml(#[from] toml::de::Error),
+
+    #[error("TOML serialization error: {0}")]
+    TomlSer(#[from] toml::ser::Error),
 }

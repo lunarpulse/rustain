@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::infrastructure::{paths, terminal_info, utils};
+use crate::infrastructure::{paths, permission_rules, terminal_info, utils};
 
 // ──────────────────────────────────────────────────────────────────
 // Health check framework (Task 2)
@@ -55,6 +55,7 @@ fn build_check_list(terminal_detail: bool) -> Vec<Box<dyn HealthCheck>> {
             config_dir: None,
         }),
     ];
+    checks.push(Box::new(PermissionRulesCheck { workspace: None }));
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
     }
@@ -781,6 +782,80 @@ impl HealthCheck for SessionStorageCheck {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────
+// Permission rules check (Story 6-0c)
+// ──────────────────────────────────────────────────────────────────
+
+pub struct PermissionRulesCheck {
+    pub workspace: Option<std::path::PathBuf>,
+}
+
+#[async_trait]
+impl HealthCheck for PermissionRulesCheck {
+    fn name(&self) -> &str {
+        "Permission rules"
+    }
+
+    async fn run(&self) -> CheckResult {
+        let workspace = match &self.workspace {
+            Some(w) => w.clone(),
+            None => match paths::workspace_dir() {
+                Ok(w) => w,
+                Err(_) => {
+                    return CheckResult {
+                        name: self.name().to_string(),
+                        status: CheckStatus::Warning,
+                        message: "cannot determine workspace directory".to_string(),
+                        fix: None,
+                    };
+                }
+            },
+        };
+
+        let user_config = match paths::config_dir() {
+            Ok(d) => d.join("config.toml"),
+            Err(_) => {
+                return CheckResult {
+                    name: self.name().to_string(),
+                    status: CheckStatus::Warning,
+                    message: "cannot determine config directory".to_string(),
+                    fix: None,
+                };
+            }
+        };
+        let workspace_rules = workspace.join(".rustain").join("permissions.toml");
+
+        match permission_rules::load_rules(&user_config, &workspace_rules) {
+            Ok(ruleset) => {
+                if ruleset.has_catchall() {
+                    CheckResult {
+                        name: self.name().to_string(),
+                        status: CheckStatus::Pass,
+                        message: "catch-all rule present".to_string(),
+                        fix: None,
+                    }
+                } else {
+                    CheckResult {
+                        name: self.name().to_string(),
+                        status: CheckStatus::Warning,
+                        message: "no catch-all rule in permissions.toml".to_string(),
+                        fix: Some(format!(
+                            r#"Add a catch-all [[rules]] pattern = "*" action = "ask" scope = "tool" to {}"#,
+                            workspace_rules.display()
+                        )),
+                    }
+                }
+            }
+            Err(_) => CheckResult {
+                name: self.name().to_string(),
+                status: CheckStatus::Warning,
+                message: "failed to load permission rules".to_string(),
+                fix: Some("Check ~/.rustain/config.toml and workspace/.rustain/permissions.toml".to_string()),
+            },
+        }
+    }
+}
+
 // Tests
 // ──────────────────────────────────────────────────────────────────
 

@@ -10,12 +10,14 @@ use futures::stream::BoxStream;
 
 use crate::domain::errors::{PermissionError, ProviderError, StorageError, ToolError};
 use crate::domain::models::{
-    ApprovalDecision, CompletionOptions, Conversation, ConversationSummary, FileOperation, Message,
+    CompletionOptions, Conversation, ConversationSummary, FileOperation, Message,
     PathAccessType, PermissionMode, StreamChunk, ToolDefinition, ToolResult,
 };
+use crate::domain::models::ApprovalScope;
+use crate::domain::services::approval_runtime::SessionApprovalSet;
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, ProviderPort, SchedulerPort, SecurityPort,
-    SessionPort, StoragePort, ToolSetPort,
+    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, ProviderPort,
+    SchedulerPort, SecurityPort, SessionPort, StoragePort, ToolSetPort,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -82,14 +84,6 @@ impl SecurityPort for NoOpSecurity {
         _op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
         Ok(PathAccessType::Workspace)
-    }
-
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<ApprovalDecision, PermissionError> {
-        Ok(ApprovalDecision::Allow)
     }
 
     fn current_mode(&self) -> PermissionMode {
@@ -167,3 +161,19 @@ impl SchedulerPort for NoOpScheduler {}
 pub struct NoOpContext;
 
 impl ContextPort for NoOpContext {}
+
+// ── ApprovalPersistencePort ─────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct NoOpApprovalPersistence;
+
+#[async_trait]
+impl ApprovalPersistencePort for NoOpApprovalPersistence {
+    async fn load(&self) -> Result<SessionApprovalSet, crate::domain::errors::ApprovalPersistenceError> {
+        Ok(SessionApprovalSet::default())
+    }
+
+    async fn save(&self, _scope: ApprovalScope) -> Result<(), crate::domain::errors::ApprovalPersistenceError> {
+        Ok(())
+    }
+}

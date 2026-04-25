@@ -1,3 +1,4 @@
+pub mod approval_runtime;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;
 pub mod command_normalize;

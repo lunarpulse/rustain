@@ -20,17 +20,19 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::tool_call::{
-    ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
+    ApprovalSource, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
 use crate::domain::models::ActiveSkill;
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use crate::domain::services::permission_chain;
+use crate::domain::services::approval_runtime::ApprovalRuntime;
 
 /// Schedules and executes tool calls with lifecycle event broadcast.
 pub struct ToolScheduler {
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     events: broadcast::Sender<ToolCallTransition>,
+    approval_runtime: Arc<ApprovalRuntime>,
 }
 
 impl ToolScheduler {
@@ -40,6 +42,7 @@ impl ToolScheduler {
     pub fn new(
         security: Arc<dyn SecurityPort>,
         tools: Arc<dyn ToolSetPort>,
+        approval_runtime: Arc<ApprovalRuntime>,
         event_capacity: usize,
     ) -> Arc<Self> {
         let cap = if event_capacity == 0 {
@@ -53,6 +56,7 @@ impl ToolScheduler {
             security,
             tools,
             events,
+            approval_runtime,
         })
     }
 
@@ -117,10 +121,7 @@ impl ToolScheduler {
         active_skills: Option<Vec<ActiveSkill>>,
     ) -> ToolCall {
         let id = req.id.clone();
-        let conversation_id = match &source {
-            ApprovalSource::ForegroundTurn { conversation_id } => conversation_id.clone(),
-            // 6-0c: ForegroundSubagent / BackgroundAgent extract from their fields.
-        };
+        let conversation_id = source.conversation_id().to_string();
         let now_secs = chrono::Utc::now().timestamp();
 
         // Phase 1: Validating
@@ -158,21 +159,7 @@ impl ToolScheduler {
         };
         self.emit(&conversation_id, &call);
 
-        // Phase 3: Decide whether AwaitingApproval is needed (forward-compat for 6-0c)
-        let mode = self.security.current_mode();
-        let risk = crate::domain::models::risk_for_builtin(&req.tool_name);
-        let needs_prompt = permission_chain::mode_risk_outcome(mode, risk).is_none();
-
-        if needs_prompt {
-            let call = ToolCall::AwaitingApproval {
-                id: id.clone(),
-                request: req.clone(),
-                approval_id: RequestId::default(), // 6-0c: real ID from ApprovalRuntime
-            };
-            self.emit(&conversation_id, &call);
-        }
-
-        // Resolve policy via existing chain (handles blocklist + workspace + mode×risk + prompt)
+        // Phase 3: Permission chain check
         let decision_fut = permission_chain::check(
             self.security.as_ref(),
             &req.tool_name,
@@ -182,10 +169,10 @@ impl ToolScheduler {
         let decision = tokio::select! {
             d = decision_fut => d,
             _ = cancel.cancelled() => {
-                // TODO(6-0c): ApprovalRuntime::cancel_by_source(&source, CancelReason::SourceAborted).await;
+                self.approval_runtime.cancel_by_source(&source, crate::domain::services::approval_runtime::CancelReason::SourceAborted).await;
                 return self.terminal(&conversation_id, ToolCall::Cancelled {
                     id, request: req,
-                    reason: if needs_prompt { "cancelled-during-approval".into() } else { "cancelled-during-policy".into() },
+                    reason: "cancelled-during-policy".into(),
                 });
             }
         };
@@ -201,28 +188,66 @@ impl ToolScheduler {
                     },
                 );
             }
-            DenyWithFeedback(feedback) => {
-                let payload = permission_chain::format_feedback_message(&feedback);
-                return self.terminal(
-                    &conversation_id,
-                    ToolCall::Error {
-                        id,
-                        request: req,
-                        error: payload,
+            Allow => { /* proceed */ }
+            Prompt { server_id, path_hint } => {
+                let risk = crate::domain::models::risk_for_builtin(&req.tool_name);
+
+                let (approval_id, rx) = self.approval_runtime.request(
+                    source.clone(),
+                    req.tool_name.clone(),
+                    req.input.clone(),
+                    risk,
+                    server_id.as_deref(),
+                    path_hint.as_deref(),
+                ).await;
+
+                if let Some(ref real_id) = approval_id {
+                    let call = ToolCall::AwaitingApproval {
+                        id: id.clone(),
+                        request: req.clone(),
+                        approval_id: real_id.clone(),
+                    };
+                    self.emit(&conversation_id, &call);
+                }
+
+                let outcome = tokio::select! {
+                    o = rx => match o {
+                        Ok(o) => o,
+                        Err(_) => {
+                            return self.terminal(&conversation_id, ToolCall::Cancelled {
+                                id, request: req, reason: "approval-channel-closed".into()
+                            });
+                        }
                     },
-                );
+                    _ = cancel.cancelled() => {
+                        self.approval_runtime.cancel_by_source(&source, crate::domain::services::approval_runtime::CancelReason::SourceAborted).await;
+                        return self.terminal(&conversation_id, ToolCall::Cancelled {
+                            id, request: req, reason: "cancelled-during-approval".into()
+                        });
+                    }
+                };
+
+                match outcome {
+                    crate::domain::models::ApprovalOutcome::Once |
+                    crate::domain::models::ApprovalOutcome::AlwaysTool { .. } |
+                    crate::domain::models::ApprovalOutcome::AlwaysServer { .. } |
+                    crate::domain::models::ApprovalOutcome::AlwaysAndSave { .. } => { /* proceed */ }
+                    crate::domain::models::ApprovalOutcome::Reject { feedback } => {
+                        let error = match feedback {
+                            Some(text) => permission_chain::format_feedback_message(&text),
+                            None => "Permission denied by user".to_string(),
+                        };
+                        return self.terminal(&conversation_id, ToolCall::Error {
+                            id, request: req, error,
+                        });
+                    }
+                    crate::domain::models::ApprovalOutcome::Cancel => {
+                        return self.terminal(&conversation_id, ToolCall::Cancelled {
+                            id, request: req, reason: "user-cancel".into()
+                        });
+                    }
+                }
             }
-            Cancel => {
-                return self.terminal(
-                    &conversation_id,
-                    ToolCall::Cancelled {
-                        id,
-                        request: req,
-                        reason: "user-cancel".into(),
-                    },
-                );
-            }
-            Allow | AlwaysAllow => { /* proceed */ }
         }
 
         // Phase 4: Executing
@@ -300,15 +325,6 @@ mod tests {
             self.mode
         }
 
-        async fn request_permission(
-            &self,
-            _tool_name: &str,
-            _input: &serde_json::Value,
-        ) -> Result<crate::domain::models::ApprovalDecision, crate::domain::errors::PermissionError>
-        {
-            Ok(crate::domain::models::ApprovalDecision::Allow)
-        }
-
         fn check_blocklist(&self, _command: &str) -> Result<(), crate::domain::errors::PermissionError> {
             Ok(())
         }
@@ -367,7 +383,8 @@ mod tests {
             parallel_safe,
             delay_ms,
         });
-        ToolScheduler::new(security, tools, 16)
+        let approval_runtime = ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
+        ToolScheduler::new(security, tools, approval_runtime, 16)
     }
 
     #[tokio::test]
@@ -505,7 +522,8 @@ mod tests {
             parallel_safe: false,
             delay_ms: 50,
         });
-        let sched = ToolScheduler::new(security, tools, 16);
+        let approval_runtime = ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
+        let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
         let batch: Vec<ToolCallRequest> = (0..3)
             .map(|i| ToolCallRequest {
                 id: format!("t{}", i),

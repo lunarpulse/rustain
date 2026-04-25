@@ -20,19 +20,46 @@ pub struct ToolCallResult {
     pub duration_ms: u64,
 }
 
-/// Placeholder newtype for an approval request identifier.
-/// Will be populated by `ApprovalRuntime::request` in Story 6-0c.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Newtype for an approval request identifier.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
+
+impl RequestId {
+    /// Generate a fresh 12-character URL-safe ID.
+    pub fn new() -> Self {
+        Self(nanoid::nanoid!(12))
+    }
+}
 
 /// Source of an approval request.
 ///
-/// `#[non_exhaustive]` so 6-0c/10-5 can add `ForegroundSubagent` and
-/// `BackgroundAgent` without breaking existing match sites.
+/// `#[non_exhaustive]` so 14-1 (A2A peer agents) can add a `RemotePeer`
+/// variant without breaking match sites.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApprovalSource {
     ForegroundTurn { conversation_id: String },
+    ForegroundSubagent {
+        conversation_id: String,
+        parent_tool_call_id: String,
+        subagent_type: String,
+    },
+    BackgroundAgent {
+        conversation_id: String,
+        task_id: String,
+        subagent_type: String,
+    },
+}
+
+impl ApprovalSource {
+    /// Return the conversation_id from any variant.
+    pub fn conversation_id(&self) -> &str {
+        match self {
+            ApprovalSource::ForegroundTurn { conversation_id } => conversation_id,
+            ApprovalSource::ForegroundSubagent { conversation_id, .. } => conversation_id,
+            ApprovalSource::BackgroundAgent { conversation_id, .. } => conversation_id,
+        }
+    }
 }
 
 /// 7-variant discriminated-union FSM for a single tool call lifecycle.
@@ -242,7 +269,7 @@ mod tests {
         let req = sample_request();
         assert!(!ToolCall::Validating { id: "a".into(), request: req.clone(), started_at: 0 }.is_terminal());
         assert!(!ToolCall::Scheduled { id: "a".into(), request: req.clone() }.is_terminal());
-        assert!(!ToolCall::AwaitingApproval { id: "a".into(), request: req.clone(), approval_id: RequestId::default() }.is_terminal());
+        assert!(!ToolCall::AwaitingApproval { id: "a".into(), request: req.clone(), approval_id: RequestId("req-default".into()) }.is_terminal());
         assert!(!ToolCall::Executing { id: "a".into(), request: req.clone(), started_at: 0 }.is_terminal());
         assert!(ToolCall::Success { id: "a".into(), request: req.clone(), result: ToolCallResult { output: "o".into(), is_error: false, duration_ms: 0 } }.is_terminal());
         assert!(ToolCall::Error { id: "a".into(), request: req.clone(), error: "e".into() }.is_terminal());
@@ -255,7 +282,7 @@ mod tests {
         let cases: Vec<(ToolCall, &'static str)> = vec![
             (ToolCall::Validating { id: "a".into(), request: req.clone(), started_at: 0 }, "⋯ Validating"),
             (ToolCall::Scheduled { id: "a".into(), request: req.clone() }, "⧖ Scheduled"),
-            (ToolCall::AwaitingApproval { id: "a".into(), request: req.clone(), approval_id: RequestId::default() }, "? Awaiting approval"),
+            (ToolCall::AwaitingApproval { id: "a".into(), request: req.clone(), approval_id: RequestId("req-default".into()) }, "? Awaiting approval"),
             (ToolCall::Executing { id: "a".into(), request: req.clone(), started_at: 0 }, "● Executing"),
             (ToolCall::Success { id: "a".into(), request: req.clone(), result: ToolCallResult { output: "o".into(), is_error: false, duration_ms: 0 } }, "✓ Success"),
             (ToolCall::Error { id: "a".into(), request: req.clone(), error: "e".into() }, "✗ Error"),
@@ -272,5 +299,20 @@ mod tests {
         let call = ToolCall::Executing { id: "xyz".into(), request: req.clone(), started_at: 0 };
         assert_eq!(call.id(), "xyz");
         assert_eq!(call.request().tool_name, "Read");
+    }
+
+    #[test]
+    fn approval_source_serde_roundtrip() {
+        let variants = vec![
+            ApprovalSource::ForegroundTurn { conversation_id: "conv-1".into() },
+            ApprovalSource::ForegroundSubagent { conversation_id: "conv-2".into(), parent_tool_call_id: "tc-1".into(), subagent_type: "explore".into() },
+            ApprovalSource::BackgroundAgent { conversation_id: "conv-3".into(), task_id: "task-1".into(), subagent_type: "general".into() },
+        ];
+        for original in variants {
+            let json = serde_json::to_string(&original).unwrap();
+            let back: ApprovalSource = serde_json::from_str(&json).unwrap();
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2, "round-trip mismatch for {:?}", original);
+        }
     }
 }

@@ -44,6 +44,7 @@ pub enum RawEventKind {
     ModeChanged(PermissionMode),
     SystemNotice { level: NoticeLevel, message: String },
     Tool(ToolCallTransition),
+    Approval(crate::domain::services::approval_runtime::ApprovalRuntimeEvent),
 }
 
 pub struct EventBus {
@@ -98,6 +99,17 @@ impl RawEvent {
                 timestamp_ms: now,
                 kind: RawEventKind::Tool(transition.clone()),
             },
+            AppEvent::ApprovalRuntimeEventBridged { event } => {
+                let conv_id = match event {
+                    crate::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { source, .. } => Some(source.conversation_id().to_string()),
+                    _ => None,
+                };
+                RawEvent {
+                    conversation_id: conv_id,
+                    timestamp_ms: now,
+                    kind: RawEventKind::Approval(event.clone()),
+                }
+            }
             AppEvent::Tick
             | AppEvent::Resize(..)
             | AppEvent::InputEvent(..)

@@ -8,8 +8,10 @@ use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::ImageAttachment;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
+use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::{
-    ApprovalDecision, FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
+    ToolRisk,
+    FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
 };
 use crate::domain::services::cross_search::CrossSearchResult;
 use crate::domain::services::search::SearchMatch;
@@ -19,9 +21,11 @@ use super::theme::Theme;
 
 /// Pending permission request awaiting user response.
 pub struct PendingPermission {
+    pub id: RequestId,
+    pub source: ApprovalSource,
     pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    pub response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
+    pub tool_input: String,
+    pub risk: ToolRisk,
 }
 
 /// State for the permission feedback mini-input (AC5).
@@ -62,7 +66,7 @@ pub struct PendingSkillActivation {
 /// Queue for permission requests that arrive while another is being displayed.
 #[derive(Default)]
 pub struct PermissionQueue {
-    queue: VecDeque<PendingPermission>,
+    pub(crate) queue: VecDeque<PendingPermission>,
 }
 
 impl PermissionQueue {
@@ -83,15 +87,8 @@ impl PermissionQueue {
         self.queue.len()
     }
 
-    /// Drain all queued requests matching the given tool_name (AC4 batch sweep).
-    /// Returns the drained requests for auto-responding.
-    pub fn drain_matching(&mut self, tool_name: &str) -> Vec<PendingPermission> {
-        let (matching, remaining): (VecDeque<_>, VecDeque<_>) = std::mem::take(&mut self.queue)
-            .into_iter()
-            .partition(|p| p.tool_name == tool_name);
-        self.queue = remaining;
-        matching.into_iter().collect()
-    }
+    // NOTE: drain_matching removed in 6-0c — the ApprovalRuntime fast-path
+    // handles batch sweep automatically after session-always resolve.
 }
 
 /// Direction for boundary navigation.

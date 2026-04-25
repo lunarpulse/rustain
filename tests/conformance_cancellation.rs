@@ -202,7 +202,8 @@ async fn ac3_cancellation_cancels_pending_approval() {
 async fn ac4_signal_cancel_before_shutdown() {
     use rustain::infrastructure::runtime::app_state::AppState;
 
-    let (app_state, mut domain_rx) = AppState::new(16);
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let (app_state, _domain_rx) = AppState::new(16, approval_runtime);
 
     app_state.session_cancel.cancel();
 

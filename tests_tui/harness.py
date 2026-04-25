@@ -154,15 +154,26 @@ class RustainTUI:
             # Copy .env so the API key is available
             if ENV_FILE.exists():
                 shutil.copy2(ENV_FILE, self._workspace_path / ".env")
-            # Pre-create .claude/settings.json with AlwaysAllow for
-            # common tools so tests don't hang on permission prompts.
-            settings_dir = self._workspace_path / ".claude"
-            settings_dir.mkdir(parents=True, exist_ok=True)
+            # Pre-create .rustain/config.toml (new 6-0c format) for
+            # session-level auto-allow rules.  This is what ApprovalRuntime
+            # loads at startup, so tests control permissions via this file.
             allow_list = (
                 self.allowed_tools
                 if self.allowed_tools is not None
                 else ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
             )
+            rustain_dir = self._workspace_path / ".rustain"
+            rustain_dir.mkdir(parents=True, exist_ok=True)
+            (rustain_dir / "config.toml").write_text(
+                "[permissions]\n"
+                + f"always_tools = {json.dumps(allow_list)}\n"
+            )
+            # Empty workspace rules file so load_rules() doesn't error.
+            (rustain_dir / "permissions.toml").write_text("")
+            # Keep .claude/settings.json for backward compatibility with
+            # other code that may still read it (doctor, init, etc.).
+            settings_dir = self._workspace_path / ".claude"
+            settings_dir.mkdir(parents=True, exist_ok=True)
             (settings_dir / "settings.json").write_text(
                 json.dumps({"permissions": {"allow": allow_list}}) + "\n"
             )
@@ -175,6 +186,10 @@ class RustainTUI:
             self._log_line_offset = sum(1 for _ in log.open())
 
         env = _load_env()
+        # Redirect rustain's config_dir() to the test workspace so
+        # ApprovalRuntime::load_session() reads from the test's
+        # .rustain/config.toml instead of the developer's ~/.config/rustain/.
+        env["RUSTAIN_CONFIG_DIR"] = str(self._workspace_path / ".rustain")
         args = [str(BINARY)]
         if self.fresh:
             args.append("--new")

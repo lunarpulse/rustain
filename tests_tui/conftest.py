@@ -40,6 +40,7 @@ def pytest_configure(config):
         "story_5_4: Story 5-4 — Custom Agents",
         "story_6_0a: Story 6-0a — Cancellation Token Tree & Dual-Channel EventBus",
         "story_6_0b: Story 6-0b — ToolScheduler with ToolCall 7-Variant FSM",
+        "story_6_0c: Story 6-0c — ApprovalRuntime Pub/Sub",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)

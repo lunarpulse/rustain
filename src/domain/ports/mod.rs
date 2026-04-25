@@ -1,6 +1,7 @@
 // Port traits — used by adapters (noop.rs, future real adapters) and services.
 // Suppress unused warnings: traits are consumed by adapter impls, not by domain code.
 #[allow(unused_imports)]
+mod approval_persistence;
 mod channel;
 #[allow(unused_imports)]
 mod clipboard;
@@ -23,6 +24,7 @@ mod storage;
 #[allow(unused_imports)]
 mod toolset;
 
+pub use approval_persistence::ApprovalPersistencePort;
 pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use context::ContextPort;

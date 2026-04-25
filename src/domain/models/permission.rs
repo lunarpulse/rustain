@@ -42,29 +42,6 @@ pub fn risk_for_builtin(tool_name: &str) -> ToolRisk {
     }
 }
 
-/// User's decision on a permission request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalDecision {
-    Allow,
-    AlwaysAllow,
-    /// Allow for this call + register session-level auto-allow (AC4).
-    SessionAllow,
-    Deny,
-    /// Deny with text feedback for the LLM (AC5).
-    DenyWithFeedback {
-        feedback: String,
-    },
-    Cancel,
-}
-
-/// A rule granting automatic permission for a specific tool pattern.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionRule {
-    pub tool_name: String,
-    pub pattern: Option<String>,
-}
-
 /// Type of filesystem operation being requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileOperation {

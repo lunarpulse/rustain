@@ -84,13 +84,7 @@ impl SecurityPort for MockSecurity {
     ) -> Result<rustain::domain::models::PathAccessType, rustain::domain::errors::PermissionError> {
         Ok(rustain::domain::models::PathAccessType::Workspace)
     }
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<rustain::domain::models::ApprovalDecision, rustain::domain::errors::PermissionError> {
-        Ok(rustain::domain::models::ApprovalDecision::Allow)
-    }
+
     fn current_mode(&self) -> rustain::domain::models::PermissionMode {
         rustain::domain::models::PermissionMode::Yolo
     }
@@ -157,7 +151,10 @@ async fn turn_scheduler_migration() {
     });
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity);
     let tools: Arc<dyn ToolSetPort> = Arc::new(MockToolSet);
-    let tool_scheduler = ToolScheduler::new(security.clone(), tools.clone(), 16);
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+        16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence)
+    );
+    let tool_scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval_runtime, 16);
 
     // Spawn bridge task (mirrors event_loop.rs)
     {

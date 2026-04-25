@@ -51,7 +51,8 @@ use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
-    AppConfig, ApprovalDecision, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
+    ApprovalOutcome,
+    AppConfig, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
     FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, NoticeLevel,
     PermissionMode, RetryState, SessionManager, SessionState, StatusState, StreamChunk,
     StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
@@ -83,6 +84,7 @@ pub async fn run(
     recovery_prompt: Option<(String, u32)>,
     skill_activator: Arc<SkillActivator>,
     agent_activator: Arc<crate::adapters::agent_activation::AgentActivator>,
+    approval_runtime: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
 
@@ -141,6 +143,7 @@ pub async fn run(
     let tool_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
         security.clone(),
         tools.clone(),
+        approval_runtime.clone(),
         config.runtime.event_bus.raw_capacity,
     );
     {
@@ -162,6 +165,28 @@ pub async fn run(
                     }
                     Ok(Err(RecvError::Closed)) => break,
                     Err(_) => continue, // idle timeout — re-poll
+                }
+            }
+        });
+    }
+
+    // Story 6-0c: spawn ApprovalRuntime bridge task
+    {
+        let bus = app_state.event_bus.clone();
+        let mut rx = approval_runtime.subscribe();
+        tokio::spawn(async move {
+            use std::time::Duration;
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
+                    Ok(Ok(event)) => {
+                        bus.emit_domain(AppEvent::ApprovalRuntimeEventBridged { event });
+                    }
+                    Ok(Err(RecvError::Lagged(n))) => {
+                        tracing::warn!(missed = n, "approval runtime subscriber lagged");
+                    }
+                    Ok(Err(RecvError::Closed)) => break,
+                    Err(_) => continue,
                 }
             }
         });
@@ -541,17 +566,18 @@ pub async fn run(
                                 InputAction::CancelOrQuit => {
                                     // Cancel active feedback input flow first (AC5)
                                     if let Some(fi) = state.pending_feedback_input.take() {
-                                        let _ = fi.pending_permission.response_tx.send(ApprovalDecision::Deny);
+                                        let pending = fi.pending_permission;
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel).await;
                                         state.focus = FocusState::Input;
                                     }
-                                    // Explicitly deny any pending permission before aborting
+                                    // Cancel any pending permission before aborting
                                     if let Some(pending) = state.pending_permission.take() {
-                                        let _ = pending.response_tx.send(ApprovalDecision::Deny);
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel).await;
                                         state.focus = FocusState::Input;
                                     }
-                                    // Deny all queued permission requests
+                                    // Cancel all queued permission requests
                                     while let Some(queued) = state.permission_queue.pop() {
-                                        let _ = queued.response_tx.send(ApprovalDecision::Deny);
+                                        let _ = approval_runtime.resolve(&queued.id, ApprovalOutcome::Cancel).await;
                                     }
                                     // Decline any pending skill trust prompt
                                     if let Some(pending) = state.pending_skill_trust.take() {
@@ -629,31 +655,26 @@ pub async fn run(
                                 }
                                 InputAction::PermissionAllow => {
                                     if let Some(pending) = state.pending_permission.take() {
-                                        let _ = pending.response_tx.send(ApprovalDecision::Allow);
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Once).await;
                                         advance_permission_queue(&mut state);
                                     }
                                 }
                                 InputAction::PermissionDeny => {
                                     if let Some(pending) = state.pending_permission.take() {
-                                        let _ = pending.response_tx.send(ApprovalDecision::Deny);
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Reject { feedback: None }).await;
                                         advance_permission_queue(&mut state);
                                     }
                                 }
                                 InputAction::PermissionAlwaysAllow => {
                                     if let Some(pending) = state.pending_permission.take() {
-                                        let _ = pending.response_tx.send(ApprovalDecision::AlwaysAllow);
+                                        use crate::domain::models::ApprovalScope;
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::AlwaysAndSave { scope: ApprovalScope::Tool(pending.tool_name.clone()) }).await;
                                         advance_permission_queue(&mut state);
                                     }
                                 }
                                 InputAction::PermissionSessionAllow => {
                                     if let Some(pending) = state.pending_permission.take() {
-                                        let tool_name = pending.tool_name.clone();
-                                        let _ = pending.response_tx.send(ApprovalDecision::SessionAllow);
-                                        // Batch sweep: drain matching queued requests (AC4)
-                                        let drained = state.permission_queue.drain_matching(&tool_name);
-                                        for queued in drained {
-                                            let _ = queued.response_tx.send(ApprovalDecision::Allow);
-                                        }
+                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::AlwaysTool { tool_name: pending.tool_name.clone() }).await;
                                         advance_permission_queue(&mut state);
                                     }
                                 }
@@ -694,13 +715,12 @@ pub async fn run(
                                 }
                                 InputAction::FeedbackInputSubmit => {
                                     if let Some(fi) = state.pending_feedback_input.take() {
+                                        let pending = fi.pending_permission;
                                         if fi.buffer.is_empty() {
-                                            let _ = fi.pending_permission.response_tx.send(ApprovalDecision::Deny);
+                                            let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Reject { feedback: None }).await;
                                         } else {
                                             let feedback = fi.buffer.clone();
-                                            let _ = fi.pending_permission.response_tx.send(
-                                                ApprovalDecision::DenyWithFeedback { feedback: feedback.clone() },
-                                            );
+                                            let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Reject { feedback: Some(feedback.clone()) }).await;
                                             // Emit FeedbackBlock into chat stream (AC5).
                                             // Escape embedded `"` so the quoted-display format
                                             // stays unambiguous even if the user typed a quote.
@@ -2832,55 +2852,17 @@ pub async fn run(
                             }
                         }
                     }
-                    AppEvent::PermissionRequest {
-                        tool_name,
-                        tool_input,
-                        response_tx,
-                    } => {
-                        use crate::adapters::tui::state::PendingPermission;
-                        let new_pending = PendingPermission {
-                            tool_name,
-                            tool_input,
-                            response_tx,
-                        };
-                        if state.pending_permission.is_some() {
-                            // Queue if another permission prompt is already displayed
-                            state.permission_queue.push(new_pending);
-                        } else {
-                            state.pending_permission = Some(new_pending);
-                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                ConfirmationType::Permission,
-                            ));
-                        }
-                        state.needs_redraw = true;
-                    }
-                    AppEvent::PermissionRequestForConv {
-                        conversation_id,
-                        tool_name,
-                        tool_input,
-                        response_tx,
-                    } => {
-                        // Route permission request to the correct tab
-                        if conversation_id == conversation.id {
-                            // DF-018 inverse guard (AC6, Story 4-3b): if the rewind overlay is active
-                            // for this conversation, the permission request is for a turn that is about
-                            // to be truncated out of existence — drop it silently.
-                            if matches!(
-                                state.focus,
-                                FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
-                            ) {
-                                tracing::debug!(
-                                    "Dropping permission request for conversation {} — rewind in progress",
-                                    conversation_id
-                                );
-                                // Drop response_tx — sender side closed, turn gets Err on the other end
-                            } else {
-                                // For active tab, display immediately
+                    AppEvent::ApprovalRuntimeEventBridged { event } => {
+                        use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
+                        match event {
+                            ApprovalRuntimeEvent::Requested { id, source, tool, input_preview, risk } => {
                                 use crate::adapters::tui::state::PendingPermission;
                                 let new_pending = PendingPermission {
-                                    tool_name,
-                                    tool_input,
-                                    response_tx,
+                                    id,
+                                    source,
+                                    tool_name: tool,
+                                    tool_input: input_preview,
+                                    risk,
                                 };
                                 if state.pending_permission.is_some() {
                                     state.permission_queue.push(new_pending);
@@ -2892,32 +2874,26 @@ pub async fn run(
                                 }
                                 state.needs_redraw = true;
                             }
-                        } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
-                            // For background tab, store in tab state for later display
-                            use crate::adapters::tui::state::PendingPermission;
-                            let new_pending = PendingPermission {
-                                tool_name,
-                                tool_input,
-                                response_tx,
-                            };
-                            // Note: TabState doesn't have pending_permission field yet
-                            // For now, we queue it in the global state but mark it with conversation_id
-                            // TODO: Add pending_permission to TabState in future refactor
-                            tracing::warn!("Permission request for background tab {} queued", conversation_id);
-                            // For now, treat as active tab (temporary until full multi-tab permission state)
-                            // Queue if another prompt is already visible OR if the feedback input
-                            // is holding a wrapped pending permission (otherwise we'd overwrite it).
-                            if state.pending_permission.is_some() || state.pending_feedback_input.is_some() {
-                                state.permission_queue.push(new_pending);
-                            } else {
-                                state.pending_permission = Some(new_pending);
-                                state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                    ConfirmationType::Permission,
-                                ));
+                            ApprovalRuntimeEvent::Resolved { id, .. } | ApprovalRuntimeEvent::Cancelled { id, .. } => {
+                                if state.pending_feedback_input.as_ref().map(|fi| fi.pending_permission.id.0 == id.0).unwrap_or(false) {
+                                    state.pending_feedback_input = None;
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
+                                } else if state.pending_permission.as_ref().map(|p| p.id.0 == id.0).unwrap_or(false) {
+                                    state.pending_permission = None;
+                                    advance_permission_queue(&mut state);
+                                    state.needs_redraw = true;
+                                } else {
+                                    let mut new_queue = std::collections::VecDeque::new();
+                                    while let Some(p) = state.permission_queue.pop() {
+                                        if p.id.0 != id.0 {
+                                            new_queue.push_back(p);
+                                        }
+                                    }
+                                    state.permission_queue = crate::adapters::tui::state::PermissionQueue { queue: new_queue };
+                                }
                             }
-                            state.needs_redraw = true;
                         }
-                        // Silently drop if conversation not found (tab closed)
                     }
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
@@ -5382,6 +5358,7 @@ fn render(
                 } else if let Some(pending) = pending_permission {
                     use crate::adapters::tui::widgets::permission_prompt;
                     let prompt_lines = permission_prompt::render_permission_lines(
+                        &pending.source,
                         &pending.tool_name,
                         &pending.tool_input,
                         theme,
@@ -5694,7 +5671,8 @@ async fn generate_title(
     user_msg: &str,
     assistant_msg: &str,
 ) -> Result<String> {
-    use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
+    use crate::domain::models::{
+    CompletionOptions, Message, MessageRole as MsgRole};
 
     let prompt_content = format!("User: {}\n\nAssistant: {}", user_msg, assistant_msg);
     let messages = vec![Message {
@@ -6451,7 +6429,8 @@ mod tests {
     async fn test_rehydrate_index_parity_with_tool_results() {
         use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
         use crate::domain::models::ImageReference;
-        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
+        use crate::domain::models::{
+    ToolCallInfo, ToolResultInfo};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();

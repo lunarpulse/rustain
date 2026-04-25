@@ -6,8 +6,10 @@ use crate::adapters::cli::commands::{Cli, Command};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::project_context_loader::ProjectContextLoader;
+use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::security_adapter::SecurityAdapter;
 use crate::adapters::skill_activation::SkillActivator;
+use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
@@ -17,7 +19,7 @@ use crate::domain::ports::{
 };
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::event_loop;
-use crate::infrastructure::{config, logging, paths, signals};
+use crate::infrastructure::{config, logging, paths, permission_rules, signals};
 
 /// Error type for subcommand exits where output was already printed.
 /// Used by `main.rs` to suppress redundant error display.
@@ -108,17 +110,24 @@ pub async fn run() -> Result<()> {
     // 5a. Construct provider adapter
     let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
 
-    // 6. Create AppState (owns EventBus + CancellationToken)
-    let raw_capacity = app_config.runtime.event_bus.raw_capacity;
-    let (app_state, domain_rx) = AppState::new(raw_capacity);
-    let domain_tx = app_state.event_bus.domain_tx.clone();
-
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-    let security_adapter = SecurityAdapter::new(workspace_path.clone(), domain_tx.clone());
-    // Load AlwaysAllow rules from .claude/settings.json
-    security_adapter.init_allowed_rules().await;
+
+    // 6. Create AppState (owns EventBus + CancellationToken + ApprovalRuntime)
+    let raw_capacity = app_config.runtime.event_bus.raw_capacity;
+    let user_config = paths::config_dir().unwrap_or_else(|_| workspace_path.join(".rustain")).join("config.toml");
+    let workspace_rules = workspace_path.join(".rustain").join("permissions.toml");
+    let persistence = Arc::new(ApprovalPersistenceToml::new(user_config.clone(), workspace_rules.clone()));
+    let approval_runtime = ApprovalRuntime::new(raw_capacity, persistence);
+    approval_runtime.load_session().await;
+    if let Ok(ruleset) = permission_rules::load_rules(&user_config, &workspace_rules) {
+        let seed = ruleset.seed_session();
+        approval_runtime.seed_session(seed).await;
+    }
+    let (app_state, domain_rx) = AppState::new(raw_capacity, approval_runtime.clone());
+    let domain_tx = app_state.event_bus.domain_tx.clone();
+    let security_adapter = SecurityAdapter::new(workspace_path.clone());
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
     // Storage must be constructed before ToolSetAdapter (Story 4-3b: tools use storage for snapshots).
     // Story 4-3b P2: pass the real workspace root so `snapshot_file` can enforce
@@ -320,6 +329,7 @@ pub async fn run() -> Result<()> {
         recovery_prompt,
         skill_activator,
         agent_activator,
+        approval_runtime,
     )
     .await;
 

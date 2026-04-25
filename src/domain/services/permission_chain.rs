@@ -2,7 +2,7 @@
 //! Pure orchestration: calls port traits, no I/O itself.
 
 use crate::domain::models::{
-    ActiveSkill, ApprovalDecision, FileOperation, PermissionMode, ToolRisk, risk_for_builtin,
+    ActiveSkill, FileOperation, PermissionMode, ToolRisk, risk_for_builtin,
 };
 use crate::domain::ports::SecurityPort;
 use std::collections::HashSet;
@@ -10,12 +10,15 @@ use std::collections::HashSet;
 /// Result of a permission chain check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
+    /// Auto-allow (mode×risk or blocklist/workspace passed).
     Allow,
-    AlwaysAllow,
+    /// Deny with reason string.
     Deny(String),
-    /// Deny with user feedback text (AC5).
-    DenyWithFeedback(String),
-    Cancel,
+    /// Needs user approval — route to ApprovalRuntime::request.
+    Prompt {
+        server_id: Option<String>,
+        path_hint: Option<String>,
+    },
 }
 
 /// Format the user feedback string as it is presented to the LLM and to the chat stream.
@@ -144,22 +147,33 @@ pub async fn check(
             };
             return PermissionDecision::Deny(reason);
         }
-        None => {} // needs prompt — fall through to Step 4
+        None => {
+            // needs prompt — route to ApprovalRuntime
+            return PermissionDecision::Prompt {
+                server_id: derive_server_id(tool_name),
+                path_hint: derive_path_hint(tool_name, input),
+            };
+        }
     }
+}
 
-    // Step 4: Request permission (only reached when mode × risk = "prompt")
-    match security.request_permission(tool_name, input).await {
-        Ok(ApprovalDecision::Allow) => PermissionDecision::Allow,
-        Ok(ApprovalDecision::AlwaysAllow) => PermissionDecision::AlwaysAllow,
-        Ok(ApprovalDecision::SessionAllow) => PermissionDecision::Allow,
-        Ok(ApprovalDecision::Deny) => {
-            PermissionDecision::Deny("Permission denied by user".to_string())
+/// Derive server_id from tool_name (MCP pattern `<server>.<tool>`).
+/// Today returns None for all built-ins — full implementation lands in 9-2.
+fn derive_server_id(tool_name: &str) -> Option<String> {
+    if let Some(dot) = tool_name.find('.') {
+        Some(tool_name[..dot].to_string())
+    } else {
+        None
+    }
+}
+
+/// Derive path_hint from tool_name and input (for Read/Write/Edit).
+fn derive_path_hint(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "Read" | "Write" | "Edit" => {
+            input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string())
         }
-        Ok(ApprovalDecision::DenyWithFeedback { feedback }) => {
-            PermissionDecision::DenyWithFeedback(feedback)
-        }
-        Ok(ApprovalDecision::Cancel) => PermissionDecision::Cancel,
-        Err(e) => PermissionDecision::Deny(e.to_string()),
+        _ => None,
     }
 }
 

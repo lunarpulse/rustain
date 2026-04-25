@@ -10,7 +10,7 @@ use rustain::adapters::noop::{
 };
 use rustain::domain::errors::{ProviderError, ToolError};
 use rustain::domain::models::{
-    ApprovalDecision, CompletionOptions, Message, MessageRole, PathAccessType, PermissionMode,
+    CompletionOptions, Message, MessageRole, PathAccessType, PermissionMode,
 };
 use rustain::domain::ports::{
     ChannelPort, ContextPort, MemoryPort, PersonaPort, ProviderPort, SchedulerPort, SecurityPort,
@@ -95,13 +95,6 @@ async fn test_noop_security_allows_all() {
             )
             .unwrap(),
         PathAccessType::Workspace
-    );
-    assert_eq!(
-        security
-            .request_permission("bash", &serde_json::json!({}))
-            .await
-            .unwrap(),
-        ApprovalDecision::Allow
     );
     assert_eq!(security.current_mode(), PermissionMode::Normal);
     security.set_mode(PermissionMode::Yolo); // no-op, doesn't panic

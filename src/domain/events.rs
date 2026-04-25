@@ -1,6 +1,6 @@
 use crate::domain::models::tab::ConversationId;
 use crate::domain::models::{
-    ApprovalDecision, NoticeLevel, PermissionMode, SkillTrustResponse, StreamChunk, ToolResult,
+    NoticeLevel, PermissionMode, SkillTrustResponse, StreamChunk, ToolResult,
 };
 use crate::domain::services::cross_search::CrossSearchResult;
 
@@ -33,12 +33,7 @@ pub enum AppEvent {
     },
     /// Internal domain events (legacy — kept for backward compat with 1.1a event loop)
     DomainEvent(DomainEventPayload),
-    /// Permission request from SecurityAdapter — TUI displays PermissionCard, user responds via oneshot.
-    PermissionRequest {
-        tool_name: String,
-        tool_input: serde_json::Value,
-        response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
-    },
+
     /// Change the active permission mode.
     SetPermissionMode(PermissionMode),
     /// Retry a message after backoff delay has elapsed.
@@ -64,13 +59,7 @@ pub enum AppEvent {
         title: String,
         token_count: u32,
     },
-    /// Permission request: now tagged with conversation_id for routing.
-    PermissionRequestForConv {
-        conversation_id: ConversationId,
-        tool_name: String,
-        tool_input: serde_json::Value,
-        response_tx: tokio::sync::oneshot::Sender<ApprovalDecision>,
-    },
+
     /// Cross-search results ready from an async scan task (Story 4-4 AC5).
     /// Carries the original query so the event loop can discard stale results
     /// if the user has typed more characters in the meantime.
@@ -136,6 +125,11 @@ pub enum AppEvent {
     ToolCallTransitionBridged {
         conversation_id: ConversationId,
         transition: crate::domain::models::ToolCallTransition,
+    },
+    /// Bridge event: an `ApprovalRuntimeEvent` has been received on the broadcast
+    /// channel and should be forwarded to the event loop for TUI/state updates.
+    ApprovalRuntimeEventBridged {
+        event: crate::domain::services::approval_runtime::ApprovalRuntimeEvent,
     },
 }
 
