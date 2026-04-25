@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use std::collections::BTreeMap;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::domain::models::SessionMeta;
 use crate::domain::models::conversation::{Conversation, generate_conversation_id};
 use crate::domain::models::notice::FeedbackBlock;
@@ -20,39 +22,36 @@ pub struct TabState {
     pub conversation: Conversation,
     pub streaming: StreamingState,
     pub session: SessionManager,
-    /// Per-conversation sidecar metadata — title, timestamps, message count,
-    /// **and bookmarks** (Story 4-4). This is the in-memory mirror of
-    /// `meta.json`; bookmark toggles write through to disk via
-    /// `StoragePort::save_session_meta` and this field is reloaded from disk
-    /// at conversation open time.
     pub session_meta: SessionMeta,
     pub scroll_offset: usize,
     pub auto_scroll: bool,
-    /// Line offsets (from top) where each content block starts.
     pub block_boundaries: Vec<usize>,
-    /// Line offsets (from top) where each message starts (all roles).
-    /// Drives the status-bar position counter and rewind/fork targeting.
     pub message_boundaries: Vec<usize>,
-    /// Line offsets (from top) where each **user** message starts.
-    /// Drives `{`/`}` jump-between-turn navigation.
     pub user_message_boundaries: Vec<usize>,
-    /// Tool block id at the top of the viewport (for focus/keyboard interaction).
     pub focused_tool_id: Option<String>,
-    /// Feedback blocks displayed in conversation, keyed by block ID.
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
-    /// The ID of the most recent active (actionable) feedback block.
     pub active_feedback_id: Option<String>,
-    /// Total content height from last render.
     pub total_content_height: usize,
-    /// Pending anchor message index for resize scroll preservation.
     pub pending_anchor: Option<usize>,
-    /// Pending user messages queued between turns.
     pub turn_queue: TurnQueue,
+    pub turn_cancel: CancellationToken,
 }
 
 impl TabState {
     /// Create a new TabState with a fresh conversation.
+    ///
+    /// Creates a detached CancellationToken (not linked to any parent).
+    /// For production use, prefer `new_with_parent` which creates a child token.
     pub fn new(id: TabId) -> Self {
+        Self::new_with_cancel(id, CancellationToken::new())
+    }
+
+    /// Create a new TabState whose `turn_cancel` is a child of `session_cancel`.
+    pub fn new_with_parent(id: TabId, session_cancel: &CancellationToken) -> Self {
+        Self::new_with_cancel(id, session_cancel.child_token())
+    }
+
+    fn new_with_cancel(id: TabId, turn_cancel: CancellationToken) -> Self {
         let now = now_unix();
         let conversation = Conversation {
             id: generate_conversation_id(),
@@ -84,16 +83,32 @@ impl TabState {
             total_content_height: 0,
             pending_anchor: None,
             turn_queue: TurnQueue::default(),
+            turn_cancel,
         }
     }
 
     /// Create a TabState from an existing conversation.
     ///
-    /// Initializes `session_meta` from the conversation (empty bookmarks).
-    /// The event loop should replace `session_meta` with the disk-loaded value
-    /// via `StoragePort::load_session_meta` immediately after calling this
-    /// constructor, so bookmarks from previous sessions survive reload.
+    /// Creates a detached CancellationToken (not linked to any parent).
+    /// For production use, prefer `from_conversation_with_parent`.
     pub fn from_conversation(id: TabId, conversation: Conversation) -> Self {
+        Self::from_conversation_with_cancel(id, conversation, CancellationToken::new())
+    }
+
+    /// Create a TabState from an existing conversation with a child cancellation token.
+    pub fn from_conversation_with_parent(
+        id: TabId,
+        conversation: Conversation,
+        session_cancel: &CancellationToken,
+    ) -> Self {
+        Self::from_conversation_with_cancel(id, conversation, session_cancel.child_token())
+    }
+
+    fn from_conversation_with_cancel(
+        id: TabId,
+        conversation: Conversation,
+        turn_cancel: CancellationToken,
+    ) -> Self {
         let session_id = conversation.session_id.clone().unwrap_or_default();
         let session_meta = SessionMeta::from_conversation(&conversation);
         Self {
@@ -113,6 +128,7 @@ impl TabState {
             total_content_height: 0,
             pending_anchor: None,
             turn_queue: TurnQueue::default(),
+            turn_cancel,
         }
     }
 
@@ -142,26 +158,29 @@ pub struct TabManager {
     tabs: Vec<TabState>,
     active_tab_index: usize,
     next_tab_id: TabId,
+    session_cancel: CancellationToken,
 }
 
 impl TabManager {
     /// Create a new TabManager with one empty tab.
-    pub fn new() -> Self {
-        let first_tab = TabState::new(0);
+    pub fn new(session_cancel: CancellationToken) -> Self {
+        let first_tab = TabState::new_with_parent(0, &session_cancel);
         Self {
             tabs: vec![first_tab],
             active_tab_index: 0,
             next_tab_id: 1,
+            session_cancel,
         }
     }
 
     /// Create a new TabManager with a pre-existing conversation in the first tab.
-    pub fn with_conversation(conversation: Conversation) -> Self {
-        let tab = TabState::from_conversation(0, conversation);
+    pub fn with_conversation(conversation: Conversation, session_cancel: CancellationToken) -> Self {
+        let tab = TabState::from_conversation_with_parent(0, conversation, &session_cancel);
         Self {
             tabs: vec![tab],
             active_tab_index: 0,
             next_tab_id: 1,
+            session_cancel,
         }
     }
 
@@ -169,7 +188,7 @@ impl TabManager {
     pub fn create_tab(&mut self) -> TabId {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = TabState::new(id);
+        let tab = TabState::new_with_parent(id, &self.session_cancel);
         self.tabs.push(tab);
         self.active_tab_index = self.tabs.len() - 1;
         id
@@ -180,23 +199,35 @@ impl TabManager {
     pub fn create_tab_with_conversation(&mut self, conversation: Conversation) -> TabId {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let tab = TabState::from_conversation(id, conversation);
+        let tab = TabState::from_conversation_with_parent(id, conversation, &self.session_cancel);
         self.tabs.push(tab);
         self.active_tab_index = self.tabs.len() - 1;
         id
     }
 
+    /// Reset the active tab's `turn_cancel` to a fresh child of `session_cancel`.
+    /// Call this before each new turn so that a previously-cancelled tab can
+    /// resume normal operation.
+    pub fn reset_and_clone_turn_cancel(&mut self) -> CancellationToken {
+        let session_cancel = self.session_cancel.clone();
+        let tab = self.active_tab_mut();
+        tab.turn_cancel = session_cancel.child_token();
+        tab.turn_cancel.clone()
+    }
+
     /// Close a tab by ID. Returns the closed tab's conversation for history storage.
+    /// Cancels the tab's `turn_cancel` before extracting the conversation.
     /// If closing the last tab, creates a new empty tab automatically.
     /// Returns None if the tab ID was not found.
     pub fn close_tab(&mut self, id: TabId) -> Option<Conversation> {
         let pos = self.tabs.iter().position(|t| t.id == id)?;
         let tab = self.tabs.remove(pos);
+        tab.turn_cancel.cancel();
         let conversation = tab.conversation;
 
         // Never run with zero tabs
         if self.tabs.is_empty() {
-            let new_tab = TabState::new(self.next_tab_id);
+            let new_tab = TabState::new_with_parent(self.next_tab_id, &self.session_cancel);
             self.next_tab_id += 1;
             self.tabs.push(new_tab);
             self.active_tab_index = 0;
@@ -298,7 +329,7 @@ impl TabManager {
 
 impl Default for TabManager {
     fn default() -> Self {
-        Self::new()
+        Self::new(CancellationToken::new())
     }
 }
 
@@ -308,14 +339,14 @@ mod tests {
 
     #[test]
     fn test_tab_manager_starts_with_one_tab() {
-        let tm = TabManager::new();
+        let tm = TabManager::default();
         assert_eq!(tm.tab_count(), 1);
         assert_eq!(tm.active_tab_index(), 0);
     }
 
     #[test]
     fn test_create_tab_adds_and_focuses() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         let id = tm.create_tab();
         assert_eq!(tm.tab_count(), 2);
         assert_eq!(tm.active_tab_id(), id);
@@ -323,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_close_tab_removes_and_refocuses() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         let id1 = tm.active_tab_id();
         let _id2 = tm.create_tab();
         tm.close_tab(id1);
@@ -332,39 +363,46 @@ mod tests {
 
     #[test]
     fn test_close_last_tab_creates_new() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         let only_id = tm.active_tab_id();
         tm.close_tab(only_id);
         assert_eq!(tm.tab_count(), 1);
-        // New tab has a different ID
         assert_ne!(tm.active_tab_id(), only_id);
     }
 
     #[test]
+    fn test_close_tab_cancels_turn_cancel() {
+        let mut tm = TabManager::default();
+        let id = tm.active_tab_id();
+        let turn_cancel = tm.active_tab().turn_cancel.clone();
+        assert!(!turn_cancel.is_cancelled());
+        tm.close_tab(id);
+        assert!(turn_cancel.is_cancelled());
+    }
+
+    #[test]
     fn test_switch_to_next_wraps() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         tm.create_tab();
         tm.create_tab();
-        // 3 tabs, active=2 (last)
         assert_eq!(tm.active_tab_index(), 2);
         tm.switch_to_next();
-        assert_eq!(tm.active_tab_index(), 0); // wrapped
+        assert_eq!(tm.active_tab_index(), 0);
     }
 
     #[test]
     fn test_switch_to_prev_wraps() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         tm.create_tab();
-        // 2 tabs, active=1
         tm.switch_to_prev();
         assert_eq!(tm.active_tab_index(), 0);
         tm.switch_to_prev();
-        assert_eq!(tm.active_tab_index(), 1); // wrapped
+        assert_eq!(tm.active_tab_index(), 1);
     }
 
     #[test]
     fn test_switch_to_index_1_based() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         tm.create_tab();
         tm.create_tab();
         tm.switch_to_index(1);
@@ -375,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_switch_to_index_out_of_range_noop() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         let orig_idx = tm.active_tab_index();
         tm.switch_to_index(9);
         assert_eq!(tm.active_tab_index(), orig_idx);
@@ -383,20 +421,17 @@ mod tests {
 
     #[test]
     fn test_find_by_conversation() {
-        let tm = TabManager::new();
+        let tm = TabManager::default();
         let conv_id = tm.active_tab().conversation.id.clone();
         assert!(tm.find_by_conversation(&conv_id).is_some());
         assert!(tm.find_by_conversation("nonexistent").is_none());
     }
 
-    /// DF-084: thinking_buffer must be cleared on session boundary (tab switch).
-    /// Start stream → accumulate thinking → switch tab → assert buffer empty.
     #[test]
     fn test_thinking_buffer_cleared_on_tab_switch() {
-        let mut tm = TabManager::new();
-        tm.create_tab(); // now two tabs; active = 1
+        let mut tm = TabManager::default();
+        tm.create_tab();
 
-        // Simulate accumulated thinking on the current tab
         tm.active_tab_mut()
             .streaming
             .thinking_buffer
@@ -406,12 +441,9 @@ mod tests {
             "Let me think..."
         );
 
-        // Switch to previous tab — should clear buffer on departing tab
         tm.switch_to_prev();
-        // The original tab is now index 1; check its buffer is cleared
         assert_eq!(tm.tabs()[1].streaming.thinking_buffer, "");
 
-        // Switch back and accumulate again, then use switch_to_next
         tm.tabs[tm.active_tab_index]
             .streaming
             .thinking_buffer
@@ -419,15 +451,43 @@ mod tests {
         tm.switch_to_next();
         assert_eq!(tm.tabs()[0].streaming.thinking_buffer, "");
 
-        // Use switch_to_index as well
-        tm.create_tab(); // three tabs
+        tm.create_tab();
         let cur = tm.active_tab_index();
         tm.tabs[cur]
             .streaming
             .thinking_buffer
             .push_str("Index thought");
         let next = if cur == 0 { 2 } else { 1 };
-        tm.switch_to_index(next + 1); // 1-based
+        tm.switch_to_index(next + 1);
         assert_eq!(tm.tabs()[cur].streaming.thinking_buffer, "");
+    }
+
+    #[test]
+    fn test_new_with_parent_creates_child_token() {
+        let session_cancel = CancellationToken::new();
+        let tab = TabState::new_with_parent(0, &session_cancel);
+        assert!(!tab.turn_cancel.is_cancelled());
+        session_cancel.cancel();
+        assert!(tab.turn_cancel.is_cancelled());
+    }
+
+    #[test]
+    fn test_sibling_tabs_independent() {
+        let session_cancel = CancellationToken::new();
+        let session_cancel_ref = session_cancel.clone();
+        let mut tm = TabManager::new(session_cancel);
+        let id_a = tm.active_tab_id();
+        let id_b = tm.create_tab();
+        let cancel_a = tm.find_by_conversation(&tm.tabs()[0].conversation.id).unwrap().turn_cancel.clone();
+
+        tm.switch_to_index(2);
+        let cancel_b = tm.active_tab().turn_cancel.clone();
+
+        cancel_a.cancel();
+        assert!(cancel_a.is_cancelled());
+        assert!(!cancel_b.is_cancelled());
+        assert!(!session_cancel_ref.is_cancelled());
+        let _ = id_a;
+        let _ = id_b;
     }
 }

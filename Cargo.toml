@@ -19,6 +19,7 @@ path = "src/main.rs"
 # ── Async runtime ────────────────────────────────────────────────
 tokio = { version = "1.50", features = ["full"] }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 # ── TUI framework ────────────────────────────────────────────────
@@ -76,6 +77,7 @@ async-trait = "0.1"
 # Epic 6 scaffolding (sprint-change-proposal-2026-04-24):
 # - insta: TUI snapshot testing for widgets (story 6-0d PlanApprovalCard; future widgets)
 insta = { version = "1.41", features = ["yaml"] }
+procfs = "0.17"
 
 [features]
 default = ["anthropic", "clipboard"]

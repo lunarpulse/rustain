@@ -11,14 +11,14 @@ use rustain::domain::models::tab::{TabManager, TabState};
 
 #[test]
 fn test_tab_manager_new_has_one_tab() {
-    let tm = TabManager::new();
+    let tm = TabManager::default();
     assert_eq!(tm.tab_count(), 1);
     assert_eq!(tm.active_tab_index(), 0);
 }
 
 #[test]
 fn test_tab_manager_create_tab_increments_count() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let id = tm.create_tab();
     assert_eq!(tm.tab_count(), 2);
     assert_eq!(tm.active_tab_id(), id);
@@ -27,7 +27,7 @@ fn test_tab_manager_create_tab_increments_count() {
 
 #[test]
 fn test_tab_manager_create_multiple_tabs() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let _id1 = tm.create_tab();
     let _id2 = tm.create_tab();
     assert_eq!(tm.tab_count(), 3);
@@ -36,7 +36,7 @@ fn test_tab_manager_create_multiple_tabs() {
 
 #[test]
 fn test_tab_manager_close_non_last_tab() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let id0 = tm.active_tab_id();
     let _id1 = tm.create_tab();
     let _id2 = tm.create_tab();
@@ -48,7 +48,7 @@ fn test_tab_manager_close_non_last_tab() {
 
 #[test]
 fn test_tab_manager_close_last_tab_creates_new() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let only_id = tm.active_tab_id();
     let conv = tm.close_tab(only_id);
     assert!(conv.is_some());
@@ -59,7 +59,7 @@ fn test_tab_manager_close_last_tab_creates_new() {
 
 #[test]
 fn test_tab_manager_close_unknown_id_returns_none() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let result = tm.close_tab(9999);
     assert!(result.is_none());
     assert_eq!(tm.tab_count(), 1);
@@ -67,7 +67,7 @@ fn test_tab_manager_close_unknown_id_returns_none() {
 
 #[test]
 fn test_tab_manager_switch_to_next_wraps() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     tm.create_tab();
     tm.create_tab();
     // active = 2 (last)
@@ -80,7 +80,7 @@ fn test_tab_manager_switch_to_next_wraps() {
 
 #[test]
 fn test_tab_manager_switch_to_prev_wraps() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     tm.create_tab();
     // active = 1
     assert_eq!(tm.active_tab_index(), 1);
@@ -92,7 +92,7 @@ fn test_tab_manager_switch_to_prev_wraps() {
 
 #[test]
 fn test_tab_manager_switch_single_tab_is_noop() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let orig = tm.active_tab_index();
     tm.switch_to_next();
     assert_eq!(tm.active_tab_index(), orig);
@@ -102,7 +102,7 @@ fn test_tab_manager_switch_single_tab_is_noop() {
 
 #[test]
 fn test_tab_manager_switch_to_index_1based() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     tm.create_tab();
     tm.create_tab();
     // tabs: [0, 1, 2], active = 2
@@ -116,7 +116,7 @@ fn test_tab_manager_switch_to_index_1based() {
 
 #[test]
 fn test_tab_manager_switch_to_index_zero_is_noop() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let orig = tm.active_tab_index();
     tm.switch_to_index(0);
     assert_eq!(tm.active_tab_index(), orig);
@@ -124,7 +124,7 @@ fn test_tab_manager_switch_to_index_zero_is_noop() {
 
 #[test]
 fn test_tab_manager_switch_to_index_out_of_range_is_noop() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let orig = tm.active_tab_index();
     tm.switch_to_index(5);
     assert_eq!(tm.active_tab_index(), orig);
@@ -132,7 +132,7 @@ fn test_tab_manager_switch_to_index_out_of_range_is_noop() {
 
 #[test]
 fn test_tab_manager_find_by_conversation_id() {
-    let tm = TabManager::new();
+    let tm = TabManager::default();
     let conv_id = tm.active_tab().conversation.id.clone();
     assert!(tm.find_by_conversation(&conv_id).is_some());
     assert!(tm.find_by_conversation("nonexistent").is_none());
@@ -140,7 +140,7 @@ fn test_tab_manager_find_by_conversation_id() {
 
 #[test]
 fn test_tab_manager_find_by_conversation_mut() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let conv_id = tm.active_tab().conversation.id.clone();
     {
         let tab = tm.find_by_conversation_mut(&conv_id).unwrap();
@@ -184,14 +184,14 @@ fn test_tab_state_new_has_fresh_conversation() {
 fn test_tab_manager_with_conversation() {
     let conv = make_test_conversation();
     let conv_id = conv.id.clone();
-    let tm = TabManager::with_conversation(conv);
+    let tm = TabManager::with_conversation(conv, tokio_util::sync::CancellationToken::new());
     assert_eq!(tm.tab_count(), 1);
     assert_eq!(tm.active_tab().conversation.id, conv_id);
 }
 
 #[test]
 fn test_tab_manager_returns_conversation_on_close() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let id0 = tm.active_tab_id();
     let conv_id = tm.active_tab().conversation.id.clone();
     let _ = tm.create_tab();
@@ -214,7 +214,7 @@ fn test_reset_thinking_buffer_clears() {
 
 #[test]
 fn test_switch_tabs_clears_thinking_buffer() {
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     // Fill thinking buffer on first tab
     tm.active_tab_mut().streaming.thinking_buffer = "thinking...".to_string();
     let _ = tm.create_tab();
@@ -352,7 +352,7 @@ fn test_tab_bar_renders_without_panic() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::tab_bar;
 
-    let tm = TabManager::new();
+    let tm = TabManager::default();
     let area = Rect::new(0, 0, 80, 1);
     let mut buf = Buffer::empty(area);
     let theme = Theme::for_capability(ColorCapability::TrueColor);
@@ -369,7 +369,7 @@ fn test_tab_bar_renders_multiple_tabs() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::tab_bar;
 
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     tm.create_tab();
     tm.create_tab();
     let area = Rect::new(0, 0, 80, 1);
@@ -385,7 +385,7 @@ fn test_tab_bar_tiny_area_no_panic() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::tab_bar;
 
-    let tm = TabManager::new();
+    let tm = TabManager::default();
     let area = Rect::new(0, 0, 0, 0); // zero size
     let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1)); // minimal buf
     let theme = Theme::for_capability(ColorCapability::TrueColor);
@@ -407,4 +407,58 @@ fn make_test_conversation() -> Conversation {
         usage: None,
         fork_source: None,
     }
+}
+
+// ── Story 6-0a: CancellationToken tree + tab lifecycle ───────────────────────
+
+use tokio_util::sync::CancellationToken;
+
+/// AC1: A tab whose turn was cancelled can still start a new turn after reset.
+#[test]
+fn test_tab_turn_cancel_reset_allows_new_turn() {
+    let session = CancellationToken::new();
+    let mut tm = TabManager::new(session.clone());
+    let id = tm.active_tab_id();
+
+    // Simulate a cancelled turn
+    tm.active_tab_mut().turn_cancel.cancel();
+    assert!(tm.active_tab().turn_cancel.is_cancelled());
+
+    // Reset the turn cancel (as event_loop does before each start_turn)
+    let new_cancel = tm.reset_and_clone_turn_cancel();
+    assert!(!new_cancel.is_cancelled());
+    assert!(!tm.active_tab().turn_cancel.is_cancelled());
+
+    // Simulate another cancellation cycle
+    new_cancel.cancel();
+    assert!(tm.active_tab().turn_cancel.is_cancelled());
+
+    // Reset again — tab should remain viable
+    let new_cancel_2 = tm.reset_and_clone_turn_cancel();
+    assert!(!new_cancel_2.is_cancelled());
+    assert!(!tm.active_tab().turn_cancel.is_cancelled());
+}
+
+/// AC1: Cancelling one tab's turn does not affect sibling tabs' reset capability.
+#[test]
+fn test_sibling_tab_reset_independent_after_cancel() {
+    let session = CancellationToken::new();
+    let mut tm = TabManager::new(session.clone());
+    let _id_a = tm.active_tab_id();
+    let id_b = tm.create_tab();
+
+    // Cancel tab B's turn
+    tm.tabs()[1].turn_cancel.cancel();
+    assert!(tm.tabs()[1].turn_cancel.is_cancelled());
+    assert!(!tm.tabs()[0].turn_cancel.is_cancelled());
+
+    // Reset active tab (B)
+    tm.switch_to_index(2); // 1-based index for tab B
+    let cancel_b = tm.reset_and_clone_turn_cancel();
+    assert!(!cancel_b.is_cancelled());
+
+    // Tab A should still be independent
+    assert!(!tm.tabs()[0].turn_cancel.is_cancelled());
+
+    let _ = id_b;
 }

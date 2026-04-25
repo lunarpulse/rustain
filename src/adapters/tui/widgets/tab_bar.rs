@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_tab_bar_single_tab() {
-        let tm = TabManager::new();
+        let tm = TabManager::default();
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         let theme = crate::adapters::tui::theme::Theme::for_capability(
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_tab_manager_creates_unique_ids() {
-        let mut tm = TabManager::new();
+        let mut tm = TabManager::default();
         let id1 = tm.active_tab_id();
         let id2 = tm.create_tab();
         assert_ne!(id1, id2);

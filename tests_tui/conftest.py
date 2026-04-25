@@ -18,9 +18,30 @@ from harness import RustainTUI, PROJECT_ROOT, BINARY
 # ── Guards ───────────────────────────────────────────────────────────────────
 
 def pytest_configure(config):
-    """Register custom markers."""
-    # Markers are declared in pyproject.toml; this is a fallback.
-    pass
+    """Register custom markers.
+
+    All story markers are declared in pyproject.toml; this is a fallback for
+    environments where pyproject.toml discovery is unreliable.
+    """
+    markers = [
+        "requires_api: test requires a live API key and network access",
+        "slow: test takes >30s (tool execution + AI response)",
+        "story_3_1: Story 3.1 — Multi-line Input & History",
+        "story_3_3: Story 3.3 — Command Palette & Which-Key",
+        "story_3_5: Story 3.5 — Help Overlay & Discoverability",
+        "story_4_3a: Story 4-3a — Fork Conversations",
+        "story_4_3b: Story 4-3b — Rewind with File Snapshot",
+        "story_4_4: Story 4-4 — Search, Bookmarks & Export",
+        "story_5_0: Story 5-0 — Python TUI Contract Test Infrastructure",
+        "story_5_0b: Story 5-0b — Permission System Redesign",
+        "story_5_1: Story 5-1 — Agent Skills Discovery & Catalog",
+        "story_5_2: Story 5-2 — Agent Skills Progressive Disclosure & Execution",
+        "story_5_3: Story 5-3 — Custom Slash Commands",
+        "story_5_4: Story 5-4 — Custom Agents",
+        "story_6_0a: Story 6-0a — Cancellation Token Tree & Dual-Channel EventBus",
+    ]
+    for marker in markers:
+        config.addinivalue_line("markers", marker)
 
 
 def pytest_collection_modifyitems(config, items):

@@ -239,7 +239,7 @@ async fn test_e2e_fork_new_tab_has_truncated_messages() {
 #[test]
 fn test_e2e_fork_tab_manager_create_tab_with_conversation() {
     // Given: a TabManager and a forked conversation
-    let mut tm = TabManager::new();
+    let mut tm = TabManager::default();
     let initial_count = tm.tab_count();
 
     let forked_conv = Conversation {

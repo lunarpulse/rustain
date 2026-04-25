@@ -692,6 +692,7 @@ data: {\"type\":\"message_stop\"}\n\
             Arc::new(rustain::adapters::noop::NoOpStorage),
             make_conversation(),
             None,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await;
 

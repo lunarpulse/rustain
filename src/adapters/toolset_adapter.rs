@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapters::skill_activation::SkillActivator;
 use crate::domain::errors::ToolError;
@@ -61,7 +62,11 @@ impl ToolSetAdapter {
         self.activator = Some(activator);
     }
 
-    async fn execute_bash(&self, input: &serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute_bash(
+        &self,
+        input: &serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
         let command = input
             .get("command")
             .and_then(|v| v.as_str())
@@ -71,43 +76,56 @@ impl ToolSetAdapter {
             .get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(120_000)
-            .min(600_000); // Cap at 10 minutes
+            .min(600_000);
 
-        let output = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&self.workspace_path)
-                .output(),
-        )
-        .await
-        .map_err(|_| ToolError::Timeout)?
-        .map_err(|e| ToolError::ExecutionFailed(format!("Failed to spawn bash: {}", e)))?;
+        let child = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.workspace_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| ToolError::ExecutionFailed(format!("spawn: {e}")))?;
 
-        let mut result = String::new();
-        if !output.stdout.is_empty() {
-            result.push_str(&String::from_utf8_lossy(&output.stdout));
-        }
-        if !output.stderr.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
+        let wait = child.wait_with_output();
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), wait);
+
+        tokio::select! {
+            _ = cancel.cancelled() => Err(ToolError::Cancelled),
+            res = timed => match res {
+                Ok(Ok(output)) => {
+                    let mut result = String::new();
+                    if !output.stdout.is_empty() {
+                        result.push_str(&String::from_utf8_lossy(&output.stdout));
+                    }
+                    if !output.stderr.is_empty() {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(&String::from_utf8_lossy(&output.stderr));
+                    }
+                    if result.is_empty() {
+                        result = format!("Command exited with status {}", output.status);
+                    }
+                    Ok(ToolResult {
+                        tool_use_id: String::new(),
+                        content: result,
+                        is_error: !output.status.success(),
+                    })
+                }
+                Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("wait: {e}"))),
+                Err(_) => Err(ToolError::Timeout),
             }
-            result.push_str(&String::from_utf8_lossy(&output.stderr));
         }
-
-        if result.is_empty() {
-            result = format!("Command exited with status {}", output.status);
-        }
-
-        Ok(ToolResult {
-            tool_use_id: String::new(),
-            content: result,
-            is_error: !output.status.success(),
-        })
     }
 
-    async fn execute_read(&self, input: &serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute_read(
+        &self,
+        input: &serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
         let file_path = input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -122,12 +140,14 @@ impl ToolSetAdapter {
             self.workspace_path.join(file_path)
         };
 
-        // Read raw bytes to preserve binary content; lossy-decode for line iteration.
-        // This mirrors rustycode's Read tool contract — binary files return a
-        // best-effort textual view rather than failing outright.
-        let bytes = tokio::fs::read(&path).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read '{}': {}", file_path, e))
-        })?;
+        let read_fut = tokio::fs::read(&path);
+
+        let bytes = tokio::select! {
+            res = read_fut => res.map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to read '{}': {}", file_path, e))
+            })?,
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+        };
         let content = String::from_utf8_lossy(&bytes).into_owned();
 
         let lines: Vec<&str> = content.lines().collect();
@@ -162,6 +182,7 @@ impl ToolSetAdapter {
         &self,
         input: &serde_json::Value,
         tool_use_id: &str,
+        cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
         let file_path = input
             .get("file_path")
@@ -292,15 +313,23 @@ impl ToolSetAdapter {
 
         // Create parent directories
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to create directories: {}", e))
-            })?;
+            let mkdir_fut = tokio::fs::create_dir_all(parent);
+            tokio::select! {
+                res = mkdir_fut => res.map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to create directories: {}", e))
+                })?,
+                _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            }
         }
 
         // Write file
-        tokio::fs::write(&path, new_content).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to write '{}': {}", file_path, e))
-        })?;
+        let write_fut = tokio::fs::write(&path, new_content.as_bytes());
+        tokio::select! {
+            res = write_fut => res.map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to write '{}': {}", file_path, e))
+            })?,
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+        }
 
         // DF-111 (AC5, schema v3): record post-write hash so revert can distinguish
         // "tool-modified" (→ Restore) from "externally-modified" (→ Conflict).
@@ -424,11 +453,12 @@ impl ToolSetPort for ToolSetAdapter {
         &self,
         tool_name: &str,
         input: serde_json::Value,
+        cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
         match tool_name {
-            "Bash" | "bash" => self.execute_bash(&input).await,
-            "Read" | "read" => self.execute_read(&input).await,
-            "Write" | "write" => self.execute_write(&input, "").await,
+            "Bash" | "bash" => self.execute_bash(&input, cancel).await,
+            "Read" | "read" => self.execute_read(&input, cancel).await,
+            "Write" | "write" => self.execute_write(&input, "", cancel).await,
             "activate_skill" => self.execute_activate_skill(&input).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
@@ -528,6 +558,10 @@ mod tests {
     use super::*;
     use crate::adapters::filesystem::FileSystemStorage;
 
+    fn test_cancel() -> CancellationToken {
+        CancellationToken::new()
+    }
+
     fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
         let sessions_dir = dir.join(".claude").join("sessions");
         let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir));
@@ -539,7 +573,7 @@ mod tests {
         let dir = std::env::current_dir().unwrap();
         let adapter = make_adapter(&dir);
         let result = adapter
-            .execute("Bash", serde_json::json!({"command": "echo hello"}))
+            .execute("Bash", serde_json::json!({"command": "echo hello"}), test_cancel())
             .await
             .unwrap();
         assert_eq!(result.content.trim(), "hello");
@@ -557,6 +591,7 @@ mod tests {
             .execute(
                 "Read",
                 serde_json::json!({"file_path": file.to_str().unwrap()}),
+                test_cancel(),
             )
             .await
             .unwrap();
@@ -565,14 +600,10 @@ mod tests {
         assert!(!result.is_error);
     }
 
-    /// Regression: Story 4-3b review P1 — Read tool must not fail on binary files.
-    /// Prior implementation used `read_to_string` which errored on any non-UTF8 byte.
-    /// Current implementation reads raw bytes and lossy-decodes, matching rustycode's contract.
     #[tokio::test]
     async fn test_read_tool_preserves_binary_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("binary.bin");
-        // Write non-UTF8 bytes (0xFF 0xFE is invalid UTF-8 start, 0x00 is null, 0x41 is 'A').
         std::fs::write(&file, [0xFFu8, 0xFE, 0x00, 0x41, b'\n', 0xC3, 0x28]).unwrap();
 
         let adapter = make_adapter(tmp.path());
@@ -580,23 +611,14 @@ mod tests {
             .execute(
                 "Read",
                 serde_json::json!({"file_path": file.to_str().unwrap()}),
+                test_cancel(),
             )
             .await
             .expect("Read must not fail on binary content");
 
-        assert!(
-            !result.is_error,
-            "binary read should succeed via lossy decode"
-        );
-        // Replacement char U+FFFD should appear for invalid sequences, 'A' should survive.
-        assert!(
-            result.content.contains('A'),
-            "ASCII content must survive lossy decode"
-        );
-        assert!(
-            result.content.contains('\u{FFFD}'),
-            "invalid UTF-8 should map to replacement chars, not an error"
-        );
+        assert!(!result.is_error, "binary read should succeed via lossy decode");
+        assert!(result.content.contains('A'), "ASCII content must survive lossy decode");
+        assert!(result.content.contains('\u{FFFD}'), "invalid UTF-8 should map to replacement chars");
     }
 
     #[tokio::test]
@@ -612,6 +634,7 @@ mod tests {
                     "file_path": file.to_str().unwrap(),
                     "content": "hello world"
                 }),
+                test_cancel(),
             )
             .await
             .unwrap();
@@ -622,8 +645,6 @@ mod tests {
         assert_eq!(content, "hello world");
     }
 
-    /// Verifies that when a checkpoint context is active, a snapshot is created
-    /// at the per-conversation path before the Write tool modifies the file.
     #[tokio::test]
     async fn test_write_snapshot_created() {
         use crate::domain::models::conversation::generate_conversation_id;
@@ -633,7 +654,6 @@ mod tests {
         let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir.clone()));
         let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), Arc::clone(&storage));
 
-        // Create a minimal conversation so that create_checkpoint has somewhere to write.
         let conv_id = generate_conversation_id();
         let conv = crate::domain::models::Conversation {
             id: conv_id.clone(),
@@ -658,11 +678,9 @@ mod tests {
         };
         storage.save_conversation(&conv).await.unwrap();
 
-        // Create a checkpoint and set context.
         let cp = storage.create_checkpoint(&conv_id).await.unwrap();
         adapter.set_execution_context(conv_id.clone(), cp, 0).await;
 
-        // Write an existing file — should snapshot first.
         let file = tmp.path().join("existing.txt");
         std::fs::write(&file, "original content").unwrap();
 
@@ -673,17 +691,13 @@ mod tests {
                     "file_path": file.to_str().unwrap(),
                     "content": "new content"
                 }),
+                test_cancel(),
             )
             .await
             .unwrap();
 
-        // The snapshot should be in {sessions_dir}/{conv_id}/snapshots/
         let snapshot_dir = sessions_dir.join(&conv_id).join("snapshots");
-        assert!(
-            snapshot_dir.exists(),
-            "snapshot dir should exist at {:?}",
-            snapshot_dir
-        );
+        assert!(snapshot_dir.exists(), "snapshot dir should exist at {:?}", snapshot_dir);
         let entries: Vec<_> = std::fs::read_dir(&snapshot_dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -693,21 +707,11 @@ mod tests {
         let snapshot_content = std::fs::read_to_string(entries[0].path()).unwrap();
         let snapshot: serde_json::Value = serde_json::from_str(&snapshot_content).unwrap();
 
-        // Verify envelope structure (schema v3 — DF-111 expected_current_hash field).
         assert_eq!(snapshot["schema_version"].as_u64().unwrap(), 3);
         assert_eq!(snapshot["conversation_id"].as_str().unwrap(), conv_id);
-        assert!(
-            snapshot["file_existed"].as_bool().unwrap(),
-            "existing-file snapshot must set file_existed=true"
-        );
-        assert!(
-            snapshot["original_hash"]
-                .as_str()
-                .unwrap()
-                .starts_with("sha256:")
-        );
+        assert!(snapshot["file_existed"].as_bool().unwrap());
+        assert!(snapshot["original_hash"].as_str().unwrap().starts_with("sha256:"));
 
-        // Verify original content is stored (base64).
         use base64::Engine as _;
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(snapshot["original_content_b64"].as_str().unwrap())
@@ -719,7 +723,7 @@ mod tests {
     async fn test_unknown_tool_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = make_adapter(tmp.path());
-        let result = adapter.execute("UnknownTool", serde_json::json!({})).await;
+        let result = adapter.execute("UnknownTool", serde_json::json!({}), test_cancel()).await;
         assert!(result.is_err());
     }
 
@@ -727,7 +731,51 @@ mod tests {
     async fn test_invalid_input_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = make_adapter(tmp.path());
-        let result = adapter.execute("Bash", serde_json::json!({})).await;
+        let result = adapter.execute("Bash", serde_json::json!({}), test_cancel()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bash_cancel_returns_cancelled() {
+        let dir = std::env::current_dir().unwrap();
+        let adapter = make_adapter(&dir);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = adapter
+            .execute("Bash", serde_json::json!({"command": "sleep 10"}), cancel)
+            .await;
+        assert!(matches!(result, Err(ToolError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_read_cancel_returns_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("test.txt");
+        std::fs::write(&file, "content").unwrap();
+        let adapter = make_adapter(tmp.path());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = adapter
+            .execute("Read", serde_json::json!({"file_path": file.to_str().unwrap()}), cancel)
+            .await;
+        assert!(matches!(result, Err(ToolError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn test_write_cancel_returns_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("test.txt");
+        let adapter = make_adapter(tmp.path());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = adapter
+            .execute(
+                "Write",
+                serde_json::json!({"file_path": file.to_str().unwrap(), "content": "x"}),
+                cancel,
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::Cancelled)));
+        assert!(!file.exists(), "file must not be created when cancelled");
     }
 }

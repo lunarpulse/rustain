@@ -11,6 +11,13 @@
 //!
 //! See `5-2-appendix-trust-deadlock-analysis.md` for the 2026-04-21
 //! incident that introduced this invariant.
+//!
+//! # EventBus Invariant (Story 6-0a)
+//!
+//! All event production in this loop MUST go through `EventBus::emit_domain`
+//! so that the broadcast tail stays in sync with the mpsc stream. Never write
+//! to `domain_tx` directly from outside `emit_domain`. See
+//! `event_bus.rs` module doc-comment for the full dual-channel contract.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,6 +26,7 @@ use anyhow::Result;
 use crossterm::event::EventStream;
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
@@ -53,14 +61,15 @@ use crate::domain::ports::{
 };
 use crate::domain::services::message_builder;
 use crate::domain::services::turn_queue::TurnQueue;
+use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::turn;
 
 /// Run the 4-branch tokio::select! event loop.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     terminal: &mut Tui,
-    domain_events_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
-    domain_tx: mpsc::UnboundedSender<AppEvent>,
+    mut domain_events_rx: mpsc::UnboundedReceiver<AppEvent>,
+    app_state: AppState,
     config: &AppConfig,
     provider: Arc<dyn ProviderPort>,
     security: Arc<dyn SecurityPort>,
@@ -75,6 +84,8 @@ pub async fn run(
     skill_activator: Arc<SkillActivator>,
     agent_activator: Arc<crate::adapters::agent_activation::AgentActivator>,
 ) -> Result<()> {
+    let domain_tx = app_state.event_bus.domain_tx.clone();
+
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
@@ -105,9 +116,9 @@ pub async fn run(
 
     // Tab manager — owns all per-tab state; standalone proxies stay in sync with the active tab
     let mut tab_manager = if let Some(conv) = restored_conversation {
-        TabManager::with_conversation(conv)
+        TabManager::with_conversation(conv, app_state.session_cancel.clone())
     } else {
-        TabManager::new()
+        TabManager::new(app_state.session_cancel.clone())
     };
     // Ensure session_id is set on the active tab's conversation
     if tab_manager.active_tab().conversation.session_id.is_none() {
@@ -183,7 +194,7 @@ pub async fn run(
 
     // Send recovery prompt if crash detected (before first render)
     if let Some((title, token_count)) = recovery_prompt {
-        let _ = domain_tx.send(AppEvent::RecoveryPrompt {
+        app_state.event_bus.emit_domain(AppEvent::RecoveryPrompt {
             conversation_id: conversation.id.clone(),
             title,
             token_count,
@@ -485,6 +496,7 @@ pub async fn run(
                                               &storage,
                                               _skill_snap,
                                               _agent_snap,
+                                                                                tab_manager.reset_and_clone_turn_cancel(),
                                           );
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
@@ -522,7 +534,7 @@ pub async fn run(
                                     // Drain user-driven pending activation (Story 5-2 deadlock fix).
                                     if let Some(pending) = state.pending_activation.take() {
                                         state.pending_activation_inspect_content = None;
-                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(pending.conversation_id),
                                             level: NoticeLevel::Info,
                                             message: format!(
@@ -690,7 +702,7 @@ pub async fn run(
                                         skill_activator
                                             .mark_trusted(&pending.conversation_id, pending.skill_file.clone())
                                             .await;
-                                        let _ = domain_tx.send(AppEvent::CompleteSkillActivation {
+                                        app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
                                             conversation_id: pending.conversation_id,
                                             skill_name: pending.skill_name,
                                             skill_file: pending.skill_file,
@@ -717,7 +729,7 @@ pub async fn run(
                                 InputAction::SkillTrustDecline => {
                                     let handled = if let Some(pending) = state.pending_activation.take() {
                                         state.pending_activation_inspect_content = None;
-                                        let _ = domain_tx.send(AppEvent::CompleteSkillActivation {
+                                        app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
                                             conversation_id: pending.conversation_id,
                                             skill_name: pending.skill_name,
                                             skill_file: pending.skill_file,
@@ -881,7 +893,7 @@ pub async fn run(
                                                     Some(arg.as_str()),
                                                 );
                                                 if let Some(m) = mode {
-                                                    domain_tx.send(AppEvent::SetPermissionMode(m)).ok();
+                                                    app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
                                                 } else {
                                                     if !matches!(state.status, StatusState::Flash { .. }) {
                                                         state.status_before_flash = Some(state.status.clone());
@@ -965,13 +977,13 @@ pub async fn run(
                                         // /deactivate [name] — Story 5-2 AC5
                                         let conv_id = conversation.id.clone();
                                         if let Some(ref target) = cmd_arg {
-                                            let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                            app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                                 conversation_id: conv_id,
                                                 name: format!("__deactivate__{}", target),
                                                 arguments: String::new(),
                                             });
                                         } else {
-                                            let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                            app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                                 conversation_id: conv_id,
                                                 name: "__deactivate_all__".to_string(),
                                                 arguments: String::new(),
@@ -984,7 +996,7 @@ pub async fn run(
                                             let args_text = cmd_arg
                                                 .map(|s| s.trim().to_string())
                                                 .unwrap_or_default();
-                                            let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                            app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                                 conversation_id: conv_id,
                                                 name: cmd_name.to_string(),
                                                 arguments: args_text,
@@ -1088,6 +1100,7 @@ pub async fn run(
                                             &storage,
                                             _skill_snap,
                                             _agent_snap,
+                                                                              tab_manager.reset_and_clone_turn_cancel(),
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -1282,7 +1295,7 @@ pub async fn run(
                                 }
                                 InputAction::SkillSelected { name, arguments } => {
                                     let conv_id = conversation.id.clone();
-                                    let _ = domain_tx.send(AppEvent::AskActivateSkill {
+                                    app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                         conversation_id: conv_id,
                                         name,
                                         arguments,
@@ -1419,7 +1432,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -1442,7 +1455,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1457,7 +1470,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1476,7 +1489,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1532,7 +1545,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1665,7 +1678,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap); }
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -2339,13 +2352,13 @@ pub async fn run(
                                             } else {
                                                 format!("Active agent: {}", name)
                                             };
-                                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: crate::domain::models::NoticeLevel::Info,
                                                 message: notice_msg,
                                             });
                                             if let Some(text) = then_submit {
-                                                let _ = domain_tx.send(AppEvent::AgentThenSubmit {
+                                                app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                                     conversation_id: conv_id,
                                                     text,
                                                 });
@@ -2359,7 +2372,7 @@ pub async fn run(
                                             if matches!(e, crate::adapters::agent_activation::AgentActivationError::OutsideWorkspace(..)) {
                                                 state.agent_registry.remove(&name);
                                             }
-                                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id),
                                                 level,
                                                 message: format!("Agent activation failed: {}", e),
@@ -2378,13 +2391,13 @@ pub async fn run(
                                     } else {
                                         "No active agent".to_string()
                                     };
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conv_id.clone()),
                                         level: crate::domain::models::NoticeLevel::Info,
                                         message: notice_msg,
                                     });
                                     if let Some(text) = then_submit {
-                                        let _ = domain_tx.send(AppEvent::AgentThenSubmit {
+                                        app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                             conversation_id: conv_id,
                                             text,
                                         });
@@ -2394,7 +2407,7 @@ pub async fn run(
                                 InputAction::AgentDiscoveryPending { name, then_submit } => {
                                     state.pending_agent_activation =
                                         Some((name.clone(), then_submit));
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: crate::domain::models::NoticeLevel::Info,
                                         message: format!(
@@ -2405,7 +2418,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::UnknownAgent(name) => {
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: crate::domain::models::NoticeLevel::Warning,
                                         message: format!(
@@ -2541,6 +2554,7 @@ pub async fn run(
                                             &storage,
                                             _skill_snap,
                                             _agent_snap,
+                                                                              tab_manager.reset_and_clone_turn_cancel(),
                                         );
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -2670,7 +2684,7 @@ pub async fn run(
                                                 conversation.messages.truncate(pos);
                                             }
                                             fallback_agent.model = None;
-                                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message: format!(
@@ -2698,6 +2712,7 @@ pub async fn run(
                                                 &storage,
                                                 _skill_snap,
                                                 Some(fallback_agent),
+                                                                                  tab_manager.reset_and_clone_turn_cancel(),
                                             );
                                         }
                                     }
@@ -2920,6 +2935,7 @@ pub async fn run(
                             &storage,
                             _skill_snap,
                             _agent_snap,
+                                                              tab_manager.reset_and_clone_turn_cancel(),
                         );
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
@@ -3094,14 +3110,14 @@ pub async fn run(
                             );
                         }
                         if count > 0 {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Info,
                                 message: format!("Loaded {} skills", count),
                             });
                         }
                         if warnings > 0 {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Warning,
                                 message: format!(
@@ -3129,14 +3145,14 @@ pub async fn run(
                             );
                         }
                         if count > 0 {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Info,
                                 message: format!("Discovered {} custom agent(s) in .claude/agents/", count),
                             });
                         }
                         if warnings > 0 {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Warning,
                                 message: format!(
@@ -3163,13 +3179,13 @@ pub async fn run(
                                         } else {
                                             format!("Active agent: {}", pending_name)
                                         };
-                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conv_id.clone()),
                                             level: crate::domain::models::NoticeLevel::Info,
                                             message: notice_msg,
                                         });
                                         if let Some(text) = then_submit {
-                                            let _ = domain_tx.send(AppEvent::AgentThenSubmit {
+                                            app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                                 conversation_id: conv_id,
                                                 text,
                                             });
@@ -3189,7 +3205,7 @@ pub async fn run(
                                         ) {
                                             state.agent_registry.remove(&pending_name);
                                         }
-                                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conv_id),
                                             level,
                                             message: format!("Agent activation failed: {}", e),
@@ -3198,7 +3214,7 @@ pub async fn run(
                                 }
                                 state.needs_redraw = true;
                             } else {
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: crate::domain::models::NoticeLevel::Warning,
                                     message: format!(
@@ -3233,6 +3249,7 @@ pub async fn run(
                                 &storage,
                                 _skill_snap,
                                 _agent_snap,
+                                                                  tab_manager.reset_and_clone_turn_cancel(),
                             );
                         }
                     }
@@ -3251,7 +3268,7 @@ pub async fn run(
                                 let names: Vec<&str> = deactivated.iter().map(|s| s.name.as_str()).collect();
                                 format!("Deactivated {} skill(s): [{}]", names.len(), names.join(", "))
                             };
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: msg,
@@ -3263,14 +3280,14 @@ pub async fn run(
                                     state.active_skill_count = skill_activator
                                         .active_count(&conversation_id)
                                         .await;
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("Deactivated skill '{}'", deactivated.name),
                                     });
                                 }
                                 None => {
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("Skill '{}' is not active", stripped),
@@ -3282,7 +3299,7 @@ pub async fn run(
                             let def = match def {
                                 Some(d) => d,
                                 None => {
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Error,
                                         message: format!("Skill '{}' not found", name),
@@ -3309,7 +3326,7 @@ pub async fn run(
                                         existing = ?state.pending_activation.as_ref().map(|p| &p.skill_name),
                                         "second user-driven skill trust prompt while one is already pending; dropping"
                                     );
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!(
@@ -3333,7 +3350,7 @@ pub async fn run(
                             // during `rx.await` — if so, skip activation + turn kickoff
                             // (start_turn would run against the wrong conversation).
                             if conversation.id != conversation_id {
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
                                     message: format!(
@@ -3376,15 +3393,16 @@ pub async fn run(
                                         &storage,
                                         snap,
                                         agent_snap,
+                                                                          tab_manager.reset_and_clone_turn_cancel(),
                                     );
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("Skill '{}' activated", active.name),
                                     });
                                 }
                                 Err(e) => {
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Error,
                                         message: e.to_string(),
@@ -3423,7 +3441,7 @@ pub async fn run(
                         trusted,
                     } => {
                         if !trusted {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: format!(
@@ -3436,7 +3454,7 @@ pub async fn run(
                         }
 
                         if conversation.id != conversation_id {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: format!(
@@ -3451,7 +3469,7 @@ pub async fn run(
                         let def = match skill_activator.lookup_skill(&skill_name).await {
                             Some(d) => d,
                             None => {
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Error,
                                     message: format!(
@@ -3465,7 +3483,7 @@ pub async fn run(
                         };
 
                         if def.file != skill_file {
-                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: format!(
@@ -3508,15 +3526,16 @@ pub async fn run(
                                     &storage,
                                     snap,
                                     agent_snap,
+                                                                      tab_manager.reset_and_clone_turn_cancel(),
                                 );
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
                                     message: format!("Skill '{}' activated", active.name),
                                 });
                             }
                             Err(e) => {
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Error,
                                     message: format!("Skill '{}' activation failed: {}", skill_name, e),
@@ -4822,25 +4841,26 @@ pub fn rehydrate_historical_images(
 }
 
 fn start_turn(
-    text: &str,
-    images: Vec<ImageAttachment>,
-    conversation: &mut Conversation,
-    streaming: &mut StreamingState,
-    state: &mut TuiState,
-    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-    provider: &Arc<dyn ProviderPort>,
-    config: &AppConfig,
-    domain_tx: &mpsc::UnboundedSender<AppEvent>,
-    security: &Arc<dyn SecurityPort>,
-    tools: &Arc<dyn ToolSetPort>,
-    persona: &Arc<dyn PersonaPort>,
-    workspace_path: &std::path::Path,
-    session_manager: &mut SessionManager,
-    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-    storage: &Arc<dyn StoragePort>,
-    activation_set: Option<crate::domain::models::SkillActivationSet>,
-    agent_snapshot: Option<crate::domain::models::ActiveAgent>,
-) {
+     text: &str,
+     images: Vec<ImageAttachment>,
+     conversation: &mut Conversation,
+     streaming: &mut StreamingState,
+     state: &mut TuiState,
+     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+     provider: &Arc<dyn ProviderPort>,
+     config: &AppConfig,
+     domain_tx: &mpsc::UnboundedSender<AppEvent>,
+     security: &Arc<dyn SecurityPort>,
+     tools: &Arc<dyn ToolSetPort>,
+     persona: &Arc<dyn PersonaPort>,
+     workspace_path: &std::path::Path,
+     session_manager: &mut SessionManager,
+     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+     storage: &Arc<dyn StoragePort>,
+     activation_set: Option<crate::domain::models::SkillActivationSet>,
+     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
+     turn_cancel: CancellationToken,
+ ) {
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
     // (Story 4-3a.1 AC3 / DF-067).
@@ -4909,14 +4929,14 @@ fn start_turn(
         conversation.session_id = Some(new_session_id.clone());
         session_manager.mark_active(new_session_id);
         let msg_count = conversation.messages.len().saturating_sub(1);
-        let _ = domain_tx.send(AppEvent::SystemNotice {
+        domain_tx.send(AppEvent::SystemNotice {
             conversation_id: Some(conversation.id.clone()),
             level: crate::domain::models::NoticeLevel::Info,
             message: format!(
                 "\u{2139}\u{fe0f} Session restarted with your conversation history ({} messages).",
                 msg_count
             ),
-        });
+        }).ok();
     }
 
     let all_tool_defs = tools.available_tools();
@@ -4943,11 +4963,11 @@ fn start_turn(
     };
     if let Some(ref allowed) = combined {
         if allowed.is_empty() {
-            let _ = domain_tx.send(AppEvent::SystemNotice {
+            domain_tx.send(AppEvent::SystemNotice {
                 conversation_id: Some(conversation.id.clone()),
                 level: crate::domain::models::NoticeLevel::Warning,
                 message: "Active agent and skill tool filters are disjoint — no tools available for this turn".to_string(),
-            });
+            }).ok();
         }
     }
     let tool_defs = match combined {
@@ -5008,6 +5028,7 @@ fn start_turn(
         storage.clone(),
         conversation.clone(),
         activation_set,
+        turn_cancel,
     ));
     *active_turn = Some(handle);
 

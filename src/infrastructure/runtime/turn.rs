@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
@@ -36,6 +37,7 @@ pub async fn run_turn(
     storage: Arc<dyn StoragePort>,
     conversation_snapshot: crate::domain::models::Conversation,
     activation_set: Option<crate::domain::models::SkillActivationSet>,
+    turn_cancel: CancellationToken,
 ) {
     // Persist the conversation before the first API call so that
     // `create_checkpoint` (called when the API returns tool_use) can load it
@@ -204,8 +206,6 @@ pub async fn run_turn(
                         let mut tool_result_messages = Vec::new();
 
                         for tc in &tool_calls {
-                            // Special handling for AskUserQuestion tool — it does not write files,
-                            // so it is excluded from checkpoint dispatch (AC2, Story 4-3b note).
                             if tc.name == "AskUserQuestion" {
                                 let question = tc
                                     .input
@@ -220,11 +220,28 @@ pub async fn run_turn(
                                     question,
                                     response_tx: resp_tx,
                                 });
-                                // Wait for user's answer
-                                let answer = match resp_rx.await {
-                                    Ok(a) => a,
-                                    Err(_) => {
-                                        // Channel dropped — user cancelled
+                                let answer = tokio::select! {
+                                    a = resp_rx => match a {
+                                        Ok(a) => a,
+                                        Err(_) => {
+                                            let _ = event_tx.send(AppEvent::ProviderChunk {
+                                                conversation_id: conversation_id.clone(),
+                                                chunk: StreamChunk::TurnComplete {
+                                                    stop_reason: StopReason::Cancelled,
+                                                },
+                                            });
+                                            return;
+                                        }
+                                    },
+                                    _ = turn_cancel.cancelled() => {
+                                        let _ = event_tx.send(AppEvent::ProviderChunk {
+                                            conversation_id: conversation_id.clone(),
+                                            chunk: StreamChunk::ToolResult {
+                                                id: tc.id.clone(),
+                                                content: "Tool execution cancelled".to_string(),
+                                                is_error: true,
+                                            },
+                                        });
                                         let _ = event_tx.send(AppEvent::ProviderChunk {
                                             conversation_id: conversation_id.clone(),
                                             chunk: StreamChunk::TurnComplete {
@@ -255,6 +272,7 @@ pub async fn run_turn(
                                 continue;
                             }
 
+                            let call_cancel = turn_cancel.child_token();
                             let active_skills: Option<&[crate::domain::models::ActiveSkill]> =
                                 activation_set.as_ref().map(|s| s.active_skills());
                             let decision = permission_chain::check(
@@ -267,7 +285,7 @@ pub async fn run_turn(
 
                             let result = match decision {
                                 PermissionDecision::Allow | PermissionDecision::AlwaysAllow => {
-                                    match tools.execute(&tc.name, tc.input.clone()).await {
+                                    match tools.execute(&tc.name, tc.input.clone(), call_cancel).await {
                                         Ok(mut result) => {
                                             result.tool_use_id = tc.id.clone();
                                             result

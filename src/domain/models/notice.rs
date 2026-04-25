@@ -1,6 +1,8 @@
 /// Severity level for system notices displayed in the status bar.
+use serde::{Deserialize, Serialize};
+
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoticeLevel {
     Info,
     Warning,

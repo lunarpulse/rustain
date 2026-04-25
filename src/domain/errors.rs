@@ -145,6 +145,9 @@ pub enum ToolError {
     #[error("Tool execution timed out")]
     Timeout,
 
+    #[error("Tool execution cancelled")]
+    Cancelled,
+
     #[error("{0}")]
     Other(String),
 }

@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use tokio::sync::mpsc;
-
 use crate::adapters::cli::commands::{Cli, Command};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::persona_adapter::PersonaAdapter;
@@ -17,6 +15,7 @@ use crate::domain::models::NoticeLevel;
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
 };
+use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, paths, signals};
 
@@ -109,8 +108,10 @@ pub async fn run() -> Result<()> {
     // 5a. Construct provider adapter
     let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
 
-    // 6. Create domain event channel (before security adapter, which needs the sender)
-    let (domain_tx, mut domain_rx) = mpsc::unbounded_channel::<AppEvent>();
+    // 6. Create AppState (owns EventBus + CancellationToken)
+    let raw_capacity = app_config.runtime.event_bus.raw_capacity;
+    let (app_state, domain_rx) = AppState::new(raw_capacity);
+    let domain_tx = app_state.event_bus.domain_tx.clone();
 
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
@@ -287,8 +288,8 @@ pub async fn run() -> Result<()> {
     let storage = Arc::new(storage);
     let storage_port: Arc<dyn StoragePort> = storage.clone();
 
-    // Store shutdown sender for signal handlers
-    signals::set_shutdown_sender(domain_tx.clone());
+    signals::set_shutdown_sender(app_state.event_bus.domain_tx.clone());
+    signals::set_session_cancel(app_state.session_cancel.clone());
     signals::install_signal_handlers().await;
 
     // 5e. Construct clipboard adapter
@@ -302,11 +303,10 @@ pub async fn run() -> Result<()> {
     // 7. Setup terminal
     let mut tui = terminal::setup()?;
 
-    // 8. Run event loop
     let result = event_loop::run(
         &mut tui,
-        &mut domain_rx,
-        domain_tx,
+        domain_rx,
+        app_state,
         &app_config,
         provider,
         security,

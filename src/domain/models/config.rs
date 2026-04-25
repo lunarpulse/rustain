@@ -6,6 +6,32 @@ pub struct SkillsConfig {
     pub disabled: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventBusConfig {
+    #[serde(default = "EventBusConfig::default_raw_capacity")]
+    pub raw_capacity: usize,
+}
+
+impl EventBusConfig {
+    fn default_raw_capacity() -> usize {
+        1024
+    }
+}
+
+impl Default for EventBusConfig {
+    fn default() -> Self {
+        Self {
+            raw_capacity: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub event_bus: EventBusConfig,
+}
+
 /// Application configuration loaded from file + env.
 ///
 /// NOTE (Story 5-1 Task 3.5): we intentionally do NOT use
@@ -32,6 +58,8 @@ pub struct AppConfig {
     pub snapshot_retention_count: Option<usize>,
     #[serde(default)]
     pub skills: SkillsConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 impl AppConfig {
@@ -61,6 +89,7 @@ impl Default for AppConfig {
             log_retain_count: 3,
             snapshot_retention_count: Some(100),
             skills: SkillsConfig::default(),
+            runtime: RuntimeConfig::default(),
         }
     }
 }

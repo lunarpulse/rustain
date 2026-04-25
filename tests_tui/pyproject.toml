@@ -40,6 +40,7 @@ markers = [
     "story_5_2: Story 5-2 — Agent Skills Progressive Disclosure & Execution",
     "story_5_3: Story 5-3 — Custom Slash Commands",
     "story_5_4: Story 5-4 — Custom Agents",
+    "story_6_0a: Story 6-0a — Cancellation Token Tree & Dual-Channel EventBus",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

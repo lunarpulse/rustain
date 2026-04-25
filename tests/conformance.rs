@@ -47,7 +47,8 @@ fn get_imports(path: &Path) -> Vec<(usize, String)> {
 fn test_domain_no_forbidden_crate_imports() {
     // futures is allowed — BoxStream/Stream are pure types, no I/O.
     // See Story 1.1b AC7 for rationale.
-    let forbidden = ["crossterm", "ratatui", "tokio", "reqwest", "arc_swap"];
+    let forbidden = ["crossterm", "ratatui", "reqwest", "arc_swap"];
+    let allowed_tokio = ["tokio_util::sync::CancellationToken", "tokio::sync"];
     let domain_dir = Path::new("src/domain");
     let files = collect_rs_files(domain_dir);
     assert!(!files.is_empty(), "No .rs files found in src/domain/");
@@ -62,6 +63,17 @@ fn test_domain_no_forbidden_crate_imports() {
                         file.display(),
                         line_num,
                         crate_name,
+                        import
+                    ));
+                }
+            }
+            if import.contains("tokio") {
+                let is_allowed = allowed_tokio.iter().any(|a| import.contains(a));
+                if !is_allowed {
+                    violations.push(format!(
+                        "{}:{} — forbidden import `tokio` (non-sync/CancellationToken) in: {}",
+                        file.display(),
+                        line_num,
                         import
                     ));
                 }

@@ -35,6 +35,8 @@ pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
 pub use completion::CompletionOptions;
 pub use config::AppConfig;
 #[allow(unused_imports)]
+pub use config::RuntimeConfig;
+#[allow(unused_imports)]
 pub use content::ContentBlockType;
 #[allow(unused_imports)]
 pub use conversation::{

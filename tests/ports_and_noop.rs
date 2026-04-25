@@ -112,7 +112,7 @@ async fn test_noop_security_allows_all() {
 async fn test_noop_toolset_no_tools() {
     let toolset = NoOpToolSet;
     assert!(toolset.available_tools().is_empty());
-    let result = toolset.execute("bash", serde_json::json!({})).await;
+    let result = toolset.execute("bash", serde_json::json!({}), tokio_util::sync::CancellationToken::new()).await;
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), ToolError::NotFound(_)));
 }

@@ -2,13 +2,14 @@ use std::io::Write;
 use std::sync::OnceLock;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapters::tui::terminal::restore_terminal_raw;
 use crate::domain::events::AppEvent;
 use crate::infrastructure::paths;
 
-/// Global sender for shutdown signals (SIGTERM/SIGINT).
 static SHUTDOWN_TX: OnceLock<mpsc::UnboundedSender<AppEvent>> = OnceLock::new();
+static SESSION_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
 
 /// Install the panic hook that restores the terminal, writes a crash log,
 /// then calls the original panic hook.
@@ -43,37 +44,43 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Store the event sender for signal handlers.
 pub fn set_shutdown_sender(tx: mpsc::UnboundedSender<AppEvent>) {
     let _ = SHUTDOWN_TX.set(tx);
 }
 
-/// Install SIGTERM/SIGINT handlers that send AppEvent::Shutdown.
-/// On first signal: send Shutdown event for graceful teardown.
-/// On second signal: restore terminal directly and exit (common double-Ctrl-C pattern).
+pub fn set_session_cancel(token: CancellationToken) {
+    let _ = SESSION_CANCEL.set(token);
+}
+
 pub async fn install_signal_handlers() {
     let tx = SHUTDOWN_TX.get().cloned();
+    let cancel = SESSION_CANCEL.get().cloned();
 
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("Failed to install SIGTERM handler");
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
             .expect("Failed to install SIGINT handler");
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .expect("Failed to install SIGHUP handler");
 
-        // First signal: graceful shutdown
         tokio::select! {
             _ = sigterm.recv() => {}
             _ = sigint.recv() => {}
+            _ = sighup.recv() => {}
         }
 
+        if let Some(ref token) = cancel {
+            token.cancel();
+        }
         if let Some(ref tx) = tx {
             let _ = tx.send(AppEvent::Shutdown);
         }
 
-        // Second signal: force restore terminal and exit
         tokio::select! {
             _ = sigterm.recv() => {}
             _ = sigint.recv() => {}
+            _ = sighup.recv() => {}
         }
 
         restore_terminal_raw();

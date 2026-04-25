@@ -17,6 +17,7 @@ use crate::domain::ports::{
     ChannelPort, ContextPort, MemoryPort, PersonaPort, ProviderPort, SchedulerPort, SecurityPort,
     SessionPort, StoragePort, ToolSetPort,
 };
+use tokio_util::sync::CancellationToken;
 
 // ── ProviderPort ────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ impl ToolSetPort for NoOpToolSet {
         &self,
         tool_name: &str,
         _input: serde_json::Value,
+        _cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
         Err(ToolError::NotFound(tool_name.into()))
     }
