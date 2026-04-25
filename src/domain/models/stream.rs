@@ -149,6 +149,7 @@ pub fn apply_chunk(
                     result: None,
                     started_at_ms: Some(now as u64 * 1000),
                     completed_at_ms: None,
+                    status: None,
                 },
             );
             streaming.phase = StreamingPhase::InToolCall { tool_id: id };

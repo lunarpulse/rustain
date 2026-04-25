@@ -130,6 +130,7 @@ fn test_tool_block_in_full_layout() {
                 }),
                 started_at_ms: Some(0),
                 completed_at_ms: Some(100),
+                status: None,
             }],
             created_at: 0,
             token_count: None,

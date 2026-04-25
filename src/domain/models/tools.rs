@@ -8,6 +8,11 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Whether this tool may execute concurrently with other tools in the same batch.
+    /// Defaults to `false` (sequential) for safety.  Future tools (e.g. Glob, Grep,
+    /// WebFetch) must opt in explicitly.
+    #[serde(default)]
+    pub parallel_safe: bool,
 }
 
 /// Tracking info for an in-progress or completed tool call.
@@ -22,6 +27,11 @@ pub struct ToolCallInfo {
     pub started_at_ms: Option<u64>,
     /// Unix timestamp in milliseconds.
     pub completed_at_ms: Option<u64>,
+    /// Optional status chip string (e.g. "● Executing") set by the event loop
+    /// when a `ToolCallTransition` is received.  Omitted from serialisation when
+    /// unset so old session JSONL loads cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// Result of a tool execution.

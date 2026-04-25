@@ -52,6 +52,7 @@ fn msg_with_tool_call(
             }),
             started_at_ms: None,
             completed_at_ms: None,
+            status: None,
         }],
         created_at: 1_700_000_000,
         token_count: None,

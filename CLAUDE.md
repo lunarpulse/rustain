@@ -27,6 +27,7 @@ rustain/src/
 │   ├── models/                      # Types/enums/structs (FocusState, AppConfig, NoticeLevel)
 │   ├── ports/                       # Port trait definitions (Story 1.1b+)
 │   ├── services/                    # Pure functions on domain types
+│   │   └── tool_scheduler.rs        # ToolCall 7-state FSM + parallel/sequential batching
 │   ├── events.rs                    # AppEvent, DomainInputEvent, ChunkAction
 │   └── errors.rs                    # DomainError, ConfigError, EventError
 ├── adapters/                        # External system interfaces
@@ -83,6 +84,24 @@ pub trait CapabilityProvider: Send + Sync {
 - `AgentSkillsProvider` — `.agents/skills/`, `.claude/skills/` (Knowledge)
 - `McpProvider` — `.claude/mcp.json` (Tools)
 - `A2aProvider` — `.claude/a2a.json` + spawn/despawn (Agents)
+
+## ToolCall FSM (Story 6-0b)
+
+Every tool invocation follows a strict 7-state lifecycle:
+
+```
+Validating → Scheduled → (AwaitingApproval)? → Executing → Success
+     ↓            ↓              ↓                 ↓         Error
+ Cancelled    Cancelled      Cancelled         Cancelled   Cancelled
+```
+
+- `Validating` — input schema checked via `ToolSetPort::validate_input`
+- `Scheduled` — policy check (`mode_risk_outcome`) decides prompt vs auto-approve
+- `AwaitingApproval` — waiting for user decision (foreground turn only)
+- `Executing` — `ToolSetPort::execute` running
+- `Success` / `Error` / `Cancelled` — terminal states
+
+Parallel batching: when all tools in a batch have `parallel_safe == true`, `FuturesOrdered` runs them concurrently; otherwise sequential fallback. Cancellation uses per-call `CancellationToken::child_token()` so individual tools can be aborted without killing the whole batch.
 
 ## Ownership Topology
 

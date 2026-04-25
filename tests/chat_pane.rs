@@ -508,6 +508,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
+        status: None,
     };
     let msg_id = rustain::domain::models::generate_conversation_id();
     let conversation = make_conversation(vec![ChatMessage {

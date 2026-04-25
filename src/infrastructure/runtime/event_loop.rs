@@ -137,6 +137,36 @@ pub async fn run(
         }
     }
 
+    // Story 6-0b: construct ToolScheduler once and spawn bridge task
+    let tool_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+        security.clone(),
+        tools.clone(),
+        config.runtime.event_bus.raw_capacity,
+    );
+    {
+        let bus = app_state.event_bus.clone();
+        let mut rx = tool_scheduler.subscribe();
+        tokio::spawn(async move {
+            use std::time::Duration;
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
+                    Ok(Ok(transition)) => {
+                        bus.emit_domain(AppEvent::ToolCallTransitionBridged {
+                            conversation_id: transition.conversation_id.clone(),
+                            transition,
+                        });
+                    }
+                    Ok(Err(RecvError::Lagged(n))) => {
+                        tracing::warn!(missed = n, "tool transition subscriber lagged");
+                    }
+                    Ok(Err(RecvError::Closed)) => break,
+                    Err(_) => continue, // idle timeout — re-poll
+                }
+            }
+        });
+    }
+
     // Active-tab proxies — always reflect the current tab; synced on every tab switch
     let mut conversation = tab_manager.active_tab().conversation.clone();
     let mut streaming = tab_manager.active_tab().streaming.clone();
@@ -488,7 +518,7 @@ pub async fn run(
                                               config,
                                               &domain_tx,
                                               &security,
-                                              &tools,
+                                              &tools, &tool_scheduler,
                                               &persona,
                                               &workspace_path,
                                               &mut session_manager,
@@ -1092,7 +1122,7 @@ pub async fn run(
                                             config,
                                             &domain_tx,
                                             &security,
-                                            &tools,
+                                            &tools, &tool_scheduler,
                                             &persona,
                                             &workspace_path,
                                             &mut session_manager,
@@ -1432,7 +1462,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -1455,7 +1485,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1470,7 +1500,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1489,7 +1519,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1545,7 +1575,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1678,7 +1708,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -2443,6 +2473,14 @@ pub async fn run(
             Some(event) = domain_events_rx.recv() => {
                 match event {
                     AppEvent::Shutdown => break,
+                    AppEvent::ToolCallTransitionBridged { conversation_id, transition } => {
+                        if conversation_id == conversation.id {
+                            if let Some(tc) = streaming.active_tool_calls.get_mut(transition.call.id()) {
+                                tc.status = Some(crate::domain::models::tool_call::status_chip(&transition.call).to_string());
+                            }
+                            state.needs_redraw = true;
+                        }
+                    }
                     AppEvent::ProviderChunk { conversation_id, chunk } => {
                         if conversation_id == conversation.id {
                             // Active tab — apply chunk to proxy variables as normal
@@ -2546,7 +2584,7 @@ pub async fn run(
                                             config,
                                             &domain_tx,
                                             &security,
-                                            &tools,
+                                            &tools, &tool_scheduler,
                                             &persona,
                                             &workspace_path,
                                             &mut session_manager,
@@ -2704,7 +2742,7 @@ pub async fn run(
                                                 config,
                                                 &domain_tx,
                                                 &security,
-                                                &tools,
+                                                &tools, &tool_scheduler,
                                                 &persona,
                                                 &workspace_path,
                                                 &mut session_manager,
@@ -2927,7 +2965,7 @@ pub async fn run(
                             config,
                             &domain_tx,
                             &security,
-                            &tools,
+                            &tools, &tool_scheduler,
                             &persona,
                             &workspace_path,
                             &mut session_manager,
@@ -3241,7 +3279,7 @@ pub async fn run(
                                 config,
                                 &domain_tx,
                                 &security,
-                                &tools,
+                                &tools, &tool_scheduler,
                                 &persona,
                                 &workspace_path,
                                 &mut session_manager,
@@ -3385,7 +3423,7 @@ pub async fn run(
                                         config,
                                         &domain_tx,
                                         &security,
-                                        &tools,
+                                        &tools, &tool_scheduler,
                                         &persona,
                                         &workspace_path,
                                         &mut session_manager,
@@ -3518,7 +3556,7 @@ pub async fn run(
                                     config,
                                     &domain_tx,
                                     &security,
-                                    &tools,
+                                    &tools, &tool_scheduler,
                                     &persona,
                                     &workspace_path,
                                     &mut session_manager,
@@ -4852,6 +4890,7 @@ fn start_turn(
      domain_tx: &mpsc::UnboundedSender<AppEvent>,
      security: &Arc<dyn SecurityPort>,
      tools: &Arc<dyn ToolSetPort>,
+    tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
      persona: &Arc<dyn PersonaPort>,
      workspace_path: &std::path::Path,
      session_manager: &mut SessionManager,
@@ -4988,6 +5027,7 @@ fn start_turn(
                         },
                         "required": ["name"]
                     }),
+                    parallel_safe: true,
                 };
                 filtered.push(act_tool);
             }
@@ -5024,6 +5064,7 @@ fn start_turn(
         domain_tx.clone(),
         security.clone(),
         tools.clone(),
+        tool_scheduler.clone(),
         conversation.id.clone(),
         storage.clone(),
         conversation.clone(),
@@ -6447,6 +6488,7 @@ mod tests {
             }),
             started_at_ms: None,
             completed_at_ms: None,
+            status: None,
         });
         let conv = mk_conversation(
             conv_id,

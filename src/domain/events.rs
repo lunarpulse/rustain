@@ -131,6 +131,12 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         text: String,
     },
+    /// Bridge event: a `ToolCallTransition` has been received on the broadcast
+    /// channel and should be forwarded to the event loop for TUI/state updates.
+    ToolCallTransitionBridged {
+        conversation_id: ConversationId,
+        transition: crate::domain::models::ToolCallTransition,
+    },
 }
 
 /// Event wrapping a tool execution result.

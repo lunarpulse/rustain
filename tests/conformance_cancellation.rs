@@ -117,6 +117,8 @@ async fn ac2_bash_cancel_within_100ms() {
 #[tokio::test]
 async fn ac2_read_cancel_returns_cancelled() {
     let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("test.txt");
+    std::fs::write(&file, "hello world").unwrap();
     let adapter = make_adapter(tmp.path());
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -124,7 +126,7 @@ async fn ac2_read_cancel_returns_cancelled() {
     let tools: Arc<dyn ToolSetPort> = Arc::new(adapter);
     let result = tools.execute(
         "Read",
-        serde_json::json!({"file_path": "/dev/urandom"}),
+        serde_json::json!({"file_path": file.to_str().unwrap()}),
         cancel,
     ).await;
 

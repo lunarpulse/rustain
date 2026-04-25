@@ -75,6 +75,14 @@ pub struct ColorTokens {
     /// the fork marker or other accents.
     // Covers: Story 4-4 AC9
     pub bookmark_accent: Color,
+    // Story 6-0b: tool status chip colors
+    pub tool_status_validating: Color,
+    pub tool_status_scheduled: Color,
+    pub tool_status_awaiting: Color,
+    pub tool_status_executing: Color,
+    pub tool_status_success: Color,
+    pub tool_status_error: Color,
+    pub tool_status_cancelled: Color,
 }
 
 /// Spacing tokens for layout calculations.
@@ -220,6 +228,14 @@ impl Theme {
                 text_hint: Color::DarkGray,
                 // Story 4-4 AC9: bookmark glyph color (yellow family).
                 bookmark_accent: Color::Rgb(230, 200, 0),
+                // Story 6-0b: tool status chip colors
+                tool_status_validating: Color::DarkGray,
+                tool_status_scheduled: Color::DarkGray,
+                tool_status_awaiting: Color::Rgb(230, 200, 0),
+                tool_status_executing: Color::Rgb(100, 150, 255),
+                tool_status_success: Color::Rgb(0, 200, 0),
+                tool_status_error: Color::Rgb(255, 100, 100),
+                tool_status_cancelled: Color::Rgb(155, 155, 155),
             },
             spacing: SpacingTokens {
                 none: 0,
@@ -412,6 +428,13 @@ impl ColorTokens {
         self.profile_base = mapper(self.profile_base);
         self.text_hint = mapper(self.text_hint);
         self.bookmark_accent = mapper(self.bookmark_accent);
+        self.tool_status_validating = mapper(self.tool_status_validating);
+        self.tool_status_scheduled = mapper(self.tool_status_scheduled);
+        self.tool_status_awaiting = mapper(self.tool_status_awaiting);
+        self.tool_status_executing = mapper(self.tool_status_executing);
+        self.tool_status_success = mapper(self.tool_status_success);
+        self.tool_status_error = mapper(self.tool_status_error);
+        self.tool_status_cancelled = mapper(self.tool_status_cancelled);
     }
 }
 

@@ -668,6 +668,13 @@ data: {\"type\":\"message_stop\"}\n\
         let (tx, mut rx) = mpsc::unbounded_channel();
         let provider: Arc<dyn ProviderPort> = Arc::new(DisconnectingProvider);
 
+        let security = Arc::new(rustain::adapters::noop::NoOpSecurity);
+        let tools = Arc::new(rustain::adapters::noop::NoOpToolSet);
+        let tool_scheduler = rustain::domain::services::tool_scheduler::ToolScheduler::new(
+            security.clone(),
+            tools.clone(),
+            16,
+        );
         rustain::infrastructure::runtime::turn::run_turn(
             provider,
             vec![Message {
@@ -686,8 +693,9 @@ data: {\"type\":\"message_stop\"}\n\
                 tools: vec![],
             },
             tx,
-            Arc::new(rustain::adapters::noop::NoOpSecurity),
-            Arc::new(rustain::adapters::noop::NoOpToolSet),
+            security,
+            tools,
+            tool_scheduler,
             "test-conv-id".to_string(),
             Arc::new(rustain::adapters::noop::NoOpStorage),
             make_conversation(),

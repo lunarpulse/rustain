@@ -297,6 +297,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                     result: None,
                                     started_at_ms: None,
                                     completed_at_ms: None,
+                                    status: None,
                                 });
                             }
                             ClaudeCodeBlock::Image => {

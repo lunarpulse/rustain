@@ -16,6 +16,7 @@ pub mod session_meta;
 mod skill;
 mod stream;
 pub mod tab;
+pub mod tool_call;
 mod tools;
 pub mod transaction;
 mod usage;
@@ -75,6 +76,7 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
+pub use tool_call::{ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition, status_chip};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};

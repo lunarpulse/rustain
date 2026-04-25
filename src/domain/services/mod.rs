@@ -11,6 +11,7 @@ pub mod permission_chain;
 pub mod search;
 pub mod session_index;
 pub mod skill_context;
+pub mod tool_scheduler;
 pub mod turn_queue;
 
 #[cfg(feature = "skills-validation")]

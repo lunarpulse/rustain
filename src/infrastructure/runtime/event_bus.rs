@@ -28,7 +28,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::domain::events::AppEvent;
-use crate::domain::models::{NoticeLevel, PermissionMode, StreamChunk};
+use crate::domain::models::{NoticeLevel, PermissionMode, StreamChunk, ToolCallTransition};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RawEvent {
@@ -43,6 +43,7 @@ pub enum RawEventKind {
     Provider(StreamChunk),
     ModeChanged(PermissionMode),
     SystemNotice { level: NoticeLevel, message: String },
+    Tool(ToolCallTransition),
 }
 
 pub struct EventBus {
@@ -91,6 +92,11 @@ impl RawEvent {
                 conversation_id: conversation_id.clone(),
                 timestamp_ms: now,
                 kind: RawEventKind::SystemNotice { level: *level, message: message.clone() },
+            },
+            AppEvent::ToolCallTransitionBridged { conversation_id, transition } => RawEvent {
+                conversation_id: Some(conversation_id.clone()),
+                timestamp_ms: now,
+                kind: RawEventKind::Tool(transition.clone()),
             },
             AppEvent::Tick
             | AppEvent::Resize(..)
@@ -272,5 +278,33 @@ mod tests {
             },
         });
         assert!(RawEvent::from_app_event(&ev).is_none());
+    }
+
+    #[test]
+    fn from_app_event_tool_call_transition() {
+        use crate::domain::models::tool_call::{ToolCall, ToolCallRequest, ToolCallTransition};
+        let transition = ToolCallTransition {
+            conversation_id: "conv-3".to_string(),
+            call: ToolCall::Validating {
+                id: "tc-1".to_string(),
+                request: ToolCallRequest {
+                    id: "tc-1".to_string(),
+                    tool_name: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "/tmp/x"}),
+                },
+                started_at: 1714000000,
+            },
+        };
+        let ev = AppEvent::ToolCallTransitionBridged {
+            conversation_id: "conv-3".to_string(),
+            transition: transition.clone(),
+        };
+        let raw = RawEvent::from_app_event(&ev).unwrap();
+        assert_eq!(raw.conversation_id.as_deref(), Some("conv-3"));
+        assert!(matches!(raw.kind, RawEventKind::Tool(_)));
+        if let RawEventKind::Tool(ref t) = raw.kind {
+            assert_eq!(t.conversation_id, "conv-3");
+            assert!(matches!(t.call, ToolCall::Validating { .. }));
+        }
     }
 }

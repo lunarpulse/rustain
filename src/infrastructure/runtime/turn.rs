@@ -10,11 +10,11 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
-    CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCallInfo,
-    ToolResultMessage, ToolUseMessage,
+    CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCall,
+    ToolCallInfo, ToolResultMessage, ToolUseMessage,
 };
 use crate::domain::ports::{ProviderPort, SecurityPort, StoragePort, ToolSetPort};
-use crate::domain::services::permission_chain::{self, PermissionDecision};
+use crate::domain::services::tool_scheduler::ToolScheduler;
 
 /// Execute a turn: stream completion, execute tools, loop until EndTurn.
 ///
@@ -31,8 +31,9 @@ pub async fn run_turn(
     mut messages: Vec<Message>,
     options: CompletionOptions,
     event_tx: mpsc::UnboundedSender<AppEvent>,
-    security: Arc<dyn SecurityPort>,
+    _security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
+    tool_scheduler: Arc<ToolScheduler>,
     conversation_id: String,
     storage: Arc<dyn StoragePort>,
     conversation_snapshot: crate::domain::models::Conversation,
@@ -100,6 +101,7 @@ pub async fn run_turn(
                                 result: None,
                                 started_at_ms: Some(now_ms()),
                                 completed_at_ms: None,
+                                status: None,
                             });
                         }
                         StreamChunk::Text { content, .. } => {
@@ -203,45 +205,31 @@ pub async fn run_turn(
                             )
                             .await;
 
-                        let mut tool_result_messages = Vec::new();
+                        let indexed: Vec<(usize, ToolCallInfo)> =
+                            tool_calls.drain(..).enumerate().collect();
+                        let (asks, regular): (Vec<_>, Vec<_>) = indexed
+                            .into_iter()
+                            .partition(|(_, tc)| tc.name == "AskUserQuestion");
+                        let mut indexed_results: Vec<(usize, ToolResultMessage)> = Vec::new();
 
-                        for tc in &tool_calls {
-                            if tc.name == "AskUserQuestion" {
-                                let question = tc
-                                    .input
-                                    .get("question")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("(no question text)")
-                                    .to_string();
-                                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                                let _ = event_tx.send(AppEvent::AskUserQuestion {
-                                    conversation_id: conversation_id.clone(),
-                                    tool_use_id: tc.id.clone(),
-                                    question,
-                                    response_tx: resp_tx,
-                                });
-                                let answer = tokio::select! {
-                                    a = resp_rx => match a {
-                                        Ok(a) => a,
-                                        Err(_) => {
-                                            let _ = event_tx.send(AppEvent::ProviderChunk {
-                                                conversation_id: conversation_id.clone(),
-                                                chunk: StreamChunk::TurnComplete {
-                                                    stop_reason: StopReason::Cancelled,
-                                                },
-                                            });
-                                            return;
-                                        }
-                                    },
-                                    _ = turn_cancel.cancelled() => {
-                                        let _ = event_tx.send(AppEvent::ProviderChunk {
-                                            conversation_id: conversation_id.clone(),
-                                            chunk: StreamChunk::ToolResult {
-                                                id: tc.id.clone(),
-                                                content: "Tool execution cancelled".to_string(),
-                                                is_error: true,
-                                            },
-                                        });
+                        for (orig_idx, tc) in asks {
+                            let question = tc
+                                .input
+                                .get("question")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(no question text)")
+                                .to_string();
+                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                            let _ = event_tx.send(AppEvent::AskUserQuestion {
+                                conversation_id: conversation_id.clone(),
+                                tool_use_id: tc.id.clone(),
+                                question,
+                                response_tx: resp_tx,
+                            });
+                            let answer = tokio::select! {
+                                a = resp_rx => match a {
+                                    Ok(a) => a,
+                                    Err(_) => {
                                         let _ = event_tx.send(AppEvent::ProviderChunk {
                                             conversation_id: conversation_id.clone(),
                                             chunk: StreamChunk::TurnComplete {
@@ -250,70 +238,16 @@ pub async fn run_turn(
                                         });
                                         return;
                                     }
-                                };
-                                let result = crate::domain::models::ToolResult {
-                                    tool_use_id: tc.id.clone(),
-                                    content: answer.clone(),
-                                    is_error: false,
-                                };
-                                let _ = event_tx.send(AppEvent::ProviderChunk {
-                                    conversation_id: conversation_id.clone(),
-                                    chunk: StreamChunk::ToolResult {
-                                        id: result.tool_use_id.clone(),
-                                        content: result.content.clone(),
-                                        is_error: result.is_error,
-                                    },
-                                });
-                                tool_result_messages.push(ToolResultMessage {
-                                    tool_use_id: result.tool_use_id,
-                                    content: result.content,
-                                    is_error: result.is_error,
-                                });
-                                continue;
-                            }
-
-                            let call_cancel = turn_cancel.child_token();
-                            let active_skills: Option<&[crate::domain::models::ActiveSkill]> =
-                                activation_set.as_ref().map(|s| s.active_skills());
-                            let decision = permission_chain::check(
-                                security.as_ref(),
-                                &tc.name,
-                                &tc.input,
-                                active_skills,
-                            )
-                            .await;
-
-                            let result = match decision {
-                                PermissionDecision::Allow | PermissionDecision::AlwaysAllow => {
-                                    match tools.execute(&tc.name, tc.input.clone(), call_cancel).await {
-                                        Ok(mut result) => {
-                                            result.tool_use_id = tc.id.clone();
-                                            result
-                                        }
-                                        Err(e) => crate::domain::models::ToolResult {
-                                            tool_use_id: tc.id.clone(),
-                                            content: format!("Tool execution failed: {}", e),
+                                },
+                                _ = turn_cancel.cancelled() => {
+                                    let _ = event_tx.send(AppEvent::ProviderChunk {
+                                        conversation_id: conversation_id.clone(),
+                                        chunk: StreamChunk::ToolResult {
+                                            id: tc.id.clone(),
+                                            content: "Tool execution cancelled".to_string(),
                                             is_error: true,
                                         },
-                                    }
-                                }
-                                PermissionDecision::Deny(reason) => {
-                                    crate::domain::models::ToolResult {
-                                        tool_use_id: tc.id.clone(),
-                                        content: format!("Permission denied: {}", reason),
-                                        is_error: true,
-                                    }
-                                }
-                                PermissionDecision::DenyWithFeedback(feedback) => {
-                                    crate::domain::models::ToolResult {
-                                        tool_use_id: tc.id.clone(),
-                                        content: permission_chain::format_feedback_message(
-                                            &feedback,
-                                        ),
-                                        is_error: true,
-                                    }
-                                }
-                                PermissionDecision::Cancel => {
+                                    });
                                     let _ = event_tx.send(AppEvent::ProviderChunk {
                                         conversation_id: conversation_id.clone(),
                                         chunk: StreamChunk::TurnComplete {
@@ -323,8 +257,11 @@ pub async fn run_turn(
                                     return;
                                 }
                             };
-
-                            // Send ToolResult chunk so apply_chunk processes it
+                            let result = crate::domain::models::ToolResult {
+                                tool_use_id: tc.id.clone(),
+                                content: answer.clone(),
+                                is_error: false,
+                            };
                             let _ = event_tx.send(AppEvent::ProviderChunk {
                                 conversation_id: conversation_id.clone(),
                                 chunk: StreamChunk::ToolResult {
@@ -333,13 +270,89 @@ pub async fn run_turn(
                                     is_error: result.is_error,
                                 },
                             });
-
-                            tool_result_messages.push(ToolResultMessage {
-                                tool_use_id: result.tool_use_id,
-                                content: result.content,
-                                is_error: result.is_error,
-                            });
+                            indexed_results.push((
+                                orig_idx,
+                                ToolResultMessage {
+                                    tool_use_id: result.tool_use_id,
+                                    content: result.content,
+                                    is_error: result.is_error,
+                                },
+                            ));
                         }
+
+                        if !regular.is_empty() {
+                            let batch_with_idx: Vec<(usize, crate::domain::models::ToolCallRequest)> = regular
+                                .iter()
+                                .map(|(orig_idx, tc)| {
+                                    (*orig_idx, crate::domain::models::ToolCallRequest {
+                                        id: tc.id.clone(),
+                                        tool_name: tc.name.clone(),
+                                        input: tc.input.clone(),
+                                    })
+                                })
+                                .collect();
+                            let source = crate::domain::models::ApprovalSource::ForegroundTurn {
+                                conversation_id: conversation_id.clone(),
+                            };
+                            let active_skills =
+                                activation_set.as_ref().map(|s| s.active_skills());
+                            let requests: Vec<crate::domain::models::ToolCallRequest> =
+                                batch_with_idx.iter().map(|(_, req)| req.clone()).collect();
+                            let terminal = tool_scheduler
+                                .clone()
+                                .schedule(source, requests, turn_cancel.clone(), active_skills)
+                                .await;
+                            for (i, call) in terminal.into_iter().enumerate() {
+                                let (id, content, is_error, was_cancelled) = match call {
+                                    ToolCall::Success { id, result, .. } => {
+                                        (id, result.output, result.is_error, false)
+                                    }
+                                    ToolCall::Error { id, error, .. } => (id, error, true, false),
+                                    ToolCall::Cancelled { id, reason, .. } => (
+                                        id,
+                                        format!("Tool execution cancelled: {}", reason),
+                                        true,
+                                        true,
+                                    ),
+                                    _ => (
+                                        batch_with_idx[i].1.id.clone(),
+                                        "Internal scheduler error: unexpected non-terminal state"
+                                            .to_string(),
+                                        true,
+                                        false,
+                                    ),
+                                };
+                                let _ = event_tx.send(AppEvent::ProviderChunk {
+                                    conversation_id: conversation_id.clone(),
+                                    chunk: StreamChunk::ToolResult {
+                                        id: id.clone(),
+                                        content: content.clone(),
+                                        is_error,
+                                    },
+                                });
+                                indexed_results.push((
+                                    batch_with_idx[i].0,
+                                    ToolResultMessage {
+                                        tool_use_id: id,
+                                        content,
+                                        is_error,
+                                    },
+                                ));
+                                if was_cancelled {
+                                    let _ = event_tx.send(AppEvent::ProviderChunk {
+                                        conversation_id: conversation_id.clone(),
+                                        chunk: StreamChunk::TurnComplete {
+                                            stop_reason: StopReason::Cancelled,
+                                        },
+                                    });
+                                    return;
+                                }
+                            }
+                        }
+
+                        indexed_results.sort_by_key(|(idx, _)| *idx);
+                        let tool_result_messages: Vec<ToolResultMessage> =
+                            indexed_results.into_iter().map(|(_, msg)| msg).collect();
 
                         // Append tool results as a user message for the next completion
                         messages.push(Message {
@@ -350,9 +363,6 @@ pub async fn run_turn(
                             tool_uses: vec![],
                             context_prefix: None,
                         });
-
-                        // Clear tool_calls for next iteration
-                        tool_calls.clear();
 
                         // Loop back to stream_completion
                         continue;

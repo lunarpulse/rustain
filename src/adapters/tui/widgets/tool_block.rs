@@ -6,6 +6,20 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::ToolCallInfo;
 
+/// Map a status chip string to its theme color.
+fn chip_color(chip: &str, theme: &Theme) -> ratatui::style::Color {
+    match chip {
+        "⋯ Validating" => theme.colors.tool_status_validating,
+        "⧖ Scheduled" => theme.colors.tool_status_scheduled,
+        "? Awaiting approval" => theme.colors.tool_status_awaiting,
+        "● Executing" => theme.colors.tool_status_executing,
+        "✓ Success" => theme.colors.tool_status_success,
+        "✗ Error" => theme.colors.tool_status_error,
+        "⊘ Cancelled" => theme.colors.tool_status_cancelled,
+        _ => theme.colors.fg_muted,
+    }
+}
+
 /// Per-tool-block UI state (not domain state).
 #[derive(Debug, Clone)]
 pub struct ToolBlockState {
@@ -103,11 +117,19 @@ pub fn render_tool_block_lines<'a>(
     match &tc.result {
         None => {
             // Executing state
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     "┄ ",
                     Style::default().fg(theme.colors.tool_border_collapsed),
                 ),
+            ];
+            if let Some(ref chip) = tc.status {
+                spans.push(Span::styled(
+                    format!("{} ", chip),
+                    Style::default().fg(chip_color(chip, theme)),
+                ));
+            }
+            spans.extend(vec![
                 Span::styled(
                     tc.name.clone(),
                     Style::default()
@@ -127,11 +149,11 @@ pub fn render_tool_block_lines<'a>(
                     Style::default().fg(theme.colors.tool_border_collapsed),
                 ),
             ]);
-            vec![line]
+            vec![Line::from(spans)]
         }
         Some(result) if result.is_error => {
             // Error state
-            let mut lines = vec![Line::from(vec![
+            let mut header = vec![
                 Span::styled(
                     "┃ ",
                     Style::default()
@@ -144,6 +166,14 @@ pub fn render_tool_block_lines<'a>(
                         .fg(theme.colors.error)
                         .add_modifier(Modifier::BOLD),
                 ),
+            ];
+            if let Some(ref chip) = tc.status {
+                header.push(Span::styled(
+                    format!("{} ", chip),
+                    Style::default().fg(chip_color(chip, theme)),
+                ));
+            }
+            header.extend(vec![
                 Span::styled(
                     tc.name.clone(),
                     Style::default()
@@ -158,7 +188,8 @@ pub fn render_tool_block_lines<'a>(
                     format!(" ({}) ┃", elapsed),
                     Style::default().fg(theme.colors.fg_muted),
                 ),
-            ])];
+            ]);
+            let mut lines = vec![Line::from(header)];
             // Error message lines
             for err_line in result.content.lines() {
                 lines.push(Line::from(vec![
@@ -179,11 +210,19 @@ pub fn render_tool_block_lines<'a>(
         Some(result) => {
             if state.collapsed {
                 // Collapsed success
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         "┄ ",
                         Style::default().fg(theme.colors.tool_border_collapsed),
                     ),
+                ];
+                if let Some(ref chip) = tc.status {
+                    spans.push(Span::styled(
+                        format!("{} ", chip),
+                        Style::default().fg(chip_color(chip, theme)),
+                    ));
+                }
+                spans.extend(vec![
                     Span::styled(
                         tc.name.clone(),
                         Style::default()
@@ -210,7 +249,7 @@ pub fn render_tool_block_lines<'a>(
                         Style::default().fg(theme.colors.tool_border_collapsed),
                     ),
                 ]);
-                vec![line]
+                vec![Line::from(spans)]
             } else {
                 // Expanded success
                 let w = width as usize;
@@ -458,6 +497,7 @@ mod tests {
             result,
             started_at_ms: Some(1000000),
             completed_at_ms: completed,
+            status: None,
         }
     }
 

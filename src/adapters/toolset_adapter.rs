@@ -387,6 +387,7 @@ impl ToolSetPort for ToolSetAdapter {
                     },
                     "required": ["command"]
                 }),
+                parallel_safe: false,
             },
             ToolDefinition {
                 name: "Read".to_string(),
@@ -409,6 +410,7 @@ impl ToolSetPort for ToolSetAdapter {
                     },
                     "required": ["file_path"]
                 }),
+                parallel_safe: true,
             },
             ToolDefinition {
                 name: "Write".to_string(),
@@ -427,6 +429,7 @@ impl ToolSetPort for ToolSetAdapter {
                     },
                     "required": ["file_path", "content"]
                 }),
+                parallel_safe: false,
             },
             ToolDefinition {
                 name: "activate_skill".to_string(),
@@ -445,6 +448,7 @@ impl ToolSetPort for ToolSetAdapter {
                     },
                     "required": ["name"]
                 }),
+                parallel_safe: true,
             },
         ]
     }
