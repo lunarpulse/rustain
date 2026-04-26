@@ -76,6 +76,10 @@ pub struct ChatMessage {
     /// Why this message's generation stopped. `None` for user messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
+    /// Whether this message was synthesized by the system (e.g., mode handoff).
+    /// `true` for synthetic messages; `false` for user-typed messages.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub synthetic: bool,
     /// Image attachments persisted alongside this message.
     /// Empty vec is omitted from JSON output for backward compatibility with pre-4.3a.1 sessions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -233,6 +237,7 @@ mod tests {
             created_at: 1700000000,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images,
         }
     }

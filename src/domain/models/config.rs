@@ -60,6 +60,9 @@ pub struct AppConfig {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    /// Start new sessions in Plan mode by default.
+    #[serde(default)]
+    pub default_plan_mode: bool,
 }
 
 impl AppConfig {
@@ -90,6 +93,7 @@ impl Default for AppConfig {
             snapshot_retention_count: Some(100),
             skills: SkillsConfig::default(),
             runtime: RuntimeConfig::default(),
+            default_plan_mode: false,
         }
     }
 }

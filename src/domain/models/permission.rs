@@ -56,3 +56,12 @@ pub enum PathAccessType {
     External,
     Export,
 }
+
+/// Outcome of the PlanApprovalCard widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlanApprovalOutcome {
+    ApproveNormal,
+    ApproveAutoEdit,
+    Reject,
+    Revise,
+}

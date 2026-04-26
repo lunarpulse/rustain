@@ -106,6 +106,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     description: "Cycle input history (when input empty)",
                     available: true,
                 },
+                HelpBinding {
+                    key: "Shift+Tab in input",
+                    description: "Cycle permission mode",
+                    available: true,
+                },
             ],
         },
         HelpCategory {
@@ -124,6 +129,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 HelpBinding {
                     key: "Ctrl+P",
                     description: "Command palette",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "/plan on|off|toggle",
+                    description: "Toggle Plan mode",
                     available: true,
                 },
             ],

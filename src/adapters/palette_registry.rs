@@ -429,13 +429,14 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 4 slash commands (/new, /export, /deactivate, /mode) + 4 mode palette entries +
-        // 6 built-ins (version, new tab, close tab, toggle sidebar, delete all, paste image from clipboard) = 14
-        assert_eq!(reg.all_entries().len(), 14);
+        // 5 slash commands (/new, /export, /deactivate, /mode, /plan) + 4 mode palette entries +
+        // 6 built-ins (version, new tab, close tab, toggle sidebar, delete all, paste image from clipboard) = 15
+        assert_eq!(reg.all_entries().len(), 15);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/deactivate"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/mode"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "/plan"));
         assert!(reg.all_entries().iter().any(|e| e.name == "version"));
         assert!(reg.all_entries().iter().any(|e| e.name == "new tab"));
         assert!(reg.all_entries().iter().any(|e| e.name == "close tab"));
@@ -447,6 +448,6 @@ mod tests {
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 14);
+        assert_eq!(reg.all_entries().len(), 15);
     }
 }

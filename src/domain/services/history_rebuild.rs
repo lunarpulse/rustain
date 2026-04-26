@@ -112,6 +112,7 @@ mod tests {
             created_at: 1700000000,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images: vec![],
         }
     }

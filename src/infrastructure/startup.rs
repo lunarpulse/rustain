@@ -9,7 +9,10 @@ use crate::adapters::project_context_loader::ProjectContextLoader;
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::security_adapter::SecurityAdapter;
 use crate::adapters::skill_activation::SkillActivator;
+use crate::domain::models::{PermissionMode, SandboxPolicy};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
+use crate::domain::services::plan_manager::PlanManager;
+use crate::domain::services::plan_mode_injector::{DefaultPlanInjector, PlanModeInjector};
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
@@ -125,10 +128,33 @@ pub async fn run() -> Result<()> {
         let seed = ruleset.seed_session();
         approval_runtime.seed_session(seed).await;
     }
-    let (app_state, domain_rx) = AppState::new(raw_capacity, approval_runtime.clone());
+    let plans_dir = workspace_path.join(".rustain").join("plans");
+    let plan_manager = Arc::new(PlanManager::new(plans_dir));
+    let plan_injector = Arc::new(DefaultPlanInjector::new());
+
+    let initial_mode = if app_config.default_plan_mode {
+        PermissionMode::Plan
+    } else {
+        PermissionMode::Normal
+    };
+    let sandbox_policy = SandboxPolicy::from_mode(initial_mode, &workspace_path);
+
+    let (app_state, domain_rx) = AppState::new(
+        raw_capacity,
+        approval_runtime.clone(),
+        sandbox_policy,
+        plan_manager.clone(),
+        plan_injector.clone(),
+    );
     let domain_tx = app_state.event_bus.domain_tx.clone();
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
+    security_adapter.set_mode(initial_mode);
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
+
+    if app_config.default_plan_mode {
+        let _ = plan_manager.ensure_dir().await;
+        plan_injector.as_ref().reset_reentry();
+    }
     // Storage must be constructed before ToolSetAdapter (Story 4-3b: tools use storage for snapshots).
     // Story 4-3b P2: pass the real workspace root so `snapshot_file` can enforce
     // path-traversal checks without falling back to the sessions_dir grandparent proxy.
@@ -144,6 +170,8 @@ pub async fn run() -> Result<()> {
     ));
     let mut tools_adapter = ToolSetAdapter::new(workspace_path.clone(), Arc::clone(&tools_storage));
     tools_adapter.set_activator(Arc::clone(&skill_activator));
+    tools_adapter.set_plan_manager(plan_manager.clone());
+    tools_adapter.set_event_tx(domain_tx.clone());
     let tools: Arc<dyn ToolSetPort> = Arc::new(tools_adapter);
 
     // 5c. Discover and load project context

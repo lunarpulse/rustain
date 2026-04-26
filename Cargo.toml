@@ -54,6 +54,7 @@ base64 = "0.22"
 async-trait = "0.1"
 arc-swap = "1.7"
 nanoid = "0.4"
+petname = "2.0"
 dirs = "6.0"
 sha2 = "0.10"
 unicode-width = "0.2"
@@ -61,6 +62,7 @@ arboard = { version = "3", optional = true }
 png = { version = "0.17", optional = true }
 pulldown-cmark = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
+scopeguard = "1"
 
 # ── Rustycode path deps — uncomment in Story 1.2 ────────────────
 # Verify crossterm/ratatui version compatibility with rustycode before enabling

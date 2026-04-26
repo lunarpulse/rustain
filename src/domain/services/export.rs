@@ -215,6 +215,7 @@ mod tests {
             created_at,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images: vec![],
         }
     }
@@ -243,6 +244,7 @@ mod tests {
             bookmarks: vec![],
             fork_source: None,
             imported_from: None,
+            plan_slug: None,
             extra: serde_json::Map::new(),
         }
     }

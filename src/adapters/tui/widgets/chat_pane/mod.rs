@@ -252,6 +252,14 @@ fn render_message<'a>(
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    if msg.synthetic {
+        role_spans.push(Span::styled(
+            "⤷ ".to_string(),
+            Style::default()
+                .fg(theme.colors.synthetic_marker)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     role_spans.push(Span::styled(
         role_text.to_string(),
         Style::default().fg(role_color).add_modifier(Modifier::BOLD),

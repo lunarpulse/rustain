@@ -247,7 +247,7 @@ def test_always_allow_then_restart_fast_paths(tmp_path):
         json.dumps({"permissions": {"allow": ["Read", "Glob", "Grep"]}}) + "\n"
     )
 
-    with RustainTUI(fresh=True, build=True, workspace=workspace, allowed_tools=["Read", "Glob", "Grep"]) as tui:
+    with RustainTUI(fresh=True, build=False, workspace=workspace, allowed_tools=["Read", "Glob", "Grep"]) as tui:
         tui.send_message("Use the Bash tool to run: echo persist_roundtrip")
         tui.wait_for_screen("[y]", timeout=30.0)
         tui.always_allow_permission(wait_before=2.0)
@@ -285,7 +285,7 @@ def test_permission_rules_toml_seeds_session(tmp_path):
         '[[rules]]\npattern = "*"\naction = "ask"\nscope = "tool"\n'
     )
 
-    with RustainTUI(fresh=True, build=True, workspace=workspace, allowed_tools=["Read", "Glob", "Grep"]) as tui:
+    with RustainTUI(fresh=True, build=False, workspace=workspace, allowed_tools=["Read", "Glob", "Grep"]) as tui:
         tui.send_message("Use the Bash tool to run: echo rules_test")
         tui.wait_for_idle(20.0)
         tui.assert_screen_not_contains(

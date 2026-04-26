@@ -4,6 +4,11 @@ use anyhow::{Context, Result};
 
 /// Resolve the `~/.rustain/` data directory, creating it if it doesn't exist.
 pub fn data_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RUSTAIN_DATA_DIR") {
+        let path = PathBuf::from(dir);
+        std::fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
     let dir = dirs::home_dir()
         .context("Could not determine home directory")?
         .join(".rustain");
@@ -27,9 +32,14 @@ pub fn config_dir() -> Result<PathBuf> {
 }
 
 /// Path to the main log file.
+/// Override with `RUSTAIN_LOG_PATH` env var for testing/CI.
 #[allow(dead_code)]
 pub fn log_file_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("rustain.log"))
+    if let Ok(path) = std::env::var("RUSTAIN_LOG_PATH") {
+        Ok(PathBuf::from(path))
+    } else {
+        Ok(data_dir()?.join("rustain.log"))
+    }
 }
 
 /// Resolve the workspace directory (current working directory).

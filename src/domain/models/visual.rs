@@ -60,6 +60,8 @@ pub enum ConfirmationType {
     SkillTrust,
     /// Skill trust inspection mode (Story 5-2 AC4) — view file contents, Esc returns to prompt.
     SkillTrustInspect,
+    /// Plan approval card (Story 6-0d AC4) — y/a/n/e for plan mode exit approval.
+    PlanApproval,
 }
 
 /// Overlay types for modal focus targets.

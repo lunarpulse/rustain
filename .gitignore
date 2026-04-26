@@ -6,6 +6,8 @@ Cargo.lock
 .env.local
 *.nu
 .claude
+.rustain
+.rustain_data
 
 # python e2e tui tests
 __pycache__

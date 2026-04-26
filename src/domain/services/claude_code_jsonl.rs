@@ -161,6 +161,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                             created_at,
                             token_count: None,
                             stop_reason: None,
+                            synthetic: false,
                             images: vec![],
                         });
                     }
@@ -210,6 +211,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                     created_at,
                                     token_count: None,
                                     stop_reason: None,
+                                    synthetic: false,
                                     images: vec![],
                                 });
                             }
@@ -337,6 +339,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                         created_at,
                         token_count: None,
                         stop_reason: None,
+                        synthetic: false,
                         images: vec![],
                     });
                 } else if let ClaudeCodeContent::Text(text) = content {
@@ -352,6 +355,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                         created_at,
                         token_count: None,
                         stop_reason: None,
+                        synthetic: false,
                         images: vec![],
                     });
                 }

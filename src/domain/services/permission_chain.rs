@@ -87,7 +87,16 @@ pub async fn check(
     tool_name: &str,
     input: &serde_json::Value,
     active_skills: Option<&[ActiveSkill]>,
+    plan_file: Option<&std::path::Path>,
 ) -> PermissionDecision {
+    // Step 0: exit_plan_mode short-circuit
+    if tool_name == "exit_plan_mode" {
+        return match security.current_mode() {
+            PermissionMode::Plan => PermissionDecision::Allow,
+            _ => PermissionDecision::Deny("exit_plan_mode is only available in Plan mode".to_string()),
+        };
+    }
+
     // Step 1: Tool restriction (active skill allowed_tools)
     // activate_skill is always allowed (carve-out for skill chaining)
     if tool_name != "activate_skill" {
@@ -114,6 +123,16 @@ pub async fn check(
 
     // Step 3: Workspace restriction (file tools)
     if let Some((path_str, op)) = extract_file_path(tool_name, input) {
+        // Plan-file write exception: allow Write/Edit to the plan file when in Plan mode.
+        if let Some(plan) = plan_file {
+            if matches!(tool_name, "Write" | "Edit") {
+                if let Some(p) = input.get("file_path").and_then(|v| v.as_str()) {
+                    if std::path::Path::new(p) == plan {
+                        return PermissionDecision::Allow;
+                    }
+                }
+            }
+        }
         if let Err(e) = security.check_workspace_access(std::path::Path::new(&path_str), op) {
             return PermissionDecision::Deny(e.to_string());
         }
@@ -141,7 +160,7 @@ pub async fn check(
             let reason = match (mode, risk) {
                 (_, ToolRisk::Blocked) => format!("Tool '{}' is blocked", tool_name),
                 (PermissionMode::Plan, _) => {
-                    format!("Plan mode: tool disallowed (risk: {:?})", risk)
+                    "Plan mode is active; you cannot modify state. Revise the plan or call exit_plan_mode.".to_string()
                 }
                 _ => format!("Mode {:?}: tool disallowed (risk: {:?})", mode, risk),
             };

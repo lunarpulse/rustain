@@ -69,6 +69,14 @@ pub enum InputAction {
     SkillTrustDecline,
     /// Skill trust prompt: user pressed i to inspect skill file (Story 5-2 AC4).
     SkillTrustInspect,
+    /// Plan approval: user pressed y (approve Normal).
+    PlanApproveNormal,
+    /// Plan approval: user pressed a (approve AutoEdit).
+    PlanApproveAutoEdit,
+    /// Plan approval: user pressed n (reject).
+    PlanReject,
+    /// Plan approval: user pressed e (revise in editor).
+    PlanRevise,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -77,6 +85,8 @@ pub enum InputAction {
     SwitchToNextTab,
     /// Switch to the previous tab (Shift+Tab when focus is not Input).
     SwitchToPrevTab,
+    /// Cycle permission mode (Shift+Tab when focus is Input).
+    CycleMode,
     /// Switch directly to a tab by 1-based index (number keys 1-9 in Chat focus).
     SwitchToTab(usize),
     /// Toggle the history sidebar (Ctrl+H).
@@ -506,6 +516,17 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         ))
     {
         return InputAction::Consumed;
+    }
+
+    // Plan approval card focus: y/a/n/e (Story 6-0d AC4)
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval)) {
+        match c {
+            'y' => return InputAction::PlanApproveNormal,
+            'a' => return InputAction::PlanApproveAutoEdit,
+            'n' => return InputAction::PlanReject,
+            'e' => return InputAction::PlanRevise,
+            _ => return InputAction::Consumed,
+        }
     }
 
     // AskUserQuestion focus: type into question input buffer
@@ -1512,6 +1533,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
         DomainKey::ShiftTab if state.focus != FocusState::Input => InputAction::SwitchToPrevTab,
+        DomainKey::ShiftTab if state.focus == FocusState::Input => InputAction::CycleMode,
         _ => InputAction::Ignored,
     }
 }

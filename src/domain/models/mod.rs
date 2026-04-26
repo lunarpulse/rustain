@@ -13,6 +13,7 @@ pub mod palette;
 mod permission;
 pub mod project_context;
 mod session;
+pub mod sandbox;
 pub mod session_meta;
 mod skill;
 mod stream;
@@ -59,9 +60,10 @@ pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 pub use approval::{ApprovalOutcome, ApprovalScope};
 #[allow(unused_imports)]
 pub use permission::{
-    FileOperation, PathAccessType, PermissionMode, ToolRisk,
+    FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome, ToolRisk,
     risk_for_builtin,
 };
+pub use sandbox::SandboxPolicy;
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};
 #[allow(unused_imports)]

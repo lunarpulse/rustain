@@ -85,6 +85,8 @@ pub struct ColorTokens {
     pub tool_status_cancelled: Color,
     /// Subagent attribution prefix color (AC11).
     pub subagent_attribution: Color,
+    /// Prefix glyph color for synthetic user messages (Story 6-0d AC9).
+    pub synthetic_marker: Color,
 }
 
 /// Spacing tokens for layout calculations.
@@ -239,6 +241,7 @@ impl Theme {
                 tool_status_error: Color::Rgb(255, 100, 100),
                 tool_status_cancelled: Color::Rgb(155, 155, 155),
                 subagent_attribution: Color::Cyan,
+                synthetic_marker: Color::DarkGray,
             },
             spacing: SpacingTokens {
                 none: 0,

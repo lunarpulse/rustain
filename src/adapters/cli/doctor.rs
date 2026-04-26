@@ -56,6 +56,7 @@ fn build_check_list(terminal_detail: bool) -> Vec<Box<dyn HealthCheck>> {
         }),
     ];
     checks.push(Box::new(PermissionRulesCheck { workspace: None }));
+    checks.push(Box::new(PlanDirCheck { workspace: None }));
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
     }
@@ -856,6 +857,50 @@ impl HealthCheck for PermissionRulesCheck {
     }
 }
 
+pub struct PlanDirCheck {
+    pub workspace: Option<std::path::PathBuf>,
+}
+
+#[async_trait]
+impl HealthCheck for PlanDirCheck {
+    fn name(&self) -> &str {
+        "Plan directory"
+    }
+
+    async fn run(&self) -> CheckResult {
+        let workspace = match &self.workspace {
+            Some(w) => w.clone(),
+            None => match paths::workspace_dir() {
+                Ok(w) => w,
+                Err(_) => {
+                    return CheckResult {
+                        name: self.name().to_string(),
+                        status: CheckStatus::Warning,
+                        message: "cannot determine workspace directory".to_string(),
+                        fix: None,
+                    };
+                }
+            },
+        };
+
+        let plans_dir = workspace.join(".rustain").join("plans");
+        match std::fs::create_dir_all(&plans_dir) {
+            Ok(()) => CheckResult {
+                name: self.name().to_string(),
+                status: CheckStatus::Pass,
+                message: format!("Plan directory writable: {}", plans_dir.display()),
+                fix: None,
+            },
+            Err(e) => CheckResult {
+                name: self.name().to_string(),
+                status: CheckStatus::Warning,
+                message: format!("Cannot create plan directory: {}", e),
+                fix: Some(format!("Ensure {} is writable", plans_dir.display())),
+            },
+        }
+    }
+}
+
 // Tests
 // ──────────────────────────────────────────────────────────────────
 
@@ -1216,7 +1261,7 @@ mod tests {
     #[test]
     fn test_build_check_list_default() {
         let checks = build_check_list(false);
-        assert!(checks.len() >= 7, "Should have at least 7 checks");
+        assert!(checks.len() >= 8, "Should have at least 8 checks");
         // Verify names
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(names.contains(&"API key"));
@@ -1226,6 +1271,7 @@ mod tests {
         assert!(names.contains(&"Workspace config"));
         assert!(names.contains(&"Terminal"));
         assert!(names.contains(&"Sessions"));
+        assert!(names.contains(&"Plan directory"));
     }
 
     #[test]

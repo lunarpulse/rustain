@@ -175,6 +175,7 @@ pub fn apply_chunk(
                     created_at: now,
                     token_count: conv.usage.as_ref().map(|u| u.output_tokens),
                     stop_reason: Some(stop_reason),
+                    synthetic: false,
                     images: vec![],
                 };
                 conv.messages.push(message);
@@ -314,6 +315,7 @@ mod tests {
             created_at: 999,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images: vec![],
         });
 
@@ -687,6 +689,7 @@ mod tests {
             created_at: 1002,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images: vec![],
         });
         streaming.is_streaming = true;

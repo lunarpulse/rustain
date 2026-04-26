@@ -25,6 +25,7 @@ pub fn render(
     current_hint: Option<&str>,
     active_skill_count: usize,
     active_agent_name: Option<&str>,
+    pending_plan_reminder_at_turn: Option<u32>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -71,6 +72,16 @@ pub fn render(
                 .add_modifier(Modifier::BOLD),
         ),
     });
+
+    // Plan-mode reminder chip ( Story 6-0d AC5/AC8 )
+    if permission_mode == PermissionMode::Plan {
+        if let Some(turn) = pending_plan_reminder_at_turn {
+            left_spans.push(Span::styled(
+                format!("{}⟳ plan-reminder t+{}", sep, turn),
+                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
 
     // Token usage (third segment)
     if let Some(usage) = token_usage {

@@ -18,9 +18,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::skill_activation::SkillActivator;
 use crate::domain::errors::ToolError;
+use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{ToolDefinition, ToolResult};
 use crate::domain::ports::{StoragePort, ToolSetPort};
+use crate::domain::services::plan_manager::PlanManager;
 
 /// Active checkpoint context for file snapshotting within a turn.
 #[derive(Clone)]
@@ -41,9 +43,17 @@ pub struct ToolSetAdapter {
     /// Active checkpoint context for the current tool-executing turn.
     /// Set by `set_execution_context` before any tools run; cleared between turns.
     current_context: Mutex<Option<ToolExecutionContext>>,
+    /// Current plan file path for `exit_plan_mode` resolution.
+    current_plan_file: Mutex<Option<std::path::PathBuf>>,
     /// Optional skill activator for `activate_skill` tool execution.
     #[allow(dead_code)]
     activator: Option<Arc<SkillActivator>>,
+    /// Optional plan manager for `exit_plan_mode` tool execution.
+    #[allow(dead_code)]
+    plan_manager: Option<Arc<PlanManager>>,
+    /// Optional event bus sender for emitting plan approval events.
+    #[allow(dead_code)]
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
 }
 
 impl ToolSetAdapter {
@@ -53,13 +63,31 @@ impl ToolSetAdapter {
             write_locks: Arc::new(Mutex::new(HashMap::new())),
             storage,
             current_context: Mutex::new(None),
+            current_plan_file: Mutex::new(None),
             activator: None,
+            plan_manager: None,
+            event_tx: None,
         }
     }
 
     #[allow(dead_code)]
     pub fn set_activator(&mut self, activator: Arc<SkillActivator>) {
         self.activator = Some(activator);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_plan_manager(&mut self, plan_manager: Arc<PlanManager>) {
+        self.plan_manager = Some(plan_manager);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_event_tx(&mut self, event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) {
+        self.event_tx = Some(event_tx);
+    }
+
+    #[allow(dead_code)]
+    pub async fn set_plan_file(&self, path: Option<std::path::PathBuf>) {
+        *self.current_plan_file.lock().await = path;
     }
 
     async fn execute_bash(
@@ -450,6 +478,21 @@ impl ToolSetPort for ToolSetAdapter {
                 }),
                 parallel_safe: true,
             },
+            ToolDefinition {
+                name: "exit_plan_mode".to_string(),
+                description: "Signal that planning is complete. Presents the plan file to the user for approval. Use only when the plan is fully written and ready for review.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "One-sentence summary of the plan to display alongside the approval card."
+                        }
+                    },
+                    "required": ["summary"]
+                }),
+                parallel_safe: false,
+            },
         ]
     }
 
@@ -464,6 +507,7 @@ impl ToolSetPort for ToolSetAdapter {
             "Read" | "read" => self.execute_read(&input, cancel).await,
             "Write" | "write" => self.execute_write(&input, "", cancel).await,
             "activate_skill" => self.execute_activate_skill(&input).await,
+            "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
     }
@@ -484,6 +528,45 @@ impl ToolSetPort for ToolSetAdapter {
 }
 
 impl ToolSetAdapter {
+    async fn execute_exit_plan_mode(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        let summary = input
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Plan ready for review.");
+
+        let plan_path = self.current_plan_file.lock().await.clone();
+        let plan_path = plan_path.unwrap_or_default();
+
+        let contents = if let Some(ref pm) = self.plan_manager {
+            pm.read_plan(&plan_path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if let Some(ref tx) = self.event_tx {
+            let context = self.current_context.lock().await;
+            let conversation_id = context
+                .as_ref()
+                .map(|c| c.conversation_id.clone())
+                .unwrap_or_default();
+            let _ = tx.send(AppEvent::PlanApprovalRequested {
+                conversation_id,
+                plan_path,
+                contents,
+                summary: summary.to_string(),
+            });
+        }
+
+        Ok(ToolResult {
+            tool_use_id: String::new(),
+            content: "Plan sent for user approval.".to_string(),
+            is_error: false,
+        })
+    }
+
     async fn execute_activate_skill(
         &self,
         input: &serde_json::Value,
@@ -671,6 +754,7 @@ mod tests {
                 created_at: 0,
                 token_count: None,
                 stop_reason: None,
+                synthetic: false,
                 images: vec![],
             }],
             created_at: 0,

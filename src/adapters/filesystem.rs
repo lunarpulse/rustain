@@ -2669,6 +2669,7 @@ mod tests {
                     created_at: 1700000000,
                     token_count: None,
                     stop_reason: None,
+                    synthetic: false,
                     images: vec![],
                 },
                 ChatMessage {
@@ -2680,6 +2681,7 @@ mod tests {
                     created_at: 1700000001,
                     token_count: Some(10),
                     stop_reason: Some(StopReason::EndTurn),
+                    synthetic: false,
                     images: vec![],
                 },
             ],
@@ -3543,6 +3545,7 @@ mod tests {
             bookmarks: vec![1, 3],
             fork_source: None,
             imported_from: None,
+            plan_slug: None,
             extra: serde_json::Map::new(),
         };
 

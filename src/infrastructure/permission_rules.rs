@@ -168,7 +168,7 @@ pub enum PermissionRulesError {
 }
 
 impl From<std::io::Error> for PermissionRulesError {
-    fn from(e: std::io::Error) -> Self {
+    fn from(_e: std::io::Error) -> Self {
         PermissionRulesError::Io(())
     }
 }

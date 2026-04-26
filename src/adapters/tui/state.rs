@@ -35,6 +35,14 @@ pub struct FeedbackInputState {
     pub pending_permission: PendingPermission,
 }
 
+/// Pending plan approval awaiting user y/a/n/e response.
+pub struct PendingPlanApproval {
+    pub conversation_id: String,
+    pub plan_path: std::path::PathBuf,
+    pub contents: String,
+    pub summary: String,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -993,6 +1001,11 @@ pub struct TuiState {
     /// Set by `submit_message` when registry is not yet discovered;
     /// consumed by `AgentsDiscovered` handler in the event loop.
     pub pending_agent_activation: Option<(String, Option<String>)>,
+    /// Pending plan approval card state (Story 6-0d AC4).
+    pub pending_plan_approval: Option<PendingPlanApproval>,
+    /// Which assistant-turn count the last plan reminder was injected at.
+    /// `None` when no reminder is pending.
+    pub pending_plan_reminder_at_turn: Option<u32>,
 }
 
 impl TuiState {
@@ -1076,6 +1089,8 @@ impl TuiState {
             agent_suggestions: Vec::new(),
             active_agent_name: None,
             pending_agent_activation: None,
+            pending_plan_approval: None,
+            pending_plan_reminder_at_turn: None,
         }
     }
 

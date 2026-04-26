@@ -42,6 +42,10 @@ pub struct SessionMeta {
     /// `None` for native rustain sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_from: Option<ImportSource>,
+    /// Plan mode slug — stable identifier for the plan file of this session.
+    /// Generated on first Plan-mode entry, persisted across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_slug: Option<String>,
     /// Lossless round-trip of unknown fields (DF-088). Any serde fields we
     /// don't know about are captured here and written back on re-save so
     /// cross-version saves never silently drop data.
@@ -63,6 +67,7 @@ impl SessionMeta {
             bookmarks: Vec::new(),
             fork_source: None,
             imported_from: None,
+            plan_slug: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -78,6 +83,7 @@ impl SessionMeta {
             bookmarks: Vec::new(),
             fork_source: conv.fork_source.clone(),
             imported_from: None,
+            plan_slug: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -236,6 +242,7 @@ mod tests {
             bookmarks: vec![1, 3],
             fork_source: None,
             imported_from: None,
+            plan_slug: None,
             extra: serde_json::Map::new(),
         };
 
@@ -333,6 +340,7 @@ mod tests {
                 original_session_id: "abc-123-def".to_string(),
                 imported_at: 1700000200,
             }),
+            plan_slug: None,
             extra: serde_json::Map::new(),
         };
 
@@ -356,6 +364,7 @@ mod tests {
             bookmarks: vec![],
             fork_source: None,
             imported_from: None,
+            plan_slug: None,
             extra: serde_json::Map::new(),
         };
 

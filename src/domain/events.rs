@@ -131,6 +131,19 @@ pub enum AppEvent {
     ApprovalRuntimeEventBridged {
         event: crate::domain::services::approval_runtime::ApprovalRuntimeEvent,
     },
+
+    /// Plan mode exit requested — present the plan approval card to the user.
+    PlanApprovalRequested {
+        conversation_id: ConversationId,
+        plan_path: std::path::PathBuf,
+        contents: String,
+        summary: String,
+    },
+    /// Plan approval resolved by the user.
+    PlanApprovalResolved {
+        conversation_id: ConversationId,
+        outcome: crate::domain::models::PlanApprovalOutcome,
+    },
 }
 
 /// Event wrapping a tool execution result.

@@ -93,14 +93,6 @@ def _build_binary() -> Path:
     return BINARY
 
 
-def _today_log() -> Path | None:
-    """Return today's log file path, or None."""
-    from datetime import date
-
-    log_file = LOG_DIR / f"rustain.log.{date.today()}"
-    return log_file if log_file.exists() else None
-
-
 # ── Main Harness ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -136,7 +128,6 @@ class RustainTUI:
         default=None, init=False, repr=False
     )
     _workspace_path: Path | None = field(default=None, init=False, repr=False)
-    _log_line_offset: int = field(default=0, init=False, repr=False)
     _screen: pyte.Screen | None = field(default=None, init=False, repr=False)
     _stream: pyte.Stream | None = field(default=None, init=False, repr=False)
 
@@ -180,16 +171,14 @@ class RustainTUI:
         else:
             self._workspace_path = self.workspace
 
-        # Record current log length to read only NEW entries later
-        log = _today_log()
-        if log:
-            self._log_line_offset = sum(1 for _ in log.open())
-
         env = _load_env()
         # Redirect rustain's config_dir() to the test workspace so
         # ApprovalRuntime::load_session() reads from the test's
         # .rustain/config.toml instead of the developer's ~/.config/rustain/.
         env["RUSTAIN_CONFIG_DIR"] = str(self._workspace_path / ".rustain")
+        env["RUSTAIN_DATA_DIR"] = str(self._workspace_path / ".rustain_data")
+        # Isolate logs per test (P0 flakiness fix: prevents cross-test log pollution)
+        env["RUSTAIN_LOG_PATH"] = str(self._workspace_path / "rustain.log")
         args = [str(BINARY)]
         if self.fresh:
             args.append("--new")
@@ -559,16 +548,16 @@ class RustainTUI:
     def fork(self) -> None:
         """Trigger fork (f) and confirm (y). Must be in Chat focus."""
         self.send(Chat.FORK)
-        time.sleep(1.0)
+        self.wait_for_screen("Fork", timeout=5.0)
         self.send(Confirm.YES)
-        time.sleep(REWIND_SETTLE)
+        self.wait_for_screen("Forked conversation", timeout=REWIND_SETTLE * 2)
 
     def fork_cancel(self) -> None:
         """Trigger fork (f) and cancel (n)."""
         self.send(Chat.FORK)
-        time.sleep(1.0)
+        self.wait_for_screen("Fork", timeout=5.0)
         self.send(Confirm.NO)
-        time.sleep(0.5)
+        self.wait_for_screen_not_contains("Fork", timeout=2.0)
 
     def open_help(self) -> None:
         """Open help overlay (?). Must be in Chat focus."""
@@ -703,14 +692,16 @@ class RustainTUI:
     # ── Log Inspection ───────────────────────────────────────────────────
 
     def log_lines(self, since_start: bool = True) -> list[str]:
-        """Read log lines, optionally only those written since this TUI started."""
-        log = _today_log()
-        if not log:
+        """Read log lines from the test-isolated log file.
+
+        The ``since_start`` parameter is retained for backward compatibility
+        but is a no-op because each test has its own log file (P0 flakiness fix).
+        """
+        from datetime import date
+        log = self._workspace_path / f"rustain.log.{date.today()}"
+        if not log.exists():
             return []
-        lines = log.read_text().splitlines()
-        if since_start:
-            lines = lines[self._log_line_offset :]
-        return lines
+        return log.read_text().splitlines()
 
     def log_contains(self, pattern: str) -> bool:
         """Check if any log line matches a regex pattern."""

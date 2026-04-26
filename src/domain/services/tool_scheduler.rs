@@ -26,6 +26,8 @@ use crate::domain::models::ActiveSkill;
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use crate::domain::services::permission_chain;
 use crate::domain::services::approval_runtime::ApprovalRuntime;
+use std::path::PathBuf;
+use tokio::sync::RwLock;
 
 /// Schedules and executes tool calls with lifecycle event broadcast.
 pub struct ToolScheduler {
@@ -33,6 +35,7 @@ pub struct ToolScheduler {
     tools: Arc<dyn ToolSetPort>,
     events: broadcast::Sender<ToolCallTransition>,
     approval_runtime: Arc<ApprovalRuntime>,
+    plan_file: RwLock<Option<PathBuf>>,
 }
 
 impl ToolScheduler {
@@ -57,6 +60,7 @@ impl ToolScheduler {
             tools,
             events,
             approval_runtime,
+            plan_file: RwLock::new(None),
         })
     }
 
@@ -64,6 +68,12 @@ impl ToolScheduler {
     /// call to `subscribe` (standard `tokio::sync::broadcast` tail semantics).
     pub fn subscribe(&self) -> broadcast::Receiver<ToolCallTransition> {
         self.events.subscribe()
+    }
+
+    /// Set the plan file path for the current conversation.
+    /// Used by the turn orchestrator to thread the plan-file exception through the chain.
+    pub async fn set_plan_file(&self, path: Option<PathBuf>) {
+        *self.plan_file.write().await = path;
     }
 
     /// Run a batch of tool calls through the scheduler.
@@ -160,11 +170,13 @@ impl ToolScheduler {
         self.emit(&conversation_id, &call);
 
         // Phase 3: Permission chain check
+        let plan_file = self.plan_file.read().await.clone();
         let decision_fut = permission_chain::check(
             self.security.as_ref(),
             &req.tool_name,
             &req.input,
             active_skills.as_deref(),
+            plan_file.as_deref(),
         );
         let decision = tokio::select! {
             d = decision_fut => d,

@@ -61,6 +61,7 @@ use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
 };
 use crate::domain::services::message_builder;
+use crate::domain::services::plan_mode_injector::PlanModeInjector;
 use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::turn;
@@ -549,10 +550,12 @@ pub async fn run(
                                               &mut session_manager,
                                               &fs_storage,
                                               &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                              None,
                                               _skill_snap,
                                               _agent_snap,
                                                                                 tab_manager.reset_and_clone_turn_cancel(),
-                                          );
+                                          ).await;
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -630,6 +633,7 @@ pub async fn run(
                                                 created_at: crate::domain::models::session_meta::now_unix(),
                                                 token_count: None,
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
+                                                synthetic: false,
                                                 images: vec![],
                                             });
                                         }
@@ -689,6 +693,56 @@ pub async fn run(
                                         state.focus = FocusState::Overlay(OverlayType::Confirmation(
                                             ConfirmationType::PermissionFeedback,
                                         ));
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                // Plan approval card key handlers (Story 6-0d AC4)
+                                InputAction::PlanApproveNormal => {
+                                    if let Some(pending) = state.pending_plan_approval.take() {
+                                        app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                            conversation_id: pending.conversation_id,
+                                            outcome: crate::domain::models::PlanApprovalOutcome::ApproveNormal,
+                                        });
+                                    }
+                                }
+                                InputAction::PlanApproveAutoEdit => {
+                                    if let Some(pending) = state.pending_plan_approval.take() {
+                                        app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                            conversation_id: pending.conversation_id,
+                                            outcome: crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit,
+                                        });
+                                    }
+                                }
+                                InputAction::PlanReject => {
+                                    if let Some(pending) = state.pending_plan_approval.take() {
+                                        app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                            conversation_id: pending.conversation_id,
+                                            outcome: crate::domain::models::PlanApprovalOutcome::Reject,
+                                        });
+                                    }
+                                }
+                                InputAction::PlanRevise => {
+                                    if let Some(ref pending) = state.pending_plan_approval {
+                                        let plan_path = pending.plan_path.clone();
+                                        // Suspend TUI
+                                        let mut out = std::io::stdout();
+                                        let _ = crossterm::execute!(out, crossterm::terminal::LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+                                        let _ = crossterm::terminal::disable_raw_mode();
+
+                                        let _restore = scopeguard::guard((), |_| {
+                                            let _ = crossterm::terminal::enable_raw_mode();
+                                            let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen, crossterm::event::EnableMouseCapture);
+                                        });
+
+                                        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+                                        let _ = std::process::Command::new(editor).arg(&plan_path).status();
+
+                                        // Re-read plan file after editor exits
+                                        drop(_restore);
+                                        let contents = tokio::fs::read_to_string(&plan_path).await.unwrap_or_default();
+                                        if let Some(ref mut pending) = state.pending_plan_approval {
+                                            pending.contents = contents;
+                                        }
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -956,6 +1010,50 @@ pub async fn run(
                                                 }
                                             }
                                         }
+                                    } else if cmd_name == "plan" {
+                                        // /plan on|off|toggle — Story 6-0d AC5
+                                        match cmd_arg.map(|s| s.trim().to_ascii_lowercase()) {
+                                            None => {
+                                                let current = match security.current_mode() {
+                                                    PermissionMode::Plan => "Plan",
+                                                    _ => "not Plan",
+                                                };
+                                                if !matches!(state.status, StatusState::Flash { .. }) {
+                                                    state.status_before_flash = Some(state.status.clone());
+                                                }
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Plan mode is {} — use /plan on|off|toggle to switch", current),
+                                                    remaining_ms: state.theme.timing.status_flash_ms,
+                                                };
+                                                state.needs_redraw = true;
+                                            }
+                                            Some(arg) => {
+                                                let target = match arg.as_str() {
+                                                    "on" => Some(PermissionMode::Plan),
+                                                    "off" => Some(PermissionMode::Normal),
+                                                    "toggle" => {
+                                                        if security.current_mode() == PermissionMode::Plan {
+                                                            Some(PermissionMode::Normal)
+                                                        } else {
+                                                            Some(PermissionMode::Plan)
+                                                        }
+                                                    }
+                                                    _ => None,
+                                                };
+                                                if let Some(m) = target {
+                                                    app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
+                                                } else {
+                                                    if !matches!(state.status, StatusState::Flash { .. }) {
+                                                        state.status_before_flash = Some(state.status.clone());
+                                                    }
+                                                    state.status = StatusState::Flash {
+                                                        message: format!("Unknown /plan argument: {}. Use on, off, or toggle", arg),
+                                                        remaining_ms: state.theme.timing.status_flash_ms,
+                                                    };
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
+                                        }
                                     } else if cmd_name == "new" {
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
@@ -1148,10 +1246,12 @@ pub async fn run(
                                             &mut session_manager,
                                             &fs_storage,
                                             &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                            None,
                                             _skill_snap,
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
-                                        );
+                                        ).await;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
@@ -1381,6 +1481,7 @@ pub async fn run(
                                                 created_at: crate::domain::models::session_meta::now_unix(),
                                                 token_count: None,
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
+                                                synthetic: false,
                                                 images: vec![],
                                             });
                                         }
@@ -1482,7 +1583,8 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -1505,7 +1607,8 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1520,12 +1623,17 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
                                         state.needs_redraw = true;
                                     }
+                                }
+                                InputAction::CycleMode => {
+                                    let next = cycle_mode(security.current_mode());
+                                    app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(next));
                                 }
                                 InputAction::SwitchToTab(n) => {
                                     if tab_manager.tab_count() > 1
@@ -1539,7 +1647,8 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -1595,7 +1704,8 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -1728,7 +1838,8 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()); }
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -2610,10 +2721,12 @@ pub async fn run(
                                             &mut session_manager,
                                             &fs_storage,
                                             &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                            None,
                                             _skill_snap,
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
-                                        );
+                                        ).await;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
@@ -2768,10 +2881,12 @@ pub async fn run(
                                                 &mut session_manager,
                                                 &fs_storage,
                                                 &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                                None,
                                                 _skill_snap,
                                                 Some(fallback_agent),
                                                                                   tab_manager.reset_and_clone_turn_cancel(),
-                                            );
+                                            ).await;
                                         }
                                     }
                                 }
@@ -2895,8 +3010,112 @@ pub async fn run(
                             }
                         }
                     }
+                    AppEvent::PlanApprovalRequested { conversation_id, plan_path, contents, summary } => {
+                        let pending = crate::adapters::tui::state::PendingPlanApproval {
+                            conversation_id,
+                            plan_path,
+                            contents,
+                            summary,
+                        };
+                        state.pending_plan_approval = Some(pending);
+                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
+                            ConfirmationType::PlanApproval,
+                        ));
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::PlanApprovalResolved { conversation_id: _conversation_id, outcome } => {
+                        state.pending_plan_approval = None;
+                        state.focus = FocusState::Input;
+                        state.needs_redraw = true;
+
+                        match outcome {
+                            crate::domain::models::PlanApprovalOutcome::ApproveNormal => {
+                                app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
+                                let plan_path = app_state.plan_manager.plan_file_for(&mut tab_manager.active_tab_mut().session_meta).path;
+                                let synthetic_msg = crate::domain::models::ChatMessage {
+                                    id: crate::domain::models::generate_conversation_id(),
+                                    role: crate::domain::models::MessageRole::User,
+                                    content: format!("The plan at {} has been approved. Execute it.", plan_path.display()),
+                                    content_blocks: vec![],
+                                    tool_calls: vec![],
+                                    created_at: crate::domain::models::session_meta::now_unix(),
+                                    token_count: None,
+                                    stop_reason: None,
+                                    synthetic: true,
+                                    images: vec![],
+                                };
+                                conversation.messages.push(synthetic_msg);
+                                let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+                                let _snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
+                            }
+                            crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
+                                app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::AutoEdit));
+                                let plan_path = app_state.plan_manager.plan_file_for(&mut tab_manager.active_tab_mut().session_meta).path;
+                                let synthetic_msg = crate::domain::models::ChatMessage {
+                                    id: crate::domain::models::generate_conversation_id(),
+                                    role: crate::domain::models::MessageRole::User,
+                                    content: format!("The plan at {} has been approved. Execute it.", plan_path.display()),
+                                    content_blocks: vec![],
+                                    tool_calls: vec![],
+                                    created_at: crate::domain::models::session_meta::now_unix(),
+                                    token_count: None,
+                                    stop_reason: None,
+                                    synthetic: true,
+                                    images: vec![],
+                                };
+                                conversation.messages.push(synthetic_msg);
+                                let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
+                                let _snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
+                            }
+                            crate::domain::models::PlanApprovalOutcome::Reject => {
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: "Plan rejected. The agent has been informed.".to_string(),
+                                });
+                                let synthetic_msg = crate::domain::models::ChatMessage {
+                                    id: crate::domain::models::generate_conversation_id(),
+                                    role: crate::domain::models::MessageRole::User,
+                                    content: "Plan rejected. Please revise the plan based on the user's feedback.".to_string(),
+                                    content_blocks: vec![],
+                                    tool_calls: vec![],
+                                    created_at: crate::domain::models::session_meta::now_unix(),
+                                    token_count: None,
+                                    stop_reason: None,
+                                    synthetic: true,
+                                    images: vec![],
+                                };
+                                conversation.messages.push(synthetic_msg);
+                            }
+                            crate::domain::models::PlanApprovalOutcome::Revise => {
+                                // Editor suspension handled inline in key handler, not here.
+                            }
+                        }
+                    }
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
+                        // Update sandbox policy
+                        let new_policy = crate::domain::models::SandboxPolicy::from_mode(mode, &workspace_path);
+                        *app_state.sandbox_policy.write().await = new_policy;
+
+                        // Plan mode warmup
+                        if mode == PermissionMode::Plan {
+                            let mut meta = tab_manager.active_tab_mut().session_meta.clone();
+                            let _ = app_state.plan_manager.ensure_dir().await;
+                            let _plan_file = app_state.plan_manager.plan_file_for(&mut meta);
+                            tab_manager.active_tab_mut().session_meta.plan_slug = meta.plan_slug;
+                            app_state.plan_injector.as_ref().reset_reentry();
+                            state.pending_plan_reminder_at_turn = Some(0);
+                        } else {
+                            state.pending_plan_reminder_at_turn = None;
+                        }
+
                         let mode_str = match mode {
                             PermissionMode::Plan => "Plan",
                             PermissionMode::Normal => "Normal",
@@ -2947,10 +3166,12 @@ pub async fn run(
                             &mut session_manager,
                             &fs_storage,
                             &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                            None,
                             _skill_snap,
                             _agent_snap,
                                                               tab_manager.reset_and_clone_turn_cancel(),
-                        );
+                        ).await;
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
@@ -3261,10 +3482,12 @@ pub async fn run(
                                 &mut session_manager,
                                 &fs_storage,
                                 &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                None,
                                 _skill_snap,
                                 _agent_snap,
                                                                   tab_manager.reset_and_clone_turn_cancel(),
-                            );
+                            ).await;
                         }
                     }
                     AppEvent::AskActivateSkill { conversation_id, name, arguments } => {
@@ -3405,10 +3628,12 @@ pub async fn run(
                                         &mut session_manager,
                                         &fs_storage,
                                         &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                        None,
                                         snap,
                                         agent_snap,
                                                                           tab_manager.reset_and_clone_turn_cancel(),
-                                    );
+                                    ).await;
                                     app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
@@ -3538,10 +3763,12 @@ pub async fn run(
                                     &mut session_manager,
                                     &fs_storage,
                                     &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                    None,
                                     snap,
                                     agent_snap,
                                                                       tab_manager.reset_and_clone_turn_cancel(),
-                                );
+                                ).await;
                                 app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
@@ -4854,7 +5081,16 @@ pub fn rehydrate_historical_images(
     }
 }
 
-fn start_turn(
+fn cycle_mode(current: PermissionMode) -> PermissionMode {
+    match current {
+        PermissionMode::Normal => PermissionMode::AutoEdit,
+        PermissionMode::AutoEdit => PermissionMode::Plan,
+        PermissionMode::Plan => PermissionMode::Yolo,
+        PermissionMode::Yolo => PermissionMode::Normal,
+    }
+}
+
+async fn start_turn(
      text: &str,
      images: Vec<ImageAttachment>,
      conversation: &mut Conversation,
@@ -4872,6 +5108,9 @@ fn start_turn(
      session_manager: &mut SessionManager,
      fs_storage: &crate::adapters::filesystem::FileSystemStorage,
      storage: &Arc<dyn StoragePort>,
+     _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
+     plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
+     plan_file: Option<std::path::PathBuf>,
      activation_set: Option<crate::domain::models::SkillActivationSet>,
      agent_snapshot: Option<crate::domain::models::ActiveAgent>,
      turn_cancel: CancellationToken,
@@ -4895,11 +5134,27 @@ fn start_turn(
         created_at: crate::domain::models::session_meta::now_unix(),
         token_count: None,
         stop_reason: None,
+        synthetic: false,
         images: persisted_refs,
     });
 
     // Build messages list for provider
     let mut messages = message_builder::build_api_messages(conversation);
+
+    // Plan mode reminder injection (Story 6-0d AC2/AC8)
+    if security.current_mode() == PermissionMode::Plan {
+        if let Some(ref plan_path) = plan_file {
+            if let Some(reminder) = plan_injector.pre_turn(conversation, plan_path).await {
+                if let Some(first_user_msg) = messages.iter_mut().find(|m| m.role == MessageRole::User) {
+                    first_user_msg.context_prefix = Some(reminder);
+                }
+                let assistant_turns = conversation.messages.iter().filter(|m| m.role == MessageRole::Assistant).count() as u32;
+                state.pending_plan_reminder_at_turn = Some(assistant_turns);
+            } else {
+                state.pending_plan_reminder_at_turn = None;
+            }
+        }
+    }
 
     // Attach images to the last user message in the API request
     // Covers: FR112 (AC1, AC2)
@@ -5550,6 +5805,21 @@ fn render(
                     }
                 }
 
+                // Render plan approval card if pending (Story 6-0d AC4)
+                if *focus
+                    == FocusState::Overlay(
+                        crate::domain::models::visual::OverlayType::Confirmation(
+                            crate::domain::models::visual::ConfirmationType::PlanApproval,
+                        ),
+                    )
+                {
+                    if let Some(ref pending) = state.pending_plan_approval {
+                        use crate::adapters::tui::widgets::plan_approval;
+                        let card_area = plan_approval::plan_approval_area(frame.area());
+                        plan_approval::render_plan_approval_card(frame, card_area, pending, theme);
+                    }
+                }
+
                 let session_title = if !conversation.title.is_empty() {
                     Some(conversation.title.as_str())
                 } else {
@@ -5573,6 +5843,7 @@ fn render(
                     current_hint.as_deref(),
                     state.active_skill_count,
                     state.active_agent_name.as_deref(),
+                    state.pending_plan_reminder_at_turn,
                 );
                 input_box::render(
                     frame,
@@ -6245,6 +6516,7 @@ mod tests {
             created_at: 1_700_000_000,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images,
         }
     }
@@ -6259,6 +6531,7 @@ mod tests {
             created_at: 1_700_000_001,
             token_count: None,
             stop_reason: None,
+            synthetic: false,
             images: vec![],
         }
     }
