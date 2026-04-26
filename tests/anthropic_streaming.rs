@@ -138,6 +138,7 @@ data: {\"type\":\"message_stop\"}\n\
 
         // Add user message
         conv.messages.push(ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "What is 2+2?".into(),
@@ -147,7 +148,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
-        });
+            });
 
         // Usage
         let a1 = apply_chunk(
@@ -268,6 +269,7 @@ data: {\"type\":\"message_stop\"}\n\
 
         let mut conv = make_conversation();
         conv.messages.push(ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Hi".into(),
@@ -277,7 +279,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
-        });
+            });
         let mut streaming = make_streaming();
 
         let mut actions = Vec::new();
@@ -600,6 +602,7 @@ data: {\"type\":\"message_stop\"}\n\
         // Feed through apply_chunk and verify conversation state
         let mut conv = make_conversation();
         conv.messages.push(ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Hello".into(),
@@ -609,7 +612,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
-        });
+            });
         let mut streaming = make_streaming();
 
         for chunk in chunks {

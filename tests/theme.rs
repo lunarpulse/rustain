@@ -408,6 +408,7 @@ fn test_tui_renders_with_theme_colors() {
                     None, // current_hint
                     0,
                     None,
+                    None,
                 );
             }
         })

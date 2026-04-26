@@ -147,6 +147,18 @@ pub async fn run(
         approval_runtime.clone(),
         config.runtime.event_bus.raw_capacity,
     );
+
+    // Story 6-0d: warm up plan slug + directory when starting in Plan mode (default_plan_mode)
+    if security.current_mode() == PermissionMode::Plan {
+        let mut meta = tab_manager.active_tab_mut().session_meta.clone();
+        let _ = app_state.plan_manager.ensure_dir().await;
+        let plan = app_state.plan_manager.plan_file_for(&mut meta);
+        tab_manager.active_tab_mut().session_meta.plan_slug = meta.plan_slug;
+        tool_scheduler.set_plan_file(Some(plan.path.clone())).await;
+        state.plan_file_path = Some(plan.path);
+        app_state.plan_injector.as_ref().reset_reentry();
+        state.pending_plan_reminder_at_turn = Some(0);
+    }
     {
         let bus = app_state.event_bus.clone();
         let mut rx = tool_scheduler.subscribe();
@@ -734,7 +746,7 @@ pub async fn run(
                                             let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen, crossterm::event::EnableMouseCapture);
                                         });
 
-                                        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+                                        let editor = crate::infrastructure::utils::env_var_trimmed("EDITOR").unwrap_or_else(|| "vi".to_string());
                                         let _ = std::process::Command::new(editor).arg(&plan_path).status();
 
                                         // Re-read plan file after editor exits
@@ -3048,6 +3060,8 @@ pub async fn run(
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
                                 let _snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                state.plan_file_path = None;
+                                tool_scheduler.set_plan_file(None).await;
                                 start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                             }
@@ -3070,6 +3084,8 @@ pub async fn run(
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
                                 let _snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                state.plan_file_path = None;
+                                tool_scheduler.set_plan_file(None).await;
                                 start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                             }
@@ -3108,11 +3124,15 @@ pub async fn run(
                         if mode == PermissionMode::Plan {
                             let mut meta = tab_manager.active_tab_mut().session_meta.clone();
                             let _ = app_state.plan_manager.ensure_dir().await;
-                            let _plan_file = app_state.plan_manager.plan_file_for(&mut meta);
+                            let plan = app_state.plan_manager.plan_file_for(&mut meta);
                             tab_manager.active_tab_mut().session_meta.plan_slug = meta.plan_slug;
+                            tool_scheduler.set_plan_file(Some(plan.path.clone())).await;
+                            state.plan_file_path = Some(plan.path);
                             app_state.plan_injector.as_ref().reset_reentry();
                             state.pending_plan_reminder_at_turn = Some(0);
                         } else {
+                            tool_scheduler.set_plan_file(None).await;
+                            state.plan_file_path = None;
                             state.pending_plan_reminder_at_turn = None;
                         }
 
@@ -5110,7 +5130,7 @@ async fn start_turn(
      storage: &Arc<dyn StoragePort>,
      _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
      plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
-     plan_file: Option<std::path::PathBuf>,
+     _plan_file: Option<std::path::PathBuf>,
      activation_set: Option<crate::domain::models::SkillActivationSet>,
      agent_snapshot: Option<crate::domain::models::ActiveAgent>,
      turn_cancel: CancellationToken,
@@ -5143,7 +5163,7 @@ async fn start_turn(
 
     // Plan mode reminder injection (Story 6-0d AC2/AC8)
     if security.current_mode() == PermissionMode::Plan {
-        if let Some(ref plan_path) = plan_file {
+        if let Some(ref plan_path) = state.plan_file_path {
             if let Some(reminder) = plan_injector.pre_turn(conversation, plan_path).await {
                 if let Some(first_user_msg) = messages.iter_mut().find(|m| m.role == MessageRole::User) {
                     first_user_msg.context_prefix = Some(reminder);

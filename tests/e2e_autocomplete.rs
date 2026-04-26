@@ -253,6 +253,7 @@ fn test_e2e_new_command_creates_fresh_session() {
     h.conversation
         .messages
         .push(rustain::domain::models::ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: rustain::domain::models::MessageRole::User,
             content: "Hello".to_string(),
@@ -262,7 +263,7 @@ fn test_e2e_new_command_creates_fresh_session() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-        });
+            });
 
     let original_id = h.conversation.id.clone();
 

@@ -49,6 +49,7 @@ fn test_error_feedback_block_in_conversation() {
     feedback_blocks.insert("fb-1".to_string(), fb);
 
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello".to_string(),
@@ -58,7 +59,7 @@ fn test_error_feedback_block_in_conversation() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
     let streaming = StreamingState::default();
 
     let backend = TestBackend::new(80, 24);

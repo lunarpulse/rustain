@@ -83,7 +83,8 @@ fn render_full_layout(
                 None,  // current_hint
                 0,
                 None,
-            );
+                None,
+                    );
             input_box::render(
                 frame,
                 app_layout.input_area,
@@ -106,6 +107,7 @@ fn render_full_layout(
 fn test_tool_block_in_full_layout() {
     let conversation = make_conversation(vec![
         ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "Read my file".to_string(),
@@ -115,8 +117,9 @@ fn test_tool_block_in_full_layout() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-        },
+            },
         ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "Reading file.".to_string(),
@@ -124,7 +127,8 @@ fn test_tool_block_in_full_layout() {
             tool_calls: vec![ToolCallInfo {
                 id: "toolu_test1".to_string(),
                 name: "Read".to_string(),
-                input: serde_json::json!({"file_path": "src/main.rs"}),
+                input: serde_json::json!({"file_path": "src/main.rs"
+            }),
                 result: Some(rustain::domain::models::ToolResultInfo {
                     content: "fn main() {}".to_string(),
                     is_error: false,
@@ -173,6 +177,7 @@ fn test_tool_block_in_full_layout() {
 #[test]
 fn test_feedback_block_in_full_layout() {
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello".to_string(),
@@ -182,7 +187,7 @@ fn test_feedback_block_in_full_layout() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
 
     let mut feedback_blocks = BTreeMap::new();
     feedback_blocks.insert(
@@ -272,7 +277,8 @@ fn test_permission_prompt_in_full_layout() {
                 None,  // current_hint
                 0,
                 None,
-            );
+                None,
+                    );
             input_box::render(
                 frame,
                 app_layout.input_area,
@@ -368,7 +374,8 @@ fn test_ask_user_question_in_full_layout() {
                 None,  // current_hint
                 0,
                 None,
-            );
+                None,
+                    );
             input_box::render(
                 frame,
                 app_layout.input_area,

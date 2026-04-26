@@ -17,6 +17,14 @@ pub enum PlanManagerError {
 }
 
 /// Domain service that manages plan-file lifecycle.
+///
+/// Slug generation is deterministic per session via `SessionMeta.plan_slug`.
+/// Once a slug is assigned it survives across restarts, forks, and rewinds.
+/// Tests can inject a custom slug function via `new_with_slug_fn` for
+/// snapshot-stable paths.
+///
+/// The plan file path is the only write exception in Plan mode — the
+/// PermissionChain (not the tool layer) grants this carve-out.
 pub struct PlanManager {
     plans_dir: PathBuf,
     slug_fn: Box<dyn Fn() -> String + Send + Sync>,

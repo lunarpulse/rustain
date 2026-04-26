@@ -1642,6 +1642,13 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /plan on|off|toggle: enter/exit plan mode — Story 6-0d AC5
+            if cmd_name == "plan" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // /deactivate [name]: deactivate active skill(s) — Story 5-2 AC5
             if cmd_name == "deactivate" {
                 return InputAction::ExecuteCommand {

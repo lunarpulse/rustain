@@ -16,8 +16,22 @@ pub trait PlanModeInjector: Send + Sync {
 }
 
 /// Default implementation of `PlanModeInjector`.
-/// Reminder cadence: full reminder on turn 0, sparse reminder every N assistant turns,
-/// re-entry reminder once per Plan-mode activation when the plan file already exists.
+///
+/// Reminder cadence (validated against Kimi CLI behavior):
+/// - Turn 0 (first assistant turn): full reminder with plan-mode envelope.
+/// - Every `reminder_every_n_turns` assistant turns: sparse one-line reminder.
+/// - All other turns: `None` (no injection).
+/// - Re-entry: once per Plan-mode activation, if the plan file already exists,
+///   a re-entry reminder containing the current plan contents is injected.
+///
+/// The reminder travels to the LLM via `Message.context_prefix`; it is **never**
+/// appended to `ChatMessage.content` (which is what the TUI renders and exports).
+/// This separation is the core invariant — break it and Plan mode becomes a leaky
+/// abstraction.
+///
+/// The tool schema visible to the model is **never mutated** by this injector.
+/// Mode-aware gating happens at the PermissionChain layer, not by adding/removing
+/// tools from the toolset.
 pub struct DefaultPlanInjector {
     /// How many assistant turns between sparse reminders.
     pub reminder_every_n_turns: u32,

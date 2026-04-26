@@ -30,6 +30,7 @@ use rustain::domain::ports::StoragePort;
 
 fn make_message(role: MessageRole, content: &str) -> ChatMessage {
     ChatMessage {
+        synthetic: false,
         id: generate_conversation_id(),
         role,
         content: content.to_string(),
@@ -39,7 +40,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }
+        }
 }
 
 fn make_conversation_5_messages() -> Conversation {

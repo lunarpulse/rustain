@@ -71,6 +71,7 @@ fn test_e2e_message_to_streaming_response() {
 
     // Step 2: User sends a message
     conversation.messages.push(ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "What is Rust?".to_string(),
@@ -80,7 +81,7 @@ fn test_e2e_message_to_streaming_response() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    });
+        });
 
     // Start streaming (typing indicator phase)
     streaming.is_streaming = true;

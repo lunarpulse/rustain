@@ -391,6 +391,7 @@ fn test_status_bar_renders_hint() {
                 Some("Tip: Press ? for help"),
                 0,
                 None,
+                None,
             );
         })
         .unwrap();
@@ -441,7 +442,8 @@ fn test_status_bar_no_hint_when_none() {
                 None,
                 0,
                 None,
-            );
+                None,
+                    );
         })
         .unwrap();
 

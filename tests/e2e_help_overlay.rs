@@ -152,7 +152,8 @@ fn test_e2e_help_overlay_shows_tmux_warning() {
 
     // Use larger terminal to fit tmux warning without scrolling.
     // Height bumped 60→85 in Story 4-4 to accommodate SEARCH & BOOKMARKS category.
-    let mut h = TestHarness::with_size(100, 85);
+    // Height bumped 85→100 in Story 6-0d to accommodate PLAN MODE entries.
+    let mut h = TestHarness::with_size(100, 100);
     h.press_key(DomainKey::Esc);
     h.type_char('?');
 
@@ -354,6 +355,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 false,
                 Some("Tip: j/k to scroll, i to type, ? for help"),
                 0,
+                None,
                 None,
             );
         })

@@ -27,6 +27,7 @@ fn make_message_with_images(
     images: Vec<ImageReference>,
 ) -> ChatMessage {
     ChatMessage {
+        synthetic: false,
         id: generate_conversation_id(),
         role,
         content: content.to_string(),
@@ -36,7 +37,7 @@ fn make_message_with_images(
         token_count: None,
         stop_reason: None,
         images,
-    }
+        }
 }
 
 fn make_conversation(id: &str, messages: Vec<ChatMessage>) -> Conversation {

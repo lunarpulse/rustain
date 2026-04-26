@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustain::domain::errors::ToolError;
+use rustain::domain::models::SandboxPolicy;
 use rustain::domain::ports::ToolSetPort;
+use rustain::domain::services::plan_manager::PlanManager;
+use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
 use rustain::adapters::filesystem::FileSystemStorage;
 use tokio_util::sync::CancellationToken;
@@ -203,7 +206,13 @@ async fn ac4_signal_cancel_before_shutdown() {
     use rustain::infrastructure::runtime::app_state::AppState;
 
     let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
-    let (app_state, _domain_rx) = AppState::new(16, approval_runtime);
+    let (app_state, _domain_rx) = AppState::new(
+        16,
+        approval_runtime,
+        SandboxPolicy::ReadOnly { network: false },
+        Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
+        Arc::new(DefaultPlanInjector::new())
+    );
 
     app_state.session_cancel.cancel();
 

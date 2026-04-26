@@ -30,6 +30,7 @@ use rustain::infrastructure::runtime::event_loop::{
 
 fn msg(role: MessageRole, content: &str) -> ChatMessage {
     ChatMessage {
+        synthetic: false,
         id: "m".to_string(),
         role,
         content: content.to_string(),
@@ -39,7 +40,7 @@ fn msg(role: MessageRole, content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }
+        }
 }
 
 fn conv(title: &str) -> Conversation {
@@ -70,6 +71,7 @@ fn meta() -> SessionMeta {
         fork_source: None,
         imported_from: None,
         extra: serde_json::Map::new(),
+        plan_slug: None,
     }
 }
 

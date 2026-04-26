@@ -23,6 +23,7 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
 fn test_build_api_messages_maps_roles() {
     let conv = make_conversation(vec![
         ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
             content: "hello".to_string(),
@@ -32,8 +33,9 @@ fn test_build_api_messages_maps_roles() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-        },
+            },
         ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "hi there".to_string(),
@@ -43,7 +45,7 @@ fn test_build_api_messages_maps_roles() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-        },
+            },
     ]);
 
     let messages = build_api_messages(&conv);

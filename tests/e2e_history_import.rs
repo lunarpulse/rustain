@@ -255,6 +255,7 @@ fn test_e2e_session_meta_imported_from_roundtrip() {
             imported_at: 1700000100,
         }),
         extra: serde_json::Map::new(),
+        plan_slug: None,
     };
 
     let json = serde_json::to_string(&meta).unwrap();
@@ -278,6 +279,7 @@ fn test_e2e_session_meta_native_session_no_imported_from_key() {
         fork_source: None,
         imported_from: None,
         extra: serde_json::Map::new(),
+        plan_slug: None,
     };
     let json = serde_json::to_string(&meta).unwrap();
     assert!(

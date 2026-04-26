@@ -227,7 +227,9 @@ def test_plan_mode_blocks_standard_tools_without_prompt(tui_strict: RustainTUI):
     tui_strict.send_message("Use the Write tool to write 'hello' to /tmp/plan_test.txt")
     tui_strict.wait_for_idle(20.0)
     tui_strict.assert_screen_not_contains("[y] Allow", msg="Plan mode should not show prompt")
-    tui_strict.assert_screen_not_contains("[y]", msg="Plan mode should not show any action glyphs")
+    # NOTE: The canonical Plan-mode deny message ("...call exit_plan_mode") may cause
+    # the model to mention action glyphs in its response text. Only the prompt UI
+    # ("[y] Allow") is the true signal of a permission prompt.
     tui_strict.set_permission_mode("normal")
 
 

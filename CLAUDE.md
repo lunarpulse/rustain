@@ -103,6 +103,8 @@ Validating → Scheduled → (AwaitingApproval)? → Executing → Success
 
 Parallel batching: when all tools in a batch have `parallel_safe == true`, `FuturesOrdered` runs them concurrently; otherwise sequential fallback. Cancellation uses per-call `CancellationToken::child_token()` so individual tools can be aborted without killing the whole batch.
 
+`exit_plan_mode` is risk-Safe and never enters `AwaitingApproval` when in Plan mode — the PermissionChain short-circuits to `Allow` directly.
+
 ## Ownership Topology
 
 Rustain nodes have three relationship types:
@@ -132,4 +134,5 @@ Selective — provider adapters, tools, MCP only:
 - **Ownership topology:** Hierarchical ownership + peer networking + self-destruct-on-abandonment
 - **Event loop:** `tokio::select!` on unified `AppEvent` channel
 - **ApprovalRuntime pub/sub:** `tokio::sync::broadcast` channel between `ToolScheduler` and TUI event loop; `ApprovalRuntime` holds pending requests and session auto-allow set; resolves via `oneshot` per request
+- **Plan mode (ADR-06-10):** flag + file + injector + tool + widget. Reminder injected to next user message via `Message.context_prefix`; never mid-stream. Plan-file write is the lone write exception in Plan mode. Entry via `/plan on|off|toggle`, Shift+Tab (input focus), or `default_plan_mode = true` in config.
 - **Tracing:** routed to `~/.rustain/rustain.log` (stdout owned by ratatui)

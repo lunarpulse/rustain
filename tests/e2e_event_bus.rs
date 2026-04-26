@@ -13,7 +13,9 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use rustain::domain::events::AppEvent;
-use rustain::domain::models::{NoticeLevel, PermissionMode, StreamChunk};
+use rustain::domain::models::{NoticeLevel, PermissionMode, SandboxPolicy, StreamChunk};
+use rustain::domain::services::plan_manager::PlanManager;
+use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
 use rustain::infrastructure::runtime::app_state::AppState;
 use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent, RawEventKind};
 
@@ -22,7 +24,13 @@ use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent, RawEventKi
 #[test]
 fn test_app_state_honors_raw_capacity() {
     let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(64, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
-    let (app_state, _domain_rx) = AppState::new(64, approval_runtime);
+    let (app_state, _domain_rx) = AppState::new(
+        64,
+        approval_runtime,
+        SandboxPolicy::ReadOnly { network: false },
+        Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
+        Arc::new(DefaultPlanInjector::new())
+    );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
     let _raw_rx = app_state.event_bus.subscribe_raw();
@@ -31,7 +39,13 @@ fn test_app_state_honors_raw_capacity() {
 #[test]
 fn test_app_state_session_cancel_is_root_token() {
     let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
-    let (app_state, _domain_rx) = AppState::new(16, approval_runtime);
+    let (app_state, _domain_rx) = AppState::new(
+        16,
+        approval_runtime,
+        SandboxPolicy::ReadOnly { network: false },
+        Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
+        Arc::new(DefaultPlanInjector::new())
+    );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());
 }

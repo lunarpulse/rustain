@@ -73,6 +73,7 @@ fn test_chat_pane_shows_user_message() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "Hello world".to_string(),
@@ -82,7 +83,7 @@ fn test_chat_pane_shows_user_message() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
@@ -120,6 +121,7 @@ fn test_chat_pane_shows_assistant_message() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "Hi there".to_string(),
@@ -129,7 +131,7 @@ fn test_chat_pane_shows_assistant_message() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
@@ -252,6 +254,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::User,
         content: "My question".to_string(),
@@ -261,7 +264,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
     let streaming = StreamingState {
         is_streaming: true,
         phase: StreamingPhase::AccumulatingText,
@@ -312,6 +315,7 @@ fn test_chat_pane_error_displays_in_red() {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role: MessageRole::Assistant,
         content: "Something went wrong".to_string(),
@@ -321,7 +325,7 @@ fn test_chat_pane_error_displays_in_red() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
@@ -429,9 +433,11 @@ fn test_feedback_block_visible_with_auto_scroll() {
 
     let messages: Vec<ChatMessage> = (1..=3)
         .map(|i| ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
-            content: format!("User message {}", i),
+            content: format!("User message {
+            }", i),
             content_blocks: vec![],
             tool_calls: vec![],
             created_at: 0,
@@ -512,6 +518,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
     };
     let msg_id = rustain::domain::models::generate_conversation_id();
     let conversation = make_conversation(vec![ChatMessage {
+        synthetic: false,
         id: msg_id.clone(),
         role: MessageRole::User,
         content: "Hello".to_string(),
@@ -521,7 +528,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }]);
+        }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 

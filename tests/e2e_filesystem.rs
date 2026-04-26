@@ -21,6 +21,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
         title: "Filesystem E2E Test".to_string(),
         messages: vec![
             ChatMessage {
+                synthetic: false,
                 id: generate_conversation_id(),
                 role: MessageRole::User,
                 content: "Hello".to_string(),
@@ -30,8 +31,9 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 token_count: None,
                 stop_reason: None,
                 images: vec![],
-            },
+                },
             ChatMessage {
+                synthetic: false,
                 id: generate_conversation_id(),
                 role: MessageRole::Assistant,
                 content: "Hi!".to_string(),
@@ -41,7 +43,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 token_count: None,
                 stop_reason: None,
                 images: vec![],
-            },
+                },
         ],
         created_at: 1700000000,
         updated_at: 1700000001,

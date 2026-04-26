@@ -5,6 +5,7 @@ use rustain::domain::services::history_rebuild::build_history_context;
 
 fn make_message(role: MessageRole, content: &str) -> ChatMessage {
     ChatMessage {
+        synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
         role,
         content: content.to_string(),
@@ -14,7 +15,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         token_count: Some(10),
         stop_reason: None,
         images: vec![],
-    }
+        }
 }
 
 /// 7.12: Integration test -- context rebuild with simulated session expiry.

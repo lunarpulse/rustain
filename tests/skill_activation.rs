@@ -82,11 +82,7 @@ async fn test_allowed_tools_enforced_denies_bash() {
     let skills: Option<&[ActiveSkill]> = Some(snap.active_skills());
     let security = rustain::adapters::noop::NoOpSecurity;
     let decision = permission_chain::check(
-        &security,
-        "Bash",
-        &serde_json::json!({"command": "ls"}),
-        skills,
-    )
+        &security, "Bash", &serde_json::json!({"command": "ls"}), skills, None)
     .await;
     assert!(
         matches!(decision, PermissionDecision::Deny(_)),
@@ -109,15 +105,11 @@ async fn test_allowed_tools_empty_denies_all_except_activate_skill() {
     let skills: Option<&[ActiveSkill]> = Some(snap.active_skills());
     let security = rustain::adapters::noop::NoOpSecurity;
 
-    let deny = permission_chain::check(&security, "Read", &serde_json::json!({}), skills).await;
+    let deny = permission_chain::check(&security, "Read", &serde_json::json!({}), skills, None).await;
     assert!(matches!(deny, PermissionDecision::Deny(_)));
 
     let allow = permission_chain::check(
-        &security,
-        "activate_skill",
-        &serde_json::json!({"name": "other"}),
-        skills,
-    )
+        &security, "activate_skill", &serde_json::json!({"name": "other"}), skills, None)
     .await;
     assert!(
         !matches!(allow, PermissionDecision::Deny(_)),
@@ -140,11 +132,7 @@ async fn test_allowed_tools_none_is_no_constraint() {
     let skills: Option<&[ActiveSkill]> = Some(snap.active_skills());
     let security = rustain::adapters::noop::NoOpSecurity;
     let decision = permission_chain::check(
-        &security,
-        "Bash",
-        &serde_json::json!({"command": "ls"}),
-        skills,
-    )
+        &security, "Bash", &serde_json::json!({"command": "ls"}), skills, None)
     .await;
     assert!(
         !matches!(decision, PermissionDecision::Deny(_)),
@@ -183,28 +171,18 @@ async fn test_multi_skill_intersection() {
     let security = rustain::adapters::noop::NoOpSecurity;
 
     let read_ok = permission_chain::check(
-        &security,
-        "Read",
-        &serde_json::json!({"file_path": "/workspace/src/main.rs"}),
-        skills,
-    )
+        &security, "Read", &serde_json::json!({"file_path": "/workspace/src/main.rs"}), skills, None)
     .await;
     assert!(!matches!(read_ok, PermissionDecision::Deny(_)));
 
     let bash_deny = permission_chain::check(
-        &security,
-        "Bash",
-        &serde_json::json!({"command": "ls"}),
-        skills,
-    )
+        &security, "Bash", &serde_json::json!({"command": "ls"}), skills, None)
     .await;
     assert!(matches!(bash_deny, PermissionDecision::Deny(_)));
 
     let grep_deny = permission_chain::check(
-        &security,
-        "Grep",
-        &serde_json::json!({"pattern": "test", "path": "/workspace/src"}),
-        skills,
+        &security, "Grep", &serde_json::json!({"pattern": "test", "path": "/workspace/src"}),
+        skills, None,
     )
     .await;
     assert!(

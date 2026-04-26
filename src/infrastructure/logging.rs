@@ -14,7 +14,7 @@ use crate::infrastructure::paths;
 /// Returns a `WorkerGuard` that **must be held alive** for the duration of the
 /// process. Dropping it flushes all buffered log writes to disk.
 pub fn init(log_level: &str) -> Result<WorkerGuard> {
-    let (log_dir, log_prefix) = if let Ok(path) = std::env::var("RUSTAIN_LOG_PATH") {
+    let (log_dir, log_prefix) = if let Ok(path) = std::env::var("RUSTAIN_LOG_PATH") { // CONFORMANCE_EXCEPTION: env var needed before utils available
         let path = PathBuf::from(path);
         let dir = path.parent().unwrap_or(&path).to_path_buf();
         // tracing_appender::rolling::daily uses {prefix}.{date} naming.

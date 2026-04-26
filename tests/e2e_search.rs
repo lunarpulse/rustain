@@ -38,7 +38,9 @@ fn make_conversation(messages: Vec<&str>) -> Conversation {
             .into_iter()
             .enumerate()
             .map(|(i, content)| ChatMessage {
-                id: format!("msg-{}", i),
+                synthetic: false,
+                id: format!("msg-{
+                }", i),
                 role: if i % 2 == 0 {
                     MessageRole::User
                 } else {

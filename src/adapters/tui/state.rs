@@ -1006,6 +1006,8 @@ pub struct TuiState {
     /// Which assistant-turn count the last plan reminder was injected at.
     /// `None` when no reminder is pending.
     pub pending_plan_reminder_at_turn: Option<u32>,
+    /// Active plan file path when in Plan mode. `None` otherwise.
+    pub plan_file_path: Option<std::path::PathBuf>,
 }
 
 impl TuiState {
@@ -1091,6 +1093,7 @@ impl TuiState {
             pending_agent_activation: None,
             pending_plan_approval: None,
             pending_plan_reminder_at_turn: None,
+            plan_file_path: None,
         }
     }
 

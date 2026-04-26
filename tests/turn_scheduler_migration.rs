@@ -122,6 +122,7 @@ fn make_conversation() -> Conversation {
         id: generate_conversation_id(),
         title: String::new(),
         messages: vec![ChatMessage {
+            synthetic: false,
             id: generate_conversation_id(),
             role: MessageRole::User,
             content: "read two files".to_string(),
@@ -131,7 +132,7 @@ fn make_conversation() -> Conversation {
             token_count: None,
             stop_reason: None,
             images: vec![],
-        }],
+            }],
         created_at: 0,
         updated_at: 0,
         last_response_at: None,

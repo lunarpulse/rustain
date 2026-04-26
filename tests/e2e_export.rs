@@ -18,6 +18,7 @@ use rustain::domain::services::export::{render_conversation_markdown, slugify};
 
 fn msg(role: MessageRole, content: &str, created_at: i64) -> ChatMessage {
     ChatMessage {
+        synthetic: false,
         id: "m".to_string(),
         role,
         content: content.to_string(),
@@ -27,7 +28,7 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-    }
+        }
 }
 
 fn msg_with_tool_call(
@@ -38,6 +39,7 @@ fn msg_with_tool_call(
     tool_result: &str,
 ) -> ChatMessage {
     ChatMessage {
+        synthetic: false,
         id: "m".to_string(),
         role,
         content: content.to_string(),
@@ -49,7 +51,7 @@ fn msg_with_tool_call(
             result: Some(ToolResultInfo {
                 content: tool_result.to_string(),
                 is_error: false,
-            }),
+        }),
             started_at_ms: None,
             completed_at_ms: None,
             status: None,
@@ -86,6 +88,7 @@ fn meta(message_count: usize) -> SessionMeta {
         fork_source: None,
         imported_from: None,
         extra: serde_json::Map::new(),
+        plan_slug: None,
     }
 }
 

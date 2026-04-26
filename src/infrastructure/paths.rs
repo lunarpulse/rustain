@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 
 /// Resolve the `~/.rustain/` data directory, creating it if it doesn't exist.
 pub fn data_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RUSTAIN_DATA_DIR") {
+    if let Ok(dir) = std::env::var("RUSTAIN_DATA_DIR") { // CONFORMANCE_EXCEPTION: bootstrapping path resolution
         let path = PathBuf::from(dir);
         std::fs::create_dir_all(&path)?;
         return Ok(path);
@@ -19,7 +19,7 @@ pub fn data_dir() -> Result<PathBuf> {
 /// Resolve the `~/.config/rustain/` config directory, creating it if it doesn't exist.
 /// Override with `RUSTAIN_CONFIG_DIR` env var for testing/CI.
 pub fn config_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RUSTAIN_CONFIG_DIR") {
+    if let Ok(dir) = std::env::var("RUSTAIN_CONFIG_DIR") { // CONFORMANCE_EXCEPTION: bootstrapping path resolution
         let path = PathBuf::from(dir);
         std::fs::create_dir_all(&path)?;
         return Ok(path);
@@ -35,7 +35,7 @@ pub fn config_dir() -> Result<PathBuf> {
 /// Override with `RUSTAIN_LOG_PATH` env var for testing/CI.
 #[allow(dead_code)]
 pub fn log_file_path() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("RUSTAIN_LOG_PATH") {
+    if let Ok(path) = std::env::var("RUSTAIN_LOG_PATH") { // CONFORMANCE_EXCEPTION: bootstrapping path resolution
         Ok(PathBuf::from(path))
     } else {
         Ok(data_dir()?.join("rustain.log"))

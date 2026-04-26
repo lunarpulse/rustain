@@ -12,6 +12,7 @@ use rustain::domain::models::{ChatMessage, Conversation, MessageRole, StreamingS
 fn make_conversation(msg_count: usize) -> Conversation {
     let messages: Vec<ChatMessage> = (0..msg_count)
         .map(|i| ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: if i % 2 == 0 {
                 MessageRole::User
@@ -450,9 +451,11 @@ fn test_virtual_scroll_above_viewport_not_rendered() {
 fn test_virtual_scroll_only_user_messages() {
     let messages: Vec<ChatMessage> = (0..5)
         .map(|i| ChatMessage {
+            synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
-            content: format!("User message {}", i),
+            content: format!("User message {
+            }", i),
             content_blocks: vec![],
             tool_calls: vec![],
             created_at: i as i64,
