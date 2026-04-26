@@ -436,6 +436,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         };
         storage.save_conversation(&existing_conv).await.unwrap();

@@ -50,6 +50,7 @@ fn make_forked_conversation(id: &str, parent_id: &str) -> Conversation {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: Some(ForkSource {
             conversation_id: parent_id.to_string(),
             message_index: 2,
@@ -68,6 +69,7 @@ fn make_plain_conversation(id: &str) -> Conversation {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }

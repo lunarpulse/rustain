@@ -11,6 +11,7 @@ mod message;
 mod notice;
 pub mod palette;
 mod permission;
+pub mod plan;
 pub mod project_context;
 mod session;
 pub mod sandbox;
@@ -62,6 +63,10 @@ pub use approval::{ApprovalOutcome, ApprovalScope};
 pub use permission::{
     FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome, ToolRisk,
     risk_for_builtin,
+};
+#[allow(unused_imports)]
+pub use plan::{
+    EffortEstimate, Plan, PlanDecision, PlanStatus, PlanTask, PlanTaskStatus,
 };
 pub use sandbox::SandboxPolicy;
 #[allow(unused_imports)]

@@ -14,8 +14,10 @@ use crate::domain::models::{
     ContentBlockType, Conversation, FeedbackBlock, MessageRole, StopReason, StreamingState,
 };
 use crate::domain::services::search::SearchMatch;
+use crate::adapters::tui::state::PendingPlanCard;
 
 use super::empty_state;
+use super::plan_card;
 use crate::adapters::tui::markdown;
 use word_wrap::wrap_text;
 
@@ -456,6 +458,7 @@ pub fn render(
         None,
         &[],
         &[],
+        None,
     )
 }
 
@@ -494,6 +497,7 @@ pub fn render_with_search(
     focused_search_match: Option<&SearchMatch>,
     search_matches: &[SearchMatch],
     bookmarks: &[usize],
+    pending_plan_card: Option<&PendingPlanCard>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -559,6 +563,29 @@ pub fn render_with_search(
             let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
             h += tool_block::tool_block_height(tc, &tb_state);
             block_boundaries.push(cumulative_offset + h);
+        }
+
+        // Add PlanCard heights (Story 6-1a AC5)
+        if msg.content_blocks.contains(&ContentBlockType::PlanCard) {
+            let mut plans_for_msg: Vec<&crate::domain::models::plan::Plan> = conversation
+                .plans
+                .values()
+                .filter(|p| p.host_message_id.as_deref() == Some(&msg.id))
+                .collect();
+            plans_for_msg.sort_by_key(|p| p.created_at);
+            if plans_for_msg.is_empty() {
+                tracing::warn!("PlanCard block in message {} has no matching plan in conversation.plans", msg.id);
+                h += plan_card::missing_plan_lines(&msg.id, theme).len();
+                block_boundaries.push(cumulative_offset + h);
+            } else {
+                for plan in &plans_for_msg {
+                    let is_pending = pending_plan_card
+                        .map(|ppc| ppc.plan_id == plan.id)
+                        .unwrap_or(false);
+                    h += plan_card::plan_card_height(plan, width as u16, is_pending);
+                    block_boundaries.push(cumulative_offset + h);
+                }
+            }
         }
 
         // Use height cache keyed by message ID. If the cached value diverges from the freshly
@@ -739,6 +766,45 @@ pub fn render_with_search(
                     }
                 }
                 tool_line_offset += tool_block::tool_block_height(tc, &tb_state);
+            }
+
+            // Render PlanCards for this message (Story 6-1a AC5)
+            if msg.content_blocks.contains(&ContentBlockType::PlanCard) {
+                let mut plans_for_msg: Vec<&crate::domain::models::plan::Plan> = conversation
+                    .plans
+                    .values()
+                    .filter(|p| p.host_message_id.as_deref() == Some(&msg.id))
+                    .collect();
+                plans_for_msg.sort_by_key(|p| p.created_at);
+
+                if plans_for_msg.is_empty() {
+                    tracing::warn!("PlanCard block in message {} has no matching plan in conversation.plans", msg.id);
+                    let fallback = plan_card::missing_plan_lines(&msg.id, theme);
+                    for (j, line) in fallback.into_iter().enumerate() {
+                        let abs_line = tool_line_offset + j;
+                        if abs_line >= visible_start && abs_line < visible_end {
+                            lines.push(line);
+                        }
+                    }
+                    tool_line_offset += plan_card::missing_plan_lines(&msg.id, theme).len();
+                } else {
+                    for plan in plans_for_msg {
+                        let is_pending = pending_plan_card
+                            .map(|ppc| ppc.plan_id == plan.id)
+                            .unwrap_or(false);
+                        let pc_lines = plan_card::render_plan_card_lines(
+                            plan, theme, area.width, is_pending,
+                        );
+                        let pc_height = pc_lines.len();
+                        for (j, line) in pc_lines.into_iter().enumerate() {
+                            let abs_line = tool_line_offset + j;
+                            if abs_line >= visible_start && abs_line < visible_end {
+                                lines.push(line);
+                            }
+                        }
+                        tool_line_offset += pc_height;
+                    }
+                }
             }
         }
         // else: skip this message entirely (viewport culling)

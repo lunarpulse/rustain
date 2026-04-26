@@ -77,6 +77,12 @@ pub enum InputAction {
     PlanReject,
     /// Plan approval: user pressed e (revise in editor).
     PlanRevise,
+    /// Plan card (6-1a): user pressed y (approve).
+    PlanCardApprove,
+    /// Plan card (6-1a): user pressed n (reject).
+    PlanCardReject,
+    /// Plan card (6-1a): user pressed e (edit in external editor).
+    PlanCardEdit,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -526,6 +532,22 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'n' => return InputAction::PlanReject,
             'e' => return InputAction::PlanRevise,
             _ => return InputAction::Consumed,
+        }
+    }
+
+    // Inline PlanCard: y/e/n when focus is Chat and card is pending (Story 6-1a AC7).
+    // Overlay PlanApproval (6-0d) takes precedence — handled above.
+    if state.pending_plan_card.is_some() {
+        match state.focus {
+            FocusState::Chat | FocusState::Input => {
+                match c {
+                    'y' => return InputAction::PlanCardApprove,
+                    'n' => return InputAction::PlanCardReject,
+                    'e' => return InputAction::PlanCardEdit,
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 

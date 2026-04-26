@@ -52,7 +52,7 @@ use crate::domain::models::tab::TabManager;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
     ApprovalOutcome,
-    AppConfig, ChatMessage, CompletionOptions, Conversation, FeedbackAction,
+    AppConfig, ChatMessage, CompletionOptions, ContentBlockType, Conversation, FeedbackAction,
     FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, NoticeLevel,
     PermissionMode, RetryState, SessionManager, SessionState, StatusState, StreamChunk,
     StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
@@ -736,26 +736,49 @@ pub async fn run(
                                 InputAction::PlanRevise => {
                                     if let Some(ref pending) = state.pending_plan_approval {
                                         let plan_path = pending.plan_path.clone();
-                                        // Suspend TUI
-                                        let mut out = std::io::stdout();
-                                        let _ = crossterm::execute!(out, crossterm::terminal::LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
-                                        let _ = crossterm::terminal::disable_raw_mode();
-
-                                        let _restore = scopeguard::guard((), |_| {
-                                            let _ = crossterm::terminal::enable_raw_mode();
-                                            let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen, crossterm::event::EnableMouseCapture);
+                                        let _ = crate::adapters::tui::editor_suspend::suspend_terminal(|| {
+                                            let editor = crate::infrastructure::utils::env_var_trimmed("EDITOR").unwrap_or_else(|| "vi".to_string());
+                                            std::process::Command::new(editor).arg(&plan_path).status()
                                         });
-
-                                        let editor = crate::infrastructure::utils::env_var_trimmed("EDITOR").unwrap_or_else(|| "vi".to_string());
-                                        let _ = std::process::Command::new(editor).arg(&plan_path).status();
-
-                                        // Re-read plan file after editor exits
-                                        drop(_restore);
                                         let contents = tokio::fs::read_to_string(&plan_path).await.unwrap_or_default();
                                         if let Some(ref mut pending) = state.pending_plan_approval {
                                             pending.contents = contents;
                                         }
                                         state.needs_redraw = true;
+                                    }
+                                }
+                                // PlanCard key handlers (Story 6-1a AC7)
+                                InputAction::PlanCardApprove => {
+                                    if let Some(ref pending) = state.pending_plan_card {
+                                        let conversation_id = conversation.id.clone();
+                                        let plan_id = pending.plan_id.clone();
+                                        app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
+                                            conversation_id,
+                                            plan_id,
+                                            decision: crate::domain::models::plan::PlanDecision::Approve,
+                                        });
+                                    }
+                                }
+                                InputAction::PlanCardReject => {
+                                    if let Some(ref pending) = state.pending_plan_card {
+                                        let conversation_id = conversation.id.clone();
+                                        let plan_id = pending.plan_id.clone();
+                                        app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
+                                            conversation_id,
+                                            plan_id,
+                                            decision: crate::domain::models::plan::PlanDecision::Reject,
+                                        });
+                                    }
+                                }
+                                InputAction::PlanCardEdit => {
+                                    if let Some(ref pending) = state.pending_plan_card {
+                                        let conversation_id = conversation.id.clone();
+                                        let plan_id = pending.plan_id.clone();
+                                        app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
+                                            conversation_id,
+                                            plan_id,
+                                            decision: crate::domain::models::plan::PlanDecision::Edit,
+                                        });
                                     }
                                 }
                                 InputAction::FeedbackInputChar(c) => {
@@ -1097,6 +1120,7 @@ pub async fn run(
                                             last_response_at: None,
                                             session_id: Some(generate_conversation_id()),
                                             usage: None,
+                                            plans: std::collections::HashMap::new(),
                                             fork_source: None,
                                         };
                                         skill_activator.on_new_conversation(&conversation.id).await;
@@ -2534,6 +2558,7 @@ pub async fn run(
                                                 app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                                     conversation_id: conv_id,
                                                     text,
+                                                    synthetic: false,
                                                 });
                                             }
                                         }
@@ -2573,6 +2598,7 @@ pub async fn run(
                                         app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                             conversation_id: conv_id,
                                             text,
+                                            synthetic: false,
                                         });
                                     }
                                     state.needs_redraw = true;
@@ -3110,9 +3136,203 @@ pub async fn run(
                                 conversation.messages.push(synthetic_msg);
                             }
                             crate::domain::models::PlanApprovalOutcome::Revise => {
-                                // Editor suspension handled inline in key handler, not here.
                             }
                         }
+                    }
+                    AppEvent::PlanProposed { conversation_id, plan } => {
+                        if conversation.id != conversation_id {
+                            tracing::warn!("PlanProposed for unknown conversation {}", conversation_id);
+                        } else {
+                            let msg_id = if let Some(last_msg) = conversation.messages.last_mut() {
+                                if last_msg.role == MessageRole::Assistant {
+                                    last_msg.content_blocks.push(ContentBlockType::PlanCard);
+                                    last_msg.id.clone()
+                                } else {
+                                    let id = crate::domain::models::generate_message_id();
+                                    let msg = ChatMessage {
+                                        id: id.clone(),
+                                        role: MessageRole::Assistant,
+                                        content: String::new(),
+                                        content_blocks: vec![ContentBlockType::PlanCard],
+                                        tool_calls: vec![],
+                                        created_at: crate::domain::models::session_meta::now_unix(),
+                                        token_count: None,
+                                        stop_reason: None,
+                                        synthetic: false,
+                                        images: vec![],
+                                    };
+                                    conversation.messages.push(msg);
+                                    id
+                                }
+                            } else {
+                                let id = crate::domain::models::generate_message_id();
+                                let msg = ChatMessage {
+                                    id: id.clone(),
+                                    role: MessageRole::Assistant,
+                                    content: String::new(),
+                                    content_blocks: vec![ContentBlockType::PlanCard],
+                                    tool_calls: vec![],
+                                    created_at: crate::domain::models::session_meta::now_unix(),
+                                    token_count: None,
+                                    stop_reason: None,
+                                    synthetic: false,
+                                    images: vec![],
+                                };
+                                conversation.messages.push(msg);
+                                id
+                            };
+
+                            let mut plan = plan;
+                            plan.host_message_id = Some(msg_id);
+                            let plan_id = plan.id.clone();
+                            let plan_title = plan.title.clone();
+                            let task_count = plan.tasks.len();
+                            conversation.plans.insert(plan.id.clone(), plan.clone());
+
+                            if security.current_mode() == PermissionMode::Yolo {
+                                if let Some(stored_plan) = conversation.plans.get_mut(&plan_id) {
+                                    stored_plan.status = crate::domain::models::plan::PlanStatus::Executing;
+                                    stored_plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
+                                }
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: format!("Plan auto-approved (YOLO mode): {} — {} tasks", plan_title, task_count),
+                                });
+                                let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
+                                    conversation_id: conversation.id.clone(),
+                                    plan_id,
+                                });
+                            } else {
+                                if let Some(ref old_pending) = state.pending_plan_card {
+                                    if let Some(old_plan) = conversation.plans.get_mut(&old_pending.plan_id) {
+                                        tracing::warn!("Superseding pending plan card: {}", old_pending.plan_id);
+                                        old_plan.status = crate::domain::models::plan::PlanStatus::Rejected;
+                                        old_plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
+                                    }
+                                }
+                                state.pending_plan_card = Some(crate::adapters::tui::state::PendingPlanCard {
+                                    conversation_id: conversation.id.clone(),
+                                    plan_id,
+                                    plan_snapshot: plan,
+                                });
+                            }
+                            state.needs_redraw = true;
+                        }
+                    }
+                    AppEvent::PlanCardResolved { conversation_id, plan_id, decision } => {
+                        if conversation.id != conversation_id {
+                            tracing::warn!("PlanCardResolved for mismatched conversation");
+                        } else {
+                            let cid = conversation.id.clone();
+                            match decision {
+                                crate::domain::models::plan::PlanDecision::Approve => {
+                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
+                                        plan.status = crate::domain::models::plan::PlanStatus::Executing;
+                                        plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
+                                    }
+                                    state.pending_plan_card = None;
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
+                                    let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
+                                        conversation_id: cid,
+                                        plan_id,
+                                    });
+                                }
+                                crate::domain::models::plan::PlanDecision::Reject => {
+                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
+                                        plan.status = crate::domain::models::plan::PlanStatus::Rejected;
+                                        plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
+                                    }
+                                    state.pending_plan_card = None;
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: "Plan rejected. You can provide feedback or try a different approach.".to_string(),
+                                    });
+                                    let conv_id = conversation.id.clone();
+                                    app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
+                                        conversation_id: conv_id,
+                                        text: "Plan rejected by user. Please revise the approach or ask clarifying questions before retrying.".to_string(),
+                                        synthetic: true,
+                                    });
+                                }
+                                crate::domain::models::plan::PlanDecision::Edit => {
+                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
+                                        plan.status = crate::domain::models::plan::PlanStatus::Editing;
+                                    }
+                                    if let Some(ref pending) = state.pending_plan_card {
+                                        if pending.plan_id == plan_id {
+                                            let plan_snapshot = pending.plan_snapshot.clone();
+                                            let result = crate::adapters::tui::editor_suspend::run_editor_on_plan(&plan_snapshot).await;
+                                            let edited_plan = match result {
+                                                Ok(Some(p)) => Some(p),
+                                                Ok(None) => None,
+                                                Err(e) => {
+                                                    tracing::warn!("Plan card editor error: {}", e);
+                                                    None
+                                                }
+                                            };
+                                            app_state.event_bus.emit_domain(AppEvent::PlanCardEditCompleted {
+                                                conversation_id: conversation.id.clone(),
+                                                plan_id,
+                                                edited_plan,
+                                            });
+                                        }
+                                    }
+                                }
+                                crate::domain::models::plan::PlanDecision::AutoApproveYolo => {
+                                    tracing::warn!("PlanCardResolved with AutoApproveYolo is unexpected — use PlanProposed YOLO branch instead");
+                                }
+                            }
+                        }
+                    }
+                    AppEvent::PlanCardEditCompleted { conversation_id, plan_id, edited_plan } => {
+                        if conversation.id != conversation_id {
+                            tracing::warn!("PlanCardEditCompleted for mismatched conversation");
+                        } else {
+                            match edited_plan {
+                                Some(new_plan) => {
+                                    if let Some(stored) = conversation.plans.get_mut(&plan_id) {
+                                        stored.title = new_plan.title;
+                                        stored.tasks = new_plan.tasks;
+                                        stored.estimated_effort = new_plan.estimated_effort;
+                                        stored.status = crate::domain::models::plan::PlanStatus::Pending;
+                                    }
+                                    if let Some(stored) = conversation.plans.get(&plan_id) {
+                                        state.pending_plan_card = Some(crate::adapters::tui::state::PendingPlanCard {
+                                            conversation_id,
+                                            plan_id,
+                                            plan_snapshot: stored.clone(),
+                                        });
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                None => {
+                                    if let Some(stored) = conversation.plans.get_mut(&plan_id) {
+                                        stored.status = crate::domain::models::plan::PlanStatus::Pending;
+                                    }
+                                    if let Some(stored) = conversation.plans.get(&plan_id) {
+                                        state.pending_plan_card = Some(crate::adapters::tui::state::PendingPlanCard {
+                                            conversation_id,
+                                            plan_id,
+                                            plan_snapshot: stored.clone(),
+                                        });
+                                    }
+                                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level: NoticeLevel::Warning,
+                                        message: "Plan edit failed (parse error). Showing original card.".to_string(),
+                                    });
+                                    state.needs_redraw = true;
+                                }
+                            }
+                        }
+                    }
+                    AppEvent::PlanExecutionStarted { conversation_id, plan_id } => {
+                        tracing::info!("Plan execution started: conversation={} plan={}", conversation_id, plan_id);
                     }
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
@@ -3443,6 +3663,7 @@ pub async fn run(
                                             app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                                 conversation_id: conv_id,
                                                 text,
+                                                synthetic: false,
                                             });
                                         }
                                     }
@@ -3481,13 +3702,14 @@ pub async fn run(
                             }
                         }
                     }
-                    AppEvent::AgentThenSubmit { conversation_id, text } => {
+                    AppEvent::AgentThenSubmit { conversation_id, text, synthetic } => {
                         if conversation.id == *conversation_id && !streaming.is_streaming {
                             let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                             let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                            start_turn(
+                            start_turn_inner(
                                 &text,
                                 Vec::new(),
+                                synthetic,
                                 &mut conversation,
                                 &mut streaming,
                                 &mut state,
@@ -5110,9 +5332,46 @@ fn cycle_mode(current: PermissionMode) -> PermissionMode {
     }
 }
 
+/// Wrapper that always creates a non-synthetic user message.
+/// Call `start_turn_inner` directly when you need `synthetic: true`.
+#[allow(dead_code)]
 async fn start_turn(
      text: &str,
      images: Vec<ImageAttachment>,
+     conversation: &mut Conversation,
+     streaming: &mut StreamingState,
+     state: &mut TuiState,
+     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+     provider: &Arc<dyn ProviderPort>,
+     config: &AppConfig,
+     domain_tx: &mpsc::UnboundedSender<AppEvent>,
+     security: &Arc<dyn SecurityPort>,
+     tools: &Arc<dyn ToolSetPort>,
+    tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
+     persona: &Arc<dyn PersonaPort>,
+     workspace_path: &std::path::Path,
+     session_manager: &mut SessionManager,
+     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+     storage: &Arc<dyn StoragePort>,
+     _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
+     plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
+     _plan_file: Option<std::path::PathBuf>,
+     activation_set: Option<crate::domain::models::SkillActivationSet>,
+     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
+     turn_cancel: CancellationToken,
+ ) {
+    start_turn_inner(
+        text, images, false, conversation, streaming, state, active_turn,
+        provider, config, domain_tx, security, tools, tool_scheduler,
+        persona, workspace_path, session_manager, fs_storage, storage,
+        _plan_manager, plan_injector, _plan_file, activation_set, agent_snapshot, turn_cancel,
+    ).await;
+}
+
+async fn start_turn_inner(
+     text: &str,
+     images: Vec<ImageAttachment>,
+     synthetic: bool,
      conversation: &mut Conversation,
      streaming: &mut StreamingState,
      state: &mut TuiState,
@@ -5154,7 +5413,7 @@ async fn start_turn(
         created_at: crate::domain::models::session_meta::now_unix(),
         token_count: None,
         stop_reason: None,
-        synthetic: false,
+        synthetic,
         images: persisted_refs,
     });
 
@@ -5544,6 +5803,7 @@ fn render(
                     focused_match_opt,
                     search_state.matches.as_slice(),
                     bookmark_indices,
+                    state.pending_plan_card.as_ref(),
                 );
 
                 // Story 4-4 AC1: render the search bar widget into its reserved slot.
@@ -6566,6 +6826,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         }
     }

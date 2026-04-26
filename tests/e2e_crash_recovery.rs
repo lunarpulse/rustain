@@ -486,6 +486,7 @@ async fn test_e2e_crash_detection_full_cycle() {
         last_response_at: None,
         session_id: Some("sess-1".to_string()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
 
@@ -540,6 +541,7 @@ async fn test_e2e_recovery_n_saves_clean_exit() {
         last_response_at: None,
         session_id: Some(generate_conversation_id()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
 

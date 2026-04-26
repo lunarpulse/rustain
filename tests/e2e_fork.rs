@@ -15,8 +15,9 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::TuiState;
+use rustain::adapters::tui::state::{HeightCache, SearchState, TuiState};
 use rustain::adapters::tui::theme::Theme;
+use rustain::domain::models::StatusState;
 use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
 use rustain::domain::models::checkpoint::CheckpointId;
 use rustain::domain::models::conversation::{
@@ -44,6 +45,12 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         }
 }
 
+fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
+    let mut state = TuiState::new(width, height);
+    state.focus = FocusState::Chat;
+    state
+}
+
 fn make_conversation_5_messages() -> Conversation {
     Conversation {
         id: generate_conversation_id(),
@@ -60,18 +67,10 @@ fn make_conversation_5_messages() -> Conversation {
         last_response_at: None,
         session_id: Some("sess-test".to_string()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
-
-fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
-    let mut state = TuiState::new(width, height);
-    state.focus = FocusState::Chat;
-    state.auto_scroll = true;
-    state
-}
-
-// ── AC[1]: Fork Trigger & Confirmation Card ───────────────────────────────────
 
 #[test]
 fn test_e2e_fork_f_key_opens_confirmation() {
@@ -252,6 +251,7 @@ fn test_e2e_fork_tab_manager_create_tab_with_conversation() {
         last_response_at: None,
         session_id: Some(generate_conversation_id()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: Some(ForkSource {
             conversation_id: "original-id".to_string(),
             message_index: 0,
@@ -709,6 +709,7 @@ async fn test_e2e_fork_empty_conversation_returns_error() {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
     let source_id = conv.id.clone();

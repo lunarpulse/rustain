@@ -10,9 +10,11 @@
 //! diffs for write-type tool calls are deferred to Story 4-6 cleanup
 //! (DF-004); the current v1 is plain-text-only and forward-compatible.
 
+use crate::domain::models::ContentBlockType;
 use crate::domain::models::MessageRole;
 use crate::domain::models::SessionMeta;
 use crate::domain::models::conversation::Conversation;
+use crate::domain::models::plan::PlanStatus;
 
 /// Render a conversation as a markdown document. See AC11 for format.
 ///
@@ -76,6 +78,71 @@ pub fn render_conversation_markdown(
             out.push_str(result_text);
             out.push_str("\n```\n\n");
             out.push_str("</details>\n\n");
+        }
+
+        // Plan card — render plan details if this message contains a PlanCard block.
+        if msg
+            .content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlockType::PlanCard))
+        {
+            let matching_plans: Vec<_> = conv
+                .plans
+                .values()
+                .filter(|p| p.host_message_id.as_deref() == Some(msg.id.as_str()))
+                .collect();
+            if matching_plans.is_empty() {
+                out.push_str("*(Plan data missing or corrupted)*\n\n");
+            }
+            for plan in matching_plans {
+                out.push_str(&format!("### Plan: {}\n\n", plan.title));
+
+                let status_str = match plan.status {
+                    PlanStatus::Pending => "Pending",
+                    PlanStatus::Executing => "Executing",
+                    PlanStatus::Completed => "Completed",
+                    PlanStatus::Rejected => "Rejected",
+                    PlanStatus::Editing => "Editing",
+                };
+
+                if let Some(effort) = &plan.estimated_effort {
+                    let mut parts = Vec::new();
+                    if let Some(tc) = effort.tool_calls {
+                        parts.push(format!("{} tool calls", tc));
+                    }
+                    if let Some(s) = effort.seconds {
+                        parts.push(format!("~{}s", s));
+                    }
+                    if !parts.is_empty() {
+                        out.push_str(&format!(
+                            "> Estimated: {} · Status: {}\n\n",
+                            parts.join(", "),
+                            status_str
+                        ));
+                    } else {
+                        out.push_str(&format!("> Status: {}\n\n", status_str));
+                    }
+                } else {
+                    out.push_str(&format!("> Status: {}\n\n", status_str));
+                }
+
+                for task in &plan.tasks {
+                    if task.description.is_empty() {
+                        out.push_str(&format!("{}. **{}**\n", task.number, task.title));
+                    } else {
+                        out.push_str(&format!(
+                            "{}. **{}** — {}\n",
+                            task.number, task.title, task.description
+                        ));
+                    }
+                    if !task.depends_on.is_empty() {
+                        let deps: Vec<String> =
+                            task.depends_on.iter().map(|d| d.to_string()).collect();
+                        out.push_str(&format!("   - depends on: {}\n", deps.join(", ")));
+                    }
+                }
+                out.push('\n');
+            }
         }
 
         // Image attachments — v1 stubs per AC11 wording. The stored
@@ -230,6 +297,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         }
     }
@@ -322,5 +390,77 @@ mod tests {
     #[test]
     fn slugify_utf8_input_produces_ascii_output() {
         assert_eq!(slugify("héllo wörld"), "h-llo-w-rld");
+    }
+
+    #[test]
+    fn plan_card_renders_in_export() {
+        use crate::domain::models::ContentBlockType;
+        use crate::domain::models::plan::{
+            EffortEstimate, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+        };
+
+        let plan_msg = ChatMessage {
+            id: "msg-plan-1".to_string(),
+            role: MessageRole::Assistant,
+            content: "Here is the plan.".to_string(),
+            content_blocks: vec![ContentBlockType::PlanCard],
+            tool_calls: vec![],
+            created_at: 1_700_000_020,
+            token_count: None,
+            stop_reason: None,
+            synthetic: false,
+            images: vec![],
+        };
+
+        let mut plans = std::collections::HashMap::new();
+        plans.insert(
+            "plan-1".to_string(),
+            Plan {
+                id: "plan-1".to_string(),
+                title: "Refactor module".to_string(),
+                tasks: vec![
+                    PlanTask {
+                        number: 1,
+                        title: "Extract trait".to_string(),
+                        description: "Move to separate file".to_string(),
+                        depends_on: vec![],
+                        status: PlanTaskStatus::Pending,
+                    },
+                    PlanTask {
+                        number: 2,
+                        title: "Update imports".to_string(),
+                        description: String::new(),
+                        depends_on: vec![1],
+                        status: PlanTaskStatus::Pending,
+                    },
+                ],
+                estimated_effort: Some(EffortEstimate {
+                    tool_calls: Some(3),
+                    seconds: Some(45),
+                }),
+                status: PlanStatus::Pending,
+                created_at: 1_700_000_020,
+                resolved_at: None,
+                host_message_id: Some("msg-plan-1".to_string()),
+            },
+        );
+
+        let mut c = conv(
+            "PlanTest",
+            vec![
+                msg(MessageRole::User, "Do it", 1_700_000_000),
+                plan_msg,
+            ],
+        );
+        c.plans = plans;
+
+        let m = meta(2);
+        let out = render_conversation_markdown(&c, &m, 1_700_000_123);
+
+        assert!(out.contains("### Plan: Refactor module"));
+        assert!(out.contains("> Estimated: 3 tool calls, ~45s · Status: Pending"));
+        assert!(out.contains("1. **Extract trait** — Move to separate file"));
+        assert!(out.contains("2. **Update imports**"));
+        assert!(out.contains("   - depends on: 1"));
     }
 }

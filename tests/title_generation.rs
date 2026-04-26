@@ -83,6 +83,7 @@ fn make_conversation() -> Conversation {
         last_response_at: None,
         session_id: Some(generate_conversation_id()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
@@ -387,6 +388,7 @@ fn test_title_guard_skips_when_title_exists() {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
 
@@ -407,6 +409,7 @@ fn test_title_guard_allows_when_title_empty() {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
 

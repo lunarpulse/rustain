@@ -263,6 +263,7 @@ impl ConversationImporter for ClaudeCodeImporter {
             last_response_at: None,
             session_id: None,
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         };
 

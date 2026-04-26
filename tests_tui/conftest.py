@@ -42,6 +42,7 @@ def pytest_configure(config):
         "story_6_0b: Story 6-0b — ToolScheduler with ToolCall 7-Variant FSM",
         "story_6_0c: Story 6-0c — ApprovalRuntime Pub/Sub",
         "story_6_0d: Story 6-0d — Plan Mode Workflow",
+        "story_6_1a: Story 6-1a — Inline Plan Card",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)

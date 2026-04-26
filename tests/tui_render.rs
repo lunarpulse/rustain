@@ -23,6 +23,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
     let streaming = StreamingState::default();

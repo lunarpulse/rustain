@@ -493,6 +493,38 @@ impl ToolSetPort for ToolSetAdapter {
                 }),
                 parallel_safe: false,
             },
+            ToolDefinition {
+                name: "propose_plan".to_string(),
+                description: "Propose a structured multi-step plan to the user for approval before any execution. Use this when the request requires multiple distinct steps. Each step should have a clear title and brief description. Provide an effort estimate when you have a reasonable basis.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Concise plan title (≤80 chars)." },
+                        "tasks": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": { "type": "string", "description": "Task title (≤120 chars)." },
+                                    "description": { "type": "string", "description": "Optional one-paragraph description." },
+                                    "depends_on": {
+                                        "type": "array",
+                                        "items": { "type": "integer", "minimum": 1 },
+                                        "description": "1-indexed task numbers that must complete before this task starts. Must reference earlier tasks."
+                                    }
+                                },
+                                "required": ["title"]
+                            }
+                        },
+                        "estimated_tool_calls": { "type": "integer", "minimum": 0 },
+                        "estimated_seconds":    { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["title", "tasks"]
+                }),
+                parallel_safe: false,
+            },
         ]
     }
 
@@ -508,6 +540,7 @@ impl ToolSetPort for ToolSetAdapter {
             "Write" | "write" => self.execute_write(&input, "", cancel).await,
             "activate_skill" => self.execute_activate_skill(&input).await,
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
+            "propose_plan" => self.execute_propose_plan(&input).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
     }
@@ -563,6 +596,36 @@ impl ToolSetAdapter {
         Ok(ToolResult {
             tool_use_id: String::new(),
             content: "Plan sent for user approval.".to_string(),
+            is_error: false,
+        })
+    }
+
+    async fn execute_propose_plan(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        use crate::domain::services::plan_parser::parse_plan_input;
+
+        let plan_id = nanoid::nanoid!();
+        let plan = parse_plan_input(input, &plan_id)?;
+
+        if let Some(ref tx) = self.event_tx {
+            let context = self.current_context.lock().await;
+            let conversation_id = context
+                .as_ref()
+                .map(|c| c.conversation_id.clone())
+                .unwrap_or_default();
+            let _ = tx.send(AppEvent::PlanProposed {
+                conversation_id,
+                plan,
+            });
+        } else {
+            tracing::warn!("execute_propose_plan: event_tx is None — plan parsed but never proposed");
+        }
+
+        Ok(ToolResult {
+            tool_use_id: String::new(),
+            content: "Plan proposed for user approval.".to_string(),
             is_error: false,
         })
     }
@@ -762,6 +825,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         };
         storage.save_conversation(&conv).await.unwrap();

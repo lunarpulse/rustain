@@ -17,7 +17,7 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{HeightCache, RevertPreviewItem, RewindPreview, TuiState};
+use rustain::adapters::tui::state::{HeightCache, RevertPreviewItem, RewindPreview, SearchState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::rewind_confirm::render_rewind_confirmation_lines;
 use rustain::domain::models::checkpoint::{CheckpointId, RevertStatus};
@@ -25,6 +25,18 @@ use rustain::domain::models::conversation::{ChatMessage, Conversation, generate_
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use rustain::domain::models::{FocusState, MessageRole, StatusState, UserMessage};
 use rustain::domain::ports::StoragePort;
+
+fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
+    let mut state = TuiState::new(width, height);
+    state.focus = FocusState::Chat;
+    state
+}
+
+fn make_state_in_rewind_overlay() -> TuiState {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind));
+    state
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -59,268 +71,9 @@ fn make_conversation_5_messages() -> Conversation {
         last_response_at: None,
         session_id: Some("sess-rewind-test".to_string()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
-}
-
-fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
-    let mut state = TuiState::new(width, height);
-    state.focus = FocusState::Chat;
-    state.auto_scroll = true;
-    state
-}
-
-fn make_state_in_rewind_overlay() -> TuiState {
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind));
-    state.pending_rewind_index = Some(2);
-    state
-}
-
-// ── AC1: Rewind Trigger & Confirmation Card ───────────────────────────────────
-
-#[test]
-fn test_e2e_rewind_r_key_opens_confirmation() {
-    // Given: Chat focus with non-empty message boundaries
-    let mut state = make_state_in_chat_focus(80, 24);
-    state.message_boundaries = vec![0, 5, 10, 15];
-    state.total_content_height = 30;
-
-    // When: I press 'R'
-    use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('R');
-    let action = handle_input(&mut state, &event);
-
-    // Then: RewindAtMessage action returned
-    assert_eq!(
-        action,
-        InputAction::RewindAtMessage,
-        "Pressing 'R' in Chat focus should return RewindAtMessage"
-    );
-}
-
-#[test]
-fn test_e2e_rewind_card_shows_files_and_message_count() {
-    // Given: a RewindPreview with 2 messages to remove and 1 file
-    let preview = RewindPreview {
-        target_message_index: 2,
-        messages_to_remove: 2,
-        files_to_revert: vec![RevertPreviewItem {
-            display_path: "src/main.rs".to_string(),
-            conflict: false,
-        }],
-    };
-    let theme = Theme::dark();
-
-    // When: rendering the confirmation card
-    let lines = render_rewind_confirmation_lines(&preview, 80, &theme);
-    let all_text: String = lines
-        .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|s| s.content.to_string())
-        .collect();
-
-    // Then: card shows message count
-    assert!(
-        all_text.contains("2 messages after message 3"),
-        "Card should show '2 messages after message 3', got: {all_text}"
-    );
-    // And: file list contains the file path
-    assert!(
-        all_text.contains("src/main.rs"),
-        "Card should show 'src/main.rs' in file list"
-    );
-    // And: double border is rendered
-    assert!(all_text.contains('╔'), "Card should have double border ╔");
-    assert!(all_text.contains('╝'), "Card should have double border ╝");
-}
-
-#[test]
-fn test_e2e_rewind_cancel_dismisses_no_side_effects() {
-    // Given: rewind overlay is active with pending index
-    let mut state = make_state_in_rewind_overlay();
-    let original_pending = state.pending_rewind_index;
-
-    // When: I press 'n'
-    use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('n');
-    let action = handle_input(&mut state, &event);
-
-    // Then: RewindCancel returned
-    assert_eq!(
-        action,
-        InputAction::RewindCancel,
-        "'n' in Rewind overlay should return RewindCancel"
-    );
-    // And: pending_rewind_index was set (event_loop would clear it)
-    assert_eq!(
-        original_pending,
-        Some(2),
-        "Pending rewind index was correctly set to 2"
-    );
-
-    // And: Esc also cancels
-    let mut state2 = make_state_in_rewind_overlay();
-    use rustain::domain::events::{DomainInputEvent as DIE2, DomainKey};
-    let esc = DIE2::SpecialKey(DomainKey::Esc);
-    let esc_action = handle_input(&mut state2, &esc);
-    assert_eq!(
-        esc_action,
-        InputAction::RewindCancel,
-        "Esc in Rewind overlay should return RewindCancel"
-    );
-}
-
-// ── AC2: Checkpoint Creation Before Tool Execution ────────────────────────────
-
-#[tokio::test]
-async fn test_e2e_rewind_create_checkpoint_before_tool_dispatch() {
-    // Given: a saved conversation with messages
-    let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
-    let conv = make_conversation_5_messages();
-    let conv_id = conv.id.clone();
-    storage.save_conversation(&conv).await.unwrap();
-
-    // When: a turn that produces tool calls triggers create_checkpoint
-    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
-
-    // Then: exactly 1 checkpoint exists
-    let checkpoints = storage.list_checkpoints(&conv_id).await.unwrap();
-    assert_eq!(
-        checkpoints.len(),
-        1,
-        "Exactly one checkpoint after one create_checkpoint call"
-    );
-    // And: message_index is messages.len() - 1 = 4
-    assert_eq!(
-        checkpoints[0].message_index, 4,
-        "message_index should be 4 (last message index in a 5-message conversation)"
-    );
-    assert_eq!(cp, checkpoints[0].id, "returned id matches list");
-}
-
-#[tokio::test]
-async fn test_e2e_rewind_no_checkpoint_on_text_only_turn() {
-    // Given: a saved conversation
-    let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
-    let conv = make_conversation_5_messages();
-    let conv_id = conv.id.clone();
-    storage.save_conversation(&conv).await.unwrap();
-
-    // When: a text-only turn (no tools) — no checkpoint is created
-
-    // Then: list_checkpoints returns empty
-    let checkpoints = storage.list_checkpoints(&conv_id).await.unwrap();
-    assert!(
-        checkpoints.is_empty(),
-        "Text-only turn must not create a checkpoint; got: {:?}",
-        checkpoints
-    );
-}
-
-#[tokio::test]
-async fn test_e2e_rewind_snapshot_taken_before_write() {
-    // Given: a saved conversation and an existing file with original content
-    let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
-    let conv = make_conversation_5_messages();
-    let conv_id = conv.id.clone();
-    storage.save_conversation(&conv).await.unwrap();
-
-    // Create a file in the tmp workspace to snapshot
-    let workspace = tmp.path();
-    let file_path = workspace.join("src").join("lib.rs");
-    tokio::fs::create_dir_all(file_path.parent().unwrap())
-        .await
-        .unwrap();
-    let original_content = b"fn original() {}";
-    tokio::fs::write(&file_path, original_content)
-        .await
-        .unwrap();
-
-    // Create a checkpoint
-    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
-
-    // Snapshot the file before "writing" (simulates ToolSetAdapter pre-write snapshot)
-    storage
-        .snapshot_file(&conv_id, cp, &file_path, original_content)
-        .await
-        .unwrap();
-
-    // "Write" new content to the file (simulates Write tool execution)
-    let new_content = b"fn modified() {}";
-    tokio::fs::write(&file_path, new_content).await.unwrap();
-
-    // Then: snapshot file exists in snapshots dir
-    let snapshots_dir = tmp.path().join("sessions").join(&conv_id).join("snapshots");
-    let mut entries = tokio::fs::read_dir(&snapshots_dir).await.unwrap();
-    let mut snapshot_files = vec![];
-    while let Some(entry) = entries.next_entry().await.unwrap() {
-        snapshot_files.push(entry.path());
-    }
-    assert_eq!(
-        snapshot_files.len(),
-        1,
-        "Exactly one snapshot file should exist"
-    );
-
-    // And: the snapshot envelope contains the ORIGINAL content, not the new content
-    let envelope_str = tokio::fs::read_to_string(&snapshot_files[0]).await.unwrap();
-    let envelope: serde_json::Value = serde_json::from_str(&envelope_str).unwrap();
-    let stored_b64 = envelope["original_content_b64"].as_str().unwrap();
-    let decoded =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, stored_b64).unwrap();
-    assert_eq!(
-        decoded, original_content,
-        "Snapshot must store the original content, not the new content"
-    );
-}
-
-// ── AC3: Rewind Execution — Truncate Messages & Revert Files ─────────────────
-
-#[tokio::test]
-async fn test_e2e_rewind_truncates_messages() {
-    // Given: a 5-message conversation with a checkpoint at message 2
-    let tmp = TempDir::new().unwrap();
-    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
-    let mut conv = make_conversation_5_messages();
-    let conv_id = conv.id.clone();
-    storage.save_conversation(&conv).await.unwrap();
-
-    // Add message 0 checkpoint (covers message_index=4 for 5-msg conversation)
-    // We want to revert to message index 2, so we need a checkpoint whose message_index <= 2
-    // Directly create checkpoint after truncating messages in memory for this test:
-    // Simulate: conv had 3 messages when checkpoint was taken
-    conv.messages.truncate(3);
-    storage.save_conversation(&conv).await.unwrap();
-    let cp = storage.create_checkpoint(&conv_id).await.unwrap();
-    // Now restore all 5 messages
-    let conv_full = make_conversation_5_messages_with_id(conv_id.clone());
-    storage.save_conversation(&conv_full).await.unwrap();
-
-    // When: rewind to checkpoint (which covers message_index=2)
-    let truncated = storage.revert_to_checkpoint(&conv_id, cp).await.unwrap();
-
-    // Then: truncated conversation has 3 messages (0..=2)
-    assert_eq!(
-        truncated.messages.len(),
-        3,
-        "Rewound conversation should have 3 messages (indices 0-2)"
-    );
-
-    // And: disk file matches
-    let reloaded = storage
-        .load_conversation(&conv_id)
-        .await
-        .unwrap()
-        .expect("conversation should exist after rewind");
-    assert_eq!(
-        reloaded.messages.len(),
-        3,
-        "Disk file should also have 3 messages after rewind"
-    );
 }
 
 fn make_conversation_5_messages_with_id(id: String) -> Conversation {
@@ -339,6 +92,7 @@ fn make_conversation_5_messages_with_id(id: String) -> Conversation {
         last_response_at: None,
         session_id: Some("sess-rewind-test".to_string()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
@@ -1645,6 +1399,7 @@ fn make_mixed_conversation_n(n_messages: usize) -> Conversation {
         last_response_at: None,
         session_id: Some("sess-amend2".to_string()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }

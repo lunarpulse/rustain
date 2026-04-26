@@ -49,6 +49,32 @@ pub fn find_matches(conversation: &Conversation, query: &str) -> Vec<SearchMatch
     for (msg_idx, msg) in conversation.messages.iter().enumerate() {
         find_matches_in_message(msg_idx, &msg.content, &query_lower, &mut matches);
     }
+
+    for plan in conversation.plans.values() {
+        let Some(host_msg_id) = &plan.host_message_id else {
+            continue;
+        };
+        let Some(msg_idx) = conversation
+            .messages
+            .iter()
+            .position(|m| &m.id == host_msg_id)
+        else {
+            continue;
+        };
+
+        let mut plan_text = plan.title.clone();
+        for task in &plan.tasks {
+            plan_text.push(' ');
+            plan_text.push_str(&task.title);
+            if !task.description.is_empty() {
+                plan_text.push(' ');
+                plan_text.push_str(&task.description);
+            }
+        }
+
+        find_matches_in_message(msg_idx, &plan_text, &query_lower, &mut matches);
+    }
+
     matches
 }
 
@@ -141,6 +167,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         }
     }
@@ -279,5 +306,62 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].byte_start, 0);
         assert_eq!(m[1].byte_start, 2);
+    }
+
+    #[test]
+    fn plan_task_title_search_returns_host_message() {
+        use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
+
+        let host_msg = ChatMessage {
+            id: "msg-host".to_string(),
+            role: MessageRole::Assistant,
+            content: "Here is your plan.".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 1_700_000_000,
+            token_count: None,
+            stop_reason: None,
+            synthetic: false,
+            images: vec![],
+        };
+
+        let mut plans = std::collections::HashMap::new();
+        plans.insert(
+            "plan-1".to_string(),
+            Plan {
+                id: "plan-1".to_string(),
+                title: "Build feature".to_string(),
+                tasks: vec![PlanTask {
+                    number: 1,
+                    title: "Write database migration".to_string(),
+                    description: "Add new table".to_string(),
+                    depends_on: vec![],
+                    status: PlanTaskStatus::Pending,
+                }],
+                estimated_effort: None,
+                status: PlanStatus::Pending,
+                created_at: 1_700_000_000,
+                resolved_at: None,
+                host_message_id: Some("msg-host".to_string()),
+            },
+        );
+
+        let mut c = conv(vec![
+            msg(MessageRole::User, "go ahead"),
+            host_msg,
+        ]);
+        c.plans = plans;
+
+        let m = find_matches(&c, "database migration");
+        assert!(!m.is_empty(), "should find task title in plan");
+        assert_eq!(m[0].message_index, 1, "match should point to host message");
+
+        let m2 = find_matches(&c, "Build feature");
+        assert!(!m2.is_empty(), "should find plan title");
+        assert_eq!(m2[0].message_index, 1);
+
+        let m3 = find_matches(&c, "Add new table");
+        assert!(!m3.is_empty(), "should find task description");
+        assert_eq!(m3[0].message_index, 1);
     }
 }

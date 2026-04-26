@@ -14,6 +14,7 @@ pub mod help_overlay;
 pub mod input_box;
 pub mod permission_prompt;
 pub mod plan_approval;
+pub mod plan_card;
 pub mod reverse_search;
 pub mod search_bar;
 pub mod skill_trust_prompt;

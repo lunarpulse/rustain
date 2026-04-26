@@ -15,6 +15,8 @@ pub mod skill_context;
 pub mod tool_scheduler;
 pub mod plan_manager;
 pub mod plan_mode_injector;
+pub mod plan_effort;
+pub mod plan_parser;
 pub mod turn_queue;
 
 #[cfg(feature = "skills-validation")]

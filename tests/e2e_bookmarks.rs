@@ -53,6 +53,7 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
@@ -98,6 +99,7 @@ fn render_chat_pane_with_bookmarks(
                 None,
                 &[],
                 bookmarks,
+                None,
             );
         })
         .unwrap();

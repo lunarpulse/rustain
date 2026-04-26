@@ -62,6 +62,7 @@ impl TabState {
             last_response_at: None,
             session_id: Some(generate_conversation_id()),
             usage: None,
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         };
         let session_id = conversation.session_id.clone().unwrap_or_default();

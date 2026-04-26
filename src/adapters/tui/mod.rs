@@ -2,6 +2,7 @@ pub mod app;
 pub mod clipboard;
 #[allow(dead_code)]
 pub mod color_detect;
+pub mod editor_suspend;
 pub mod help_data;
 pub mod hints;
 pub mod image;

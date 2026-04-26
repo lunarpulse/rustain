@@ -406,6 +406,7 @@ fn make_test_conversation() -> Conversation {
         last_response_at: None,
         session_id: Some("sess-test".to_string()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }

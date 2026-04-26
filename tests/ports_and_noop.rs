@@ -73,6 +73,7 @@ async fn test_noop_storage_operations() {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
     assert!(storage.save_conversation(&conv).await.is_ok());

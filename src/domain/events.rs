@@ -119,6 +119,7 @@ pub enum AppEvent {
     AgentThenSubmit {
         conversation_id: ConversationId,
         text: String,
+        synthetic: bool,
     },
     /// Bridge event: a `ToolCallTransition` has been received on the broadcast
     /// channel and should be forwarded to the event loop for TUI/state updates.
@@ -143,6 +144,25 @@ pub enum AppEvent {
     PlanApprovalResolved {
         conversation_id: ConversationId,
         outcome: crate::domain::models::PlanApprovalOutcome,
+    },
+
+    PlanProposed {
+        conversation_id: ConversationId,
+        plan: crate::domain::models::Plan,
+    },
+    PlanCardResolved {
+        conversation_id: ConversationId,
+        plan_id: String,
+        decision: crate::domain::models::PlanDecision,
+    },
+    PlanCardEditCompleted {
+        conversation_id: ConversationId,
+        plan_id: String,
+        edited_plan: Option<crate::domain::models::Plan>,
+    },
+    PlanExecutionStarted {
+        conversation_id: ConversationId,
+        plan_id: String,
     },
 }
 

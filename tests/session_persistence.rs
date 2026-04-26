@@ -53,6 +53,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         }),
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
@@ -257,6 +258,7 @@ async fn test_slash_new_saves_and_creates_fresh_session() {
         last_response_at: None,
         session_id: Some(generate_conversation_id()),
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
     assert!(new_conv.messages.is_empty());
@@ -294,6 +296,7 @@ async fn test_slash_new_empty_session_no_save() {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
 

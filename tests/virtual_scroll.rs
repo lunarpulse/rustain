@@ -38,6 +38,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
@@ -473,6 +474,7 @@ fn test_virtual_scroll_only_user_messages() {
         last_response_at: None,
         session_id: None,
         usage: None,
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     };
     let streaming = StreamingState::default();

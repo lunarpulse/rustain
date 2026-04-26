@@ -106,6 +106,8 @@ pub struct Conversation {
     pub last_response_at: Option<i64>,
     pub session_id: Option<String>,
     pub usage: Option<UsageInfo>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub plans: std::collections::HashMap<String, super::plan::Plan>,
     pub fork_source: Option<ForkSource>,
     // v0.5+: pub active_agent: Option<AgentDefinition>,
     // v1.0+: pub enabled_mcp_servers: Vec<String>,
@@ -173,6 +175,8 @@ pub struct PersistedConversation {
     pub last_response_at: Option<i64>,
     #[serde(default)]
     pub usage: Option<UsageInfo>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub plans: std::collections::HashMap<String, super::plan::Plan>,
     /// Crash detection flag: `false` while session is in-flight, `true` after graceful shutdown.
     /// Defaults to `false` for forward compat (old files trigger recovery prompt — safe default).
     #[serde(default)]
@@ -195,6 +199,7 @@ impl PersistedConversation {
             updated_at: Some(conv.updated_at),
             last_response_at: conv.last_response_at,
             usage: conv.usage.clone(),
+            plans: conv.plans.clone(),
             clean_exit,
         }
     }
@@ -209,6 +214,7 @@ impl PersistedConversation {
             last_response_at: self.last_response_at,
             session_id: self.session_id,
             usage: self.usage,
+            plans: self.plans,
             fork_source: self.fork_source,
         }
     }
@@ -363,5 +369,60 @@ mod tests {
             let result: serde_json::Result<ImageReference> = serde_json::from_str(&json);
             assert!(result.is_ok(), "valid filename {:?} must be accepted", name);
         }
+    }
+
+    // Story 6-1a AC1/AC4: pre-6-1a session JSON without `plans` field deserializes to empty HashMap
+    #[test]
+    fn test_conversation_backward_compat_without_plans_field() {
+        let json = r#"{
+            "id": "legacy-conv",
+            "title": "Legacy",
+            "messages": [],
+            "createdAt": 1700000000,
+            "updatedAt": 1700000000
+        }"#;
+        let conv: Conversation = serde_json::from_str(json).unwrap();
+        assert!(conv.plans.is_empty());
+    }
+
+    // Story 6-1a AC4: round-trip with one plan inserted preserves the data
+    #[test]
+    fn test_conversation_round_trip_with_plan() {
+        use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
+        let mut conv = Conversation {
+            id: "c1".to_string(),
+            title: "Test".to_string(),
+            messages: vec![],
+            created_at: 1700000000,
+            updated_at: 1700000000,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans: std::collections::HashMap::new(),
+            fork_source: None,
+        };
+        let plan = Plan {
+            id: "p1".to_string(),
+            title: "Plan".to_string(),
+            tasks: vec![PlanTask {
+                number: 1,
+                title: "Task".to_string(),
+                description: String::new(),
+                depends_on: vec![],
+                status: PlanTaskStatus::Pending,
+            }],
+            estimated_effort: None,
+            status: PlanStatus::Pending,
+            created_at: 1700000000,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        conv.plans.insert(plan.id.clone(), plan.clone());
+
+        let persisted = PersistedConversation::from_conversation(&conv);
+        let json = serde_json::to_string(&persisted).unwrap();
+        let back: PersistedConversation = serde_json::from_str(&json).unwrap();
+        let restored = back.to_conversation();
+        assert_eq!(restored.plans.get("p1"), Some(&plan));
     }
 }

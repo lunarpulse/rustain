@@ -145,6 +145,9 @@ pub enum ToolError {
     #[error("Tool execution failed: {0}")]
     ExecutionFailed(String),
 
+    #[error("Invalid tool input: {0}")]
+    InvalidInput(String),
+
     #[error("Tool execution timed out")]
     Timeout,
 

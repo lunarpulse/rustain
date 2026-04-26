@@ -1171,6 +1171,14 @@ impl StoragePort for FileSystemStorage {
         conv.messages.truncate(keep_until);
         conv.updated_at = now_unix();
 
+        let surviving_ids: std::collections::HashSet<String> =
+            conv.messages.iter().map(|m| m.id.clone()).collect();
+        conv.plans.retain(|_, plan| {
+            plan.host_message_id
+                .as_ref()
+                .map_or(false, |id| surviving_ids.contains(id))
+        });
+
         // Load the existing SessionMeta BEFORE save_conversation_inner overwrites it,
         // so we can preserve the `extra` flatten map (DF-088 round-trip invariant).
         let pre_save_meta = self.load_session_meta(conversation_id).await.ok().flatten();
@@ -1952,6 +1960,15 @@ impl StoragePort for FileSystemStorage {
         let truncated: Vec<_> = source.messages[..=message_index].to_vec();
         let now = now_unix();
 
+        let mut forked_plans = std::collections::HashMap::new();
+        for (plan_id, plan) in &source.plans {
+            if let Some(host_msg_id) = &plan.host_message_id {
+                if truncated.iter().any(|m| &m.id == host_msg_id) {
+                    forked_plans.insert(plan_id.clone(), plan.clone());
+                }
+            }
+        }
+
         // P4: guard against empty/whitespace-only source titles to avoid "Fork of "
         // with a dangling trailing space. Party-mode review 2026-04-12.
         let forked_title = if source.title.trim().is_empty() {
@@ -1968,6 +1985,7 @@ impl StoragePort for FileSystemStorage {
             last_response_at: None,
             session_id: Some(generate_conversation_id()),
             usage: None,
+            plans: forked_plans,
             fork_source: Some(ForkSource {
                 conversation_id: source.id.clone(),
                 message_index,
@@ -2695,6 +2713,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
             }),
+            plans: std::collections::HashMap::new(),
             fork_source: None,
         }
     }
@@ -3715,5 +3734,232 @@ mod tests {
             }
         }
         assert_eq!(count, 1, "snapshot file must be created for large file");
+    }
+
+    #[tokio::test]
+    async fn fork_preserves_plans_within_truncated_range() {
+        use crate::domain::models::ContentBlockType;
+        use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
+        use crate::domain::models::checkpoint::CheckpointId;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        let storage = FileSystemStorage::new(sessions_dir);
+
+        let mut plans = std::collections::HashMap::new();
+        plans.insert(
+            "plan-a".to_string(),
+            Plan {
+                id: "plan-a".to_string(),
+                title: "Keep this".to_string(),
+                tasks: vec![PlanTask {
+                    number: 1,
+                    title: "Task".to_string(),
+                    description: String::new(),
+                    depends_on: vec![],
+                    status: PlanTaskStatus::Pending,
+                }],
+                estimated_effort: None,
+                status: PlanStatus::Pending,
+                created_at: 1700000000,
+                resolved_at: None,
+                host_message_id: Some("msg-1".to_string()),
+            },
+        );
+        plans.insert(
+            "plan-b".to_string(),
+            Plan {
+                id: "plan-b".to_string(),
+                title: "Drop this".to_string(),
+                tasks: vec![],
+                estimated_effort: None,
+                status: PlanStatus::Pending,
+                created_at: 1700000005,
+                resolved_at: None,
+                host_message_id: Some("msg-3".to_string()),
+            },
+        );
+
+        let source = Conversation {
+            id: "source-conv".to_string(),
+            title: "Source".to_string(),
+            messages: vec![
+                ChatMessage {
+                    id: "msg-1".to_string(),
+                    role: MessageRole::User,
+                    content: "one".to_string(),
+                    content_blocks: vec![ContentBlockType::PlanCard],
+                    tool_calls: vec![],
+                    created_at: 1700000000,
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                },
+                ChatMessage {
+                    id: "msg-2".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "two".to_string(),
+                    content_blocks: vec![],
+                    tool_calls: vec![],
+                    created_at: 1700000001,
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                },
+                ChatMessage {
+                    id: "msg-3".to_string(),
+                    role: MessageRole::User,
+                    content: "three".to_string(),
+                    content_blocks: vec![ContentBlockType::PlanCard],
+                    tool_calls: vec![],
+                    created_at: 1700000002,
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                },
+            ],
+            created_at: 1700000000,
+            updated_at: 1700000002,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans,
+            fork_source: None,
+        };
+
+        storage.save_conversation(&source).await.unwrap();
+
+        let forked_id = storage
+            .fork_at_checkpoint("source-conv", CheckpointId(1))
+            .await
+            .unwrap();
+
+        let forked = storage
+            .load_conversation(&forked_id)
+            .await
+            .unwrap()
+            .expect("forked conversation should exist");
+
+        assert_eq!(forked.messages.len(), 2, "fork keeps messages 0 and 1");
+        assert_eq!(forked.plans.len(), 1, "only plan-a should survive");
+        assert!(forked.plans.contains_key("plan-a"));
+        assert!(!forked.plans.contains_key("plan-b"));
+    }
+
+    #[tokio::test]
+    async fn rewind_prunes_plans_beyond_truncation_point() {
+        use crate::domain::models::ContentBlockType;
+        use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        let storage = FileSystemStorage::new(sessions_dir);
+
+        let mut plans = std::collections::HashMap::new();
+        plans.insert(
+            "plan-keep".to_string(),
+            Plan {
+                id: "plan-keep".to_string(),
+                title: "Survives".to_string(),
+                tasks: vec![PlanTask {
+                    number: 1,
+                    title: "Task".to_string(),
+                    description: String::new(),
+                    depends_on: vec![],
+                    status: PlanTaskStatus::Pending,
+                }],
+                estimated_effort: None,
+                status: PlanStatus::Pending,
+                created_at: 1700000000,
+                resolved_at: None,
+                host_message_id: Some("msg-1".to_string()),
+            },
+        );
+        plans.insert(
+            "plan-drop".to_string(),
+            Plan {
+                id: "plan-drop".to_string(),
+                title: "Pruned".to_string(),
+                tasks: vec![],
+                estimated_effort: None,
+                status: PlanStatus::Pending,
+                created_at: 1700000005,
+                resolved_at: None,
+                host_message_id: Some("msg-3".to_string()),
+            },
+        );
+
+        let conv = Conversation {
+            id: "rewind-conv".to_string(),
+            title: "Rewind".to_string(),
+            messages: vec![
+                ChatMessage {
+                    id: "msg-1".to_string(),
+                    role: MessageRole::User,
+                    content: "keep".to_string(),
+                    content_blocks: vec![ContentBlockType::PlanCard],
+                    tool_calls: vec![],
+                    created_at: 1700000000,
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                },
+                ChatMessage {
+                    id: "msg-2".to_string(),
+                    role: MessageRole::Assistant,
+                    content: "also keep".to_string(),
+                    content_blocks: vec![],
+                    tool_calls: vec![],
+                    created_at: 1700000001,
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                },
+                ChatMessage {
+                    id: "msg-3".to_string(),
+                    role: MessageRole::User,
+                    content: "prune this".to_string(),
+                    content_blocks: vec![ContentBlockType::PlanCard],
+                    tool_calls: vec![],
+                    created_at: 1700000002,
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                },
+            ],
+            created_at: 1700000000,
+            updated_at: 1700000002,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans,
+            fork_source: None,
+        };
+
+        storage.save_conversation(&conv).await.unwrap();
+
+        let truncated = storage
+            .truncate_conversation("rewind-conv", 1)
+            .await
+            .unwrap();
+
+        assert_eq!(truncated.messages.len(), 2);
+        assert_eq!(truncated.plans.len(), 1, "only plan-keep should survive");
+        assert!(truncated.plans.contains_key("plan-keep"));
+        assert!(!truncated.plans.contains_key("plan-drop"));
+
+        let reloaded = storage
+            .load_conversation("rewind-conv")
+            .await
+            .unwrap()
+            .expect("should reload");
+        assert_eq!(reloaded.plans.len(), 1);
+        assert!(reloaded.plans.contains_key("plan-keep"));
     }
 }

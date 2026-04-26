@@ -43,6 +43,15 @@ pub struct PendingPlanApproval {
     pub summary: String,
 }
 
+/// Pending inline PlanCard awaiting user [y]/[e]/[n] response (Story 6-1a).
+/// Distinct from PendingPlanApproval (6-0d overlay). At most one per conversation.
+#[derive(Debug, Clone)]
+pub struct PendingPlanCard {
+    pub conversation_id: String,
+    pub plan_id: String,
+    pub plan_snapshot: crate::domain::models::Plan,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -1003,6 +1012,8 @@ pub struct TuiState {
     pub pending_agent_activation: Option<(String, Option<String>)>,
     /// Pending plan approval card state (Story 6-0d AC4).
     pub pending_plan_approval: Option<PendingPlanApproval>,
+    /// Pending inline PlanCard awaiting user resolution (Story 6-1a).
+    pub pending_plan_card: Option<PendingPlanCard>,
     /// Which assistant-turn count the last plan reminder was injected at.
     /// `None` when no reminder is pending.
     pub pending_plan_reminder_at_turn: Option<u32>,
@@ -1092,6 +1103,7 @@ impl TuiState {
             active_agent_name: None,
             pending_agent_activation: None,
             pending_plan_approval: None,
+            pending_plan_card: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,
         }

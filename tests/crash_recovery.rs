@@ -51,6 +51,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         }),
+        plans: std::collections::HashMap::new(),
         fork_source: None,
     }
 }
