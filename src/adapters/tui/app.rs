@@ -98,6 +98,14 @@ pub enum InputAction {
     /// Toggle the history sidebar (Ctrl+H).
     // Covers: FR107, UX-DR20
     ToggleSidebar,
+    /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
+    OpenPanel(crate::domain::models::visual::PanelType),
+    /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
+    CopyTaskResult { plan_id: Option<String>, task_number: u32 },
+    /// Reserved key pressed (Coming in Story 6.4 — Story 6-3).
+    ReservedKey6_4,
+    /// Reserved key pressed in task panel (Coming in Story 6.4 — Story 6-3).
+    ReservedPanelKey6_4,
     /// Open the selected conversation from sidebar.
     // Covers: FR107, AC4
     OpenSidebarConversation,
@@ -273,6 +281,7 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
             if *w < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
                 state.sidebar_visible = false;
                 state.sidebar_panel = None;
+                state.task_panel_state.drill_down_task = None;
                 if matches!(state.focus, FocusState::Sidebar { .. }) {
                     state.focus = FocusState::Chat;
                 }
@@ -402,8 +411,9 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     state.help_overlay.open(prior_focus);
                     state.focus = FocusState::Overlay(OverlayType::Help);
                 }
-                ChordAction::OpenPanel(_) => {
-                    // Stub for future epics
+                ChordAction::OpenPanel(panel_type) => {
+                    state.which_key.dismiss();
+                    return InputAction::OpenPanel(panel_type);
                 }
             }
             state.needs_redraw = true;
@@ -656,6 +666,17 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             state.needs_redraw = true;
             InputAction::Consumed
         }
+        FocusState::Chat if state.task_panel_state.drill_down_task.is_some() => {
+            match c {
+                'c' => {
+                    let task_number = state.task_panel_state.drill_down_task.unwrap();
+                    let plan_id = state.task_panel_state.last_executed_plan_id.clone();
+                    InputAction::CopyTaskResult { plan_id, task_number }
+                }
+                'r' | 's' | 'e' => InputAction::ReservedKey6_4,
+                _ => InputAction::Ignored,
+            }
+        }
         FocusState::Chat => match c {
             // Feedback block action: retry
             'r' if state.active_feedback_id.is_some() => {
@@ -823,38 +844,80 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         } => {
             match c {
                 'j' => {
-                    // Move selection down (clamped to entry count)
-                    if state.sidebar_entry_count > 0 {
+                    let moved = if _panel == crate::domain::models::visual::PanelType::Tasks {
+                        let max = state.task_panel_max_index();
+                        if state.task_panel_state.selected_index < max {
+                            state.task_panel_state.selected_index += 1;
+                            state.sidebar_selected = state.task_panel_state.selected_index;
+                            true
+                        } else {
+                            false
+                        }
+                    } else if state.sidebar_entry_count > 0 {
                         let max = state.sidebar_entry_count - 1;
                         if state.sidebar_selected < max {
                             state.sidebar_selected += 1;
-                            state.focus = FocusState::Sidebar {
-                                panel: crate::domain::models::visual::PanelType::History,
-                                selected: state.sidebar_selected,
-                            };
-                            state.needs_redraw = true;
+                            true
+                        } else {
+                            false
                         }
-                    }
-                    InputAction::Consumed
-                }
-                'k' => {
-                    // Move selection up
-                    if state.sidebar_selected > 0 {
-                        state.sidebar_selected -= 1;
+                    } else {
+                        false
+                    };
+                    if moved {
                         state.focus = FocusState::Sidebar {
-                            panel: crate::domain::models::visual::PanelType::History,
+                            panel: _panel,
                             selected: state.sidebar_selected,
                         };
                         state.needs_redraw = true;
                     }
                     InputAction::Consumed
                 }
-                'd' => {
-                    // Delete selected conversation — shows confirmation overlay
+                'k' => {
+                    let moved = if _panel == crate::domain::models::visual::PanelType::Tasks {
+                        if state.task_panel_state.selected_index > 0 {
+                            state.task_panel_state.selected_index -= 1;
+                            state.sidebar_selected = state.task_panel_state.selected_index;
+                            true
+                        } else {
+                            false
+                        }
+                    } else if state.sidebar_selected > 0 {
+                        state.sidebar_selected -= 1;
+                        true
+                    } else {
+                        false
+                    };
+                    if moved {
+                        state.focus = FocusState::Sidebar {
+                            panel: _panel,
+                            selected: state.sidebar_selected,
+                        };
+                        state.needs_redraw = true;
+                    }
+                    InputAction::Consumed
+                }
+                '\n' if _panel == crate::domain::models::visual::PanelType::Tasks
+                    && state.task_panel_state.task_count > 0 =>
+                {
+                    let task_number = (state.task_panel_state.selected_index + 1) as u32;
+                    state.task_panel_state.drill_down_task = Some(task_number);
+                    state.focus = FocusState::Chat;
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                'p' | 'x' if _panel == crate::domain::models::visual::PanelType::Tasks => {
+                    state.needs_redraw = true;
+                    InputAction::ReservedPanelKey6_4
+                }
+                's' if _panel == crate::domain::models::visual::PanelType::Tasks => {
+                    state.needs_redraw = true;
+                    InputAction::ReservedPanelKey6_4
+                }
+                'd' if _panel == crate::domain::models::visual::PanelType::History => {
                     InputAction::DeleteSidebarConversation
                 }
-                '/' => {
-                    // Open cross-conversation search (Story 4-4 AC5; UX-DR87)
+                '/' if _panel == crate::domain::models::visual::PanelType::History => {
                     state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
                     state.cross_search.active = true;
                     state.focus = FocusState::Overlay(OverlayType::CrossSearch);
@@ -1226,6 +1289,17 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                     return InputAction::Consumed;
                 }
                 return submit_message(state);
+            }
+            if state.focus == FocusState::Chat
+                && state.task_panel_state.drill_down_task.is_some()
+            {
+                state.task_panel_state.drill_down_task = None;
+                state.focus = FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    selected: state.task_panel_state.selected_index,
+                };
+                state.needs_redraw = true;
+                return InputAction::Consumed;
             }
             state.focus = match state.focus {
                 FocusState::Input => FocusState::Chat,

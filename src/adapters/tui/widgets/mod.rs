@@ -7,6 +7,7 @@ pub mod cross_search;
 pub mod fork_confirm;
 pub mod rewind_confirm;
 pub mod sidebar;
+pub use sidebar::truncate_to_width as truncate_sidebar_text;
 
 pub mod empty_state;
 pub mod feedback_block;
@@ -20,5 +21,7 @@ pub mod search_bar;
 pub mod skill_trust_prompt;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod task_detail;
+pub mod task_panel;
 pub mod tool_block;
 pub mod which_key_bar;

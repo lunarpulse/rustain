@@ -269,6 +269,7 @@ impl TestHarness {
                         0,
                         None,
                         None,
+                        None,
                     );
 
                     input_box::render(

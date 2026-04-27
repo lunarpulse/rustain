@@ -14,7 +14,19 @@ fn try_load_from(path: &Path) -> Option<AppConfig> {
         }
     };
     match toml::from_str::<AppConfig>(&content) {
-        Ok(config) => Some(config),
+        Ok(config) => {
+            if let Err(e) = config.layout.auto_panels.validate() {
+                tracing::warn!(
+                    "Config file at {} has invalid value: {} — falling back to defaults for that key.",
+                    path.display(),
+                    e
+                );
+                let mut sanitized = config;
+                sanitized.layout.auto_panels = Default::default();
+                return Some(sanitized);
+            }
+            Some(config)
+        }
         Err(e) => {
             tracing::warn!("Config file malformed at {}: {}", path.display(), e);
             None

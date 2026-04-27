@@ -592,11 +592,44 @@ impl Default for AutocompleteState {
     }
 }
 
+/// Story 6-3: state for the task panel + drill-down detail view.
+#[derive(Debug, Clone)]
+pub struct TaskPanelState {
+    pub selected_index: usize,
+    pub last_executed_plan_id: Option<String>,
+    pub auto_open_skipped_for_plan: Option<String>,
+    pub drill_down_task: Option<u32>,
+    pub task_count: usize,
+    /// Conversations where the user explicitly closed the Tasks panel via
+    /// `Ctrl+X, T`. Subsequent `PlanExecutionStarted` events suppress auto-open
+    /// for these conversations until the user reopens manually OR a plan in
+    /// the conversation finishes with `failed > 0` (see PlanCompleted arm).
+    /// PD1 (Sally Option 1 + A1).
+    pub auto_open_suppressed_conversations: std::collections::HashSet<String>,
+    /// Conversations that have already received the one-time hint toast
+    /// "Tasks panel hidden for this session — Ctrl+X, T to reopen." Tracked
+    /// per-conversation, shown at most once. PD1 (Sally A2).
+    pub auto_open_hint_shown_for: std::collections::HashSet<String>,
+}
+
+impl Default for TaskPanelState {
+    fn default() -> Self {
+        Self {
+            selected_index: 0,
+            last_executed_plan_id: None,
+            auto_open_skipped_for_plan: None,
+            drill_down_task: None,
+            task_count: 0,
+            auto_open_suppressed_conversations: std::collections::HashSet::new(),
+            auto_open_hint_shown_for: std::collections::HashSet::new(),
+        }
+    }
+}
+
 /// Action dispatched by a which-key chord.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChordAction {
-    /// Open a panel (stub for future epics).
-    #[allow(dead_code)]
+    /// Open a panel.
     OpenPanel(crate::domain::models::visual::PanelType),
     /// Show help overlay.
     #[allow(dead_code)]
@@ -773,7 +806,7 @@ impl WhichKeyState {
             ChordAction::Noop("Subagent panel — Epic 10".to_string()),
         );
         chord_map.insert('l', ChordAction::Noop("Log panel — Epic 14".to_string()));
-        chord_map.insert('t', ChordAction::Noop("Task panel — Epic 6".to_string()));
+        chord_map.insert('t', ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks));
         chord_map.insert('u', ChordAction::Noop("Usage/cost — Epic 7".to_string()));
         chord_map.insert('w', ChordAction::Noop("Watch/monitor — future".to_string()));
         chord_map.insert('d', ChordAction::Noop("Dashboard — future".to_string()));
@@ -965,6 +998,12 @@ pub struct TuiState {
     pub sidebar_entry_count: usize,
     /// Scroll offset for the sidebar list.
     pub sidebar_scroll_offset: usize,
+    /// Story 6-3: state for the task panel sidebar and drill-down detail view.
+    pub task_panel_state: TaskPanelState,
+    /// Story 6-3 (PD4): resolved value of `[layout.auto_panels] on_task_plan`.
+    /// `"tasks"` (default) or `"none"`. Read by the `PlanExecutionStarted`
+    /// event arm to decide whether to auto-open the Tasks panel.
+    pub auto_open_on_task_plan: String,
     /// Pending delete confirmation target. None = no pending confirmation.
     pub pending_delete: Option<crate::domain::models::visual::DeleteConfirmTarget>,
     /// Message index selected for fork (set when user presses `f`, cleared on confirm/cancel).
@@ -1088,6 +1127,8 @@ impl TuiState {
             sidebar_selected: 0,
             sidebar_entry_count: 0,
             sidebar_scroll_offset: 0,
+            task_panel_state: TaskPanelState::default(),
+            auto_open_on_task_plan: "tasks".to_string(),
             pending_delete: None,
             pending_fork_index: None,
             pending_rewind_index: None,
@@ -1115,6 +1156,10 @@ impl TuiState {
 
     pub fn replace_agent_registry(&mut self, registry: AgentRegistry) {
         self.agent_registry = registry;
+    }
+
+    pub fn task_panel_max_index(&self) -> usize {
+        self.task_panel_state.task_count.saturating_sub(1)
     }
 
     pub fn refresh_agent_suggestions(&mut self) {

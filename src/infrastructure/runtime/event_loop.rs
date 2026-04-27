@@ -92,6 +92,7 @@ pub async fn run(
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
+    state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
 
     // Cache multiplexer detection once at startup (UX-DR62)
     state.multiplexer_detected = crate::adapters::tui::help_data::is_multiplexer_session();
@@ -1362,6 +1363,69 @@ pub async fn run(
                                     state.needs_redraw = true;
                                     } // end else (content not empty)
                                 }
+                                InputAction::CopyTaskResult { plan_id, task_number } => {
+                                    use crate::adapters::tui::clipboard;
+                                    let content = plan_id.as_deref()
+                                        .and_then(|id| conversation.plans.get(id))
+                                        .and_then(|plan| plan.tasks.get((task_number - 1) as usize))
+                                        .map(|task| {
+                                            match task.status {
+                                                PlanTaskStatus::Completed => {
+                                                    task.result.as_ref().map(|r| r.text.clone()).unwrap_or_default()
+                                                }
+                                                PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled => {
+                                                    task.error.clone().unwrap_or_default()
+                                                }
+                                                _ => format!("Task {}: {} — {:?}", task.number, task.title, task.status),
+                                            }
+                                        })
+                                        .unwrap_or_default();
+                                    if content.is_empty() {
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = StatusState::Flash {
+                                            message: "Nothing to copy".to_string(),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                    } else {
+                                        let result = clipboard::copy_to_clipboard(&content);
+                                        let flash_msg = match result {
+                                            clipboard::ClipboardResult::Osc52Success => {
+                                                "Copied to clipboard".to_string()
+                                            }
+                                            clipboard::ClipboardResult::FallbackSuccess(ref path) => {
+                                                format!("Copied to {}", path.display())
+                                            }
+                                            clipboard::ClipboardResult::Failed(ref err) => {
+                                                format!("Copy failed: {}", err)
+                                            }
+                                        };
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = StatusState::Flash {
+                                            message: flash_msg,
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ReservedKey6_4 => {
+                                    if crate::adapters::tui::task_panel_handlers::is_failed_drill_down(
+                                        &state,
+                                        &conversation,
+                                    ) {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: "Coming in Story 6.4 (Task Control & Plan Deviation).".to_string(),
+                                        });
+                                    }
+                                }
+                                InputAction::ReservedPanelKey6_4 => {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: "Coming in Story 6.4 (Task Control & Plan Deviation).".to_string(),
+                                    });
+                                }
                                 InputAction::ImageFormatError => {
                                     let fb = FeedbackBlock {
                                         id: generate_conversation_id(),
@@ -1747,6 +1811,52 @@ pub async fn run(
                                             remaining_ms: state.theme.timing.status_flash_ms,
                                         };
                                         state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::OpenPanel(panel_type) => {
+                                    use crate::domain::models::visual::PanelType;
+                                    if panel_type == PanelType::Tasks {
+                                        let term_width = state.terminal_width;
+                                        let outcome = crate::adapters::tui::task_panel_handlers::handle_open_panel_tasks(
+                                            &mut state,
+                                            &conversation,
+                                            term_width,
+                                            layout::SIDEBAR_MIN_WIDTH,
+                                        );
+                                        if outcome.opened {
+                                            state.focus = FocusState::Sidebar {
+                                                panel: panel_type,
+                                                selected: state.sidebar_selected,
+                                            };
+                                        } else if outcome.closed {
+                                            state.focus = FocusState::Chat;
+                                        }
+                                        if let Some(notice) = outcome.notice {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(notice.conversation_id),
+                                                level: notice.level,
+                                                message: notice.message,
+                                            });
+                                        }
+                                    } else if state.sidebar_visible && state.sidebar_panel == Some(panel_type) {
+                                        state.sidebar_visible = false;
+                                        state.sidebar_panel = None;
+                                        state.focus = FocusState::Chat;
+                                        state.needs_redraw = true;
+                                    } else if state.terminal_width >= layout::SIDEBAR_MIN_WIDTH {
+                                        state.sidebar_visible = true;
+                                        state.sidebar_panel = Some(panel_type);
+                                        state.focus = FocusState::Sidebar {
+                                            panel: panel_type,
+                                            selected: state.sidebar_selected,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Warning,
+                                            message: "Panel requires terminal width >= 120 cols.".to_string(),
+                                        });
                                     }
                                 }
                                 InputAction::OpenSidebarConversation => {
@@ -3379,27 +3489,85 @@ pub async fn run(
                             &mut conversation,
                             &app_state.event_bus,
                         );
+                        let term_width = state.terminal_width;
+                        let auto_open_setting = state.auto_open_on_task_plan.clone();
+                        let outcome = crate::adapters::tui::task_panel_handlers::handle_plan_execution_started(
+                            &mut state,
+                            &conversation,
+                            &conversation_id,
+                            &plan_id,
+                            term_width,
+                            crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH,
+                            &auto_open_setting,
+                        );
+                        for notice in outcome.notices {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: Some(notice.conversation_id),
+                                level: notice.level,
+                                message: notice.message,
+                            });
+                        }
                     }
-                    AppEvent::PlanTaskStatusChanged { .. } => {
-                        // 6.3 will subscribe here for task panel updates
+                    AppEvent::PlanTaskStatusChanged { conversation_id, plan_id, task_number, status: _ } => {
+                        let _ = crate::adapters::tui::task_panel_handlers::handle_plan_task_status_changed(
+                            &mut state,
+                            &conversation,
+                            &conversation_id,
+                            &plan_id,
+                        );
+                        tracing::trace!(
+                            plan = %plan_id, task = %task_number,
+                            "PlanTaskStatusChanged received"
+                        );
                     }
-                    AppEvent::PlanCompleted { conversation_id: _conv_id, plan_id: _pid, completed, failed, skipped, total_elapsed_ms } => {
+                    AppEvent::PlanCompleted { conversation_id, plan_id, completed, failed, skipped, total_elapsed_ms } => {
                         tracing::info!(
                             "Plan completed: {} completed, {} failed, {} skipped, ~{}ms",
                             completed, failed, skipped, total_elapsed_ms
                         );
+                        if conversation_id == conversation.id {
+                            state.task_panel_state.last_executed_plan_id = Some(plan_id.clone());
+                            // PD1 (Sally A1): a real plan-level failure trumps user-set
+                            // suppression — clear the flag and force the panel back open
+                            // so the failure is surfaced even if the user had dismissed it.
+                            if failed > 0
+                                && state
+                                    .task_panel_state
+                                    .auto_open_suppressed_conversations
+                                    .remove(&conversation.id)
+                                && state.terminal_width >= crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH
+                            {
+                                state.sidebar_visible = true;
+                                state.sidebar_panel = Some(crate::domain::models::visual::PanelType::Tasks);
+                                state.task_panel_state.drill_down_task = None;
+                                state.task_panel_state.task_count = conversation
+                                    .plans
+                                    .get(&plan_id)
+                                    .map(|p| p.tasks.len())
+                                    .unwrap_or(0);
+                                state.needs_redraw = true;
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Warning,
+                                    message: "Plan failed — task panel reopened.".to_string(),
+                                });
+                            }
+                        }
                     }
-                    AppEvent::PlanCancelled { conversation_id: _conv_id, plan_id: _pid, cancelled_at_task } => {
+                    AppEvent::PlanCancelled { conversation_id, plan_id, cancelled_at_task } => {
                         let msg = match cancelled_at_task {
                             Some(n) => format!("Plan cancelled at task {}", n),
                             None => "Plan cancelled".to_string(),
                         };
                         tracing::info!("{}", msg);
-                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                            conversation_id: Some(conversation.id.clone()),
-                            level: NoticeLevel::Info,
-                            message: msg,
-                        });
+                        if conversation_id == conversation.id {
+                            state.task_panel_state.last_executed_plan_id = Some(plan_id);
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: NoticeLevel::Info,
+                                message: msg,
+                            });
+                        }
                     }
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
@@ -4106,6 +4274,21 @@ pub async fn run(
                 let tick_ms = state.theme.timing.tick_interval_ms;
                 if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
                     *elapsed_ms += tick_ms;
+                    state.needs_redraw = true;
+                }
+
+                // PD2: keep Running-task elapsed display live in the Tasks panel.
+                // Without this tick-driven redraw, `task.elapsed_ms()` for Running
+                // tasks (which calls `now_unix_ms()` each render) only refreshes
+                // on `PlanTaskStatusChanged` events — between status changes the
+                // counter visibly freezes. Piggybacks on the existing 4Hz tick.
+                if state.sidebar_visible
+                    && state.sidebar_panel
+                        == Some(crate::domain::models::visual::PanelType::Tasks)
+                    && crate::adapters::tui::task_panel_handlers::any_plan_has_running_task(
+                        &conversation,
+                    )
+                {
                     state.needs_redraw = true;
                 }
 
@@ -5871,14 +6054,45 @@ fn render(
                 if let Some(sidebar_area) = app_layout.sidebar {
                     let active_conv_id =
                         tab_manager_for_bar.map(|tm| tm.active_tab().conversation.id.as_str());
-                    sidebar::render_history_panel(
-                        sidebar_area,
-                        frame.buffer_mut(),
-                        session_index.entries(),
-                        state.sidebar_selected,
-                        active_conv_id,
-                        theme,
-                    );
+                    match state.sidebar_panel {
+                        Some(crate::domain::models::visual::PanelType::Tasks) => {
+                            use crate::adapters::tui::widgets::task_panel;
+                            let plan_to_render = task_panel::resolve_panel_plan(
+                                conversation,
+                                state.task_panel_state.last_executed_plan_id.as_deref(),
+                            );
+                            state.task_panel_state.task_count = plan_to_render.map(|p| p.tasks.len()).unwrap_or(0);
+                            let is_focused = matches!(state.focus,
+                                FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. });
+                            task_panel::render_task_panel(
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                plan_to_render,
+                                state.task_panel_state.selected_index,
+                                is_focused,
+                                theme,
+                            );
+                        }
+                        Some(crate::domain::models::visual::PanelType::History) | None => {
+                            sidebar::render_history_panel(
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                session_index.entries(),
+                                state.sidebar_selected,
+                                active_conv_id,
+                                theme,
+                            );
+                        }
+                        Some(crate::domain::models::visual::PanelType::Agents)
+                        | Some(crate::domain::models::visual::PanelType::Adapters) => {
+                            use ratatui::widgets::Widget;
+                            let block = ratatui::widgets::Block::default()
+                                .title(" (panel deferred) ")
+                                .borders(ratatui::widgets::Borders::ALL)
+                                .border_style(ratatui::style::Style::default().fg(theme.colors.fg_muted));
+                            block.render(sidebar_area, frame.buffer_mut());
+                        }
+                    }
                 }
 
                 // Story 4-4 AC2: thread search query + focused match into chat pane
@@ -5902,23 +6116,55 @@ fn render(
                 let bookmark_indices: &[usize] = tab_manager_for_bar
                     .map(|tm| tm.active_tab().session_meta.bookmarks.as_slice())
                     .unwrap_or(&[]);
-                let result = chat_pane::render_with_search(
-                    frame,
-                    app_layout.chat_pane,
-                    conversation,
-                    streaming,
-                    scroll_offset,
-                    auto_scroll,
-                    theme,
-                    height_cache,
-                    tool_block_states,
-                    feedback_blocks,
-                    search_query_opt,
-                    focused_match_opt,
-                    search_state.matches.as_slice(),
-                    bookmark_indices,
-                    state.pending_plan_card.as_ref(),
-                );
+                let mut skip_chat_render = false;
+                if let Some(task_number) = state.task_panel_state.drill_down_task {
+                    let plan_opt = state.task_panel_state.last_executed_plan_id
+                        .as_deref()
+                        .and_then(|id| conversation.plans.get(id));
+                    if let Some(plan) = plan_opt {
+                        if let Some(task) = plan.tasks.get((task_number - 1) as usize) {
+                            use crate::adapters::tui::widgets::task_detail;
+                            task_detail::render(
+                                app_layout.chat_pane,
+                                frame.buffer_mut(),
+                                plan,
+                                task,
+                                theme,
+                                app_layout.chat_pane.height,
+                            );
+                            skip_chat_render = true;
+                        } else {
+                            state.task_panel_state.drill_down_task = None;
+                        }
+                    } else {
+                        state.task_panel_state.drill_down_task = None;
+                        state.task_panel_state.last_executed_plan_id = None;
+                    }
+                }
+                if !skip_chat_render {
+                    let result = chat_pane::render_with_search(
+                        frame,
+                        app_layout.chat_pane,
+                        conversation,
+                        streaming,
+                        scroll_offset,
+                        auto_scroll,
+                        theme,
+                        height_cache,
+                        tool_block_states,
+                        feedback_blocks,
+                        search_query_opt,
+                        focused_match_opt,
+                        search_state.matches.as_slice(),
+                        bookmark_indices,
+                        state.pending_plan_card.as_ref(),
+                    );
+                    content_height = result.total_content_height;
+                    block_bounds = result.block_boundaries;
+                    msg_bounds = result.message_boundaries;
+                    user_msg_bounds = result.user_message_boundaries;
+                    focused_tool_id = result.focused_tool_id;
+                }
 
                 // Story 4-4 AC1: render the search bar widget into its reserved slot.
                 if let Some(search_bar_area) = app_layout.search_bar {
@@ -5956,11 +6202,6 @@ fn render(
                         theme,
                     );
                 }
-                content_height = result.total_content_height;
-                block_bounds = result.block_boundaries;
-                msg_bounds = result.message_boundaries;
-                user_msg_bounds = result.user_message_boundaries;
-                focused_tool_id = result.focused_tool_id;
 
                 // Render peek overlay if any tool block has peek_active (AC5)
                 for (tool_id, tbs) in tool_block_states.iter() {
@@ -6219,6 +6460,7 @@ fn render(
                 } else {
                     None
                 };
+                let drill_down_breadcrumb = state.task_panel_state.drill_down_task.map(|n| format!("Tasks > Task {}", n));
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -6238,6 +6480,7 @@ fn render(
                     state.active_skill_count,
                     state.active_agent_name.as_deref(),
                     state.pending_plan_reminder_at_turn,
+                    drill_down_breadcrumb.as_deref(),
                 );
                 input_box::render(
                     frame,

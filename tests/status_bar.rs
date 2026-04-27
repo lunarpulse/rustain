@@ -81,6 +81,7 @@ fn render_status_bar_ml(
                 0,
                 None,
                 None,
+                    None,
                     );
         })
         .unwrap();
@@ -295,6 +296,7 @@ fn test_status_bar_shows_active_agent() {
                 0,
                 Some("code-reviewer"),
                 None,
+                None,
             );
         })
         .unwrap();
@@ -336,6 +338,7 @@ fn test_status_bar_hides_agent_when_none() {
                 0,
                 None,
                 None,
+                    None,
                     );
         })
         .unwrap();
@@ -376,6 +379,7 @@ fn test_status_bar_agent_name_truncated() {
                 None,
                 0,
                 Some("a-very-long-agent-name-that-exceeds-twenty-four"),
+                None,
                 None,
             );
         })

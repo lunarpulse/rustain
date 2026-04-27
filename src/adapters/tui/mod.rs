@@ -9,6 +9,7 @@ pub mod image;
 pub mod layout;
 pub mod markdown;
 pub mod state;
+pub mod task_panel_handlers;
 pub mod terminal;
 #[allow(dead_code)]
 pub mod theme;

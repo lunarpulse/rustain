@@ -26,6 +26,7 @@ pub fn render(
     active_skill_count: usize,
     active_agent_name: Option<&str>,
     pending_plan_reminder_at_turn: Option<u32>,
+    drill_down_breadcrumb: Option<&str>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -39,6 +40,11 @@ pub fn render(
         format!(" {}", model)
     };
     let mut left_spans: Vec<Span> = vec![Span::styled(model_label, Style::default().fg(fg))];
+
+    if let Some(breadcrumb) = drill_down_breadcrumb {
+        left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+        left_spans.push(Span::styled(breadcrumb.to_string(), Style::default().fg(theme.colors.fg_muted)));
+    }
 
     // Session title (after model, if restored session)
     if let Some(title) = session_title {

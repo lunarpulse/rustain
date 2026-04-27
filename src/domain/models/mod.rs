@@ -41,6 +41,8 @@ pub use config::AppConfig;
 #[allow(unused_imports)]
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
+pub use config::{AutoPanelsConfig, LayoutConfig};
+#[allow(unused_imports)]
 pub use content::ContentBlockType;
 #[allow(unused_imports)]
 pub use conversation::{

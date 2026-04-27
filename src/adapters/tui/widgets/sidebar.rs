@@ -157,7 +157,7 @@ pub fn format_relative_time(timestamp: i64, now: i64) -> String {
 /// Truncate text to fit within a given display width.
 /// Uses char_indices for UTF-8 safe truncation.
 /// F18: Handles zero-width characters properly when max_width < 3.
-fn truncate_to_width(text: &str, max_width: usize) -> String {
+pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     if text.width() <= max_width {
         return text.to_string();
     }

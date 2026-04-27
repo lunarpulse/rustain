@@ -63,6 +63,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     0,
                     None,
                     None,
+                    None,
                 );
                 input_box::render(
                     frame,

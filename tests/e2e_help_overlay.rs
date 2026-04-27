@@ -357,6 +357,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 0,
                 None,
                 None,
+                None,
             );
         })
         .unwrap();
