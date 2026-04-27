@@ -1,7 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::BorderType;
 
-use crate::domain::models::plan::{Plan, PlanStatus};
+use crate::domain::models::plan::{Plan, PlanStatus, PlanTaskStatus};
+use crate::domain::services::plan_runtime::format_elapsed_ms;
 
 pub fn render_plan_card_lines<'a>(
     plan: &Plan,
@@ -107,20 +108,69 @@ pub fn render_plan_card_lines<'a>(
         } else {
             Style::default()
         };
-        lines.push(Line::from(vec![
-            Span::styled(
-                vertical_char,
-                Style::default().fg(theme.colors.decision_border),
-            ),
+
+        let (icon_str, icon_color) = if !is_pending && task.started_at_ms.is_some() {
+            match task.status {
+                PlanTaskStatus::Running => ("●".to_string(), theme.colors.tool_status_executing),
+                PlanTaskStatus::Waiting => (format!("⧖ (deps: {})", task.waiting_on.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")), theme.colors.tool_status_awaiting),
+                PlanTaskStatus::Completed => ("✓".to_string(), theme.colors.tool_status_success),
+                PlanTaskStatus::Failed => ("✗".to_string(), theme.colors.tool_status_error),
+                PlanTaskStatus::Skipped => ("⏭".to_string(), theme.colors.tool_status_cancelled),
+                PlanTaskStatus::Cancelled => ("⊘".to_string(), theme.colors.tool_status_cancelled),
+                PlanTaskStatus::Pending => (String::new(), theme.colors.fg_muted),
+            }
+        } else {
+            (String::new(), theme.colors.fg_muted)
+        };
+
+        let elapsed_str = if !is_pending && task.started_at_ms.is_some() {
+            match task.elapsed_ms() {
+                Some(ms) => {
+                    let formatted = format_elapsed_ms(ms);
+                    if task.status == PlanTaskStatus::Running {
+                        format!("(running {})", formatted)
+                    } else {
+                        format!("({})", formatted)
+                    }
+                }
+                None => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        let suffix = if icon_str.is_empty() && elapsed_str.is_empty() {
+            String::new()
+        } else if icon_str.is_empty() {
+            format!(" {}", elapsed_str)
+        } else if elapsed_str.is_empty() {
+            format!(" {}", icon_str)
+        } else {
+            format!(" {} {}", icon_str, elapsed_str)
+        };
+
+        let full_width_needed = 2 + title_display.len() + suffix.len();
+        let padding = inner_width.saturating_sub(full_width_needed);
+
+        let mut spans: Vec<Span<'_>> = vec![
+            Span::styled(vertical_char, Style::default().fg(theme.colors.decision_border)),
             Span::styled(format!("  {}", title_display), title_style),
-            Span::raw(" ".repeat(
-                inner_width.saturating_sub(2 + title_display.len())
-            )),
-            Span::styled(
-                vertical_char,
-                Style::default().fg(theme.colors.decision_border),
-            ),
-        ]));
+        ];
+        if !icon_str.is_empty() {
+            spans.push(Span::styled(
+                format!(" {}", icon_str),
+                Style::default().fg(icon_color),
+            ));
+        }
+        if !elapsed_str.is_empty() {
+            spans.push(Span::styled(
+                format!(" {}", elapsed_str),
+                Style::default().fg(theme.colors.fg_muted),
+            ));
+        }
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.push(Span::styled(vertical_char, Style::default().fg(theme.colors.decision_border)));
+        lines.push(Line::from(spans));
 
         if !task.description.is_empty() {
             let desc_lines = wrap_description(&task.description, inner_width.saturating_sub(4));
@@ -232,6 +282,13 @@ pub fn render_plan_card_lines<'a>(
             }
             PlanStatus::Editing => "[editing]".to_string(),
             PlanStatus::Pending => "[pending]".to_string(),
+            PlanStatus::Cancelled => {
+                if let Some(ts) = plan.resolved_at {
+                    format!("[cancelled {}]", format_timestamp(ts))
+                } else {
+                    "[cancelled]".to_string()
+                }
+            }
         };
         lines.push(Line::from(vec![
             Span::styled(
@@ -347,6 +404,11 @@ mod tests {
                     description: "Do the first thing".to_string(),
                     depends_on: vec![],
                     status: PlanTaskStatus::Pending,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
                 },
                 PlanTask {
                     number: 2,
@@ -354,6 +416,11 @@ mod tests {
                     description: String::new(),
                     depends_on: vec![1],
                     status: PlanTaskStatus::Pending,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
                 },
             ],
             estimated_effort: Some(EffortEstimate {
@@ -543,5 +610,114 @@ mod tests {
     fn negative_timestamp_handled() {
         assert_eq!(format_timestamp(-1), "-1");
         assert_eq!(format_timestamp(0), "00:00:00");
+    }
+
+    fn make_plan_executing() -> Plan {
+        Plan {
+            id: "exec-plan-id".to_string(),
+            title: "Exec Plan".to_string(),
+            tasks: vec![
+                PlanTask {
+                    number: 1,
+                    title: "Init".to_string(),
+                    description: String::new(),
+                    depends_on: vec![],
+                    status: PlanTaskStatus::Completed,
+                    started_at_ms: Some(1700000000000),
+                    completed_at_ms: Some(1700000005000),
+                    result: Some(crate::domain::models::plan::TaskResult {
+                        text: "Done".to_string(),
+                        tool_call_count: 1,
+                        token_count: Some(20),
+                    }),
+                    error: None,
+                    waiting_on: vec![],
+                },
+                PlanTask {
+                    number: 2,
+                    title: "Build".to_string(),
+                    description: String::new(),
+                    depends_on: vec![1],
+                    status: PlanTaskStatus::Running,
+                    started_at_ms: None, // None keeps elapsed out of snapshot (avoids wall-clock drift)
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
+                },
+                PlanTask {
+                    number: 3,
+                    title: "Test".to_string(),
+                    description: String::new(),
+                    depends_on: vec![2],
+                    status: PlanTaskStatus::Pending,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
+                },
+                PlanTask {
+                    number: 4,
+                    title: "Deploy".to_string(),
+                    description: String::new(),
+                    depends_on: vec![3],
+                    status: PlanTaskStatus::Pending,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
+                },
+            ],
+            estimated_effort: None,
+            status: PlanStatus::Executing,
+            created_at: 1700000000,
+            resolved_at: Some(1700000060),
+            host_message_id: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_mid_execution_plan_card() {
+        let plan = make_plan_executing();
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines = render_plan_card_lines(&plan, &theme, 80, false);
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                let row: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                row + "\n"
+            })
+            .collect();
+        insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn snapshot_failed_with_skipped_downstream() {
+        let mut plan = make_plan_executing();
+        plan.status = PlanStatus::Completed;
+        plan.tasks[0].status = PlanTaskStatus::Completed;
+        plan.tasks[0].completed_at_ms = Some(1700000005000);
+        plan.tasks[1].status = PlanTaskStatus::Failed;
+        plan.tasks[1].started_at_ms = Some(1700000005000);
+        plan.tasks[1].error = Some("compilation error".to_string());
+        plan.tasks[1].completed_at_ms = Some(1700000010000);
+        plan.tasks[2].status = PlanTaskStatus::Skipped;
+        plan.tasks[2].error = Some("Skipped — blocked by upstream task(s) 2".to_string());
+        plan.tasks[2].completed_at_ms = Some(1700000010001);
+        plan.tasks[3].status = PlanTaskStatus::Skipped;
+        plan.tasks[3].error = Some("Skipped — blocked by upstream task(s) 2".to_string());
+        plan.tasks[3].completed_at_ms = Some(1700000010001);
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines = render_plan_card_lines(&plan, &theme, 80, false);
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                let row: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                row + "\n"
+            })
+            .collect();
+        insta::assert_snapshot!(text);
     }
 }

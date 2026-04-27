@@ -164,6 +164,32 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         plan_id: String,
     },
+    /// Per-task status update — fired by PlanRuntime on each transition (Pending → Running,
+    /// Running → Completed/Failed/Skipped/Cancelled, etc.). Story 6.3's task panel
+    /// subscribes to this for real-time render.
+    PlanTaskStatusChanged {
+        conversation_id: ConversationId,
+        plan_id: String,
+        task_number: u32,
+        status: crate::domain::models::PlanTaskStatus,
+    },
+    /// All tasks terminal; unified summary has been appended to the conversation.
+    PlanCompleted {
+        conversation_id: ConversationId,
+        plan_id: String,
+        completed: u32,
+        failed: u32,
+        skipped: u32,
+        total_elapsed_ms: i64,
+    },
+    /// Plan execution was interrupted by a Cancelled task (AC2 hard-stop branch).
+    /// 6.4 will additionally emit this on user-initiated `!cancel-plan`.
+    PlanCancelled {
+        conversation_id: ConversationId,
+        plan_id: String,
+        /// Task that triggered the cancel; None for whole-plan cancel from 6.4 user action.
+        cancelled_at_task: Option<u32>,
+    },
 }
 
 /// Event wrapping a tool execution result.

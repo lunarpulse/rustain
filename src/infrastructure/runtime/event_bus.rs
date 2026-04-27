@@ -52,6 +52,12 @@ pub struct EventBus {
     pub raw_tx: broadcast::Sender<RawEvent>,
 }
 
+impl crate::domain::ports::EventEmitter for EventBus {
+    fn emit(&self, event: AppEvent) {
+        self.emit_domain(event);
+    }
+}
+
 impl EventBus {
     pub fn new(raw_capacity: usize) -> (Self, mpsc::UnboundedReceiver<AppEvent>) {
         assert!(raw_capacity > 0, "raw_capacity must be > 0");

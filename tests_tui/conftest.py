@@ -43,6 +43,7 @@ def pytest_configure(config):
         "story_6_0c: Story 6-0c — ApprovalRuntime Pub/Sub",
         "story_6_0d: Story 6-0d — Plan Mode Workflow",
         "story_6_1a: Story 6-1a — Inline Plan Card",
+        "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)

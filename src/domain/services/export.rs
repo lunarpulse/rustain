@@ -103,6 +103,7 @@ pub fn render_conversation_markdown(
                     PlanStatus::Completed => "Completed",
                     PlanStatus::Rejected => "Rejected",
                     PlanStatus::Editing => "Editing",
+                    PlanStatus::Cancelled => "Cancelled",
                 };
 
                 if let Some(effort) = &plan.estimated_effort {
@@ -425,6 +426,11 @@ mod tests {
                         description: "Move to separate file".to_string(),
                         depends_on: vec![],
                         status: PlanTaskStatus::Pending,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        result: None,
+                        error: None,
+                        waiting_on: vec![],
                     },
                     PlanTask {
                         number: 2,
@@ -432,6 +438,11 @@ mod tests {
                         description: String::new(),
                         depends_on: vec![1],
                         status: PlanTaskStatus::Pending,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        result: None,
+                        error: None,
+                        waiting_on: vec![],
                     },
                 ],
                 estimated_effort: Some(EffortEstimate {

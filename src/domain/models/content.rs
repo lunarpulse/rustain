@@ -17,6 +17,7 @@ pub enum ContentBlockType {
     // v0.5
     Thinking(String),
     PlanCard,
+    PlanSummary,
     PlanDeviation,
     SubagentStatus,
     AskUserQuestion,

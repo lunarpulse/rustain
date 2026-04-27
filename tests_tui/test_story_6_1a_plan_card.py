@@ -251,8 +251,10 @@ def test_yolo_auto_approve_plan(tui: RustainTUI):
     tui.chat_mode()
     tui.wait(1.0)
     screen = tui.get_screen_text()
-    assert "Plan:" in screen, (
-        f"Expected plan card visible in scrollback. Screen:\n{screen}"
+    # YOLO auto-runs the plan immediately, so either the pending card ("Plan:")
+    # or the completed summary ("Plan complete:") may be visible in scrollback.
+    assert "Plan:" in screen or "Plan complete:" in screen, (
+        f"Expected plan card or summary visible in scrollback. Screen:\n{screen}"
     )
 
 

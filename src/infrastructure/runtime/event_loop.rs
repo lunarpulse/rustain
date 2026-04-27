@@ -54,7 +54,7 @@ use crate::domain::models::{
     ApprovalOutcome,
     AppConfig, ChatMessage, CompletionOptions, ContentBlockType, Conversation, FeedbackAction,
     FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, NoticeLevel,
-    PermissionMode, RetryState, SessionManager, SessionState, StatusState, StreamChunk,
+    PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager, SessionState, StatusState, StreamChunk,
     StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{
@@ -159,6 +159,10 @@ pub async fn run(
         app_state.plan_injector.as_ref().reset_reentry();
         state.pending_plan_reminder_at_turn = Some(0);
     }
+
+    // Story 6-2a: construct PlanRuntime for sequential task execution
+    let plan_runtime = crate::domain::services::plan_runtime::PlanRuntime::new();
+
     {
         let bus = app_state.event_bus.clone();
         let mut rx = tool_scheduler.subscribe();
@@ -267,6 +271,33 @@ pub async fn run(
             title,
             token_count,
         });
+    }
+
+    // Story 6-2a AC11: flip stale Running tasks back to Pending on reload
+    // and emit warning notices for mid-execution plans.
+    {
+        let mut plans_to_warn: Vec<(String, String, u32)> = Vec::new();
+        for plan in conversation.plans.values_mut() {
+            if plan.status == PlanStatus::Executing {
+                for task in &mut plan.tasks {
+                    if task.status == PlanTaskStatus::Running {
+                        plans_to_warn.push((plan.id.clone(), plan.title.clone(), task.number));
+                        task.status = PlanTaskStatus::Pending;
+                        task.started_at_ms = None;
+                    }
+                }
+            }
+        }
+        for (_pid, ptitle, tnum) in &plans_to_warn {
+            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                conversation_id: Some(conversation.id.clone()),
+                level: NoticeLevel::Warning,
+                message: format!(
+                    "Plan '{}' was mid-execution at exit (task {} was running). Plan execution was halted. Resume from the task panel (6.3) or invoke /plan resume <id> (later) to continue.",
+                    ptitle, tnum
+                ),
+            });
+        }
     }
 
     // Render first frame immediately
@@ -1763,6 +1794,16 @@ pub async fn run(
                                                     let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                                     // Overwrite the fresh conversation with the loaded one
                                                     conversation = loaded_conv;
+                                                    // G1-P4: flip any Running tasks back to Pending — they were in-flight
+                                                    // when the session was saved and must not re-enter Running on reload.
+                                                    for plan in conversation.plans.values_mut() {
+                                                        for task in &mut plan.tasks {
+                                                            if task.status == PlanTaskStatus::Running {
+                                                                task.status = PlanTaskStatus::Pending;
+                                                                task.started_at_ms = None;
+                                                            }
+                                                        }
+                                                    }
                                                     // Story 4-4: hydrate session_meta (bookmarks) for the loaded tab
                                                     if let Ok(Some(meta)) = fs_storage.load_session_meta(&conv_id).await {
                                                         tab_manager.active_tab_mut().session_meta = meta;
@@ -3332,7 +3373,33 @@ pub async fn run(
                         }
                     }
                     AppEvent::PlanExecutionStarted { conversation_id, plan_id } => {
-                        tracing::info!("Plan execution started: conversation={} plan={}", conversation_id, plan_id);
+                        plan_runtime.clone().start(
+                            conversation_id.clone(),
+                            plan_id.clone(),
+                            &mut conversation,
+                            &app_state.event_bus,
+                        );
+                    }
+                    AppEvent::PlanTaskStatusChanged { .. } => {
+                        // 6.3 will subscribe here for task panel updates
+                    }
+                    AppEvent::PlanCompleted { conversation_id: _conv_id, plan_id: _pid, completed, failed, skipped, total_elapsed_ms } => {
+                        tracing::info!(
+                            "Plan completed: {} completed, {} failed, {} skipped, ~{}ms",
+                            completed, failed, skipped, total_elapsed_ms
+                        );
+                    }
+                    AppEvent::PlanCancelled { conversation_id: _conv_id, plan_id: _pid, cancelled_at_task } => {
+                        let msg = match cancelled_at_task {
+                            Some(n) => format!("Plan cancelled at task {}", n),
+                            None => "Plan cancelled".to_string(),
+                        };
+                        tracing::info!("{}", msg);
+                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            conversation_id: Some(conversation.id.clone()),
+                            level: NoticeLevel::Info,
+                            message: msg,
+                        });
                     }
                     AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
@@ -4067,12 +4134,59 @@ pub async fn run(
                 }
 
                 if state.needs_redraw {
-                    match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
-                        Ok(()) => state.needs_redraw = false,
-                        Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
-                    }
-                }
-            }
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                            Ok(()) => state.needs_redraw = false,
+                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                        }
+                                    }
+
+                                    // Story 6-2a: if a plan task was running, advance the runtime.
+                                    let executing_plan_info: Option<(String, u32)> = conversation
+                                        .plans
+                                        .values()
+                                        .find(|p| p.status == PlanStatus::Executing)
+                                        .and_then(|p| {
+                                            p.tasks.iter().find(|t| t.status == PlanTaskStatus::Running).map(|t| (p.id.clone(), t.number))
+                                        });
+                                    if let Some((pid, task_num)) = executing_plan_info {
+                                        let conv_id = conversation.id.clone();
+                                        let (msg_text, tool_count, any_success, token_count, stop_reason) = conversation
+                                            .messages
+                                            .iter()
+                                            .rev()
+                                            .find(|m| m.role == MessageRole::Assistant)
+                                            .map(|m| {
+                                                let tc = m.tool_calls.len() as u32;
+                                                let success = m.tool_calls.iter().any(|tc_info| {
+                                                    tc_info.result.as_ref().is_some_and(|r| !r.is_error)
+                                                });
+                                                (m.content.clone(), tc, success, m.token_count, m.stop_reason.clone())
+                                            })
+                                            .unwrap_or_else(|| (String::new(), 0, false, None, None));
+                                        let stop = if streaming.is_streaming { None } else { stop_reason };
+                                        let outcome = crate::domain::services::plan_runtime::PlanRuntime::classify_outcome(
+                                            &msg_text, tool_count, any_success, stop,
+                                        );
+                                        let outcome = match &outcome {
+                                            crate::domain::services::plan_runtime::TaskTurnOutcome::Success { .. } => {
+                                                crate::domain::services::plan_runtime::TaskTurnOutcome::Success {
+                                                    result_text: msg_text,
+                                                    tool_call_count: tool_count,
+                                                    token_count,
+                                                }
+                                            }
+                                            other => other.clone(),
+                                        };
+                                        plan_runtime.on_turn_complete(
+                                            &conv_id,
+                                            &pid,
+                                            task_num,
+                                            outcome,
+                                            &mut conversation,
+                                            &app_state.event_bus,
+                                        ).await;
+                                    }
+                                }
 
             // Branch 4: Active task monitoring (placeholder for future stories)
             // Currently a no-op future that never resolves

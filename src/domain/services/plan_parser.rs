@@ -120,6 +120,11 @@ fn parse_plan_input_inner(
             description,
             depends_on,
             status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
         });
     }
 
@@ -407,6 +412,11 @@ mod tests {
                 description: String::new(),
                 depends_on: vec![],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,

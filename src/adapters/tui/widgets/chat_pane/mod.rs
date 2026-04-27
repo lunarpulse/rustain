@@ -277,6 +277,19 @@ fn render_message<'a>(
                 Style::default().fg(theme.colors.error),
             )));
         }
+    } else if msg.content_blocks.contains(&ContentBlockType::PlanSummary) {
+        // PlanSummary: thin top border + markdown content
+        lines.push(Line::from(Span::styled(
+            "┄".repeat(width),
+            Style::default().fg(theme.colors.fg_muted),
+        )));
+        let parsed_lines = markdown::render(
+            &msg.content,
+            width,
+            theme,
+            &markdown::RenderOptions::completed(),
+        );
+        lines.extend(parsed_lines);
     } else {
         let parsed_lines = markdown::render(
             &msg.content,
@@ -586,6 +599,11 @@ pub fn render_with_search(
                     block_boundaries.push(cumulative_offset + h);
                 }
             }
+        }
+
+        // PlanSummary adds 1 line for the thin top border (Story 6-2a AC6)
+        if msg.content_blocks.contains(&ContentBlockType::PlanSummary) {
+            h += 1;
         }
 
         // Use height cache keyed by message ID. If the cached value diverges from the freshly

@@ -24,6 +24,11 @@ fn make_task(number: u32, title: &str) -> PlanTask {
         description: String::new(),
         depends_on: vec![],
         status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
     }
 }
 
@@ -34,6 +39,11 @@ fn make_task_with_desc(number: u32, title: &str, desc: &str) -> PlanTask {
         description: desc.to_string(),
         depends_on: vec![],
         status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
     }
 }
 
@@ -113,6 +123,11 @@ fn ac1_plan_serde_round_trip() {
                 description: "Extract module".to_string(),
                 depends_on: vec![1],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             },
         ],
         estimated_effort: Some(EffortEstimate {
@@ -411,6 +426,11 @@ fn ac7_edit_round_trip_toml() {
                 description: "Read existing module".to_string(),
                 depends_on: vec![],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             },
             PlanTask {
                 number: 2,
@@ -418,6 +438,11 @@ fn ac7_edit_round_trip_toml() {
                 description: String::new(),
                 depends_on: vec![1],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             },
         ],
         estimated_effort: Some(EffortEstimate {
@@ -548,6 +573,11 @@ fn ac10_export_renders_plan() {
                     description: String::new(),
                     depends_on: vec![1],
                     status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
                 },
             ],
             estimated_effort: Some(EffortEstimate {
@@ -666,6 +696,11 @@ fn ac10_search_indexes_plan() {
                 description: "Add new table".to_string(),
                 depends_on: vec![],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,

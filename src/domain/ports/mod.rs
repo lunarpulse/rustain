@@ -8,6 +8,8 @@ mod clipboard;
 #[allow(unused_imports)]
 mod context;
 #[allow(unused_imports)]
+mod event_emitter;
+#[allow(unused_imports)]
 mod memory;
 #[allow(unused_imports)]
 mod persona;
@@ -28,6 +30,7 @@ pub use approval_persistence::ApprovalPersistencePort;
 pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use context::ContextPort;
+pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
 pub use persona::PersonaPort;
 pub use provider::ProviderPort;

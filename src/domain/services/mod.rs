@@ -17,6 +17,8 @@ pub mod plan_manager;
 pub mod plan_mode_injector;
 pub mod plan_effort;
 pub mod plan_parser;
+pub mod plan_runtime;
+pub use plan_runtime::{PlanRuntime, TaskTurnOutcome, PlanRuntimeState};
 pub mod turn_queue;
 
 #[cfg(feature = "skills-validation")]

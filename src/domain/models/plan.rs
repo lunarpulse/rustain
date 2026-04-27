@@ -1,4 +1,4 @@
-//! Domain model for inline plan proposals (Story 6-1a).
+//! Domain model for inline plan proposals (Story 6-1a) and plan execution (Story 6-2a).
 //!
 //! Plans live on `Conversation.plans: HashMap<id, Plan>`. Content blocks
 //! (`ContentBlockType::PlanCard`) reference plans by ID via `host_message_id`.
@@ -9,6 +9,13 @@
 //! - At most one pending plan card per conversation (enforced by `TuiState::pending_plan_card`)
 //! - `propose_plan` is risk-Safe — never routes through `ApprovalRuntime`
 //! - Plans are serialized with `#[serde(default)]` for backward compatibility
+//!
+//! **Task lifecycle (Story 6-2a):**
+//! - `started_at_ms` set by `PlanRuntime` on dispatch (Pending → Running)
+//! - `result` set on Success terminal
+//! - `error` set on Failure / Skipped / Cancelled
+//! - `completed_at_ms` set on any terminal transition
+//! - `waiting_on` populated defensively (sequential walk should not produce `Waiting`)
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +58,48 @@ pub struct PlanTask {
     /// Status defaults to Pending until 6.2a flips it.
     #[serde(default)]
     pub status: PlanTaskStatus,
+    /// Wall-clock ms when this task transitioned to Running. None until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    /// Wall-clock ms when this task transitioned to a terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    /// Captured result on Success. None for non-Success terminal states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<TaskResult>,
+    /// Captured error on Failure or rationale on Skipped/Cancelled. None on Success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// For Waiting (defensive — should not arise in sequential walk per AC3 note).
+    /// Stored so 6.3's panel can render dep tags consistently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waiting_on: Vec<u32>,
+}
+
+impl PlanTask {
+    /// Wall-clock elapsed ms (Running → terminal). `None` if not started.
+    /// While in Running, returns the live elapsed-since-start.
+    pub fn elapsed_ms(&self) -> Option<i64> {
+        self.started_at_ms.map(|start| {
+            let end = self.completed_at_ms.unwrap_or_else(now_unix_ms);
+            (end - start).max(0)
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskResult {
+    /// Plain-text concatenation of the assistant message that closed the task's turn.
+    /// Truncated to 4 KiB at storage time.
+    pub text: String,
+    pub tool_call_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<u32>,
+}
+
+fn now_unix_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +120,8 @@ pub enum PlanStatus {
     Completed,
     Rejected,
     Editing,
+    /// Plan execution was interrupted by a Cancelled task (AC2 hard-stop branch).
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -82,6 +133,10 @@ pub enum PlanTaskStatus {
     Completed,
     Failed,
     Skipped,
+    /// Dep gate — defensive; sequential walk should not produce this.
+    Waiting,
+    /// 6.4 will flip via per-task cancel; this story produces it on whole-turn cancel.
+    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +163,11 @@ mod tests {
                 description: "Do thing".to_string(),
                 depends_on: vec![],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             }],
             estimated_effort: Some(EffortEstimate {
                 tool_calls: Some(5),
@@ -134,6 +194,11 @@ mod tests {
                 description: String::new(),
                 depends_on: vec![],
                 status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,
@@ -172,6 +237,15 @@ mod tests {
                 description: "d".to_string(),
                 depends_on: vec![2],
                 status: PlanTaskStatus::Running,
+                started_at_ms: Some(1000),
+                completed_at_ms: Some(2000),
+                result: Some(TaskResult {
+                    text: "done".to_string(),
+                    tool_call_count: 3,
+                    token_count: Some(100),
+                }),
+                error: None,
+                waiting_on: vec![],
             }],
             estimated_effort: Some(EffortEstimate {
                 tool_calls: Some(1),
@@ -188,5 +262,129 @@ mod tests {
         assert!(json.contains("\"dependsOn\""), "{}", json);
         assert!(json.contains("\"hostMessageId\""), "{}", json);
         assert!(json.contains("\"resolvedAt\""), "{}", json);
+        assert!(json.contains("\"startedAtMs\""), "{}", json);
+        assert!(json.contains("\"completedAtMs\""), "{}", json);
+        assert!(json.contains("\"toolCallCount\""), "{}", json);
+        assert!(json.contains("\"tokenCount\""), "{}", json);
+    }
+
+    #[test]
+    fn pre_6_2a_json_deserializes() {
+        let json = r#"{
+            "id": "old-id",
+            "title": "Old Plan",
+            "tasks": [{
+                "number": 1,
+                "title": "Step",
+                "description": "",
+                "dependsOn": [],
+                "status": "completed"
+            }],
+            "status": "completed",
+            "createdAt": 1700000000
+        }"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.tasks[0].started_at_ms, None);
+        assert_eq!(plan.tasks[0].completed_at_ms, None);
+        assert_eq!(plan.tasks[0].result, None);
+        assert_eq!(plan.tasks[0].error, None);
+        assert!(plan.tasks[0].waiting_on.is_empty());
+        assert_eq!(plan.tasks[0].status, PlanTaskStatus::Completed);
+    }
+
+    #[test]
+    fn new_task_status_variants_serialize() {
+        assert_eq!(
+            serde_json::to_string(&PlanTaskStatus::Waiting).unwrap(),
+            "\"waiting\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PlanTaskStatus::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+    }
+
+    #[test]
+    fn new_plan_status_cancelled_serializes() {
+        assert_eq!(
+            serde_json::to_string(&PlanStatus::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+    }
+
+    #[test]
+    fn task_result_round_trip() {
+        let tr = TaskResult {
+            text: "Completed successfully.".to_string(),
+            tool_call_count: 3,
+            token_count: Some(150),
+        };
+        let json = serde_json::to_string(&tr).unwrap();
+        let back: TaskResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tr);
+        assert!(json.contains("\"toolCallCount\""));
+        assert!(json.contains("\"tokenCount\""));
+    }
+
+    #[test]
+    fn task_result_minimal_skips_token_count() {
+        let tr = TaskResult {
+            text: "done".to_string(),
+            tool_call_count: 0,
+            token_count: None,
+        };
+        let json = serde_json::to_string(&tr).unwrap();
+        assert!(!json.contains("\"tokenCount\""));
+    }
+
+    #[test]
+    fn elapsed_ms_returns_none_when_not_started() {
+        let task = PlanTask {
+            number: 1,
+            title: "t".to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+        };
+        assert_eq!(task.elapsed_ms(), None);
+    }
+
+    #[test]
+    fn elapsed_ms_returns_delta_when_running() {
+        let task = PlanTask {
+            number: 1,
+            title: "t".to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Running,
+            started_at_ms: Some(1000),
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+        };
+        assert!(task.elapsed_ms().unwrap() >= 0);
+    }
+
+    #[test]
+    fn elapsed_ms_returns_fixed_delta_when_terminal() {
+        let task = PlanTask {
+            number: 1,
+            title: "t".to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Completed,
+            started_at_ms: Some(1000),
+            completed_at_ms: Some(5000),
+            result: None,
+            error: None,
+            waiting_on: vec![],
+        };
+        assert_eq!(task.elapsed_ms(), Some(4000));
     }
 }
