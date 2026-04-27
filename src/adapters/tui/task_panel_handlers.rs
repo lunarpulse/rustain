@@ -52,6 +52,8 @@ pub fn handle_open_panel_tasks(
         state.sidebar_visible = false;
         state.sidebar_panel = None;
         state.task_panel_state.drill_down_task = None;
+        state.task_panel_state.expanded_detail = false;
+        state.task_panel_state.detail_scroll_offset = 0;
         // PD1: explicit close suppresses future auto-open for this conversation.
         state
             .task_panel_state
@@ -144,6 +146,8 @@ pub fn handle_plan_execution_started(
         state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
         state.task_panel_state.selected_index = 0;
         state.task_panel_state.drill_down_task = None;
+        state.task_panel_state.expanded_detail = false;
+        state.task_panel_state.detail_scroll_offset = 0;
         state.task_panel_state.auto_open_skipped_for_plan = None;
         state.task_panel_state.task_count = task_count;
         out.suppressed = true;
@@ -168,6 +172,8 @@ pub fn handle_plan_execution_started(
         state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
         state.task_panel_state.selected_index = 0;
         state.task_panel_state.drill_down_task = None;
+        state.task_panel_state.expanded_detail = false;
+        state.task_panel_state.detail_scroll_offset = 0;
         state.task_panel_state.auto_open_skipped_for_plan = None;
         state.task_panel_state.task_count = task_count;
         state.needs_redraw = true;

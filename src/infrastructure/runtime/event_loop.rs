@@ -3168,7 +3168,7 @@ pub async fn run(
                                     tool_input: input_preview,
                                     risk,
                                 };
-                                if state.pending_permission.is_some() {
+                                if state.pending_plan_card.is_some() || state.pending_permission.is_some() {
                                     state.permission_queue.push(new_pending);
                                 } else {
                                     state.pending_permission = Some(new_pending);
@@ -3540,6 +3540,8 @@ pub async fn run(
                                 state.sidebar_visible = true;
                                 state.sidebar_panel = Some(crate::domain::models::visual::PanelType::Tasks);
                                 state.task_panel_state.drill_down_task = None;
+                                state.task_panel_state.expanded_detail = false;
+                                state.task_panel_state.detail_scroll_offset = 0;
                                 state.task_panel_state.task_count = conversation
                                     .plans
                                     .get(&plan_id)
@@ -4324,6 +4326,10 @@ pub async fn run(
                                     }
 
                                     // Story 6-2a: if a plan task was running, advance the runtime.
+                                    // Guard: only call on_turn_complete when a NEW assistant message
+                                    // has arrived since the task started. Without this guard, the
+                                    // 250ms render tick repeatedly classifies the same stale message
+                                    // (the plan proposal) and instantly completes every task.
                                     let executing_plan_info: Option<(String, u32)> = conversation
                                         .plans
                                         .values()
@@ -4332,42 +4338,44 @@ pub async fn run(
                                             p.tasks.iter().find(|t| t.status == PlanTaskStatus::Running).map(|t| (p.id.clone(), t.number))
                                         });
                                     if let Some((pid, task_num)) = executing_plan_info {
-                                        let conv_id = conversation.id.clone();
-                                        let (msg_text, tool_count, any_success, token_count, stop_reason) = conversation
-                                            .messages
-                                            .iter()
-                                            .rev()
-                                            .find(|m| m.role == MessageRole::Assistant)
-                                            .map(|m| {
-                                                let tc = m.tool_calls.len() as u32;
-                                                let success = m.tool_calls.iter().any(|tc_info| {
-                                                    tc_info.result.as_ref().is_some_and(|r| !r.is_error)
-                                                });
-                                                (m.content.clone(), tc, success, m.token_count, m.stop_reason.clone())
-                                            })
-                                            .unwrap_or_else(|| (String::new(), 0, false, None, None));
-                                        let stop = if streaming.is_streaming { None } else { stop_reason };
-                                        let outcome = crate::domain::services::plan_runtime::PlanRuntime::classify_outcome(
-                                            &msg_text, tool_count, any_success, stop,
-                                        );
-                                        let outcome = match &outcome {
-                                            crate::domain::services::plan_runtime::TaskTurnOutcome::Success { .. } => {
-                                                crate::domain::services::plan_runtime::TaskTurnOutcome::Success {
-                                                    result_text: msg_text,
-                                                    tool_call_count: tool_count,
-                                                    token_count,
+                                        let assistant_count = conversation.messages.iter().filter(|m| m.role == MessageRole::Assistant).count();
+                                        if plan_runtime.can_complete_turn(&pid, assistant_count) && !streaming.is_streaming {
+                                            let conv_id = conversation.id.clone();
+                                            let (msg_text, tool_count, any_success, token_count, stop_reason) = conversation
+                                                .messages
+                                                .iter()
+                                                .rev()
+                                                .find(|m| m.role == MessageRole::Assistant)
+                                                .map(|m| {
+                                                    let tc = m.tool_calls.len() as u32;
+                                                    let success = m.tool_calls.iter().any(|tc_info| {
+                                                        tc_info.result.as_ref().is_some_and(|r| !r.is_error)
+                                                    });
+                                                    (m.content.clone(), tc, success, m.token_count, m.stop_reason.clone())
+                                                })
+                                                .unwrap_or_else(|| (String::new(), 0, false, None, None));
+                                            let outcome = crate::domain::services::plan_runtime::PlanRuntime::classify_outcome(
+                                                &msg_text, tool_count, any_success, stop_reason,
+                                            );
+                                            let outcome = match &outcome {
+                                                crate::domain::services::plan_runtime::TaskTurnOutcome::Success { .. } => {
+                                                    crate::domain::services::plan_runtime::TaskTurnOutcome::Success {
+                                                        result_text: msg_text,
+                                                        tool_call_count: tool_count,
+                                                        token_count,
+                                                    }
                                                 }
-                                            }
-                                            other => other.clone(),
-                                        };
-                                        plan_runtime.on_turn_complete(
-                                            &conv_id,
-                                            &pid,
-                                            task_num,
-                                            outcome,
-                                            &mut conversation,
-                                            &app_state.event_bus,
-                                        ).await;
+                                                other => other.clone(),
+                                            };
+                                            plan_runtime.on_turn_complete(
+                                                &conv_id,
+                                                &pid,
+                                                task_num,
+                                                outcome,
+                                                &mut conversation,
+                                                &app_state.event_bus,
+                                            ).await;
+                                        }
                                     }
                                 }
 
@@ -6131,13 +6139,19 @@ fn render(
                                 task,
                                 theme,
                                 app_layout.chat_pane.height,
+                                state.task_panel_state.expanded_detail,
+                                &mut state.task_panel_state.detail_scroll_offset,
                             );
                             skip_chat_render = true;
                         } else {
                             state.task_panel_state.drill_down_task = None;
+                            state.task_panel_state.expanded_detail = false;
+                            state.task_panel_state.detail_scroll_offset = 0;
                         }
                     } else {
                         state.task_panel_state.drill_down_task = None;
+                        state.task_panel_state.expanded_detail = false;
+                        state.task_panel_state.detail_scroll_offset = 0;
                         state.task_panel_state.last_executed_plan_id = None;
                     }
                 }

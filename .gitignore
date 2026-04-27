@@ -11,3 +11,6 @@ Cargo.lock
 
 # python e2e tui tests
 __pycache__
+.opencode
+graphify-out
+AGENTS.md

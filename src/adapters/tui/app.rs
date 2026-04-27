@@ -282,6 +282,8 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
                 state.sidebar_visible = false;
                 state.sidebar_panel = None;
                 state.task_panel_state.drill_down_task = None;
+                state.task_panel_state.expanded_detail = false;
+                state.task_panel_state.detail_scroll_offset = 0;
                 if matches!(state.focus, FocusState::Sidebar { .. }) {
                     state.focus = FocusState::Chat;
                 }
@@ -433,6 +435,18 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         update_reverse_search_matches(state);
         state.needs_redraw = true;
         return InputAction::Consumed;
+    }
+
+    // Inline PlanCard takes priority over Permission overlay when pending (H1 fix).
+    // Without this guard, ApprovalRuntime steals focus to Overlay(Permission) and 'y'
+    // routes to PermissionAllow instead of PlanCardApprove.
+    if state.pending_plan_card.is_some() {
+        match c {
+            'y' => return InputAction::PlanCardApprove,
+            'n' => return InputAction::PlanCardReject,
+            'e' => return InputAction::PlanCardEdit,
+            _ => {}
+        }
     }
 
     // Permission prompt focus: y/n/a/s/f are handled, chat-scroll keys pass through
@@ -674,6 +688,30 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     InputAction::CopyTaskResult { plan_id, task_number }
                 }
                 'r' | 's' | 'e' => InputAction::ReservedKey6_4,
+                // 6-3 AC7: scroll the result body within the drill-down view.
+                // Widget clamps the offset against actual content height.
+                'j' => {
+                    state.task_panel_state.detail_scroll_offset =
+                        state.task_panel_state.detail_scroll_offset.saturating_add(1);
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                'k' => {
+                    state.task_panel_state.detail_scroll_offset =
+                        state.task_panel_state.detail_scroll_offset.saturating_sub(1);
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                'g' => {
+                    state.task_panel_state.detail_scroll_offset = 0;
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                'G' => {
+                    state.task_panel_state.detail_scroll_offset = u16::MAX;
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
                 _ => InputAction::Ignored,
             }
         }
@@ -895,15 +933,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         };
                         state.needs_redraw = true;
                     }
-                    InputAction::Consumed
-                }
-                '\n' if _panel == crate::domain::models::visual::PanelType::Tasks
-                    && state.task_panel_state.task_count > 0 =>
-                {
-                    let task_number = (state.task_panel_state.selected_index + 1) as u32;
-                    state.task_panel_state.drill_down_task = Some(task_number);
-                    state.focus = FocusState::Chat;
-                    state.needs_redraw = true;
                     InputAction::Consumed
                 }
                 'p' | 'x' if _panel == crate::domain::models::visual::PanelType::Tasks => {
@@ -1294,6 +1323,9 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 && state.task_panel_state.drill_down_task.is_some()
             {
                 state.task_panel_state.drill_down_task = None;
+                state.task_panel_state.expanded_detail = false;
+                state.task_panel_state.detail_scroll_offset = 0;
+                state.task_panel_state.detail_scroll_offset = 0;
                 state.focus = FocusState::Sidebar {
                     panel: crate::domain::models::visual::PanelType::Tasks,
                     selected: state.task_panel_state.selected_index,
@@ -1559,9 +1591,36 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. })
+            && state.task_panel_state.task_count > 0 =>
+        {
+            let task_number = (state.task_panel_state.selected_index + 1) as u32;
+            state.task_panel_state.drill_down_task = Some(task_number);
+            state.task_panel_state.expanded_detail = false;
+            state.task_panel_state.detail_scroll_offset = 0;
+            state.focus = FocusState::Chat;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
         DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { .. }) => {
             // Open selected conversation — event loop resolves ID from session_index
             InputAction::OpenSidebarConversation
+        }
+
+        // 6-3 AC7: inside the task drill-down view, Enter toggles the
+        // result body between half-viewport and full-viewport rendering.
+        // Must precede the chat tool-block arm below so the drill-down
+        // doesn't fall through to it (focus is still `Chat` post-drill-in).
+        DomainKey::Enter
+            if state.focus == FocusState::Chat
+                && state.task_panel_state.drill_down_task.is_some() =>
+        {
+            state.task_panel_state.expanded_detail =
+                !state.task_panel_state.expanded_detail;
+            state.task_panel_state.detail_scroll_offset = 0;
+            state.needs_redraw = true;
+            InputAction::Consumed
         }
 
         DomainKey::Enter if state.focus == FocusState::Chat => {
@@ -1630,6 +1689,69 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
         DomainKey::ShiftTab if state.focus != FocusState::Input => InputAction::SwitchToPrevTab,
         DomainKey::ShiftTab if state.focus == FocusState::Input => InputAction::CycleMode,
+
+        // Up/Down arrow keys for task panel navigation (mirror j/k behavior)
+        // 6-3 AC7: arrow-key scroll inside the task drill-down result body.
+        // Mirrors the j/k char handlers above; widget clamps the offset.
+        DomainKey::Down
+            if state.focus == FocusState::Chat
+                && state.task_panel_state.drill_down_task.is_some() =>
+        {
+            state.task_panel_state.detail_scroll_offset =
+                state.task_panel_state.detail_scroll_offset.saturating_add(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Up
+            if state.focus == FocusState::Chat
+                && state.task_panel_state.drill_down_task.is_some() =>
+        {
+            state.task_panel_state.detail_scroll_offset =
+                state.task_panel_state.detail_scroll_offset.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
+        DomainKey::Up if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. }) => {
+            let moved = if state.task_panel_state.selected_index > 0 {
+                state.task_panel_state.selected_index -= 1;
+                state.sidebar_selected = state.task_panel_state.selected_index;
+                true
+            } else {
+                false
+            };
+            if moved {
+                state.focus = FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    selected: state.sidebar_selected,
+                };
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Down if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. }) => {
+            let moved = if state.task_panel_state.task_count > 0 {
+                let max = state.task_panel_state.task_count.saturating_sub(1);
+                if state.task_panel_state.selected_index < max {
+                    state.task_panel_state.selected_index += 1;
+                    state.sidebar_selected = state.task_panel_state.selected_index;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if moved {
+                state.focus = FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    selected: state.sidebar_selected,
+                };
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+
         _ => InputAction::Ignored,
     }
 }

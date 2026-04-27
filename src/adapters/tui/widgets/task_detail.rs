@@ -57,6 +57,8 @@ pub fn render(
     task: &PlanTask,
     theme: &crate::adapters::tui::theme::Theme,
     _vp_height: u16,
+    expanded: bool,
+    scroll_offset: &mut u16,
 ) {
     Clear.render(area, buf);
 
@@ -117,7 +119,14 @@ pub fn render(
         // lists, and inline markers render the same way they do in chat. The
         // pipeline returns one `Line` per visual row; we cap to
         // `max_result_lines` rows and let the body Rect contain them.
-        let max_result_lines = (inner.height / 2).saturating_sub(4).max(1) as usize;
+        // 6-3 AC7: when `expanded` is set, give the body all remaining
+        // viewport rows minus a 4-row reserve for the hint, blank, tokens
+        // summary, and action row. Otherwise cap to half the viewport.
+        let max_result_lines = if expanded {
+            max_y.saturating_sub(y).saturating_sub(4).max(1) as usize
+        } else {
+            (inner.height / 2).saturating_sub(4).max(1) as usize
+        };
         let body_height = (max_result_lines as u16).min(max_y.saturating_sub(y));
         let lines = markdown::render(
             &result.text,
@@ -125,10 +134,18 @@ pub fn render(
             theme,
             &markdown::RenderOptions::completed(),
         );
-        let truncated = lines.len() > body_height as usize;
+        let total = lines.len();
+        // 6-3 AC7: clamp the caller-provided scroll offset against the body
+        // height so the last line stays in view when scrolling past the end
+        // (j/G), and `0` always parks at the top.
+        let max_offset = total.saturating_sub(body_height as usize);
+        let clamped = (*scroll_offset as usize).min(max_offset);
+        *scroll_offset = clamped as u16;
+        let end = (clamped + body_height as usize).min(total);
+        let truncated = total > body_height as usize;
         if body_height > 0 && y < max_y {
             let visible: Vec<Line<'static>> =
-                lines.into_iter().take(body_height as usize).collect();
+                lines.into_iter().skip(clamped).take(body_height as usize).collect();
             Paragraph::new(visible)
                 .wrap(Wrap { trim: false })
                 .render(
@@ -142,11 +159,24 @@ pub fn render(
                 );
             y += body_height;
         }
-        if truncated && y < max_y {
+        if y < max_y {
+            // Combined position + key hint. Always show position when the
+            // body is truncated; show key hints unconditionally so the user
+            // knows the affordance even at the top.
+            let pos = if truncated {
+                format!("({}-{} / {})  ", clamped + 1, end, total)
+            } else {
+                String::new()
+            };
+            let keys = if expanded {
+                "[Enter] collapse  [j/k] scroll"
+            } else {
+                "[Enter] expand  [j/k] scroll"
+            };
             buf.set_string(
                 inner.x,
                 y,
-                "... [Enter] expand",
+                &format!("{}{}", pos, keys),
                 Style::default().fg(theme.colors.fg_muted),
             );
             y += 1;
@@ -265,15 +295,30 @@ mod tests {
     }
 
     fn render_to_string(area: Rect, plan: &Plan, task: &PlanTask) -> String {
+        render_to_string_ex(area, plan, task, false)
+    }
+
+    fn render_to_string_ex(area: Rect, plan: &Plan, task: &PlanTask, expanded: bool) -> String {
+        render_to_string_full(area, plan, task, expanded, 0).0
+    }
+
+    fn render_to_string_full(
+        area: Rect,
+        plan: &Plan,
+        task: &PlanTask,
+        expanded: bool,
+        scroll: u16,
+    ) -> (String, u16) {
         let mut buf = Buffer::empty(area);
-        render(area, &mut buf, plan, task, &test_theme(), area.height);
-        let mut s = String::new();
+        let mut clamped = scroll;
+        render(area, &mut buf, plan, task, &test_theme(), area.height, expanded, &mut clamped);
+        let mut out = String::new();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
-                s.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
+                out.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
             }
         }
-        s
+        (out, clamped)
     }
 
     #[test]
@@ -310,6 +355,64 @@ mod tests {
         let task = make_task(4, "Active task", PlanTaskStatus::Running);
         let content = render_to_string(Rect::new(0, 0, 80, 24), &plan, &task);
         assert!(content.contains("Task 4"));
+    }
+
+    #[test]
+    fn ac7_expanded_renders_more_result_lines_than_collapsed() {
+        // 6-3 AC7: when `expanded == true`, the body must render more
+        // lines than the half-viewport-capped collapsed view.
+        let plan = make_plan();
+        let mut task = make_task(7, "Long result", PlanTaskStatus::Completed);
+        let body: String = (1..=40)
+            .map(|i| format!("line-marker-{:02}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        task.result = Some(TaskResult { text: body, tool_call_count: 0, token_count: None });
+
+        let collapsed = render_to_string_ex(Rect::new(0, 0, 80, 30), &plan, &task, false);
+        let expanded = render_to_string_ex(Rect::new(0, 0, 80, 30), &plan, &task, true);
+
+        let count_markers = |s: &str| (1..=40)
+            .filter(|i| s.contains(&format!("line-marker-{:02}", i)))
+            .count();
+        let collapsed_n = count_markers(&collapsed);
+        let expanded_n = count_markers(&expanded);
+        assert!(
+            expanded_n > collapsed_n,
+            "expanded should render more rows than collapsed (collapsed={}, expanded={})",
+            collapsed_n, expanded_n
+        );
+        assert!(collapsed.contains("[Enter] expand"));
+        assert!(expanded.contains("[Enter] collapse"));
+    }
+
+    #[test]
+    fn ac7_scroll_offset_reveals_later_lines_and_clamps_at_end() {
+        // 6-3 AC7: rendering at scroll=0 hides the tail markers, scrolling
+        // forward reveals them, and scrolling past the end clamps so the
+        // last line is still in view (the widget writes the clamped value
+        // back through the &mut u16).
+        let plan = make_plan();
+        let mut task = make_task(8, "Long result", PlanTaskStatus::Completed);
+        let body: String = (1..=40)
+            .map(|i| format!("line-marker-{:02}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        task.result = Some(TaskResult { text: body, tool_call_count: 0, token_count: None });
+        let area = Rect::new(0, 0, 80, 30);
+
+        let (top, top_scroll) = render_to_string_full(area, &plan, &task, true, 0);
+        assert_eq!(top_scroll, 0);
+        assert!(top.contains("line-marker-01"), "top view shows first line");
+        assert!(!top.contains("line-marker-40"), "top view does not show last line");
+
+        let (mid, _) = render_to_string_full(area, &plan, &task, true, 10);
+        assert!(mid.contains("line-marker-15"), "scrolled view reveals middle line");
+
+        // Scroll way past the end — widget should clamp and still show the tail.
+        let (end, end_scroll) = render_to_string_full(area, &plan, &task, true, u16::MAX);
+        assert!(end_scroll < 40, "clamped offset stays within content");
+        assert!(end.contains("line-marker-40"), "tail visible when scrolled to end");
     }
 
     #[test]

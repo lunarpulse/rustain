@@ -599,6 +599,15 @@ pub struct TaskPanelState {
     pub last_executed_plan_id: Option<String>,
     pub auto_open_skipped_for_plan: Option<String>,
     pub drill_down_task: Option<u32>,
+    /// 6-3 AC7: when `true`, the drill-down `task_detail` view renders the
+    /// full result body instead of the half-viewport cap. Toggled by Enter
+    /// while inside the drill-down. Reset whenever `drill_down_task` clears.
+    pub expanded_detail: bool,
+    /// 6-3 AC7: scroll offset (in rendered rows) into the result body within
+    /// the drill-down view. j/Down advance, k/Up retreat. The widget clamps
+    /// this against `lines.len() - body_height` on each render. Reset on
+    /// drill-in, drill-out, and the Enter expand/collapse toggle.
+    pub detail_scroll_offset: u16,
     pub task_count: usize,
     /// Conversations where the user explicitly closed the Tasks panel via
     /// `Ctrl+X, T`. Subsequent `PlanExecutionStarted` events suppress auto-open
@@ -619,6 +628,8 @@ impl Default for TaskPanelState {
             last_executed_plan_id: None,
             auto_open_skipped_for_plan: None,
             drill_down_task: None,
+            expanded_detail: false,
+            detail_scroll_offset: 0,
             task_count: 0,
             auto_open_suppressed_conversations: std::collections::HashSet::new(),
             auto_open_hint_shown_for: std::collections::HashSet::new(),

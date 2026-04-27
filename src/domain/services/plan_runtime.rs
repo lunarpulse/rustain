@@ -23,6 +23,9 @@ pub struct PlanRuntimeState {
     pub conversation_id: String,
     pub plan_id: String,
     pub task_cancels: BTreeMap<u32, CancellationToken>,
+    /// Number of assistant messages in the conversation when the current task started.
+    /// Used to detect when a new assistant response has arrived for this task.
+    pub task_start_assistant_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -83,10 +86,12 @@ impl PlanRuntime {
             }
         }
 
+        let assistant_count = conversation.messages.iter().filter(|m| m.role == MessageRole::Assistant).count();
         let state = PlanRuntimeState {
             conversation_id: conversation_id.clone(),
             plan_id: plan_id.clone(),
             task_cancels: BTreeMap::new(),
+            task_start_assistant_count: assistant_count,
         };
 
         {
@@ -344,6 +349,16 @@ impl PlanRuntime {
             conversation_id: s.conversation_id.clone(),
             plan_id: s.plan_id.clone(),
             task_cancels: s.task_cancels.clone(),
+            task_start_assistant_count: s.task_start_assistant_count,
+        })
+    }
+
+    /// Returns true if the running task for this plan has received a new assistant
+    /// message since it started — i.e. the turn is ready to be classified.
+    pub fn can_complete_turn(&self, plan_id: &str, current_assistant_count: usize) -> bool {
+        let plans = self.plans.read().unwrap();
+        plans.get(plan_id).map_or(false, |s| {
+            current_assistant_count > s.task_start_assistant_count
         })
     }
 

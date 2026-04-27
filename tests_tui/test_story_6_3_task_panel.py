@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from harness import RustainTUI
 from keys import ESC, ENTER, CTRL_X
 
@@ -34,7 +36,7 @@ PROMPT_TWO_TASK_PLAN = (
     "Include estimated_tool_calls=2 and estimated_seconds=10."
 )
 
-SIDEBAR_ENTER = "\n"
+
 
 
 def _send_chord_ctrl_x_t(tui: RustainTUI) -> None:
@@ -124,16 +126,7 @@ def test_panel_navigation(tui: RustainTUI):
 @pytest.mark.slow
 @pytest.mark.story_6_3
 def test_drill_down(tui: RustainTUI):
-    """Enter on a task in the panel drills down to detail view replacing chat.
-
-    KNOWN BUG: The drill-down handler (app.rs:882) matches on '\n' (char
-    event) but crossterm maps both \\r and \\n to KeyCode::Enter which
-    becomes DomainKey::Enter (special key).  The Sidebar Enter handler at
-    line 1542 catches DomainKey::Enter first and routes to
-    OpenSidebarConversation instead of drill-down.  Until this is fixed,
-    we verify the sidebar opens and shows tasks, accepting that the
-    drill-down navigation is blocked by the Enter key mismatch.
-    """
+    """Enter on a task in the panel drills down to detail view replacing chat."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
     _wait_for_plan_card(tui)
     tui.send("y")
@@ -143,7 +136,7 @@ def test_drill_down(tui: RustainTUI):
 
     _ensure_task_panel_open(tui)
 
-    tui.send(SIDEBAR_ENTER)
+    tui.send(ENTER)
     tui.wait(0.5)
     screen = tui.get_screen_text()
     if "[Esc] Back" in screen or "drill_down" in screen.lower():
@@ -151,9 +144,9 @@ def test_drill_down(tui: RustainTUI):
             f"Expected task detail view after Enter. Screen:\n{screen}"
         )
     else:
-        pytest.skip(
-            "Drill-down not triggered — known Enter key mismatch bug "
-            "(app.rs:882 uses char '\\n' but crossterm generates DomainKey::Enter)"
+        pytest.fail(
+            "Drill-down not triggered — expected task detail view after Enter. "
+            f"Screen:\n{screen}"
         )
 
 
@@ -164,11 +157,7 @@ def test_drill_down(tui: RustainTUI):
 @pytest.mark.slow
 @pytest.mark.story_6_3
 def test_drill_down_back(tui: RustainTUI):
-    """Esc from drill-down detail view returns to the sidebar panel.
-
-    Depends on drill-down working; skips if the Enter key mismatch bug
-    prevents entering the detail view.
-    """
+    """Esc from drill-down detail view returns to the sidebar panel."""
     tui.send_message(PROMPT_TWO_TASK_PLAN)
     _wait_for_plan_card(tui)
     tui.send("y")
@@ -178,13 +167,13 @@ def test_drill_down_back(tui: RustainTUI):
 
     _ensure_task_panel_open(tui)
 
-    tui.send(SIDEBAR_ENTER)
+    tui.send(ENTER)
     tui.wait(0.5)
     screen = tui.get_screen_text()
     if "Task" not in screen or "[Esc] Back" not in screen:
-        pytest.skip(
-            "Drill-down not triggered — known Enter key mismatch bug "
-            "(app.rs:882 uses char '\\n' but crossterm generates DomainKey::Enter)"
+        pytest.fail(
+            "Drill-down not triggered — expected task detail view after Enter. "
+            f"Screen:\n{screen}"
         )
 
     tui.send(ESC)
@@ -199,11 +188,7 @@ def test_drill_down_back(tui: RustainTUI):
 @pytest.mark.slow
 @pytest.mark.story_6_3
 def test_failed_task_action_row(tui: RustainTUI):
-    """Detail view for a Failed task shows [r] Retry, [s] Skip, [e] Edit task.
-
-    Depends on drill-down working; skips if the Enter key mismatch bug
-    prevents entering the detail view.
-    """
+    """Detail view for a Failed task shows [r] Retry, [s] Skip, [e] Edit task."""
     prompt = (
         "Use the propose_plan tool to propose a plan titled 'Fail Panel Test' "
         "with two tasks: 1. Read the file /nonexistent/path/fail.txt "
@@ -224,13 +209,24 @@ def test_failed_task_action_row(tui: RustainTUI):
 
     _ensure_task_panel_open(tui)
 
-    tui.send(SIDEBAR_ENTER)
+    # The LLM may reorder tasks; navigate to the failed task (✗ icon) if needed.
+    panel_screen = tui.get_screen_text()
+    if "\u2717" not in panel_screen:
+        pytest.skip("No failed task visible in panel — LLM may have reordered or not failed.")
+    # If first visible task is not the failed one, navigate down.
+    lines = panel_screen.splitlines()
+    first_task_line = next((ln for ln in lines if ln.strip().startswith("1.")), "")
+    if "\u2717" not in first_task_line:
+        tui.send("j")
+        tui.wait(0.3)
+
+    tui.send(ENTER)
     tui.wait(0.5)
     screen = tui.get_screen_text()
     if "[Esc] Back" not in screen:
-        pytest.skip(
-            "Drill-down not triggered — known Enter key mismatch bug "
-            "(app.rs:882 uses char '\\n' but crossterm generates DomainKey::Enter)"
+        pytest.fail(
+            "Drill-down not triggered — expected task detail view after Enter. "
+            f"Screen:\n{screen}"
         )
     has_action_row = (
         "[r]" in screen or "[s]" in screen or "[e]" in screen
@@ -257,13 +253,13 @@ def test_reserved_key_notice(tui: RustainTUI):
 
     _ensure_task_panel_open(tui)
 
-    tui.send(SIDEBAR_ENTER)
+    tui.send(ENTER)
     tui.wait(0.5)
     screen = tui.get_screen_text()
     if "Task" not in screen or "[Esc] Back" not in screen:
-        pytest.skip(
-            "Drill-down not triggered — known Enter key mismatch bug "
-            "(app.rs:882 uses char '\\n' but crossterm generates DomainKey::Enter)"
+        pytest.fail(
+            "Drill-down not triggered — expected task detail view after Enter. "
+            f"Screen:\n{screen}"
         )
 
     tui.send("r")
@@ -334,3 +330,136 @@ def test_auto_open_on_execution_started(tui: RustainTUI):
             "Plan completed before auto-open could be observed — race condition; "
             "panel content verified by test_drill_down"
         )
+
+
+# ── Scenario 11: Task detail views show distinct content per task ───────────
+
+
+PROMPT_AGI_TREND_PLAN = (
+    "Use the propose_plan tool to propose a plan titled 'AGI Trend Search' "
+    "with three tasks: 1. Search the latest news about AGI developments in 2025 "
+    "2. Summarize key milestones from major AI labs "
+    "3. List potential risks and opportunities. "
+    "Include estimated_tool_calls=3 and estimated_seconds=15."
+)
+
+
+@pytest.mark.requires_api
+@pytest.mark.slow
+@pytest.mark.story_6_3
+def test_task_detail_content_varies_per_task(tui: RustainTUI):
+    """Drilling into different tasks must show different detail content.
+
+    If every task detail view renders identical text, the lookup or render
+    pipeline is broken — this test catches that bug.
+    """
+    tui.send_message(PROMPT_AGI_TREND_PLAN)
+    _wait_for_plan_card(tui)
+    tui.send("y")
+
+    tui.wait_for_screen("Plan complete:", timeout=180.0)
+    tui.wait_for_idle()
+
+    _ensure_task_panel_open(tui)
+
+    # Capture detail content for the first two tasks and compare.
+    contents: list[str] = []
+    for _ in range(2):
+        tui.send(ENTER)
+        tui.wait(0.5)
+        screen = tui.get_screen_text()
+        if "[Esc] Back" not in screen:
+            pytest.fail(
+                "Drill-down not triggered — expected task detail view after Enter. "
+                f"Screen:\n{screen}"
+            )
+        contents.append(screen)
+        tui.send(ESC)
+        tui.wait(0.5)
+        # Move to next task for the next iteration
+        tui.send("j")
+        tui.wait(0.3)
+
+    assert contents[0] != contents[1], (
+        "Task detail views for different tasks show identical content — "
+        f"this indicates a drill-down bug.\n\n"
+        f"--- Task 1 detail ---\n{contents[0]}\n\n"
+        f"--- Task 2 detail ---\n{contents[1]}"
+    )
+
+
+# ── Scenario 12: Task detail copied content differs per task ────────────────
+
+
+PROMPT_AGI_PLAN = (
+    "Use the propose_plan tool to propose a plan titled 'AGI Trend Search' "
+    "with two tasks: 1. Search the latest news about AGI developments in 2025 "
+    "2. Summarize key milestones from major AI labs. "
+    "Include estimated_tool_calls=2 and estimated_seconds=10."
+)
+
+CLIPBOARD_FALLBACK = Path.home() / ".rustain" / "clipboard.txt"
+
+
+@pytest.mark.requires_api
+@pytest.mark.slow
+@pytest.mark.story_6_3
+def test_task_detail_copy_result_differs_per_task(tui: RustainTUI):
+    """Copy result ('c') from each task detail view must yield different text.
+
+    This test bypasses screen-capture ambiguity and reads the actual payload
+    that the detail view would copy, via the clipboard fallback file.
+    """
+    tui.send_message(PROMPT_AGI_PLAN)
+    _wait_for_plan_card(tui)
+    tui.send("y")
+
+    tui.wait_for_screen("Plan complete:", timeout=180.0)
+    tui.wait_for_idle()
+
+    _ensure_task_panel_open(tui)
+
+    copied_texts: list[str] = []
+    for _ in range(2):
+        tui.send(ENTER)
+        tui.wait(0.5)
+        screen = tui.get_screen_text()
+        if "[Esc] Back" not in screen:
+            pytest.fail(
+                "Drill-down not triggered — expected task detail view after Enter. "
+                f"Screen:\n{screen}"
+            )
+
+        # Clear any stale clipboard file so we know the next 'c' really wrote it
+        if CLIPBOARD_FALLBACK.exists():
+            CLIPBOARD_FALLBACK.unlink()
+
+        # Copy the task result / error / fallback text via 'c'
+        tui.send("c")
+        tui.wait(0.5)
+
+        # Check what happened after pressing 'c'
+        post_copy_screen = tui.get_screen_text()
+        if "Nothing to copy" in post_copy_screen:
+            # Task has no result/error; use the header line from the screen instead
+            header_line = next(
+                (ln for ln in post_copy_screen.splitlines() if "Task" in ln and "Esc" not in ln),
+                ""
+            )
+            copied_texts.append(header_line)
+        elif CLIPBOARD_FALLBACK.exists():
+            copied_texts.append(CLIPBOARD_FALLBACK.read_text())
+        else:
+            copied_texts.append("")
+
+        tui.send(ESC)
+        tui.wait(0.5)
+        tui.send("j")
+        tui.wait(0.3)
+
+    assert copied_texts[0] != copied_texts[1], (
+        "Task detail content is identical for different tasks — "
+        f"this indicates the drill-down is not selecting the correct task.\n\n"
+        f"--- Task 1 content ---\n{copied_texts[0]}\n\n"
+        f"--- Task 2 content ---\n{copied_texts[1]}"
+    )

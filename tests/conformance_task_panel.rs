@@ -5,14 +5,16 @@
 
 use std::collections::HashMap;
 
-use rustain::domain::events::AppEvent;
-use rustain::domain::models::{
-    Conversation, NoticeLevel, Plan, PlanStatus, PlanTask, PlanTaskStatus,
-    generate_conversation_id,
-};
+use rustain::adapters::tui::app::handle_input;
 use rustain::adapters::tui::state::{TaskPanelState, TuiState};
 use rustain::adapters::tui::color_detect::ColorCapability;
 use rustain::adapters::tui::widgets::task_panel::{render_task_panel, resolve_panel_plan};
+use rustain::domain::events::{AppEvent, DomainInputEvent, DomainKey};
+use rustain::domain::models::{
+    Conversation, FocusState, NoticeLevel, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+    generate_conversation_id,
+};
+use rustain::domain::models::visual::PanelType;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -255,7 +257,6 @@ use rustain::adapters::tui::task_panel_handlers::{
     handle_plan_task_status_changed, is_failed_drill_down, resolve_copy_task_payload,
 };
 use rustain::domain::models::plan::TaskResult;
-use rustain::domain::models::visual::PanelType;
 
 const SIDEBAR_MIN: u16 = 120;
 
@@ -563,4 +564,81 @@ fn pd4_auto_panels_config_validates_known_values() {
     assert!(cfg.validate().is_ok());
     cfg.on_task_plan = "history".into();
     assert!(cfg.validate().is_err());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AC6: Enter dispatch on Tasks sidebar sets correct drill_down_task
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ac6_enter_on_task_1_drills_into_task_1() {
+    let mut state = TuiState::new(160, 24);
+    state.task_panel_state.task_count = 3;
+    state.task_panel_state.selected_index = 0;
+    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 0 };
+    let _action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert_eq!(state.task_panel_state.drill_down_task, Some(1));
+}
+
+#[test]
+fn ac7_enter_in_task_detail_toggles_expanded() {
+    // 6-3 AC7: with focus already on the drill-down view, pressing Enter
+    // toggles `expanded_detail` between false and true. Drilling in resets
+    // the flag, and Esc-back clears it again.
+    let mut state = TuiState::new(160, 24);
+    state.task_panel_state.task_count = 1;
+    state.task_panel_state.selected_index = 0;
+    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 0 };
+
+    // Drill in.
+    let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert_eq!(state.task_panel_state.drill_down_task, Some(1));
+    assert!(!state.task_panel_state.expanded_detail, "expanded resets on drill-in");
+
+    // First Enter inside drill-down: expand.
+    let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert!(state.task_panel_state.expanded_detail, "Enter expands result");
+    assert_eq!(state.task_panel_state.drill_down_task, Some(1), "still drilled in");
+
+    // Second Enter: collapse.
+    let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert!(!state.task_panel_state.expanded_detail, "Enter collapses result");
+
+    // Esc back: clears drill-down and expanded flag together.
+    state.task_panel_state.expanded_detail = true;
+    let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert_eq!(state.task_panel_state.drill_down_task, None);
+    assert!(!state.task_panel_state.expanded_detail, "expanded clears on Esc");
+}
+
+#[test]
+fn ac6_enter_on_task_2_drills_into_task_2() {
+    let mut state = TuiState::new(160, 24);
+    state.task_panel_state.task_count = 3;
+    state.task_panel_state.selected_index = 1;
+    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 1 };
+    let _action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+    assert_eq!(state.task_panel_state.drill_down_task, Some(2));
+}
+
+#[test]
+fn ac6_arrow_down_navigates_task_panel() {
+    let mut state = TuiState::new(160, 24);
+    state.task_panel_state.task_count = 3;
+    state.task_panel_state.selected_index = 0;
+    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 0 };
+    let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Down));
+    assert_eq!(state.task_panel_state.selected_index, 1);
+    assert_eq!(state.sidebar_selected, 1);
+}
+
+#[test]
+fn ac6_arrow_up_navigates_task_panel() {
+    let mut state = TuiState::new(160, 24);
+    state.task_panel_state.task_count = 3;
+    state.task_panel_state.selected_index = 2;
+    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 2 };
+    let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Up));
+    assert_eq!(state.task_panel_state.selected_index, 1);
+    assert_eq!(state.sidebar_selected, 1);
 }
