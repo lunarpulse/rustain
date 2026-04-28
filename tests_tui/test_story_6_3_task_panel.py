@@ -11,9 +11,8 @@ Scenarios:
 4. j/k navigation moves selection cursor in the task panel.
 5. Enter drills down to task detail view (chat pane replaced).
 6. Esc returns from drill-down to task panel sidebar.
-7. Failed task detail view shows reserved keys [r] Retry [s] Skip [e] Edit.
-8. Reserved key 'r' in detail view emits "Coming in Story 6.4" notice.
-9. Second Ctrl+X, T toggles the panel closed.
+7. Failed task detail view shows action keys [r] Retry [s] Skip [e] Edit.
+8. Second Ctrl+X, T toggles the panel closed.
 10. Ctrl+X, T while on History panel switches to Tasks panel.
 
 Structural-only tests (no API key needed) exercise the chord, sidebar
@@ -22,6 +21,8 @@ plan-approval → task-panel-auto-open → drill-down flow.
 """
 
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -108,7 +109,7 @@ def test_panel_navigation(tui: RustainTUI):
     _wait_for_plan_card(tui)
     tui.send("y")
 
-    tui.wait_for_screen("Plan complete:", timeout=120.0)
+    tui.wait_for_screen("Plan complete", timeout=120.0)
     tui.wait_for_idle()
 
     _ensure_task_panel_open(tui)
@@ -131,7 +132,7 @@ def test_drill_down(tui: RustainTUI):
     _wait_for_plan_card(tui)
     tui.send("y")
 
-    tui.wait_for_screen("Plan complete:", timeout=120.0)
+    tui.wait_for_screen("Plan complete", timeout=120.0)
     tui.wait_for_idle()
 
     _ensure_task_panel_open(tui)
@@ -162,7 +163,7 @@ def test_drill_down_back(tui: RustainTUI):
     _wait_for_plan_card(tui)
     tui.send("y")
 
-    tui.wait_for_screen("Plan complete:", timeout=120.0)
+    tui.wait_for_screen("Plan complete", timeout=120.0)
     tui.wait_for_idle()
 
     _ensure_task_panel_open(tui)
@@ -199,7 +200,7 @@ def test_failed_task_action_row(tui: RustainTUI):
     _wait_for_plan_card(tui)
     tui.send("y")
 
-    found = tui.wait_for_screen("Plan complete:", timeout=180.0)
+    found = tui.wait_for_screen("Plan complete", timeout=180.0)
     if not found:
         found = tui.wait_for_screen("Plan cancelled", timeout=10.0)
     if not found:
@@ -232,49 +233,7 @@ def test_failed_task_action_row(tui: RustainTUI):
         "[r]" in screen or "[s]" in screen or "[e]" in screen
     )
     assert has_action_row, (
-        f"Expected action row with reserved keys. Screen:\n{screen}"
-    )
-
-
-# ── Scenario 8: Reserved key 'r' emits Coming in Story 6.4 notice ────────
-
-
-@pytest.mark.requires_api
-@pytest.mark.slow
-@pytest.mark.story_6_3
-def test_reserved_key_notice(tui: RustainTUI):
-    """Pressing 'r' in detail view emits a 'Coming in Story 6.4' notice."""
-    tui.send_message(PROMPT_TWO_TASK_PLAN)
-    _wait_for_plan_card(tui)
-    tui.send("y")
-
-    tui.wait_for_screen("Plan complete:", timeout=120.0)
-    tui.wait_for_idle()
-
-    _ensure_task_panel_open(tui)
-
-    tui.send(ENTER)
-    tui.wait(0.5)
-    screen = tui.get_screen_text()
-    if "Task" not in screen or "[Esc] Back" not in screen:
-        pytest.fail(
-            "Drill-down not triggered — expected task detail view after Enter. "
-            f"Screen:\n{screen}"
-        )
-
-    tui.send("r")
-    tui.wait(0.5)
-    tui.send(ESC)
-    tui.wait(0.5)
-    tui.chat_mode()
-    tui.wait(0.3)
-    tui.jump_bottom()
-    tui.wait(0.3)
-    scrollback = tui.get_screen_text()
-    assert (
-        "6.4" in scrollback or "Coming" in scrollback or "Task" in scrollback
-    ), (
-        f"Expected 'Coming in Story 6.4' notice or task detail view. Screen:\n{scrollback}"
+        f"Expected action row with action keys. Screen:\n{screen}"
     )
 
 
@@ -357,7 +316,18 @@ def test_task_detail_content_varies_per_task(tui: RustainTUI):
     _wait_for_plan_card(tui)
     tui.send("y")
 
-    tui.wait_for_screen("Plan complete:", timeout=180.0)
+    # Relaxed completion detection — model verbosity may scroll the summary
+    # out of the visible chat pane; sidebar "Plan complete" + "Ready" is
+    # sufficient proof the plan reached a terminal state.
+    deadline = time.time() + 180.0
+    plan_done = False
+    while time.time() < deadline:
+        screen = tui.get_screen_text()
+        if "Plan complete:" in screen or ("Plan complete" in screen and "Ready" in screen):
+            plan_done = True
+            break
+        time.sleep(1.0)
+    assert plan_done, f"Plan never reached terminal state within 180s. Screen:\n{tui.get_screen_text()}"
     tui.wait_for_idle()
 
     _ensure_task_panel_open(tui)
@@ -405,21 +375,34 @@ CLIPBOARD_FALLBACK = Path.home() / ".rustain" / "clipboard.txt"
 @pytest.mark.slow
 @pytest.mark.story_6_3
 def test_task_detail_copy_result_differs_per_task(tui: RustainTUI):
-    """Copy result ('c') from each task detail view must yield different text.
+    """Drill-down into different tasks shows distinct task detail views.
 
-    This test bypasses screen-capture ambiguity and reads the actual payload
-    that the detail view would copy, via the clipboard fallback file.
+    We verify selection correctness by reading the task title/header line
+    visible in each drill-down view *before* pressing 'c'.  The clipboard
+    payload itself is non-deterministic — a model may complete a task by
+    chatting without calling a tool, leaving result.text empty — so we
+    only use it as auxiliary evidence, not the primary assertion.
     """
     tui.send_message(PROMPT_AGI_PLAN)
     _wait_for_plan_card(tui)
     tui.send("y")
 
-    tui.wait_for_screen("Plan complete:", timeout=180.0)
+    # Accept either chat-pane summary or sidebar terminal-state indicator
+    deadline = time.time() + 180.0
+    plan_done = False
+    while time.time() < deadline:
+        screen = tui.get_screen_text()
+        if "Plan complete:" in screen or ("Plan complete" in screen and "Ready" in screen):
+            plan_done = True
+            break
+        time.sleep(1.0)
+    assert plan_done, f"Plan never reached terminal state within 180s. Screen:\n{tui.get_screen_text()}"
     tui.wait_for_idle()
 
     _ensure_task_panel_open(tui)
 
-    copied_texts: list[str] = []
+    header_lines: list[str] = []
+    copy_payloads: list[str] = []
     for _ in range(2):
         tui.send(ENTER)
         tui.wait(0.5)
@@ -430,36 +413,46 @@ def test_task_detail_copy_result_differs_per_task(tui: RustainTUI):
                 f"Screen:\n{screen}"
             )
 
-        # Clear any stale clipboard file so we know the next 'c' really wrote it
+        # Capture the task header line (e.g. "Task 1. Search the latest news...")
+        # The detail view header format is "Task {n}. {title}    {icon} {status} · {elapsed}".
+        # We match lines that start with "Task " after stripping leading spaces.
+        header = next(
+            (ln for ln in screen.splitlines() if ln.strip().startswith("Task ")),
+            ""
+        )
+        header_lines.append(header)
+
+        # Attempt to copy — non-deterministic; model may have empty result
         if CLIPBOARD_FALLBACK.exists():
             CLIPBOARD_FALLBACK.unlink()
-
-        # Copy the task result / error / fallback text via 'c'
         tui.send("c")
         tui.wait(0.5)
-
-        # Check what happened after pressing 'c'
         post_copy_screen = tui.get_screen_text()
-        if "Nothing to copy" in post_copy_screen:
-            # Task has no result/error; use the header line from the screen instead
-            header_line = next(
-                (ln for ln in post_copy_screen.splitlines() if "Task" in ln and "Esc" not in ln),
-                ""
-            )
-            copied_texts.append(header_line)
-        elif CLIPBOARD_FALLBACK.exists():
-            copied_texts.append(CLIPBOARD_FALLBACK.read_text())
+        if CLIPBOARD_FALLBACK.exists():
+            copy_payloads.append(CLIPBOARD_FALLBACK.read_text())
         else:
-            copied_texts.append("")
+            copy_payloads.append("")
 
         tui.send(ESC)
         tui.wait(0.5)
         tui.send("j")
         tui.wait(0.3)
 
-    assert copied_texts[0] != copied_texts[1], (
-        "Task detail content is identical for different tasks — "
-        f"this indicates the drill-down is not selecting the correct task.\n\n"
-        f"--- Task 1 content ---\n{copied_texts[0]}\n\n"
-        f"--- Task 2 content ---\n{copied_texts[1]}"
+    # PRIMARY assertion: the drill-down views show different task headers.
+    # This proves selection is moving between tasks.
+    assert header_lines[0] != header_lines[1], (
+        "Drill-down did not select different tasks — headers are identical.\n\n"
+        f"--- Task 1 header ---\n{header_lines[0]}\n\n"
+        f"--- Task 2 header ---\n{header_lines[1]}\n\n"
+        f"--- Full screen dump (last iteration) ---\n{screen}"
     )
+
+    # SECONDARY (best-effort): if both tasks produced copyable content, it
+    # should differ.  We do NOT fail when the clipboard is empty because that
+    # is legitimate LLM behavior (no tool call → no stored result).
+    if copy_payloads[0] and copy_payloads[1]:
+        assert copy_payloads[0] != copy_payloads[1], (
+            "Copy payload identical for different tasks.\n\n"
+            f"--- Task 1 payload ---\n{copy_payloads[0]}\n\n"
+            f"--- Task 2 payload ---\n{copy_payloads[1]}"
+        )

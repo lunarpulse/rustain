@@ -66,11 +66,16 @@ def pytest_collection_modifyitems(config, items):
                     has_key = True
                     break
 
-    if not has_key:
-        skip_api = pytest.mark.skip(reason="No API key — set ANTHROPIC_API_KEY or add to .env")
-        for item in items:
-            if "requires_api" in item.keywords:
-                item.add_marker(skip_api)
+    for item in items:
+        if "requires_api" in item.keywords:
+            # Serialize all API tests to the same xdist worker to avoid
+            # hammering the provider with parallel requests (rate-limit
+            # flakiness under api.z.ai / glm-4.5-Air).
+            item.add_marker(pytest.mark.xdist_group("api"))
+            if not has_key:
+                item.add_marker(
+                    pytest.mark.skip(reason="No API key — set ANTHROPIC_API_KEY or add to .env")
+                )
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

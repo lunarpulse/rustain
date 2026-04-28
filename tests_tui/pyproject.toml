@@ -52,9 +52,10 @@ markers = [
 # Run all:      pytest
 # Skip API:     pytest -m "not requires_api"
 # Single story: pytest -m story_4_3b
-timeout = 120
+timeout = 180
 reruns = 2
-reruns_delay = 1
+reruns_delay = 10
+addopts = "--dist loadgroup"
 filterwarnings = [
     # pexpect.spawn uses pty.forkpty() in a multi-threaded parent (pytest-xdist).
     # This is a known limitation of the PTY-based test harness; the warning

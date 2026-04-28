@@ -21,6 +21,8 @@ artifacts (✓ icons, summary text) reachable via scrollback.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from harness import RustainTUI
@@ -73,7 +75,7 @@ def _wait_for_completion(tui: RustainTUI, timeout: float = 90.0) -> str:
     including transient dispatch messages and the final summary — is reachable
     via repeated screenshots.
     """
-    found = tui.wait_for_screen("Plan complete:", timeout=timeout)
+    found = tui.wait_for_screen("Plan complete", timeout=timeout)
     assert found, (
         f"Plan never completed within {timeout}s. Screen:\n{tui.get_screen_text()}"
     )
@@ -155,7 +157,46 @@ def test_partial_failure_summary_counts(tui: RustainTUI):
 
     tui.send("y")
 
-    scrollback = _wait_for_completion(tui, timeout=180.0)
+    # Completion detection must tolerate LLM variance:
+    # - Normal path: "Plan complete:" appears in the chat pane.
+    # - Verbose-model path: the model generates a long post-task
+    #   monologue that pushes the summary out of view, but the sidebar
+    #   shows "Plan complete" and the status bar reads "Ready".
+    # - Deviation path: when task 2 fails and task 3 depends on it,
+    #   the runtime auto-skips downstream tasks and presents a
+    #   "Plan deviation — reapproval required" card that blocks
+    #   execution until the user re-approves (sends "y" again).
+    deadline = time.time() + 180.0
+    completed = False
+    while time.time() < deadline:
+        screen = tui.get_screen_text()
+        if "Plan complete:" in screen:
+            completed = True
+            break
+        if "Plan complete" in screen and "Ready" in screen:
+            completed = True
+            break
+        if "reapproval required" in screen and "Ready" in screen:
+            tui.send("y")
+            time.sleep(1.0)
+            continue
+        time.sleep(1.0)
+    assert completed, (
+        f"Plan never reached terminal state within 180s. Screen:\n{screen}"
+    )
+
+    # Capture scrollback for assertion — jump around because the model's
+    # verbose output may have scrolled the summary off the visible area.
+    tui.chat_mode()
+    tui.wait(0.5)
+    tui.jump_top()
+    tui.wait(0.5)
+    top = tui.get_screen_text()
+    tui.jump_bottom()
+    tui.wait(0.5)
+    bottom = tui.get_screen_text()
+    scrollback = top + "\n---\n" + bottom
+
     # Either the plan failed/skipped some tasks (preferred outcome) or all
     # 3 succeeded — both are valid runtime traces; only the structure of
     # the summary message matters.

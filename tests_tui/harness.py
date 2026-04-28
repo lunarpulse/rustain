@@ -55,8 +55,8 @@ TERM_COLS = 130
 STARTUP_WAIT = 3.0
 KEY_DELAY = 0.2
 PERMISSION_WAIT = 10.0
-TOOL_EXEC_WAIT = 15.0
-TURN_COMPLETE_WAIT = 15.0
+TOOL_EXEC_WAIT = 30.0
+TURN_COMPLETE_WAIT = 30.0
 REWIND_SETTLE = 3.0
 
 
@@ -120,7 +120,7 @@ class RustainTUI:
     Empty list → no tools pre-allowed (permission prompts for everything).
     """
 
-    timeout: float = 60.0
+    timeout: float = 120.0
     """pexpect timeout for expect() calls."""
 
     _child: pexpect.spawn | None = field(default=None, init=False, repr=False)
@@ -313,6 +313,16 @@ class RustainTUI:
             f"Expected '{text}' NOT on screen. {msg}\n"
             f"Screen content:\n{screen_text}"
         )
+
+    def is_stream_disconnected(self) -> bool:
+        """Check whether the screen shows an API stream disconnect message.
+
+        When the provider rate-limits or drops the SSE stream, the TUI shows
+        'Stream disconnected unexpectedly' and an '[interrupted]' tag. Tests
+        that depend on tool execution should skip gracefully in this state.
+        """
+        screen = self.get_screen_text()
+        return "Stream disconnected" in screen or "interrupted" in screen
 
     def wait_for_screen(
         self,

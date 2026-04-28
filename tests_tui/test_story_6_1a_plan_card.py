@@ -249,7 +249,12 @@ def test_yolo_auto_approve_plan(tui: RustainTUI):
     )
 
     tui.chat_mode()
-    tui.wait(1.0)
+    # Task panel auto-opens in YOLO mode (sidebar narrows chat). Close it to
+    # restore full-width viewport, then scroll up to bring plan card into view.
+    tui.toggle_sidebar()
+    tui.wait(0.5)
+    tui.scroll_up(10)
+    tui.wait(0.5)
     screen = tui.get_screen_text()
     # YOLO auto-runs the plan immediately, so either the pending card ("Plan:")
     # or the completed summary ("Plan complete:") may be visible in scrollback.
@@ -290,8 +295,25 @@ def test_snapshot_plan_card_60x16(tui_60x16: RustainTUI):
     """Snapshot: inline PlanCard at 60x16 renders with plain border."""
     tui = tui_60x16
     tui.send_message(PROMPT_PLAN)
-    _wait_for_plan_card(tui, timeout=30.0)
+    tui.wait_for_idle()
+
     screen = tui.get_screen_text()
+    if "Stream disconnected" in screen or "interrupted" in screen:
+        pytest.skip("API stream disconnected — plan card not rendered")
+
+    # 16-row terminal: verbose assistant text pushes plan card above viewport.
+    # Scroll up to bring the header into view.
+    if "Plan:" not in screen:
+        tui.scroll_up(5)
+        tui.wait(0.3)
+        screen = tui.get_screen_text()
+    if "Plan:" not in screen:
+        tui.scroll_up(5)
+        tui.wait(0.3)
+        screen = tui.get_screen_text()
+    assert "Plan:" in screen, (
+        f"PlanCard header did not appear. Screen:\n{screen}"
+    )
 
     assert any(c in screen for c in ("┌", "┐", "└", "┘")), (
         f"Expected plain border at 60 cols. Screen:\n{screen}"

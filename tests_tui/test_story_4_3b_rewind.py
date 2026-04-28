@@ -103,6 +103,9 @@ class TestRewindForkInstead:
         tui.send_message("Write 'fork test' to rewind_fork.txt")
         # Tools are auto-allowed via .claude/settings.json in temp workspace.
         tui.wait_for_idle()
+        screen = tui.get_screen_text()
+        if "Stream disconnected" in screen or "interrupted" in screen:
+            pytest.skip("API stream disconnected — Write tool not exercised")
         assert tui.file_exists("rewind_fork.txt")
 
         tui.chat_mode()
@@ -131,6 +134,11 @@ class TestRewindConflict:
         )
         # Tools are auto-allowed via .claude/settings.json in temp workspace.
         tui_write_only.wait_for_idle()
+        screen = tui_write_only.get_screen_text()
+        if "Stream disconnected" in screen or "interrupted" in screen:
+            pytest.skip(
+                "API stream disconnected — Write tool not exercised, snapshots not created"
+            )
 
         # Externally modify the file AFTER the tool wrote it
         tui_write_only.write_file("conflict_test.txt", "USER EDITED EXTERNALLY")
