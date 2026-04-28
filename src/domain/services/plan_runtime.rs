@@ -219,6 +219,14 @@ impl PlanRuntime {
                     status: PlanTaskStatus::Completed,
                 });
 
+                // Drain pause-pending entry — task already terminal, pause intent moot.
+                // Only the Cancelled branch drains today; without this, the entry leaks
+                // for the lifetime of the plan and a future check on the same task
+                // number would be fooled.
+                if let Some(s) = self.plans.write().unwrap().get_mut(plan_id) {
+                    s.pause_pending_tasks.remove(&task_number);
+                }
+
                 // Check for whole-plan-cancel race (task completed before token cancel)
                 let is_whole_cancel = {
                     let plans = self.plans.read().unwrap();
@@ -273,6 +281,11 @@ impl PlanRuntime {
                     task_number,
                     status: PlanTaskStatus::Failed,
                 });
+
+                // Drain pause-pending entry — task already terminal, pause intent moot.
+                if let Some(s) = self.plans.write().unwrap().get_mut(plan_id) {
+                    s.pause_pending_tasks.remove(&task_number);
+                }
 
                 // Check for whole-plan-cancel race (task failed before token cancel)
                 let is_whole_cancel = {
@@ -785,7 +798,10 @@ pub(crate) fn finish_plan(
         let total_elapsed_ms: i64 = plan.tasks.iter().filter_map(|t| t.elapsed_ms()).sum();
         let total_tokens: u32 = plan.tasks.iter().filter_map(|t| t.result.as_ref().and_then(|r| r.token_count)).sum();
 
-        plan.status = PlanStatus::Completed;
+        // Preserve Cancelled — whole-plan-cancel race set it before reaching here.
+        if plan.status != PlanStatus::Cancelled {
+            plan.status = PlanStatus::Completed;
+        }
 
         let snapshot = plan.tasks.iter().map(|t| {
             (t.number, t.title.clone(), t.status, t.elapsed_ms(), t.error.clone(), t.result.clone())
