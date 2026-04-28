@@ -102,10 +102,32 @@ pub enum InputAction {
     OpenPanel(crate::domain::models::visual::PanelType),
     /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
     CopyTaskResult { plan_id: Option<String>, task_number: u32 },
-    /// Reserved key pressed (Coming in Story 6.4 — Story 6-3).
-    ReservedKey6_4,
-    /// Reserved key pressed in task panel (Coming in Story 6.4 — Story 6-3).
-    ReservedPanelKey6_4,
+    /// Story 6.4: Pause/Resume task (panel `p` or drill-down `p` on Paused).
+    TaskPause(u32),
+    /// Story 6.4: Skip task (panel `s` or drill-down `s` on Failed).
+    TaskSkip(u32),
+    /// Story 6.4: Retry failed task (drill-down `r` on Failed).
+    TaskRetry(u32),
+    /// Story 6.4: Edit failed task (drill-down `e` on Failed).
+    TaskEdit(u32),
+    /// Story 6.4: Cancel plan (panel `x` or palette `!cancel-plan`).
+    TaskCancelPlan,
+    /// Story 6.4: Resume all paused tasks (palette `!resume-all-tasks`).
+    TaskResumeAll,
+    /// Story 6.4: Enter reorder mode for selected task (palette `!reorder-task`).
+    TaskReorderEnter(u32),
+    /// Story 6.4: Move reorder target up/down.
+    TaskReorderMove(Direction),
+    /// Story 6.4: Commit reorder (Enter).
+    TaskReorderCommit,
+    /// Story 6.4: Cancel reorder (Esc).
+    TaskReorderCancel,
+    /// Story 6.4: Skip cascade card response.
+    SkipCascadeAck(crate::adapters::tui::state::SkipCascadeChoice),
+    /// Story 6.4: Plan deviation card decision.
+    PlanDeviationDecided(String, crate::domain::models::plan::PlanDecision),
+    /// Story 6.4: Cancel plan confirm card response.
+    CancelPlanConfirm(bool),
     /// Open the selected conversation from sidebar.
     // Covers: FR107, AC4
     OpenSidebarConversation,
@@ -449,6 +471,56 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         }
     }
 
+    // Story 6.4: Plan deviation card key intercept (y/e/n)
+    if let Some((ref pid, _)) = state.task_panel_state.pending_deviation {
+        match c {
+            'y' => {
+                return InputAction::PlanDeviationDecided(
+                    pid.clone(),
+                    crate::domain::models::plan::PlanDecision::Approve,
+                );
+            }
+            'e' => {
+                return InputAction::PlanDeviationDecided(
+                    pid.clone(),
+                    crate::domain::models::plan::PlanDecision::Edit,
+                );
+            }
+            'n' => {
+                return InputAction::PlanDeviationDecided(
+                    pid.clone(),
+                    crate::domain::models::plan::PlanDecision::Reject,
+                );
+            }
+            _ => return InputAction::Ignored,
+        }
+    }
+
+    // Story 6.4: Cancel plan confirm card key intercept (y/n)
+    if let Some(ref _pid) = state.task_panel_state.cancel_plan_confirm {
+        match c {
+            'y' => return InputAction::CancelPlanConfirm(true),
+            'n' => return InputAction::CancelPlanConfirm(false),
+            _ => return InputAction::Ignored,
+        }
+    }
+
+    // Story 6.4: Skip cascade card key intercept (s/c/n)
+    if state.task_panel_state.skip_cascade_pending.is_some() {
+        match c {
+            's' => return InputAction::SkipCascadeAck(
+                crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip,
+            ),
+            'c' => return InputAction::SkipCascadeAck(
+                crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway,
+            ),
+            'n' => return InputAction::SkipCascadeAck(
+                crate::adapters::tui::state::SkipCascadeChoice::CancelSkip,
+            ),
+            _ => return InputAction::Ignored,
+        }
+    }
+
     // Permission prompt focus: y/n/a/s/f are handled, chat-scroll keys pass through
     // to the chat pane (AC6), all others ignored.
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
@@ -681,13 +753,17 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             InputAction::Consumed
         }
         FocusState::Chat if state.task_panel_state.drill_down_task.is_some() => {
+            let n = state.task_panel_state.drill_down_task.unwrap();
             match c {
                 'c' => {
-                    let task_number = state.task_panel_state.drill_down_task.unwrap();
                     let plan_id = state.task_panel_state.last_executed_plan_id.clone();
-                    InputAction::CopyTaskResult { plan_id, task_number }
+                    InputAction::CopyTaskResult { plan_id, task_number: n }
                 }
-                'r' | 's' | 'e' => InputAction::ReservedKey6_4,
+                // Story 6.4: status-conditional dispatch — gating in event_loop.rs
+                'r' => InputAction::TaskRetry(n),
+                's' => InputAction::TaskSkip(n),
+                'e' => InputAction::TaskEdit(n),
+                'p' => InputAction::TaskPause(n),
                 // 6-3 AC7: scroll the result body within the drill-down view.
                 // Widget clamps the offset against actual content height.
                 'j' => {
@@ -880,6 +956,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             panel: _panel,
             selected: _selected,
         } => {
+            // Story 6.4: reorder-mode intercept — override j/k/↑/↓/Enter/Esc when reorder active
+            if state.task_panel_state.reorder_mode_for.is_some()
+                && _panel == crate::domain::models::visual::PanelType::Tasks
+            {
+                state.needs_redraw = true;
+                return match c {
+                    'j' | '\u{2193}' => InputAction::TaskReorderMove(Direction::Down),
+                    'k' | '\u{2191}' => InputAction::TaskReorderMove(Direction::Up),
+                    '\r' => InputAction::TaskReorderCommit,
+                    '\u{1b}' => InputAction::TaskReorderCancel,
+                    _ => InputAction::Ignored,
+                };
+            }
             match c {
                 'j' => {
                     let moved = if _panel == crate::domain::models::visual::PanelType::Tasks {
@@ -935,13 +1024,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     }
                     InputAction::Consumed
                 }
-                'p' | 'x' if _panel == crate::domain::models::visual::PanelType::Tasks => {
+                'x' if _panel == crate::domain::models::visual::PanelType::Tasks => {
                     state.needs_redraw = true;
-                    InputAction::ReservedPanelKey6_4
+                    InputAction::TaskCancelPlan
+                }
+                'p' if _panel == crate::domain::models::visual::PanelType::Tasks => {
+                    state.needs_redraw = true;
+                    // Panel `p`: dispatch with selected_index (0-based); event_loop resolves to task number
+                    InputAction::TaskPause(state.task_panel_state.selected_index as u32)
                 }
                 's' if _panel == crate::domain::models::visual::PanelType::Tasks => {
                     state.needs_redraw = true;
-                    InputAction::ReservedPanelKey6_4
+                    // Panel `s`: dispatch with selected_index (0-based); event_loop resolves to task number
+                    InputAction::TaskSkip(state.task_panel_state.selected_index as u32)
                 }
                 'd' if _panel == crate::domain::models::visual::PanelType::History => {
                     InputAction::DeleteSidebarConversation
@@ -1319,6 +1414,13 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 }
                 return submit_message(state);
             }
+            // Story 6.4: reorder-mode Esc — cancel and restore
+            if state.focus == FocusState::Chat
+                && state.task_panel_state.reorder_mode_for.is_some()
+            {
+                state.needs_redraw = true;
+                return InputAction::TaskReorderCancel;
+            }
             if state.focus == FocusState::Chat
                 && state.task_panel_state.drill_down_task.is_some()
             {
@@ -1589,6 +1691,13 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 }
             }
             InputAction::Consumed
+        }
+
+        DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. })
+            && state.task_panel_state.reorder_mode_for.is_some() =>
+        {
+            state.needs_redraw = true;
+            InputAction::TaskReorderCommit
         }
 
         DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. })
@@ -2207,7 +2316,19 @@ fn dispatch_palette_action(
     use crate::domain::models::palette::PaletteAction;
 
     match action {
-        PaletteAction::ExecuteCommand(name, args) => InputAction::ExecuteCommand { name, args },
+        PaletteAction::ExecuteCommand(name, args) => {
+            // Story 6.4: route task-control palette commands to dedicated InputAction variants
+            if name == "cancel-plan" {
+                InputAction::TaskCancelPlan
+            } else if name == "resume-all-tasks" {
+                InputAction::TaskResumeAll
+            } else if name == "reorder-task" {
+                let task_n = (state.task_panel_state.selected_index + 1) as u32;
+                InputAction::TaskReorderEnter(task_n)
+            } else {
+                InputAction::ExecuteCommand { name, args }
+            }
+        }
         PaletteAction::InsertMention(path) => {
             // Insert @path at cursor position, return to input focus
             let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);

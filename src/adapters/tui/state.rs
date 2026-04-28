@@ -8,6 +8,7 @@ use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::ImageAttachment;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
+use crate::domain::models::plan::{PlanDeviationKind, PlanTaskStatus};
 use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::{
     ToolRisk,
@@ -619,6 +620,16 @@ pub struct TaskPanelState {
     /// "Tasks panel hidden for this session — Ctrl+X, T to reopen." Tracked
     /// per-conversation, shown at most once. PD1 (Sally A2).
     pub auto_open_hint_shown_for: std::collections::HashSet<String>,
+    /// Story 6.4: task selected for reorder mode.
+    pub reorder_mode_for: Option<u32>,
+    /// Story 6.4: original task order, restored on Esc.
+    pub reorder_original_order: Option<Vec<u32>>,
+    /// Story 6.4: (plan_id, deviation_kind) while deviation card is shown.
+    pub pending_deviation: Option<(String, PlanDeviationKind)>,
+    /// Story 6.4: pending skip cascade confirmation state.
+    pub skip_cascade_pending: Option<SkipCascadePending>,
+    /// Story 6.4: Some(plan_id) while cancel-plan confirm card is shown.
+    pub cancel_plan_confirm: Option<String>,
 }
 
 impl Default for TaskPanelState {
@@ -633,8 +644,31 @@ impl Default for TaskPanelState {
             task_count: 0,
             auto_open_suppressed_conversations: std::collections::HashSet::new(),
             auto_open_hint_shown_for: std::collections::HashSet::new(),
+            reorder_mode_for: None,
+            reorder_original_order: None,
+            pending_deviation: None,
+            skip_cascade_pending: None,
+            cancel_plan_confirm: None,
         }
     }
+}
+
+/// Story 6.4: pending skip cascade confirmation state (AC2).
+#[derive(Debug, Clone)]
+pub struct SkipCascadePending {
+    pub plan_id: String,
+    pub source_task: u32,
+    pub source_prior_status: PlanTaskStatus,
+    pub source_prior_error: Option<String>,
+    pub downstream: Vec<u32>,
+}
+
+/// Story 6.4: user's choice on the skip cascade card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipCascadeChoice {
+    CascadeSkip,
+    ContinueAnyway,
+    CancelSkip,
 }
 
 /// Action dispatched by a which-key chord.

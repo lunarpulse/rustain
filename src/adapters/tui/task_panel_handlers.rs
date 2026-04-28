@@ -226,23 +226,17 @@ pub fn handle_plan_task_status_changed(
     }
 }
 
-/// `true` iff the user is currently drilled into a task whose status is `Failed`.
-/// Used to gate `InputAction::ReservedKey6_4` so the "Coming in 6.4" notice
-/// only fires when the action row actually advertises `r/s/e`.
-pub fn is_failed_drill_down(state: &TuiState, conversation: &Conversation) -> bool {
-    let Some(n) = state.task_panel_state.drill_down_task else {
-        return false;
-    };
-    let Some(plan_id) = state.task_panel_state.last_executed_plan_id.as_ref() else {
-        return false;
-    };
-    let Some(plan) = conversation.plans.get(plan_id) else {
-        return false;
-    };
+/// Returns the status of the currently drilled-down task, or `None` if no
+/// drill-down is active or the task/plan cannot be resolved.
+/// Used to gate status-conditional dispatch for `TaskPause`, `TaskSkip`, `TaskRetry`,
+/// and `TaskEdit` — Story 6.4 replaces the 6-3 `is_failed_drill_down` gate.
+pub fn drill_down_task_status(state: &TuiState, conversation: &Conversation) -> Option<PlanTaskStatus> {
+    let n = state.task_panel_state.drill_down_task?;
+    let plan_id = state.task_panel_state.last_executed_plan_id.as_ref()?;
+    let plan = conversation.plans.get(plan_id)?;
     plan.tasks
         .get(n.saturating_sub(1) as usize)
-        .map(|t| t.status == PlanTaskStatus::Failed)
-        .unwrap_or(false)
+        .map(|t| t.status)
 }
 
 /// Resolves the clipboard payload for `InputAction::CopyTaskResult`. Returns
@@ -303,4 +297,280 @@ pub fn any_plan_has_running_task(conversation: &Conversation) -> bool {
         p.status == PlanStatus::Executing
             && p.tasks.iter().any(|t| t.status == PlanTaskStatus::Running)
     })
+}
+
+/// Story 6.4: compute transitively-dependent task numbers.
+/// Performs a reverse `depends_on` walk starting from `task_number`.
+/// Defensively guards against cycles (should never occur).
+pub fn dependents(plan: &crate::domain::models::plan::Plan, task_number: u32) -> Vec<u32> {
+    let mut result: Vec<u32> = Vec::new();
+    let mut queue: Vec<u32> = vec![task_number];
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    seen.insert(task_number);
+    while let Some(current) = queue.pop() {
+        for task in &plan.tasks {
+            if task.depends_on.contains(&current) && seen.insert(task.number) {
+                result.push(task.number);
+                queue.push(task.number);
+            }
+        }
+    }
+    result
+}
+
+/// Story 6.4: handle pause/resume from the task panel or drill-down view.
+/// Returns notices the caller should emit via the event bus.
+#[derive(Debug, Clone)]
+pub struct PauseOutcome {
+    pub notices: Vec<PendingNotice>,
+    pub should_resume_advance: bool,
+    /// True if a Running task was paused (requires token cancel from caller).
+    pub running_task_paused: Option<u32>,
+}
+
+pub fn handle_task_pause(
+    state: &mut TuiState,
+    conversation: &mut Conversation,
+    task_number: u32,
+) -> PauseOutcome {
+    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            return PauseOutcome {
+                notices: vec![PendingNotice {
+                    level: NoticeLevel::Info,
+                    message: "No active plan.".to_string(),
+                    conversation_id: conversation.id.clone(),
+                }],
+                should_resume_advance: false,
+                running_task_paused: None,
+            };
+        }
+    };
+
+    let plan = match conversation.plans.get_mut(&plan_id) {
+        Some(p) => p,
+        None => {
+            return PauseOutcome {
+                notices: vec![PendingNotice {
+                    level: NoticeLevel::Info,
+                    message: "No active plan.".to_string(),
+                    conversation_id: conversation.id.clone(),
+                }],
+                should_resume_advance: false,
+                running_task_paused: None,
+            };
+        }
+    };
+
+    let idx = (task_number.saturating_sub(1)) as usize;
+    if idx >= plan.tasks.len() {
+        return PauseOutcome {
+            notices: vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: format!("Task {} not found.", task_number),
+                conversation_id: conversation.id.clone(),
+            }],
+            should_resume_advance: false,
+            running_task_paused: None,
+        };
+    }
+
+    let task_status = plan.tasks[idx].status;
+
+    match task_status {
+        PlanTaskStatus::Paused => {
+            // Resume: flip Paused back to Pending (and transitive dependents)
+            let resume_set = {
+                let mut set = vec![task_number];
+                let deps = dependents(plan, task_number);
+                // Only resume dependents that are also Paused
+                for dep in &deps {
+                    let dep_idx = (dep.saturating_sub(1)) as usize;
+                    if dep_idx < plan.tasks.len() && plan.tasks[dep_idx].status == PlanTaskStatus::Paused {
+                        set.push(*dep);
+                    }
+                }
+                set
+            };
+
+            let mut count = 0u32;
+            for tn in &resume_set {
+                let t_idx = (tn.saturating_sub(1)) as usize;
+                if t_idx >= plan.tasks.len() {
+                    continue;
+                }
+                let was_running = plan.tasks[t_idx].started_at_ms.is_some()
+                    && plan.tasks[t_idx].completed_at_ms.is_none();
+                plan.tasks[t_idx].status = PlanTaskStatus::Pending;
+                if was_running {
+                    plan.tasks[t_idx].started_at_ms = None;
+                }
+                count += 1;
+            }
+
+            PauseOutcome {
+                notices: vec![PendingNotice {
+                    level: NoticeLevel::Info,
+                    message: format!("Resumed {} task(s).", count),
+                    conversation_id: conversation.id.clone(),
+                }],
+                should_resume_advance: true,
+                running_task_paused: None,
+            }
+        }
+        PlanTaskStatus::Pending => {
+            // Pause: flip to Paused directly (no token cancel needed)
+            plan.tasks[idx].status = PlanTaskStatus::Paused;
+            let deps = dependents(plan, task_number);
+            for dep in &deps {
+                let dep_idx = (dep.saturating_sub(1)) as usize;
+                if dep_idx < plan.tasks.len() && !matches!(plan.tasks[dep_idx].status, PlanTaskStatus::Completed | PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled) {
+                    plan.tasks[dep_idx].status = PlanTaskStatus::Paused;
+                }
+            }
+            PauseOutcome {
+                notices: vec![],
+                should_resume_advance: false,
+                running_task_paused: None,
+            }
+        }
+        PlanTaskStatus::Running => {
+            // Pause: mark pause pending, then caller cancels the token
+            let deps = dependents(plan, task_number);
+            // Set dependents to Paused synchronously (they're not running)
+            for dep in &deps {
+                let dep_idx = (dep.saturating_sub(1)) as usize;
+                if dep_idx < plan.tasks.len() && !matches!(plan.tasks[dep_idx].status, PlanTaskStatus::Completed | PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled) {
+                    plan.tasks[dep_idx].status = PlanTaskStatus::Paused;
+                }
+            }
+            PauseOutcome {
+                notices: vec![PendingNotice {
+                    level: NoticeLevel::Info,
+                    message: format!("Pausing Task {}...", task_number),
+                    conversation_id: conversation.id.clone(),
+                }],
+                should_resume_advance: false,
+                running_task_paused: Some(task_number),
+            }
+        }
+        _ => {
+            PauseOutcome {
+                notices: vec![PendingNotice {
+                    level: NoticeLevel::Info,
+                    message: format!(
+                        "Task {} cannot be paused (status: {:?}).",
+                        task_number, task_status
+                    ),
+                    conversation_id: conversation.id.clone(),
+                }],
+                should_resume_advance: false,
+                running_task_paused: None,
+            }
+        }
+    }
+}
+
+/// Story 6.4: handle skip from the task panel or drill-down view.
+pub fn handle_task_skip(
+    state: &mut TuiState,
+    conversation: &mut Conversation,
+    task_number: u32,
+) -> Vec<PendingNotice> {
+    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            return vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: "No active plan.".to_string(),
+                conversation_id: conversation.id.clone(),
+            }];
+        }
+    };
+
+    let plan = match conversation.plans.get_mut(&plan_id) {
+        Some(p) => p,
+        None => {
+            return vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: "No active plan.".to_string(),
+                conversation_id: conversation.id.clone(),
+            }];
+        }
+    };
+
+    let idx = (task_number.saturating_sub(1)) as usize;
+    if idx >= plan.tasks.len() {
+        return vec![PendingNotice {
+            level: NoticeLevel::Info,
+            message: format!("Task {} not found.", task_number),
+            conversation_id: conversation.id.clone(),
+        }];
+    }
+
+    let task_status = plan.tasks[idx].status;
+
+    match task_status {
+        PlanTaskStatus::Pending | PlanTaskStatus::Failed => {
+            let downstream = dependents(plan, task_number);
+            let prior_status = task_status;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+
+            plan.tasks[idx].status = PlanTaskStatus::Skipped;
+            plan.tasks[idx].completed_at_ms = Some(now_ms);
+            plan.tasks[idx].error = Some("Skipped by user".to_string());
+
+            // Emit status change for the source task
+            let mut notices = vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: format!("Task {} skipped.", task_number),
+                conversation_id: conversation.id.clone(),
+            }];
+
+            if downstream.is_empty() {
+                // No dependents → skip is final
+                notices.push(PendingNotice {
+                    level: NoticeLevel::Info,
+                    message: "Skipped — advancing.".to_string(),
+                    conversation_id: conversation.id.clone(),
+                });
+            } else {
+                // Show cascade card
+                state.task_panel_state.skip_cascade_pending =
+                    Some(crate::adapters::tui::state::SkipCascadePending {
+                        plan_id: plan_id.clone(),
+                        source_task: task_number,
+                        source_prior_status: prior_status,
+                        source_prior_error: plan.tasks[idx].error.clone(),
+                        downstream,
+                    });
+            }
+
+            notices
+        }
+        _ => {
+            vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: format!(
+                    "Task {} cannot be skipped (status: {:?}).",
+                    task_number, task_status
+                ),
+                conversation_id: conversation.id.clone(),
+            }]
+        }
+    }
+}
+
+/// Story 6.4: resolve a selected_index (0-based, from panel cursor) to a task number.
+/// Returns None if no plan or index out of bounds.
+pub fn resolve_panel_task_number(
+    state: &TuiState,
+    conversation: &Conversation,
+    selected_index: u32,
+) -> Option<u32> {
+    let plan_id = state.task_panel_state.last_executed_plan_id.as_ref()?;
+    let plan = conversation.plans.get(plan_id)?;
+    let idx = selected_index as usize;
+    plan.tasks.get(idx).map(|t| t.number)
 }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -6,7 +6,7 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::ContentBlockType;
 use crate::domain::models::conversation::{ChatMessage, generate_message_id};
 use crate::domain::models::plan::{
-    Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
+    Plan, PlanDeviationKind, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
 };
 use crate::domain::models::tab::ConversationId;
 use crate::domain::models::MessageRole;
@@ -26,6 +26,12 @@ pub struct PlanRuntimeState {
     /// Number of assistant messages in the conversation when the current task started.
     /// Used to detect when a new assistant response has arrived for this task.
     pub task_start_assistant_count: usize,
+    /// Story 6.4: tasks that are pending a pause transition in the Cancelled branch.
+    pub pause_pending_tasks: HashSet<u32>,
+    /// Story 6.4: set true when user invokes !cancel-plan on the whole plan.
+    pub whole_plan_cancel_pending: bool,
+    /// Story 6.4: deviation pending reapproval. Blocks advance_after_task until resolved.
+    pub pending_deviation: Option<PlanDeviationKind>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +63,19 @@ impl PlanRuntime {
         conversation: &mut crate::domain::models::Conversation,
         event_emitter: &dyn EventEmitter,
     ) {
+        // Story 6.4 reload normalization: flip Paused → Pending.
+        // After restart, in-memory task_cancels is empty; a Paused
+        // task has nothing to resume from. Pending lets find_next_eligible
+        // re-arm it on next user action.
+        if let Some(plan) = conversation.plans.get_mut(&plan_id) {
+            for task in &mut plan.tasks {
+                if task.status == PlanTaskStatus::Paused {
+                    task.status = PlanTaskStatus::Pending;
+                    task.started_at_ms = None;
+                }
+            }
+        }
+
         {
             let plan = match conversation.plans.get(&plan_id) {
                 Some(p) => p,
@@ -92,6 +111,9 @@ impl PlanRuntime {
             plan_id: plan_id.clone(),
             task_cancels: BTreeMap::new(),
             task_start_assistant_count: assistant_count,
+            pause_pending_tasks: HashSet::new(),
+            whole_plan_cancel_pending: false,
+            pending_deviation: None,
         };
 
         {
@@ -197,6 +219,39 @@ impl PlanRuntime {
                     status: PlanTaskStatus::Completed,
                 });
 
+                // Check for whole-plan-cancel race (task completed before token cancel)
+                let is_whole_cancel = {
+                    let plans = self.plans.read().unwrap();
+                    plans.get(plan_id).map(|s| s.whole_plan_cancel_pending).unwrap_or(false)
+                };
+                if is_whole_cancel {
+                    if let Some(plan) = conversation.plans.get_mut(plan_id) {
+                        for task in &mut plan.tasks {
+                            if task.number == task_number { continue; }
+                            if !is_terminal(task.status) {
+                                task.status = PlanTaskStatus::Cancelled;
+                                task.completed_at_ms = Some(now_ms);
+                                task.error = Some("Plan cancelled by user".to_string());
+                                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                                    conversation_id: conversation_id.clone(),
+                                    plan_id: plan_id.to_string(),
+                                    task_number: task.number,
+                                    status: PlanTaskStatus::Cancelled,
+                                });
+                            }
+                        }
+                        plan.status = PlanStatus::Cancelled;
+                    }
+                    event_emitter.emit(AppEvent::PlanCancelled {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        cancelled_at_task: None,
+                    });
+                    finish_plan(conversation_id, plan_id, conversation, event_emitter);
+                    self.plans.write().unwrap().remove(plan_id);
+                    return;
+                }
+
                 self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
             }
             TaskTurnOutcome::Failure { error } => {
@@ -219,14 +274,160 @@ impl PlanRuntime {
                     status: PlanTaskStatus::Failed,
                 });
 
-                {
-                    let plan = conversation.plans.get_mut(plan_id).unwrap();
-                    skip_blocked_tasks(conversation_id, plan_id, task_number, plan, event_emitter);
+                // Check for whole-plan-cancel race (task failed before token cancel)
+                let is_whole_cancel = {
+                    let plans = self.plans.read().unwrap();
+                    plans.get(plan_id).map(|s| s.whole_plan_cancel_pending).unwrap_or(false)
+                };
+                if is_whole_cancel {
+                    if let Some(plan) = conversation.plans.get_mut(plan_id) {
+                        for task in &mut plan.tasks {
+                            if task.number == task_number { continue; }
+                            if !is_terminal(task.status) {
+                                task.status = PlanTaskStatus::Cancelled;
+                                task.completed_at_ms = Some(now_ms);
+                                task.error = Some("Plan cancelled by user".to_string());
+                                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                                    conversation_id: conversation_id.clone(),
+                                    plan_id: plan_id.to_string(),
+                                    task_number: task.number,
+                                    status: PlanTaskStatus::Cancelled,
+                                });
+                            }
+                        }
+                        plan.status = PlanStatus::Cancelled;
+                    }
+                    event_emitter.emit(AppEvent::PlanCancelled {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        cancelled_at_task: None,
+                    });
+                    finish_plan(conversation_id, plan_id, conversation, event_emitter);
+                    self.plans.write().unwrap().remove(plan_id);
+                    return;
                 }
 
-                self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
+                // Story 6.4: wrap skip_blocked_tasks with PlanDeviation emission
+                let (skipped_count, changed_steps) = {
+                    let _original_len = {
+                        let plan = conversation.plans.get(plan_id).unwrap();
+                        plan.tasks.len() as u32
+                    };
+                    let plan = conversation.plans.get_mut(plan_id).unwrap();
+                    let pre_len = plan.tasks.len();
+                    skip_blocked_tasks(conversation_id, plan_id, task_number, plan, event_emitter);
+                    let skipped: Vec<_> = plan.tasks.iter()
+                        .filter(|t| t.status == PlanTaskStatus::Skipped
+                            && t.error.as_ref().map_or(false, |e| e.contains("depends on failed task")))
+                        .map(|t| t.number)
+                        .collect();
+                    let count = skipped.len() as u32;
+                    // revert pre_len if the body changed length (shouldn't — tasks don't get added)
+                    let _ = pre_len;
+                    (count, skipped)
+                };
+
+                if skipped_count > 0 {
+                    let plan = conversation.plans.get(plan_id).unwrap();
+                    let current_step_count = plan.tasks.len() as u32 - skipped_count;
+                    let summary = format!(
+                        "Auto-skipped {} task(s) blocked by upstream failure of Task {}.",
+                        skipped_count, task_number
+                    );
+                    let deviation_kind = PlanDeviationKind::AutoSkipBlockedTasks {
+                        source_task: task_number,
+                    };
+                    self.mark_deviation_pending(plan_id, deviation_kind.clone()).await;
+                    event_emitter.emit(AppEvent::PlanDeviation {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        deviation_kind,
+                        original_step_count: current_step_count + skipped_count,
+                        current_step_count,
+                        changed_steps,
+                        summary,
+                    });
+                }
+
+                if !self.has_pending_deviation(plan_id).await {
+                    self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
+                }
             }
             TaskTurnOutcome::Cancelled { reason } => {
+                let (is_pause_pending, is_whole_cancel) = {
+                    let plans = self.plans.read().unwrap();
+                    plans.get(plan_id).map(|s| {
+                        (s.pause_pending_tasks.contains(&task_number), s.whole_plan_cancel_pending)
+                    }).unwrap_or((false, false))
+                };
+
+                if is_pause_pending {
+                    // AC1: pause-pending path — flip to Paused, plan stays Executing
+                    {
+                        let plan = match conversation.plans.get_mut(plan_id) {
+                            Some(p) => p,
+                            None => return,
+                        };
+                        if idx >= plan.tasks.len() {
+                            return;
+                        }
+                        plan.tasks[idx].status = PlanTaskStatus::Paused;
+                        plan.tasks[idx].error = None;
+                        // completed_at_ms is NOT set — Paused is non-terminal
+                    }
+                    event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        task_number,
+                        status: PlanTaskStatus::Paused,
+                    });
+                    // Remove from pause_pending set — it's been consumed
+                    self.plans.write().unwrap()
+                        .get_mut(plan_id)
+                        .map(|s| { s.pause_pending_tasks.remove(&task_number); });
+                    // Do NOT call skip_blocked_tasks or advance_after_task — runtime idles
+                    return;
+                }
+
+                if is_whole_cancel {
+                    // AC6: whole-plan-cancel-pending path — cancel all non-terminal
+                    {
+                        let plan = match conversation.plans.get_mut(plan_id) {
+                            Some(p) => p,
+                            None => return,
+                        };
+                        if idx < plan.tasks.len() {
+                            plan.tasks[idx].status = PlanTaskStatus::Cancelled;
+                            plan.tasks[idx].completed_at_ms = Some(now_ms);
+                            plan.tasks[idx].error = Some(reason);
+                        }
+                        for task in &mut plan.tasks {
+                            if is_terminal(task.status) {
+                                continue;
+                            }
+                            task.status = PlanTaskStatus::Cancelled;
+                            task.completed_at_ms = Some(now_ms);
+                            task.error = Some("Plan cancelled by user".to_string());
+                            event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                                conversation_id: conversation_id.clone(),
+                                plan_id: plan_id.to_string(),
+                                task_number: task.number,
+                                status: PlanTaskStatus::Cancelled,
+                            });
+                        }
+                        plan.status = PlanStatus::Cancelled;
+                    }
+                    event_emitter.emit(AppEvent::PlanCancelled {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        cancelled_at_task: None,
+                    });
+                    finish_plan(conversation_id, plan_id, conversation, event_emitter);
+                    self.plans.write().unwrap().remove(plan_id);
+                    return;
+                }
+
+                // Existing hard-stop path (per-task cancel → PlanCancelled with Some(n))
                 {
                     let plan = match conversation.plans.get_mut(plan_id) {
                         Some(p) => p,
@@ -350,7 +551,76 @@ impl PlanRuntime {
             plan_id: s.plan_id.clone(),
             task_cancels: s.task_cancels.clone(),
             task_start_assistant_count: s.task_start_assistant_count,
+            pause_pending_tasks: s.pause_pending_tasks.clone(),
+            whole_plan_cancel_pending: s.whole_plan_cancel_pending,
+            pending_deviation: s.pending_deviation.clone(),
         })
+    }
+
+    pub async fn mark_pause_pending(
+        &self,
+        plan_id: &str,
+        task_number: u32,
+    ) {
+        let mut plans = self.plans.write().unwrap();
+        if let Some(state) = plans.get_mut(plan_id) {
+            state.pause_pending_tasks.insert(task_number);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn mark_whole_plan_cancel_pending(&self, plan_id: &str) {
+        let mut plans = self.plans.write().unwrap();
+        if let Some(state) = plans.get_mut(plan_id) {
+            state.whole_plan_cancel_pending = true;
+        }
+    }
+
+    pub async fn mark_deviation_pending(
+        &self,
+        plan_id: &str,
+        kind: PlanDeviationKind,
+    ) {
+        let mut plans = self.plans.write().unwrap();
+        if let Some(state) = plans.get_mut(plan_id) {
+            state.pending_deviation = Some(kind);
+        }
+    }
+
+    pub async fn clear_deviation_pending(&self, plan_id: &str) {
+        let mut plans = self.plans.write().unwrap();
+        if let Some(state) = plans.get_mut(plan_id) {
+            state.pending_deviation = None;
+        }
+    }
+
+    /// Story 6.4: remove runtime state for a plan that has been cancelled
+    /// without a running task (no-turn-complete path).
+    pub async fn remove_plan(&self, plan_id: &str) {
+        let mut plans = self.plans.write().unwrap();
+        plans.remove(plan_id);
+    }
+
+    async fn has_pending_deviation(&self, plan_id: &str) -> bool {
+        let plans = self.plans.read().unwrap();
+        plans.get(plan_id).map_or(false, |s| s.pending_deviation.is_some())
+    }
+
+    /// Public wrapper for the private `advance_after_task`. Called by 6-4
+    /// handlers after a status mutation (pause-resume, skip, retry, edit).
+    /// Short-circuits if pending_deviation is set.
+    pub async fn resume_advance(
+        &self,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: &dyn EventEmitter,
+    ) {
+        if self.has_pending_deviation(plan_id).await {
+            tracing::debug!("PlanRuntime::resume_advance: short-circuited — pending_deviation is set");
+            return;
+        }
+        self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
     }
 
     /// Returns true if the running task for this plan has received a new assistant
@@ -500,7 +770,7 @@ fn skip_blocked_tasks(
     }
 }
 
-fn finish_plan(
+pub(crate) fn finish_plan(
     conversation_id: &ConversationId,
     plan_id: &str,
     conversation: &mut crate::domain::models::Conversation,
@@ -659,6 +929,49 @@ fn is_terminal(status: PlanTaskStatus) -> bool {
             | PlanTaskStatus::Skipped
             | PlanTaskStatus::Cancelled
     )
+    // Paused is non-terminal — eligibility skips it but resume can flip it back.
+}
+
+/// Story 6.4: public version of `is_terminal` for use by adapters/event loop.
+pub fn is_terminal_pub(status: PlanTaskStatus) -> bool {
+    is_terminal(status)
+}
+
+/// Story 6.4: validate a reorder move.
+/// `i` = current index of `task_number` in plan.tasks, `j` = target index.
+/// Pure function; no I/O.
+pub fn validate_reorder(plan: &Plan, task_number: u32, j: usize) -> Result<(), String> {
+    let i = plan.tasks.iter()
+        .position(|t| t.number == task_number)
+        .ok_or_else(|| format!("Task {} not found in plan", task_number))?;
+
+    if i == j {
+        return Ok(());
+    }
+
+    if plan.tasks[i].status != PlanTaskStatus::Pending {
+        return Err("Only pending tasks can be reordered".to_string());
+    }
+
+    // Can't push before a task it depends on
+    for dep_n in &plan.tasks[i].depends_on {
+        if let Some(dep_pos) = plan.tasks.iter().position(|t| &t.number == dep_n) {
+            if dep_pos >= j {
+                return Err("Would push before a task it depends on".to_string());
+            }
+        }
+    }
+
+    // Can't push past a task that depends on it
+    for t in &plan.tasks {
+        if t.depends_on.contains(&task_number) {
+            if plan.tasks.iter().position(|pt| pt.number == t.number).unwrap_or(usize::MAX) <= j {
+                return Err("Would push past a task that depends on it".to_string());
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn extract_first_sentence(text: &str) -> String {

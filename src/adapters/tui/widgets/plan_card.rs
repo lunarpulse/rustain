@@ -111,13 +111,14 @@ pub fn render_plan_card_lines<'a>(
 
         let (icon_str, icon_color) = if !is_pending && task.started_at_ms.is_some() {
             match task.status {
+                PlanTaskStatus::Pending => (String::new(), theme.colors.fg_muted),
                 PlanTaskStatus::Running => ("●".to_string(), theme.colors.tool_status_executing),
                 PlanTaskStatus::Waiting => (format!("⧖ (deps: {})", task.waiting_on.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")), theme.colors.tool_status_awaiting),
                 PlanTaskStatus::Completed => ("✓".to_string(), theme.colors.tool_status_success),
                 PlanTaskStatus::Failed => ("✗".to_string(), theme.colors.tool_status_error),
                 PlanTaskStatus::Skipped => ("⏭".to_string(), theme.colors.tool_status_cancelled),
                 PlanTaskStatus::Cancelled => ("⊘".to_string(), theme.colors.tool_status_cancelled),
-                PlanTaskStatus::Pending => (String::new(), theme.colors.fg_muted),
+                PlanTaskStatus::Paused => ("⏸".to_string(), theme.colors.tool_status_awaiting),
             }
         } else {
             (String::new(), theme.colors.fg_muted)

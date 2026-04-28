@@ -253,8 +253,8 @@ fn resolve_panel_plan_returns_none_when_empty() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 use rustain::adapters::tui::task_panel_handlers::{
-    any_plan_has_running_task, handle_open_panel_tasks, handle_plan_execution_started,
-    handle_plan_task_status_changed, is_failed_drill_down, resolve_copy_task_payload,
+    any_plan_has_running_task, drill_down_task_status, handle_open_panel_tasks, handle_plan_execution_started,
+    handle_plan_task_status_changed, resolve_copy_task_payload,
 };
 use rustain::domain::models::plan::TaskResult;
 
@@ -449,15 +449,15 @@ fn ac7_reserved_keys_only_emit_on_failed_drill_down() {
     conv.plans.get_mut("test-plan").unwrap().tasks[1].error = Some("fail".to_string());
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.last_executed_plan_id = Some("test-plan".to_string());
-    // Drill into Completed task → reserved key must NOT fire.
+    // Drill into Completed task → status is Completed (not Failed).
     state.task_panel_state.drill_down_task = Some(1);
-    assert!(!is_failed_drill_down(&state, &conv));
-    // Drill into Failed task → reserved key SHOULD fire.
+    assert_eq!(drill_down_task_status(&state, &conv), Some(PlanTaskStatus::Completed));
+    // Drill into Failed task → status is Failed.
     state.task_panel_state.drill_down_task = Some(2);
-    assert!(is_failed_drill_down(&state, &conv));
-    // No drill-down at all → must not fire.
+    assert_eq!(drill_down_task_status(&state, &conv), Some(PlanTaskStatus::Failed));
+    // No drill-down at all → None.
     state.task_panel_state.drill_down_task = None;
-    assert!(!is_failed_drill_down(&state, &conv));
+    assert_eq!(drill_down_task_status(&state, &conv), None);
 }
 
 #[test]

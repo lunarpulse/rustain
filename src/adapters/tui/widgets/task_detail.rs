@@ -8,11 +8,11 @@
 //!
 //! - `Completed`: `[c] Copy result   [Esc] Back`
 //! - `Failed`: `[c] Copy error   [r] Retry   [s] Skip   [e] Edit task   [Esc] Back`
+//! - `Paused`: `[c] Copy info   [p] Resume   [Esc] Back` (Story 6.4)
 //! - Others: `[c] Copy info   [Esc] Back`
 //!
-//! The `r`/`s`/`e` keys on Failed tasks are **reserved for Story 6.4**. In 6-3
-//! they emit a SystemNotice "Coming in Story 6.4" and stay on the detail view.
-//! 6-4 only changes the handler, not the keymap shape.
+//! Action keys are the live mutation surface (Story 6.4). Status-conditional
+//! dispatch via `drill_down_task_status`. Keymap shape preserved from 6.3.
 
 use ratatui::{
     buffer::Buffer,
@@ -35,6 +35,7 @@ fn status_icon(status: PlanTaskStatus, theme: &crate::adapters::tui::theme::Them
         PlanTaskStatus::Failed => ("\u{2717}", theme.colors.tool_status_error),
         PlanTaskStatus::Skipped => ("\u{23ED}", theme.colors.tool_status_cancelled),
         PlanTaskStatus::Cancelled => ("\u{2298}", theme.colors.tool_status_cancelled),
+        PlanTaskStatus::Paused => ("\u{23F8}", theme.colors.tool_status_awaiting),
     }
 }
 
@@ -47,6 +48,7 @@ fn status_word(status: PlanTaskStatus) -> &'static str {
         PlanTaskStatus::Failed => "Failed",
         PlanTaskStatus::Skipped => "Skipped",
         PlanTaskStatus::Cancelled => "Cancelled",
+        PlanTaskStatus::Paused => "Paused",
     }
 }
 
@@ -241,6 +243,7 @@ pub fn render(
         let action_text = match task.status {
             PlanTaskStatus::Completed => "[c] Copy result   [Esc] Back".to_string(),
             PlanTaskStatus::Failed => "[c] Copy error   [r] Retry   [s] Skip   [e] Edit task   [Esc] Back".to_string(),
+            PlanTaskStatus::Paused => "[c] Copy info   [p] Resume   [Esc] Back".to_string(),
             _ => "[c] Copy info   [Esc] Back".to_string(),
         };
         let action_y = max_y.saturating_sub(1);

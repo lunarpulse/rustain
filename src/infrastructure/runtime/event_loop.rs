@@ -1407,25 +1407,730 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
-                                InputAction::ReservedKey6_4 => {
-                                    if crate::adapters::tui::task_panel_handlers::is_failed_drill_down(
-                                        &state,
-                                        &conversation,
-                                    ) {
+                                // ─── Story 6.4: Task Control & Plan Deviation ───
+
+                                InputAction::TaskPause(n) => {
+                                    let task_number = if state.task_panel_state.drill_down_task.is_some() {
+                                        n
+                                    } else {
+                                        match crate::adapters::tui::task_panel_handlers::resolve_panel_task_number(&state, &conversation, n) {
+                                            Some(tn) => tn,
+                                            None => {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "No task selected.".to_string(),
+                                                });
+                                                continue;
+                                            }
+                                        }
+                                    };
+                                    let outcome = crate::adapters::tui::task_panel_handlers::handle_task_pause(
+                                        &mut state,
+                                        &mut conversation,
+                                        task_number,
+                                    );
+                                    for notice in &outcome.notices {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(notice.conversation_id.clone()),
+                                            level: notice.level,
+                                            message: notice.message.clone(),
+                                        });
+                                    }
+                                    // Emit PlanTaskStatusChanged: scoped to release immutable borrow
+                                    let plan_id = state.task_panel_state.last_executed_plan_id.clone().unwrap_or_default();
+                                    let current_status = {
+                                        conversation.plans.get(&plan_id)
+                                            .and_then(|plan| plan.tasks.get((task_number.saturating_sub(1)) as usize))
+                                            .map(|t| t.status)
+                                    };
+                                    if let Some(status) = current_status {
+                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                            conversation_id: conversation.id.clone(),
+                                            plan_id: plan_id.clone(),
+                                            task_number,
+                                            status,
+                                        });
+                                    }
+                                    let running_to_cancel = outcome.running_task_paused;
+                                    let should_advance = outcome.should_resume_advance;
+                                    drop(outcome);
+                                    if let Some(running_n) = running_to_cancel {
+                                        plan_runtime.mark_pause_pending(&plan_id, running_n).await;
+                                        if let Some(snapshot) = plan_runtime.snapshot(&plan_id).await {
+                                            if let Some(token) = snapshot.task_cancels.get(&running_n) {
+                                                token.cancel();
+                                            }
+                                        }
+                                    }
+                                    if should_advance {
+                                        let conv_id = conversation.id.clone();
+                                        plan_runtime.resume_advance(
+                                            &conv_id,
+                                            &plan_id,
+                                            &mut conversation,
+                                            app_state.event_bus.as_ref(),
+                                        ).await;
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskSkip(n) => {
+                                    let task_number = if state.task_panel_state.drill_down_task.is_some() {
+                                        n
+                                    } else {
+                                        match crate::adapters::tui::task_panel_handlers::resolve_panel_task_number(&state, &conversation, n) {
+                                            Some(tn) => tn,
+                                            None => {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "No task selected.".to_string(),
+                                                });
+                                                continue;
+                                            }
+                                        }
+                                    };
+                                    let notices = crate::adapters::tui::task_panel_handlers::handle_task_skip(
+                                        &mut state,
+                                        &mut conversation,
+                                        task_number,
+                                    );
+                                    for notice in &notices {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(notice.conversation_id.clone()),
+                                            level: notice.level,
+                                            message: notice.message.clone(),
+                                        });
+                                    }
+                                    let plan_id = state.task_panel_state.last_executed_plan_id.clone().unwrap_or_default();
+                                    let current_status = {
+                                        conversation.plans.get(&plan_id)
+                                            .and_then(|plan| plan.tasks.get((task_number.saturating_sub(1)) as usize))
+                                            .map(|t| t.status)
+                                    };
+                                    if let Some(status) = current_status {
+                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                            conversation_id: conversation.id.clone(),
+                                            plan_id: plan_id.clone(),
+                                            task_number,
+                                            status,
+                                        });
+                                    }
+                                    let should_advance = state.task_panel_state.skip_cascade_pending.is_none();
+                                    if should_advance {
+                                        let conv_id = conversation.id.clone();
+                                        plan_runtime.resume_advance(
+                                            &conv_id,
+                                            &plan_id,
+                                            &mut conversation,
+                                            app_state.event_bus.as_ref(),
+                                        ).await;
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskRetry(n) => {
+                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+                                        Some(id) => id.clone(),
+                                        None => {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message: "No active plan.".to_string(),
+                                            });
+                                            continue;
+                                        }
+                                    };
+                                    let should_retry = match conversation.plans.get_mut(&plan_id) {
+                                        Some(plan) => {
+                                            let idx = (n.saturating_sub(1)) as usize;
+                                            if idx < plan.tasks.len() && plan.tasks[idx].number == n && plan.tasks[idx].status == PlanTaskStatus::Failed {
+                                                plan.tasks[idx].status = PlanTaskStatus::Pending;
+                                                plan.tasks[idx].started_at_ms = None;
+                                                plan.tasks[idx].completed_at_ms = None;
+                                                plan.tasks[idx].error = None;
+                                                plan.tasks[idx].result = None;
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        None => false,
+                                    };
+                                    if should_retry {
+                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                            conversation_id: conversation.id.clone(),
+                                            plan_id: plan_id.clone(),
+                                            task_number: n,
+                                            status: PlanTaskStatus::Pending,
+                                        });
                                         app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Info,
-                                            message: "Coming in Story 6.4 (Task Control & Plan Deviation).".to_string(),
+                                            message: format!("Retrying Task {}.", n),
                                         });
+                                        let conv_id = conversation.id.clone();
+                                        plan_runtime.resume_advance(
+                                            &conv_id,
+                                            &plan_id,
+                                            &mut conversation,
+                                            app_state.event_bus.as_ref(),
+                                        ).await;
                                     }
+                                    state.needs_redraw = true;
                                 }
-                                InputAction::ReservedPanelKey6_4 => {
+
+                                InputAction::TaskEdit(n) => {
+                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+                                        Some(id) => id.clone(),
+                                        None => continue,
+                                    };
+                                    let has_failed_task = conversation.plans.get(&plan_id)
+                                        .and_then(|p| p.tasks.get((n.saturating_sub(1)) as usize))
+                                        .map(|t| t.number == n && t.status == PlanTaskStatus::Failed)
+                                        .unwrap_or(false);
+                                    if !has_failed_task {
+                                        continue;
+                                    }
+                                    let (orig_title, orig_description) = {
+                                        let plan = conversation.plans.get(&plan_id).unwrap();
+                                        let task = &plan.tasks[(n.saturating_sub(1)) as usize];
+                                        (task.title.clone(), task.description.clone())
+                                    };
+                                    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                                    let edits_dir = home.join(".rustain").join("edits");
+                                    let _ = std::fs::create_dir_all(&edits_dir);
+                                    let path = edits_dir.join(format!("task-{}-{}.txt", plan_id, n));
+                                    let safe_title = orig_title.replace('\n', " ");
+                                    let template: String = format!(
+                                        "# Edit task title and description below.\n\
+                                         # Save and exit to apply; close without changes to cancel.\n\
+                                         # Lines starting with # are ignored.\n\
+                                         title: {}\n\
+                                         description: |\n{}",
+                                        safe_title,
+                                        {
+                                            let indented: Vec<String> = orig_description
+                                                .lines()
+                                                .map(|l| format!("  {}", l))
+                                                .collect();
+                                            indented.join("\n")
+                                        }
+                                    );
+                                    let _ = std::fs::write(&path, &template);
+                                    // editor_suspend handles terminal suspend/restore internally
+                                    let exit_result = crate::adapters::tui::editor_suspend::run_editor_on_path(&path);
+                                    match exit_result {
+                                        Ok(_exit_status) => {
+                                            match std::fs::read_to_string(&path) {
+                                                Ok(content) => {
+                                                    if content == template {
+                                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                            conversation_id: Some(conversation.id.clone()),
+                                                            level: NoticeLevel::Info,
+                                                            message: "Task edit cancelled.".to_string(),
+                                                        });
+                                                    } else {
+                                                        let mut new_title = String::new();
+                                                        let mut new_desc_lines: Vec<String> = Vec::new();
+                                                        let mut reading_desc = false;
+                                                        for line in content.lines() {
+                                                            // Only skip comment lines before the description block
+                                                            if line.starts_with('#') && !reading_desc {
+                                                                continue;
+                                                            }
+                                                            if line == "description: |" {
+                                                                reading_desc = true;
+                                                            } else if reading_desc {
+                                                                if let Some(rest) = line.strip_prefix("  ") {
+                                                                    new_desc_lines.push(rest.to_string());
+                                                                } else if line.is_empty() {
+                                                                    // preserve empty lines within description body
+                                                                    new_desc_lines.push(String::new());
+                                                                } else {
+                                                                    reading_desc = false;
+                                                                }
+                                                            } else if let Some(rest) = line.strip_prefix("title: ") {
+                                                                new_title = rest.to_string();
+                                                            } else if !line.trim().is_empty() && new_title.is_empty() {
+                                                                // fallback: first non-comment non-empty line is title
+                                                                new_title = line.to_string();
+                                                            }
+                                                        }
+                                                        if new_title.is_empty() {
+                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: NoticeLevel::Warning,
+                                                                message: "Failed to parse edited task — missing title. Task unchanged.".to_string(),
+                                                            });
+                                                        } else {
+                                                            let new_desc = new_desc_lines.join("\n");
+                                                            {
+                                                                let plan = conversation.plans.get_mut(&plan_id).unwrap();
+                                                                let idx = (n.saturating_sub(1)) as usize;
+                                                                plan.tasks[idx].title = new_title;
+                                                                plan.tasks[idx].description = new_desc;
+                                                                plan.tasks[idx].status = PlanTaskStatus::Pending;
+                                                                plan.tasks[idx].started_at_ms = None;
+                                                                plan.tasks[idx].completed_at_ms = None;
+                                                                plan.tasks[idx].error = None;
+                                                                plan.tasks[idx].result = None;
+                                                            }
+                                                            app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                                conversation_id: conversation.id.clone(),
+                                                                plan_id: plan_id.clone(),
+                                                                task_number: n,
+                                                                status: PlanTaskStatus::Pending,
+                                                            });
+                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: NoticeLevel::Info,
+                                                                message: format!("Task {} edited and queued for retry.", n),
+                                                            });
+                                                            state.task_panel_state.drill_down_task = None;
+                                                            let conv_id = conversation.id.clone();
+                                                            plan_runtime.resume_advance(
+                                                                &conv_id,
+                                                                &plan_id,
+                                                                &mut conversation,
+                                                                app_state.event_bus.as_ref(),
+                                                            ).await;
+                                                        }
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: NoticeLevel::Warning,
+                                                        message: "Failed to read edited file. Task unchanged.".to_string(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Err(_e) => {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message: "Task edit cancelled (editor exited with error).".to_string(),
+                                            });
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskCancelPlan => {
+                                    let executing_plan = conversation.plans.values()
+                                        .find(|p| p.status == PlanStatus::Executing);
+                                    if executing_plan.is_none() {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: "No active plan to cancel.".to_string(),
+                                        });
+                                    } else {
+                                        let plan = executing_plan.unwrap();
+                                        state.task_panel_state.cancel_plan_confirm = Some(plan.id.clone());
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskResumeAll => {
+                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+                                        Some(id) => id.clone(),
+                                        None => {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message: "No paused tasks.".to_string(),
+                                            });
+                                            continue;
+                                        }
+                                    };
+                                    let mut count = 0u32;
+                                    {
+                                        let plan = match conversation.plans.get_mut(&plan_id) {
+                                            Some(p) => p,
+                                            None => {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "No paused tasks.".to_string(),
+                                                });
+                                                continue;
+                                            }
+                                        };
+                                        for task in &mut plan.tasks {
+                                            if task.status == PlanTaskStatus::Paused {
+                                                let was_running = task.started_at_ms.is_some()
+                                                    && task.completed_at_ms.is_none();
+                                                task.status = PlanTaskStatus::Pending;
+                                                if was_running {
+                                                    task.started_at_ms = None;
+                                                }
+                                                count += 1;
+                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                    conversation_id: conversation.id.clone(),
+                                                    plan_id: plan_id.clone(),
+                                                    task_number: task.number,
+                                                    status: PlanTaskStatus::Pending,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    if count == 0 {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: "No paused tasks.".to_string(),
+                                        });
+                                    } else {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: format!("Resumed {} task(s).", count),
+                                        });
+                                        let conv_id = conversation.id.clone();
+                                        plan_runtime.resume_advance(
+                                            &conv_id,
+                                            &plan_id,
+                                            &mut conversation,
+                                            app_state.event_bus.as_ref(),
+                                        ).await;
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskReorderEnter(n) => {
+                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+                                        Some(id) => id.clone(),
+                                        None => {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message: "No active plan.".to_string(),
+                                            });
+                                            continue;
+                                        }
+                                    };
+                                    if let Some(plan) = conversation.plans.get(&plan_id) {
+                                        let idx = (n.saturating_sub(1)) as usize;
+                                        if idx < plan.tasks.len() && plan.tasks[idx].status == PlanTaskStatus::Pending {
+                                            let orig_order: Vec<u32> = plan.tasks.iter().map(|t| t.number).collect();
+                                            state.task_panel_state.reorder_mode_for = Some(n);
+                                            state.task_panel_state.reorder_original_order = Some(orig_order);
+                                        } else {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message: "Reorder requires a pending task selected.".to_string(),
+                                            });
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskReorderMove(dir) => {
+                                    let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
+                                        Some(id) => id.clone(),
+                                        None => continue,
+                                    };
+                                    let task_n = match state.task_panel_state.reorder_mode_for {
+                                        Some(tn) => tn,
+                                        None => continue,
+                                    };
+                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
+                                        let current_idx = plan.tasks.iter().position(|t| t.number == task_n);
+                                        if let Some(i) = current_idx {
+                                            let new_i = match dir {
+                                                crate::adapters::tui::state::Direction::Up => {
+                                                    if i > 0 { i - 1 } else { i }
+                                                }
+                                                crate::adapters::tui::state::Direction::Down => {
+                                                    if i + 1 < plan.tasks.len() { i + 1 } else { i }
+                                                }
+                                            };
+                                            if i == new_i {
+                                                continue;
+                                            }
+                                            if let Err(reason) = crate::domain::services::plan_runtime::validate_reorder(plan, task_n, new_i) {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Warning,
+                                                    message: format!("Reorder violates dependencies: {}.", reason),
+                                                });
+                                            } else {
+                                                let task = plan.tasks.remove(i);
+                                                plan.tasks.insert(new_i, task);
+                                            }
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::TaskReorderCommit => {
+                                    if let Some(plan_id) = state.task_panel_state.last_executed_plan_id.as_ref() {
+                                        if let Some(plan) = conversation.plans.get(plan_id) {
+                                            for task in &plan.tasks {
+                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                    conversation_id: conversation.id.clone(),
+                                                    plan_id: plan_id.clone(),
+                                                    task_number: task.number,
+                                                    status: PlanTaskStatus::Pending,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    state.task_panel_state.reorder_mode_for = None;
+                                    state.task_panel_state.reorder_original_order = None;
                                     app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: NoticeLevel::Info,
-                                        message: "Coming in Story 6.4 (Task Control & Plan Deviation).".to_string(),
+                                        message: "Plan reordered.".to_string(),
                                     });
+                                    state.needs_redraw = true;
                                 }
+
+                                InputAction::TaskReorderCancel => {
+                                    if let (Some(plan_id), Some(orig)) = (
+                                        state.task_panel_state.last_executed_plan_id.as_ref(),
+                                        state.task_panel_state.reorder_original_order.take(),
+                                    ) {
+                                        if let Some(plan) = conversation.plans.get_mut(plan_id) {
+                                            let mut restored = Vec::new();
+                                            for num in &orig {
+                                                if let Some(idx) = plan.tasks.iter().position(|t| &t.number == num) {
+                                                    restored.push(plan.tasks.remove(idx));
+                                                }
+                                            }
+                                            plan.tasks = restored;
+                                        }
+                                    }
+                                    state.task_panel_state.reorder_mode_for = None;
+                                    state.task_panel_state.reorder_original_order = None;
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::SkipCascadeAck(choice) => {
+                                    let skip_pending = match state.task_panel_state.skip_cascade_pending.take() {
+                                        Some(s) => s,
+                                        None => continue,
+                                    };
+                                    let plan_id = skip_pending.plan_id.clone();
+                                    let conv_id = conversation.id.clone();
+                                    match choice {
+                                        crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip => {
+                                            {
+                                                let plan = match conversation.plans.get_mut(&plan_id) {
+                                                    Some(p) => p,
+                                                    None => continue,
+                                                };
+                                                let now_ms = chrono::Utc::now().timestamp_millis();
+                                                for num in &skip_pending.downstream {
+                                                    let idx = (num.saturating_sub(1)) as usize;
+                                                    if idx < plan.tasks.len() {
+                                                        plan.tasks[idx].status = PlanTaskStatus::Skipped;
+                                                        plan.tasks[idx].completed_at_ms = Some(now_ms);
+                                                        plan.tasks[idx].error = Some(format!(
+                                                            "Skipped — upstream Task {} skipped",
+                                                            skip_pending.source_task
+                                                        ));
+                                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                            conversation_id: conv_id.clone(),
+                                                            plan_id: plan_id.clone(),
+                                                            task_number: *num,
+                                                            status: PlanTaskStatus::Skipped,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            plan_runtime.resume_advance(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            ).await;
+                                        }
+                                        crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway => {
+                                            plan_runtime.resume_advance(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            ).await;
+                                        }
+                                        crate::adapters::tui::state::SkipCascadeChoice::CancelSkip => {
+                                            {
+                                                let plan = match conversation.plans.get_mut(&plan_id) {
+                                                    Some(p) => p,
+                                                    None => continue,
+                                                };
+                                                let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
+                                                if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
+                                                    plan.tasks[idx].status = skip_pending.source_prior_status;
+                                                    plan.tasks[idx].error = skip_pending.source_prior_error.clone();
+                                                    plan.tasks[idx].completed_at_ms = None;
+                                                }
+                                            }
+                                            if let Some(plan) = conversation.plans.get(&plan_id) {
+                                                let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
+                                                if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
+                                                    app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                        conversation_id: conv_id.clone(),
+                                                        plan_id: plan_id.clone(),
+                                                        task_number: skip_pending.source_task,
+                                                        status: plan.tasks[idx].status,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::PlanDeviationDecided(plan_id, decision) => {
+                                    use crate::domain::models::plan::PlanDecision;
+                                    let conv_id = conversation.id.clone();
+                                    match decision {
+                                        PlanDecision::Approve => {
+                                            plan_runtime.clear_deviation_pending(&plan_id).await;
+                                            state.task_panel_state.pending_deviation = None;
+                                            plan_runtime.resume_advance(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            ).await;
+                                        }
+                                        PlanDecision::Edit => {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message: "Nothing to edit on auto-skip deviation. Use [n] to reject and stop.".to_string(),
+                                            });
+                                        }
+                                        PlanDecision::Reject => {
+                                            plan_runtime.clear_deviation_pending(&plan_id).await;
+                                            state.task_panel_state.pending_deviation = None;
+                                            {
+                                                let plan = match conversation.plans.get_mut(&plan_id) {
+                                                    Some(p) => p,
+                                                    None => continue,
+                                                };
+                                                let now_ms = chrono::Utc::now().timestamp_millis();
+                                                for task in &mut plan.tasks {
+                                                    if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
+                                                        task.status = PlanTaskStatus::Cancelled;
+                                                        task.completed_at_ms = Some(now_ms);
+                                                        task.error = Some("Plan cancelled by user".to_string());
+                                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                            conversation_id: conv_id.clone(),
+                                                            plan_id: plan_id.clone(),
+                                                            task_number: task.number,
+                                                            status: PlanTaskStatus::Cancelled,
+                                                        });
+                                                    }
+                                                }
+                                                plan.status = PlanStatus::Cancelled;
+                                            }
+                                            app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                                conversation_id: conv_id.clone(),
+                                                plan_id: plan_id.clone(),
+                                                cancelled_at_task: None,
+                                            });
+                                            crate::domain::services::plan_runtime::finish_plan(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::CancelPlanConfirm(confirmed) => {
+                                    if confirmed {
+                                        let plan_id = match state.task_panel_state.cancel_plan_confirm.take() {
+                                            Some(id) => id,
+                                            None => continue,
+                                        };
+                                        // Clear any overlay cards before cancelling
+                                        state.task_panel_state.pending_deviation = None;
+                                        state.task_panel_state.skip_cascade_pending = None;
+                                        let conv_id = conversation.id.clone();
+                                        let has_running = conversation.plans.get(&plan_id)
+                                            .map(|p| p.tasks.iter().any(|t| t.status == PlanTaskStatus::Running))
+                                            .unwrap_or(false);
+                                        if has_running {
+                                            plan_runtime.mark_whole_plan_cancel_pending(&plan_id).await;
+                                            if let Some(snapshot) = plan_runtime.snapshot(&plan_id).await {
+                                                for (task_n, token) in &snapshot.task_cancels {
+                                                    let is_running = conversation.plans.get(&plan_id)
+                                                        .and_then(|p| p.tasks.get((task_n.saturating_sub(1)) as usize))
+                                                        .map(|t| t.status == PlanTaskStatus::Running)
+                                                        .unwrap_or(false);
+                                                    if is_running {
+                                                        token.cancel();
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message: "Cancelling plan...".to_string(),
+                                            });
+                                        } else {
+                                            let plan = match conversation.plans.get_mut(&plan_id) {
+                                                Some(p) => p,
+                                                None => continue,
+                                            };
+                                            // Guard against plan that became terminal while confirm card was visible
+                                            if plan.status != PlanStatus::Executing {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conv_id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "Plan already finished.".to_string(),
+                                                });
+                                                continue;
+                                            }
+                                            let now_ms = chrono::Utc::now().timestamp_millis();
+                                            for task in &mut plan.tasks {
+                                                if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
+                                                    task.status = PlanTaskStatus::Cancelled;
+                                                    task.completed_at_ms = Some(now_ms);
+                                                    task.error = Some("Plan cancelled by user".to_string());
+                                                    app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                        conversation_id: conv_id.clone(),
+                                                        plan_id: plan_id.clone(),
+                                                        task_number: task.number,
+                                                        status: PlanTaskStatus::Cancelled,
+                                                    });
+                                                }
+                                            }
+                                            plan.status = PlanStatus::Cancelled;
+                                            drop(plan);
+                                            app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                                conversation_id: conv_id.clone(),
+                                                plan_id: plan_id.clone(),
+                                                cancelled_at_task: None,
+                                            });
+                                            crate::domain::services::plan_runtime::finish_plan(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            );
+                                            plan_runtime.remove_plan(&plan_id).await;
+                                        }
+                                    } else {
+                                        state.task_panel_state.cancel_plan_confirm = None;
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                // ─── End Story 6.4 ───
                                 InputAction::ImageFormatError => {
                                     let fb = FeedbackBlock {
                                         id: generate_conversation_id(),
@@ -3556,22 +4261,44 @@ pub async fn run(
                             }
                         }
                     }
-                    AppEvent::PlanCancelled { conversation_id, plan_id, cancelled_at_task } => {
-                        let msg = match cancelled_at_task {
-                            Some(n) => format!("Plan cancelled at task {}", n),
-                            None => "Plan cancelled".to_string(),
-                        };
-                        tracing::info!("{}", msg);
-                        if conversation_id == conversation.id {
-                            state.task_panel_state.last_executed_plan_id = Some(plan_id);
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                conversation_id: Some(conversation.id.clone()),
-                                level: NoticeLevel::Info,
-                                message: msg,
-                            });
+                        AppEvent::PlanCancelled { conversation_id, plan_id, cancelled_at_task } => {
+                            let msg = match cancelled_at_task {
+                                Some(n) => format!("Plan cancelled at task {}", n),
+                                None => "Plan cancelled".to_string(),
+                            };
+                            tracing::info!("{}", msg);
+                            if conversation_id == conversation.id {
+                                state.task_panel_state.last_executed_plan_id = Some(plan_id);
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: msg,
+                                });
+                            }
                         }
-                    }
-                    AppEvent::SetPermissionMode(mode) => {
+                        AppEvent::PlanDeviation { conversation_id: cid, plan_id: pid, deviation_kind, original_step_count: _, current_step_count: _, changed_steps: _, summary } => {
+                            let yolo = security.current_mode() == PermissionMode::Yolo;
+                            if yolo {
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    conversation_id: Some(cid.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: format!("Plan adjusted: {}", summary),
+                                });
+                                plan_runtime.clear_deviation_pending(&pid).await;
+                                if cid == conversation.id {
+                                    plan_runtime.resume_advance(
+                                        &cid,
+                                        &pid,
+                                        &mut conversation,
+                                        app_state.event_bus.as_ref(),
+                                    ).await;
+                                }
+                            } else if cid == conversation.id {
+                                state.task_panel_state.pending_deviation = Some((pid, deviation_kind));
+                                state.needs_redraw = true;
+                            }
+                        }
+                        AppEvent::SetPermissionMode(mode) => {
                         security.set_mode(mode);
                         // Update sandbox policy
                         let new_policy = crate::domain::models::SandboxPolicy::from_mode(mode, &workspace_path);
@@ -6125,10 +6852,84 @@ fn render(
                     .map(|tm| tm.active_tab().session_meta.bookmarks.as_slice())
                     .unwrap_or(&[]);
                 let mut skip_chat_render = false;
-                if let Some(task_number) = state.task_panel_state.drill_down_task {
+
+                // Story 6.4: render priority chain (cards > drill-down > chat)
+                // 1. Plan deviation card (AC5)
+                if let Some((ref pid, _)) = state.task_panel_state.pending_deviation {
+                    use crate::adapters::tui::widgets::plan_deviation_card;
+                    let plan_data = conversation.plans.get(pid);
+                    let (original, current, changed, summary) = if let Some(plan) = plan_data {
+                        let original_count = plan.tasks.len() as u32;
+                        let changed_steps: Vec<u32> = plan.tasks.iter()
+                            .filter(|t| t.status == PlanTaskStatus::Skipped)
+                            .map(|t| t.number)
+                            .collect();
+                        let current_count = original_count;
+                        let summary_str = format!(
+                            "{} task(s) auto-skipped due to upstream failure.",
+                            changed_steps.len()
+                        );
+                        (original_count, current_count, changed_steps, summary_str)
+                    } else {
+                        (0u32, 0u32, vec![], "".to_string())
+                    };
+                    plan_deviation_card::render(
+                        app_layout.chat_pane,
+                        frame.buffer_mut(),
+                        original,
+                        current,
+                        &changed,
+                        &summary,
+                    );
+                    skip_chat_render = true;
+                }
+                // 2. Cancel plan confirm card (AC6)
+                else if let Some(ref pid) = state.task_panel_state.cancel_plan_confirm {
+                    use crate::adapters::tui::widgets::cancel_plan_confirm_card;
+                    let (plan_title, n_pending, n_completed) =
+                        conversation.plans.get(pid).map(|plan| {
+                            let pending = plan.tasks.iter()
+                                .filter(|t| !crate::domain::services::plan_runtime::is_terminal_pub(t.status))
+                                .count() as u32;
+                            let completed = plan.tasks.iter()
+                                .filter(|t| t.status == PlanTaskStatus::Completed)
+                                .count() as u32;
+                            (plan.title.clone(), pending, completed)
+                        }).unwrap_or_default();
+                    cancel_plan_confirm_card::render(
+                        app_layout.chat_pane,
+                        frame.buffer_mut(),
+                        &plan_title,
+                        n_pending,
+                        n_completed,
+                    );
+                    skip_chat_render = true;
+                }
+                // 3. Skip cascade card (AC2)
+                else if let Some(ref pending) = state.task_panel_state.skip_cascade_pending {
+                    use crate::adapters::tui::widgets::task_skip_cascade_card;
+                    task_skip_cascade_card::render(
+                        app_layout.chat_pane,
+                        frame.buffer_mut(),
+                        pending,
+                    );
+                    skip_chat_render = true;
+                }
+                // 4. Existing drill-down view (6-3)
+                else if let Some(task_number) = state.task_panel_state.drill_down_task {
                     let plan_opt = state.task_panel_state.last_executed_plan_id
                         .as_deref()
-                        .and_then(|id| conversation.plans.get(id));
+                        .and_then(|id| conversation.plans.get(id))
+                        .or_else(|| {
+                            // Story 6.4: fallback to resolve_panel_plan when
+                            // last_executed_plan_id is None (e.g. after restart).
+                            // Also back-fill last_executed_plan_id so subsequent
+                            // drill-down lookups hit the cached path.
+                            use crate::adapters::tui::widgets::task_panel;
+                            let p = task_panel::resolve_panel_plan(conversation, None)?;
+                            state.task_panel_state.last_executed_plan_id = Some(p.id.clone());
+                            Some(p)
+                        });
                     if let Some(plan) = plan_opt {
                         if let Some(task) = plan.tasks.get((task_number - 1) as usize) {
                             use crate::adapters::tui::widgets::task_detail;

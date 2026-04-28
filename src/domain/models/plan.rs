@@ -135,6 +135,10 @@ pub enum PlanTaskStatus {
     Skipped,
     /// Dep gate — defensive; sequential walk should not produce this.
     Waiting,
+    /// Story 6.4: user-initiated pause. Distinct from `Cancelled` (which is a hard stop).
+    /// A `Paused` task can transition back to `Pending` via the resume flow (AC1).
+    /// Downstream-dependent tasks are transitively paused.
+    Paused,
     /// 6.4 will flip via per-task cancel; this story produces it on whole-turn cancel.
     Cancelled,
 }
@@ -146,6 +150,16 @@ pub enum PlanDecision {
     AutoApproveYolo,
     Edit,
     Reject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PlanDeviationKind {
+    /// Runtime auto-skipped downstream tasks blocked by upstream failure/cancellation.
+    AutoSkipBlockedTasks { source_task: u32 },
+    /// Agent proposed a plan revision via the propose_plan_revision tool.
+    /// Variant reserved; tool implementation deferred to 6.4-FU1.
+    AgentRevision { proposed_tasks: Vec<PlanTask> },
 }
 
 #[cfg(test)]
@@ -386,5 +400,46 @@ mod tests {
             waiting_on: vec![],
         };
         assert_eq!(task.elapsed_ms(), Some(4000));
+    }
+
+    #[test]
+    fn paused_serializes_correctly() {
+        assert_eq!(
+            serde_json::to_string(&PlanTaskStatus::Paused).unwrap(),
+            "\"paused\""
+        );
+        let back: PlanTaskStatus = serde_json::from_str("\"paused\"").unwrap();
+        assert_eq!(back, PlanTaskStatus::Paused);
+    }
+
+    #[test]
+    fn plan_deviation_kind_auto_skip_round_trip() {
+        let kind = PlanDeviationKind::AutoSkipBlockedTasks { source_task: 2 };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(json.contains("\"kind\":\"autoSkipBlockedTasks\""));
+        let back: PlanDeviationKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn plan_deviation_kind_agent_revision_round_trip() {
+        let kind = PlanDeviationKind::AgentRevision {
+            proposed_tasks: vec![PlanTask {
+                number: 1,
+                title: "t".to_string(),
+                description: String::new(),
+                depends_on: vec![],
+                status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&kind).unwrap();
+        assert!(json.contains("\"kind\":\"agentRevision\""));
+        let back: PlanDeviationKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, kind);
     }
 }

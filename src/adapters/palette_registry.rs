@@ -131,6 +131,29 @@ impl PaletteRegistry {
             });
         }
 
+        // Story 6.4: task control palette entries
+        self.entries.push(PaletteEntry {
+            name: "!cancel-plan".into(),
+            description: "Cancel the current executing plan".into(),
+            shortcut: Some("Ctrl+X, T then x".into()),
+            scope: PaletteScope::All,
+            action: PaletteAction::ExecuteCommand("cancel-plan".into(), None),
+        });
+        self.entries.push(PaletteEntry {
+            name: "!reorder-task".into(),
+            description: "Move the selected pending task up or down".into(),
+            shortcut: None,
+            scope: PaletteScope::All,
+            action: PaletteAction::ExecuteCommand("reorder-task".into(), None),
+        });
+        self.entries.push(PaletteEntry {
+            name: "!resume-all-tasks".into(),
+            description: "Resume every paused task".into(),
+            shortcut: None,
+            scope: PaletteScope::All,
+            action: PaletteAction::ExecuteCommand("resume-all-tasks".into(), None),
+        });
+
         self.populated_from_discovered = cr_discovered;
     }
 
@@ -430,8 +453,9 @@ mod tests {
 
         reg.populate_from_command_registry(&cr);
         // 5 slash commands (/new, /export, /deactivate, /mode, /plan) + 4 mode palette entries +
-        // 6 built-ins (version, new tab, close tab, toggle sidebar, delete all, paste image from clipboard) = 15
-        assert_eq!(reg.all_entries().len(), 15);
+        // 6 built-ins (version, new tab, close tab, toggle sidebar, delete all, paste image from clipboard)
+        // + 3 story 6.4 (!cancel-plan, !reorder-task, !resume-all-tasks) = 18
+        assert_eq!(reg.all_entries().len(), 18);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/deactivate"));
@@ -448,6 +472,6 @@ mod tests {
 
         // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 15);
+        assert_eq!(reg.all_entries().len(), 18);
     }
 }

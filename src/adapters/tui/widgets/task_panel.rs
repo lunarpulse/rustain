@@ -35,11 +35,11 @@
 //! sub-tasks as indented children with a `(k/n sub-tasks)` fraction on the
 //! parent. In 6-3 — with no decomposed plans yet — this is a layout-only seat.
 //!
-//! ## Reserved keys
+//! ## Task control keys (Story 6.4)
 //!
-//! `p`/`s`/`x` at the panel level and `r`/`s`/`e` in the Failed-task detail
-//! view are reserved for 6.4. They emit "Coming in Story 6.4" notices and are
-//! no-ops in 6-3.
+//! Panel: `p` (Pause/Resume), `s` (Skip), `x` (Cancel plan).
+//! Drill-down Failed: `r` (Retry), `s` (Skip), `e` (Edit).
+//! Drill-down Paused: `p` (Resume).
 
 use ratatui::{
     prelude::*,
@@ -108,6 +108,11 @@ fn task_icon_for(
             symbol: "\u{2298}",
             color: theme.colors.tool_status_cancelled,
             suffix: " (cancelled)".to_string(),
+        },
+        PlanTaskStatus::Paused => TaskIcon {
+            symbol: "\u{23F8}",
+            color: theme.colors.tool_status_awaiting,
+            suffix: " (paused)".to_string(),
         },
     }
 }

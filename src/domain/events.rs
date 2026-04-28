@@ -190,6 +190,19 @@ pub enum AppEvent {
         /// Task that triggered the cancel; None for whole-plan cancel from 6.4 user action.
         cancelled_at_task: Option<u32>,
     },
+    /// Story 6.4: emitted when the executing plan deviates from the approved plan
+    /// (auto-skip of blocked tasks; agent-proposed revision deferred to 6.4-FU1).
+    /// TUI renders a PlanDeviationCard requiring reapproval in Normal/Plan modes;
+    /// YOLO mode auto-continues with a notice.
+    PlanDeviation {
+        conversation_id: ConversationId,
+        plan_id: String,
+        deviation_kind: crate::domain::models::plan::PlanDeviationKind,
+        original_step_count: u32,
+        current_step_count: u32,
+        changed_steps: Vec<u32>,
+        summary: String,
+    },
 }
 
 /// Event wrapping a tool execution result.
