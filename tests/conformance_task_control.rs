@@ -68,6 +68,7 @@ fn make_conv(plan: Plan) -> (Conversation, TuiState) {
         id: generate_conversation_id(),
         title: "Test".to_string(),
         messages: vec![],
+        turns: Vec::new(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_000,
         last_response_at: None,

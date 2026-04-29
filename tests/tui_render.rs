@@ -18,6 +18,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
         id: String::new(),
         title: String::new(),
         messages: Vec::new(),
+        turns: Vec::new(),
         created_at: 0,
         updated_at: 0,
         last_response_at: None,

@@ -77,6 +77,7 @@ pub fn make_conv_with_plan(plan: Plan) -> Conversation {
         id: generate_conversation_id(),
         title: "Race Test".to_string(),
         messages: vec![],
+        turns: Vec::new(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_000,
         last_response_at: None,

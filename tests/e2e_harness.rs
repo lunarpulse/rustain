@@ -25,10 +25,11 @@ use rustain::domain::events::{ChunkAction, DomainInputEvent, DomainKey};
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, FeedbackBlock, FocusState, Message, MessageRole,
     PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
-    ToolCallInfo, apply_chunk, generate_conversation_id,
+    ToolCallInfo, generate_conversation_id,
 };
 use rustain::domain::ports::ProviderPort;
 use rustain::domain::services::message_builder;
+use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
 use rustain::domain::services::turn_queue::TurnQueue;
 
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
@@ -154,6 +155,9 @@ pub struct TestHarness {
     pub state: TuiState,
     pub conversation: Conversation,
     pub streaming: StreamingState,
+    pub reducer: ReducerState,
+    #[allow(dead_code)]
+    pub clock: rustain::domain::clock::MockClock,
     #[allow(dead_code)]
     pub turn_queue: TurnQueue,
     pub height_cache: HeightCache,
@@ -188,6 +192,7 @@ impl TestHarness {
             id: generate_conversation_id(),
             title: String::new(),
             messages: Vec::new(),
+            turns: Vec::new(),
             created_at: 0,
             updated_at: 0,
             last_response_at: None,
@@ -197,11 +202,15 @@ impl TestHarness {
             fork_source: None,
         };
 
+        let (reducer, clock) = test_reducer_state(0);
+
         Self {
             terminal,
             state,
             conversation,
             streaming: StreamingState::default(),
+            reducer,
+            clock,
             turn_queue: TurnQueue::default(),
             height_cache: HeightCache::default(),
             tool_block_states: HashMap::new(),
@@ -410,14 +419,15 @@ impl TestHarness {
         self.state.needs_redraw = true;
     }
 
-    /// Process a StreamChunk through apply_chunk and return the action.
+    /// Process a StreamChunk through reduce() and return the action.
     pub fn process_chunk(&mut self, chunk: StreamChunk) -> ChunkAction {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        apply_chunk(&mut self.conversation, &mut self.streaming, chunk, now)
+        apply_chunk_for_tests(
+            &mut self.conversation,
+            &mut self.streaming,
+            &mut self.reducer,
+            chunk,
+            &self.clock,
+        )
     }
 
     /// Process a sequence of chunks (simulating a full provider response).

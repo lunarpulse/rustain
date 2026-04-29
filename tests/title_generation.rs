@@ -10,9 +10,10 @@ use rustain::domain::errors::ProviderError;
 use rustain::domain::events::{AppEvent, ChunkAction};
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
-    StreamingState, apply_chunk, generate_conversation_id,
+    StreamingState, generate_conversation_id,
 };
 use rustain::domain::ports::ProviderPort;
+use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
 
 // ── Mock Provider ──────────────────────────────────────────────
 
@@ -78,6 +79,7 @@ fn make_conversation() -> Conversation {
         id: generate_conversation_id(),
         title: String::new(),
         messages: Vec::new(),
+        turns: Vec::new(),
         created_at: 1000,
         updated_at: 1000,
         last_response_at: None,
@@ -113,24 +115,27 @@ fn test_trigger_title_generation_only_at_two_messages() {
         is_streaming: true,
         ..StreamingState::default()
     };
+    let (mut state, clock) = test_reducer_state(1000);
 
     // No user message — only assistant response → messages.len() == 1 → no trigger
-    apply_chunk(
+    apply_chunk_for_tests(
         &mut conv,
         &mut streaming,
+        &mut state,
         StreamChunk::Text {
             content: "Hello".into(),
             parent_tool_use_id: None,
         },
-        1000,
+        &clock,
     );
-    let action = apply_chunk(
+    let action = apply_chunk_for_tests(
         &mut conv,
         &mut streaming,
+        &mut state,
         StreamChunk::TurnComplete {
             stop_reason: StopReason::EndTurn,
         },
-        1001,
+        &clock,
     );
     assert_eq!(
         action,
@@ -147,23 +152,26 @@ fn test_trigger_title_generation_only_at_two_messages() {
         is_streaming: true,
         ..StreamingState::default()
     };
+    let (mut state2, clock2) = test_reducer_state(1000);
 
-    apply_chunk(
+    apply_chunk_for_tests(
         &mut conv2,
         &mut streaming2,
+        &mut state2,
         StreamChunk::Text {
             content: "Hello!".into(),
             parent_tool_use_id: None,
         },
-        1000,
+        &clock2,
     );
-    let action2 = apply_chunk(
+    let action2 = apply_chunk_for_tests(
         &mut conv2,
         &mut streaming2,
+        &mut state2,
         StreamChunk::TurnComplete {
             stop_reason: StopReason::EndTurn,
         },
-        1001,
+        &clock2,
     );
     assert_eq!(
         action2,
@@ -342,22 +350,26 @@ fn test_no_title_generation_for_subsequent_turns() {
         ..StreamingState::default()
     };
 
-    apply_chunk(
+    let (mut state, clock) = test_reducer_state(1000);
+
+    apply_chunk_for_tests(
         &mut conv,
         &mut streaming,
+        &mut state,
         StreamChunk::Text {
             content: "Second response".into(),
             parent_tool_use_id: None,
         },
-        1002,
+        &clock,
     );
-    let action = apply_chunk(
+    let action = apply_chunk_for_tests(
         &mut conv,
         &mut streaming,
+        &mut state,
         StreamChunk::TurnComplete {
             stop_reason: StopReason::EndTurn,
         },
-        1003,
+        &clock,
     );
 
     // 4 messages — trigger_title_generation should be false
@@ -383,6 +395,7 @@ fn test_title_guard_skips_when_title_exists() {
         id: generate_conversation_id(),
         title: "Already Set".to_string(),
         messages: Vec::new(),
+        turns: Vec::new(),
         created_at: 1000,
         updated_at: 1000,
         last_response_at: None,
@@ -404,6 +417,7 @@ fn test_title_guard_allows_when_title_empty() {
         id: generate_conversation_id(),
         title: String::new(),
         messages: Vec::new(),
+        turns: Vec::new(),
         created_at: 1000,
         updated_at: 1000,
         last_response_at: None,

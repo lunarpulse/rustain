@@ -51,6 +51,7 @@ fn conv(title: &str) -> Conversation {
             msg(MessageRole::User, "hello world"),
             msg(MessageRole::Assistant, "hi there"),
         ],
+        turns: Vec::new(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_060,
         last_response_at: None,

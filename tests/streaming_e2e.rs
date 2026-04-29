@@ -9,17 +9,20 @@ use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
+use rustain::domain::clock::MockClock;
 use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, StreamingPhase,
-    StreamingState, apply_chunk, generate_conversation_id,
+    StreamingState, generate_conversation_id,
 };
+use rustain::domain::services::reducer::{apply_chunk_for_tests, test_reducer_state};
 
 fn make_conversation() -> Conversation {
     Conversation {
         id: generate_conversation_id(),
         title: String::new(),
         messages: Vec::new(),
+        turns: Vec::new(),
         created_at: 0,
         updated_at: 0,
         last_response_at: None,
@@ -43,6 +46,7 @@ fn test_e2e_message_to_streaming_response() {
 
     let mut conversation = make_conversation();
     let mut streaming = StreamingState::default();
+    let (mut reducer, clock) = test_reducer_state(0);
 
     // Step 1: Render empty state
     terminal
@@ -123,7 +127,13 @@ fn test_e2e_message_to_streaming_response() {
         content: "Rust is a ".to_string(),
         parent_tool_use_id: None,
     };
-    let action1 = apply_chunk(&mut conversation, &mut streaming, chunk1, 1001);
+    let action1 = apply_chunk_for_tests(
+        &mut conversation,
+        &mut streaming,
+        &mut reducer,
+        chunk1,
+        &clock,
+    );
     assert_eq!(action1, ChunkAction::NeedsRedraw);
     assert_eq!(streaming.current_text_buffer, "Rust is a ");
 
@@ -131,7 +141,13 @@ fn test_e2e_message_to_streaming_response() {
         content: "systems programming language.".to_string(),
         parent_tool_use_id: None,
     };
-    let action2 = apply_chunk(&mut conversation, &mut streaming, chunk2, 1002);
+    let action2 = apply_chunk_for_tests(
+        &mut conversation,
+        &mut streaming,
+        &mut reducer,
+        chunk2,
+        &clock,
+    );
     assert_eq!(action2, ChunkAction::NeedsRedraw);
     assert_eq!(
         streaming.current_text_buffer,
@@ -168,7 +184,13 @@ fn test_e2e_message_to_streaming_response() {
     let chunk3 = StreamChunk::TurnComplete {
         stop_reason: StopReason::EndTurn,
     };
-    let action3 = apply_chunk(&mut conversation, &mut streaming, chunk3, 1003);
+    let action3 = apply_chunk_for_tests(
+        &mut conversation,
+        &mut streaming,
+        &mut reducer,
+        chunk3,
+        &clock,
+    );
     assert!(matches!(action3, ChunkAction::TurnComplete { .. }));
     assert!(!streaming.is_streaming);
 

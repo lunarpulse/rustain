@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 
 use super::checkpoint::CheckpointId;
 use super::content::ContentBlockType;
+use super::message::MessageRole;
 use super::stream::StopReason;
-use super::tools::ToolCallInfo;
+use super::tools::{ToolCallInfo, ToolResultInfo};
+use super::turn::{Turn, TurnPart, migrate_chat_message_to_turn};
 use super::usage::UsageInfo;
 
 /// Returns `true` only if `s` matches the hash-addressed filename format produced by
@@ -98,6 +100,11 @@ pub struct Conversation {
     pub id: String,
     pub title: String,
     pub messages: Vec<ChatMessage>,
+    /// Authoritative turn-level state. Committed by `reduce()` on TurnComplete.
+    /// `messages` is a legacy mirror rebuilt from `turns` after each commit via
+    /// `rebuild_messages_mirror` — to be removed in S16.4 alongside `ChatMessage`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<Turn>,
     /// Unix timestamp in seconds.
     pub created_at: i64,
     /// Unix timestamp in seconds.
@@ -112,6 +119,125 @@ pub struct Conversation {
     // v0.5+: pub active_agent: Option<AgentDefinition>,
     // v1.0+: pub enabled_mcp_servers: Vec<String>,
     // v1.0+: pub external_context_paths: Vec<String>,
+}
+
+impl Conversation {
+    /// Rebuild the legacy `messages` mirror from the authoritative `turns`.
+    ///
+    /// Preserves non-Assistant messages (User, System) that are not yet represented
+    /// in `turns` (S16.4 migrates those). Only rebuilds Assistant messages from turns.
+    ///
+    /// Path B: This deliberately reproduces the legacy concat-then-tools shape
+    /// (the bug we are fixing) so that chat_pane, bookmark_list, search, export,
+    /// and all other `ChatMessage` consumers keep working unchanged. Removed in
+    /// S16.4 alongside the chat_pane render flip.
+    // TODO(S16.4): delete this method and the `messages` mirror
+    pub fn rebuild_messages_mirror(&mut self) {
+        // Keep non-Assistant messages (user, system) — they aren't yet in `turns`
+        let mut new_messages: Vec<ChatMessage> = Vec::new();
+
+        for msg in self.messages.drain(..) {
+            if msg.role != MessageRole::Assistant {
+                new_messages.push(msg);
+            }
+        }
+
+        // Rebuild assistant messages from turns
+        for turn in &self.turns {
+            if turn.role != MessageRole::Assistant {
+                // User/system turns should be kept if present (future migration)
+                continue;
+            }
+
+            let mut content = String::new();
+            let mut tool_calls = Vec::new();
+            let mut tool_results: std::collections::HashMap<super::turn::PartId, &TurnPart> =
+                std::collections::HashMap::new();
+
+            // First pass: collect results, prose, and reasoning
+            for part in &turn.parts {
+                match part {
+                    TurnPart::Prose { text, .. } => {
+                        content.push_str(text);
+                    }
+                    TurnPart::Reasoning { text, .. } => {
+                        content.push_str(text);
+                    }
+                    TurnPart::ToolResult { refs, .. } => {
+                        if tool_results.insert(*refs, part).is_some() {
+                            tracing::warn!(
+                                "Duplicate ToolResult refs {:?} in turn {} — earlier result overwritten",
+                                refs,
+                                turn.id.0
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Second pass: build tool_calls from invocations, matching results
+            for part in &turn.parts {
+                if let TurnPart::ToolInvocation {
+                    id: pid,
+                    tool,
+                    args,
+                    status,
+                    started_at,
+                    ended_at,
+                } = part
+                {
+                    let status_str = match status {
+                        super::turn::InvocationStatus::Success => Some("Done"),
+                        super::turn::InvocationStatus::Error => Some("Error"),
+                        super::turn::InvocationStatus::Running
+                        | super::turn::InvocationStatus::Pending => None,
+                        super::turn::InvocationStatus::Cancelled => Some("Cancelled"),
+                    };
+
+                    let result = tool_results.get(pid).and_then(|rp| {
+                        if let TurnPart::ToolResult { output, .. } = rp {
+                            Some(ToolResultInfo {
+                                content: output.content.clone(),
+                                is_error: output.is_error,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+
+                    // Deterministic tool call ID based on turn id and part id
+                    let tc_id = format!("tc_{}_{}", turn.id.0, pid.0);
+
+                    tool_calls.push(ToolCallInfo {
+                        id: tc_id,
+                        name: tool.clone(),
+                        input: args.clone(),
+                        result,
+                        started_at_ms: Some((*started_at).max(0) as u64),
+                        completed_at_ms: ended_at.map(|v| v.max(0) as u64),
+                        status: status_str.map(|s| s.to_string()),
+                    });
+                }
+            }
+
+            let msg = ChatMessage {
+                id: turn.id.0.clone(),
+                role: turn.role,
+                content,
+                content_blocks: vec![],
+                tool_calls,
+                created_at: turn.started_at / 1000,
+                token_count: self.usage.as_ref().map(|u| u.output_tokens),
+                stop_reason: turn.stop_reason.clone(),
+                synthetic: false,
+                images: vec![],
+            };
+            new_messages.push(msg);
+        }
+
+        self.messages = new_messages;
+    }
 }
 
 /// Summary for conversation list display (lighter than full Conversation).
@@ -164,6 +290,11 @@ pub struct PersistedConversation {
     pub id: String,
     pub title: String,
     pub messages: Vec<ChatMessage>,
+    /// Authoritative turn-level state. Written alongside `messages` (harmless
+    /// redundancy for one story's duration). On deserialization: if present,
+    /// authoritative; if absent (pre-16.2 session), populated via `migrate_chat_message_to_turn`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<Turn>,
     pub created_at: i64,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -193,6 +324,7 @@ impl PersistedConversation {
             id: conv.id.clone(),
             title: conv.title.clone(),
             messages: conv.messages.clone(),
+            turns: conv.turns.clone(),
             created_at: conv.created_at,
             session_id: conv.session_id.clone(),
             fork_source: conv.fork_source.clone(),
@@ -205,10 +337,11 @@ impl PersistedConversation {
     }
 
     pub fn to_conversation(self) -> Conversation {
-        Conversation {
+        let mut conv = Conversation {
             id: self.id,
             title: self.title,
             messages: self.messages,
+            turns: self.turns,
             created_at: self.created_at,
             updated_at: self.updated_at.unwrap_or(self.created_at),
             last_response_at: self.last_response_at,
@@ -216,7 +349,22 @@ impl PersistedConversation {
             usage: self.usage,
             plans: self.plans,
             fork_source: self.fork_source,
+        };
+
+        // Legacy-deserialization fallback: if `turns` is empty but `messages` is populated
+        // (pre-16.2 session JSON), populate `turns` by migrating each Assistant `ChatMessage`.
+        // Non-Assistant messages are kept in `messages` only (rebuild_messages_mirror preserves
+        // them) — migrating them to `turns` would cause them to be dropped by the mirror rebuild
+        // because rebuild_messages_mirror only rebuilds Assistant messages from turns.
+        if conv.turns.is_empty() && !conv.messages.is_empty() {
+            for msg in &conv.messages {
+                if msg.role == MessageRole::Assistant {
+                    conv.turns.push(migrate_chat_message_to_turn(msg));
+                }
+            }
         }
+
+        conv
     }
 }
 
@@ -393,6 +541,7 @@ mod tests {
             id: "c1".to_string(),
             title: "Test".to_string(),
             messages: vec![],
+            turns: Vec::new(),
             created_at: 1700000000,
             updated_at: 1700000000,
             last_response_at: None,

@@ -622,6 +622,7 @@ mod tests {
             id: "c1".to_string(),
             title: "T".to_string(),
             messages: vec![],
+            turns: Vec::new(),
             created_at: 0,
             updated_at: 0,
             last_response_at: None,

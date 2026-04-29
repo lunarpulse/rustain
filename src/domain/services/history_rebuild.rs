@@ -30,6 +30,7 @@ pub fn build_history_context(messages: &[ChatMessage]) -> String {
         let role_label = match msg.role {
             MessageRole::User => "[User]",
             MessageRole::Assistant => "[Assistant]",
+            MessageRole::System => "[System]",
         };
 
         lines.push(format!("{}: {}", role_label, summary));

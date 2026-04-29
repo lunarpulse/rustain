@@ -9,9 +9,9 @@ mod streaming_integration {
     use rustain::domain::events::ChunkAction;
     use rustain::domain::models::{
         ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason,
-        StreamChunk, StreamingPhase, StreamingState, UsageInfo, apply_chunk,
-        generate_conversation_id,
+        StreamChunk, StreamingPhase, StreamingState, UsageInfo, generate_conversation_id,
     };
+    use rustain::domain::services::reducer::{apply_chunk_for_tests, test_reducer_state};
 
     /// Helper: create a fresh conversation.
     fn make_conversation() -> Conversation {
@@ -19,6 +19,7 @@ mod streaming_integration {
             id: generate_conversation_id(),
             title: String::new(),
             messages: Vec::new(),
+            turns: Vec::new(),
             created_at: 1000,
             updated_at: 1000,
             last_response_at: None,
@@ -31,6 +32,7 @@ mod streaming_integration {
 
     /// Helper: create streaming state.
     fn make_streaming() -> StreamingState {
+        let (mut reducer, clock) = test_reducer_state(1000);
         StreamingState {
             is_streaming: true,
             ..StreamingState::default()
@@ -136,6 +138,7 @@ data: {\"type\":\"message_stop\"}\n\
     fn test_apply_chunk_full_turn_sequence() {
         let mut conv = make_conversation();
         let mut streaming = make_streaming();
+        let (mut reducer, clock) = test_reducer_state(1000);
 
         // Add user message
         conv.messages.push(ChatMessage {
@@ -152,9 +155,10 @@ data: {\"type\":\"message_stop\"}\n\
         });
 
         // Usage
-        let a1 = apply_chunk(
+        let a1 = apply_chunk_for_tests(
             &mut conv,
             &mut streaming,
+            &mut reducer,
             StreamChunk::Usage {
                 usage: UsageInfo {
                     input_tokens: 10,
@@ -164,37 +168,40 @@ data: {\"type\":\"message_stop\"}\n\
                 },
                 session_id: None,
             },
-            1000,
+            &clock,
         );
         assert_eq!(a1, ChunkAction::None);
 
         // Text chunks
-        let a2 = apply_chunk(
+        let a2 = apply_chunk_for_tests(
             &mut conv,
             &mut streaming,
+            &mut reducer,
             StreamChunk::Text {
                 content: "The answer ".into(),
                 parent_tool_use_id: None,
             },
-            1000,
+            &clock,
         );
         assert_eq!(a2, ChunkAction::NeedsRedraw);
 
-        let a3 = apply_chunk(
+        let a3 = apply_chunk_for_tests(
             &mut conv,
             &mut streaming,
+            &mut reducer,
             StreamChunk::Text {
                 content: "is 4.".into(),
                 parent_tool_use_id: None,
             },
-            1000,
+            &clock,
         );
         assert_eq!(a3, ChunkAction::NeedsRedraw);
 
         // Updated usage
-        apply_chunk(
+        apply_chunk_for_tests(
             &mut conv,
             &mut streaming,
+            &mut reducer,
             StreamChunk::Usage {
                 usage: UsageInfo {
                     input_tokens: 10,
@@ -204,17 +211,18 @@ data: {\"type\":\"message_stop\"}\n\
                 },
                 session_id: None,
             },
-            1001,
+            &clock,
         );
 
         // Turn complete
-        let a4 = apply_chunk(
+        let a4 = apply_chunk_for_tests(
             &mut conv,
             &mut streaming,
+            &mut reducer,
             StreamChunk::TurnComplete {
                 stop_reason: StopReason::EndTurn,
             },
-            1001,
+            &clock,
         );
         assert_eq!(
             a4,
@@ -282,10 +290,17 @@ data: {\"type\":\"message_stop\"}\n\
             images: vec![],
         });
         let mut streaming = make_streaming();
+        let (mut reducer, clock) = test_reducer_state(1000);
 
         let mut actions = Vec::new();
         for chunk in chunks {
-            actions.push(apply_chunk(&mut conv, &mut streaming, chunk, 1000));
+            actions.push(apply_chunk_for_tests(
+                &mut conv,
+                &mut streaming,
+                &mut reducer,
+                chunk,
+                &clock,
+            ));
         }
 
         assert_eq!(actions[0], ChunkAction::None); // Usage
@@ -615,9 +630,10 @@ data: {\"type\":\"message_stop\"}\n\
             images: vec![],
         });
         let mut streaming = make_streaming();
+        let (mut reducer, clock) = test_reducer_state(1000);
 
         for chunk in chunks {
-            apply_chunk(&mut conv, &mut streaming, chunk, 1000);
+            apply_chunk_for_tests(&mut conv, &mut streaming, &mut reducer, chunk, &clock);
         }
 
         assert_eq!(conv.messages.len(), 2);

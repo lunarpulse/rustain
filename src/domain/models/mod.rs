@@ -84,7 +84,12 @@ pub use skill::{
     SkillValidationError, validate_skill_frontmatter,
 };
 #[allow(unused_imports)]
-pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_chunk};
+pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
+// TODO(S16.4): remove these upward re-exports once consumers migrate to domain::services::reducer
+#[allow(unused_imports)]
+pub use crate::domain::services::reducer::{
+    LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
+};
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]

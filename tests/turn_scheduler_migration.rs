@@ -137,6 +137,7 @@ fn make_conversation() -> Conversation {
             stop_reason: None,
             images: vec![],
         }],
+        turns: Vec::new(),
         created_at: 0,
         updated_at: 0,
         last_response_at: None,

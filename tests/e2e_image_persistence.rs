@@ -45,6 +45,7 @@ fn make_conversation(id: &str, messages: Vec<ChatMessage>) -> Conversation {
         id: id.to_string(),
         title: "Image Test".to_string(),
         messages,
+        turns: Vec::new(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_001,
         last_response_at: None,

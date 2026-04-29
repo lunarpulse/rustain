@@ -98,6 +98,7 @@ impl From<(&[Message], &CompletionOptions)> for AnthropicRequest {
                 let role = match msg.role {
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
+                    MessageRole::System => "user",
                 };
 
                 let mut content = Vec::new();

@@ -54,14 +54,15 @@ use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
     NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager,
-    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, apply_chunk,
-    generate_conversation_id, next_delay,
+    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, generate_conversation_id,
+    next_delay,
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
 };
 use crate::domain::services::message_builder;
 use crate::domain::services::plan_mode_injector::PlanModeInjector;
+use crate::domain::services::reducer::{reduce, update_streaming_mirror};
 use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::turn;
@@ -1149,6 +1150,7 @@ pub async fn run(
                                             id: generate_conversation_id(),
                                             title: String::new(),
                                             messages: Vec::new(),
+                                            turns: Vec::new(),
                                             created_at: crate::domain::models::session_meta::now_unix(),
                                             updated_at: crate::domain::models::session_meta::now_unix(),
                                             last_response_at: None,
@@ -3510,18 +3512,34 @@ pub async fn run(
                     }
                     AppEvent::ProviderChunk { conversation_id, chunk } => {
                         if conversation_id == conversation.id {
-                            // Active tab — apply chunk to proxy variables as normal
-                            let action = apply_chunk(
-                                &mut conversation,
-                                &mut streaming,
+                            // Active tab — apply chunk via reduce() + mirror sync
+                            let clock = tab_manager.active_tab().clock.clone();
+                            let action = reduce(
+                                &mut tab_manager.active_tab_mut().reducer,
                                 chunk,
-                                crate::domain::models::session_meta::now_unix(),
+                                &*clock,
                             );
+                            update_streaming_mirror(&tab_manager.active_tab().reducer, &mut streaming);
+
+                            // Propagate pending usage to conversation clone
+                            if let Some(usage) = tab_manager.active_tab_mut().reducer.pending_usage.take() {
+                                conversation.usage = Some(usage);
+                            }
+
+                            // Drain committed turn into the conversation clone (syncs to tab_manager via save_active_tab)
+                            if let Some(committed) = tab_manager.active_tab_mut().reducer.committed_turn.take() {
+                                conversation.turns.push(committed);
+                                conversation.rebuild_messages_mirror();
+                            }
+                            // Compute title-generation trigger after committed turn is drained
+                            let title_trigger = conversation.turns.len() == 2
+                                && conversation.title.is_empty();
+
                             match action {
                                 ChunkAction::NeedsRedraw => {
                                     state.needs_redraw = true;
                                 }
-                                ChunkAction::TurnComplete { persist, trigger_title_generation } => {
+                                ChunkAction::TurnComplete { persist, .. } => {
                                     state.status = StatusState::Idle;
                                     // Sync token usage from conversation to TUI state
                                     state.token_usage = conversation.usage.clone();
@@ -3566,8 +3584,7 @@ pub async fn run(
                                     }
 
                                     // Spawn background title generation (AC1, AC3, AC5)
-                                    if trigger_title_generation && conversation.title.is_empty()
-                                        && conversation.messages.len() >= 2
+                                    if title_trigger
                                     {
                                         let provider_ref = provider.clone();
                                         let event_tx_ref = domain_tx.clone();
@@ -3639,15 +3656,31 @@ pub async fn run(
                                 ChunkAction::None => {}
                             }
                         } else if let Some(tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
-                            // Background tab — route chunk directly to its stored state
-                            let action = apply_chunk(
-                                &mut tab.conversation,
-                                &mut tab.streaming,
+                            // Background tab — route chunk via reduce() + mirror sync
+                            let action = reduce(
+                                &mut tab.reducer,
                                 chunk,
-                                crate::domain::models::session_meta::now_unix(),
+                                &*tab.clock.clone(),
                             );
-                            if let ChunkAction::TurnComplete { persist, trigger_title_generation } = action {
-                                // apply_chunk already set tab.streaming.is_streaming = false
+                            update_streaming_mirror(&tab.reducer, &mut tab.streaming);
+
+                            // Propagate pending usage to conversation
+                            if let Some(usage) = tab.reducer.pending_usage.take() {
+                                tab.conversation.usage = Some(usage);
+                            }
+
+                            // Drain committed turn into Conversation.turns
+                            if let Some(committed) = tab.reducer.committed_turn.take() {
+                                tab.conversation.turns.push(committed);
+                                tab.conversation.rebuild_messages_mirror();
+                            }
+
+                            // Compute title-generation trigger after committed turn is drained
+                            let bg_title_trigger = tab.conversation.turns.len() == 2
+                                && tab.conversation.title.is_empty();
+
+                            if let ChunkAction::TurnComplete { persist, .. } = action {
+                                // reduce() committed the turn; tab.streaming.is_streaming synced via mirror
                                 if persist {
                                     let now = crate::domain::models::session_meta::now_unix();
                                     tab.conversation.updated_at = now;
@@ -3668,8 +3701,7 @@ pub async fn run(
                                         }
                                     }));
                                 }
-                                if trigger_title_generation && tab.conversation.title.is_empty()
-                                    && tab.conversation.messages.len() >= 2
+                                if bg_title_trigger
                                 {
                                     let provider_ref = provider.clone();
                                     let event_tx_ref = domain_tx.clone();
@@ -5467,7 +5499,10 @@ async fn apply_bookmark_toggle(
     // structural first lines; prefixing them with `» ` looks like an error.
     use crate::domain::models::MessageRole;
     let role = conversation.messages[target_idx].role;
-    if !matches!(role, MessageRole::User | MessageRole::Assistant) {
+    if !matches!(
+        role,
+        MessageRole::User | MessageRole::Assistant | MessageRole::System
+    ) {
         state.status = StatusState::Flash {
             message: "Cannot bookmark tool message — target a user or assistant message"
                 .to_string(),
@@ -8051,6 +8086,7 @@ mod tests {
             id: id.to_string(),
             title: "rehydrate test".to_string(),
             messages,
+            turns: Vec::new(),
             created_at: 1_700_000_000,
             updated_at: 1_700_000_001,
             last_response_at: None,

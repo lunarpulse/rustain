@@ -258,6 +258,7 @@ impl ConversationImporter for ClaudeCodeImporter {
             id: new_id.clone(),
             title: candidate.title.clone(),
             messages,
+            turns: Vec::new(),
             created_at,
             updated_at,
             last_response_at: None,

@@ -68,6 +68,7 @@ async fn test_noop_storage_operations() {
         id: "test".into(),
         title: "Test".into(),
         messages: vec![],
+        turns: Vec::new(),
         created_at: 0,
         updated_at: 0,
         last_response_at: None,

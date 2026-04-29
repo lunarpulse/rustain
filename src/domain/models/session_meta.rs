@@ -265,6 +265,7 @@ mod tests {
             id: "test-id".to_string(),
             title: "Test Title".to_string(),
             messages: vec![],
+            turns: Vec::new(),
             created_at: 1700000000,
             updated_at: 1700000100,
             last_response_at: None,

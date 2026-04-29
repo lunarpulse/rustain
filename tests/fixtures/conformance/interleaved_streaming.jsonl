@@ -1,0 +1,5 @@
+{"text":{"content":"I'll","parent_tool_use_id":null}}
+{"text":{"content":" search","parent_tool_use_id":null}}
+{"toolUse":{"id":"toolu_01","name":"Bash","input":{"command":"ls"}}}
+{"toolResult":{"id":"toolu_01","content":"output","is_error":false}}
+{"turnComplete":{"stop_reason":"endTurn"}}

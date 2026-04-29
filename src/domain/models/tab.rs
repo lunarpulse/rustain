@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::models::SessionMeta;
 use crate::domain::models::conversation::{Conversation, generate_conversation_id};
 use crate::domain::models::notice::FeedbackBlock;
 use crate::domain::models::session::{SessionManager, SessionState};
 use crate::domain::models::stream::StreamingState;
+use crate::domain::services::reducer::ReducerState;
 use crate::domain::services::turn_queue::TurnQueue;
 
 /// Unique identifier for a tab (TUI concept, not persisted).
@@ -21,6 +24,12 @@ pub struct TabState {
     pub id: TabId,
     pub conversation: Conversation,
     pub streaming: StreamingState,
+    /// Path B: authoritative reducer state (replaces `apply_chunk`).
+    /// Populated in the event loop; `streaming` is a render mirror synced
+    /// from this via `update_streaming_mirror` after each `reduce()` call.
+    pub reducer: ReducerState,
+    /// Injected clock for the reducer (testable via MockClock).
+    pub clock: Arc<dyn Clock>,
     pub session: SessionManager,
     pub session_meta: SessionMeta,
     pub scroll_offset: usize,
@@ -37,26 +46,42 @@ pub struct TabState {
     pub turn_cancel: CancellationToken,
 }
 
+/// Current unix timestamp in milliseconds.
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 impl TabState {
     /// Create a new TabState with a fresh conversation.
     ///
     /// Creates a detached CancellationToken (not linked to any parent).
     /// For production use, prefer `new_with_parent` which creates a child token.
     pub fn new(id: TabId) -> Self {
-        Self::new_with_cancel(id, CancellationToken::new())
+        Self::new_with_cancel(id, CancellationToken::new(), Arc::new(SystemClock::default()))
     }
 
     /// Create a new TabState whose `turn_cancel` is a child of `session_cancel`.
     pub fn new_with_parent(id: TabId, session_cancel: &CancellationToken) -> Self {
-        Self::new_with_cancel(id, session_cancel.child_token())
+        Self::new_with_cancel(id, session_cancel.child_token(), Arc::new(SystemClock::default()))
     }
 
-    fn new_with_cancel(id: TabId, turn_cancel: CancellationToken) -> Self {
+    /// Create a new TabState with an injected clock (test entrypoint).
+    pub fn new_with_clock(id: TabId, clock: Arc<dyn Clock>) -> Self {
+        Self::new_with_cancel(id, CancellationToken::new(), clock)
+    }
+
+    fn new_with_cancel(id: TabId, turn_cancel: CancellationToken, clock: Arc<dyn Clock>) -> Self {
         let now = now_unix();
+        let instant_now = clock.now();
+        let wall_anchor = now_unix_ms();
         let conversation = Conversation {
             id: generate_conversation_id(),
             title: String::new(),
             messages: Vec::new(),
+            turns: Vec::new(),
             created_at: now,
             updated_at: now,
             last_response_at: None,
@@ -71,6 +96,8 @@ impl TabState {
             id,
             conversation,
             streaming: StreamingState::default(),
+            reducer: ReducerState::new(wall_anchor, instant_now),
+            clock: clock.clone(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
             session_meta,
             scroll_offset: 0,
@@ -93,7 +120,12 @@ impl TabState {
     /// Creates a detached CancellationToken (not linked to any parent).
     /// For production use, prefer `from_conversation_with_parent`.
     pub fn from_conversation(id: TabId, conversation: Conversation) -> Self {
-        Self::from_conversation_with_cancel(id, conversation, CancellationToken::new())
+        Self::from_conversation_with_cancel(
+            id,
+            conversation,
+            CancellationToken::new(),
+            Arc::new(SystemClock::default()),
+        )
     }
 
     /// Create a TabState from an existing conversation with a child cancellation token.
@@ -102,20 +134,39 @@ impl TabState {
         conversation: Conversation,
         session_cancel: &CancellationToken,
     ) -> Self {
-        Self::from_conversation_with_cancel(id, conversation, session_cancel.child_token())
+        Self::from_conversation_with_cancel(
+            id,
+            conversation,
+            session_cancel.child_token(),
+            Arc::new(SystemClock::default()),
+        )
+    }
+
+    /// Create a TabState from an existing conversation with an injected clock (test entrypoint).
+    pub fn from_conversation_with_clock(
+        id: TabId,
+        conversation: Conversation,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self::from_conversation_with_cancel(id, conversation, CancellationToken::new(), clock)
     }
 
     fn from_conversation_with_cancel(
         id: TabId,
         conversation: Conversation,
         turn_cancel: CancellationToken,
+        clock: Arc<dyn Clock>,
     ) -> Self {
+        let instant_now = clock.now();
+        let wall_anchor = now_unix_ms();
         let session_id = conversation.session_id.clone().unwrap_or_default();
         let session_meta = SessionMeta::from_conversation(&conversation);
         Self {
             id,
             conversation,
             streaming: StreamingState::default(),
+            reducer: ReducerState::new(wall_anchor, instant_now),
+            clock: clock.clone(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
             session_meta,
             scroll_offset: 0,

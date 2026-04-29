@@ -1980,6 +1980,7 @@ impl StoragePort for FileSystemStorage {
             id: new_id.clone(),
             title: forked_title,
             messages: truncated,
+            turns: Vec::new(),
             created_at: now,
             updated_at: now,
             last_response_at: None,
@@ -2713,6 +2714,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
             }),
+            turns: Vec::new(),
             plans: std::collections::HashMap::new(),
             fork_source: None,
         }
@@ -3831,6 +3833,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            turns: Vec::new(),
             plans,
             fork_source: None,
         };
@@ -3948,6 +3951,7 @@ mod tests {
             last_response_at: None,
             session_id: None,
             usage: None,
+            turns: Vec::new(),
             plans,
             fork_source: None,
         };

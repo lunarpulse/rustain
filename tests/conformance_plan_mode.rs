@@ -93,6 +93,7 @@ fn make_conv(assistant_turns: usize) -> Conversation {
         id: "c1".to_string(),
         title: "t".to_string(),
         messages,
+        turns: Vec::new(),
         created_at: 0,
         updated_at: 0,
         last_response_at: None,

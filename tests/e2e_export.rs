@@ -68,6 +68,7 @@ fn conv(title: &str, messages: Vec<ChatMessage>) -> Conversation {
         id: "conv-ffeeddcc-test".to_string(),
         title: title.to_string(),
         messages,
+        turns: Vec::new(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_060,
         last_response_at: None,

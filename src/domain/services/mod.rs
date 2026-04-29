@@ -14,6 +14,7 @@ pub mod plan_manager;
 pub mod plan_mode_injector;
 pub mod plan_parser;
 pub mod plan_runtime;
+pub mod reducer;
 pub mod search;
 pub mod session_index;
 pub mod skill_context;

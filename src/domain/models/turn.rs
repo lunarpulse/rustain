@@ -46,6 +46,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::conversation::ChatMessage;
+use super::message::MessageRole;
 use super::tools::ToolCallInfo;
 
 // ---------------------------------------------------------------------------
@@ -78,9 +79,8 @@ pub fn generate_turn_id() -> TurnId {
 // ---------------------------------------------------------------------------
 
 /// Lifecycle state of a tool invocation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(test, derive(PartialEq))]
 pub enum InvocationStatus {
     Pending,
     Running,
@@ -99,9 +99,8 @@ pub enum InvocationStatus {
 /// module from the `tools` module's exact derive set. The field shapes match
 /// `ToolResultInfo` (ADR-16-01 §Decision §1), but `turn` does not depend on
 /// `tools`'s `Debug`/`Serialize`/`Deserialize` choices.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(test, derive(PartialEq))]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
@@ -114,9 +113,8 @@ pub struct ToolOutput {
 /// A single item inside an assistant turn.
 ///
 /// JSON shape: `{"kind":"prose","id":7,"text":"…"}` etc.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[cfg_attr(test, derive(PartialEq))]
 pub enum TurnPart {
     Prose {
         id: PartId,
@@ -146,30 +144,69 @@ pub enum TurnPart {
 // ---------------------------------------------------------------------------
 
 /// An assistant turn as an ordered stream of typed parts.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(test, derive(PartialEq))]
 pub struct Turn {
     pub id: TurnId,
     pub parts: Vec<TurnPart>,
     /// Unix timestamp in milliseconds.
     pub started_at: i64,
     pub model: String,
+    /// The role of this turn. Defaults to `Assistant`; set to `User` in `Turn::user`,
+    /// `System` in `Turn::system`. When `ChatMessage` is deleted in S16.4, this field
+    /// becomes the sole role discriminator — it is not a legacy holdover.
+    #[serde(default, skip_serializing_if = "is_default_role")]
+    pub role: MessageRole,
+    /// Stop reason from the model (set on TurnComplete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<super::stream::StopReason>,
     /// Turn-local counter; not persisted.
     #[serde(skip)]
     next_part_id: u64,
 }
 
+fn is_default_role(r: &MessageRole) -> bool {
+    *r == MessageRole::Assistant
+}
+
 impl Turn {
-    /// Create a new empty turn.
+    /// Create a new empty assistant turn.
     pub fn new(model: String, started_at: i64) -> Self {
         Self {
             id: generate_turn_id(),
             parts: Vec::new(),
             started_at,
             model,
+            role: MessageRole::Assistant,
+            stop_reason: None,
             next_part_id: 0,
         }
+    }
+
+    /// Create a user turn with a single prose part.
+    ///
+    /// For new construction sites in this story (the reducer-driven path).
+    /// Existing `ChatMessage`-construction sites remain untouched until S16.4.
+    pub fn user(text: String, started_at: i64) -> Self {
+        let mut turn = Self::new(String::new(), started_at);
+        turn.role = MessageRole::User;
+        if !text.is_empty() {
+            turn.push_part(|id| TurnPart::Prose { id, text });
+        }
+        turn
+    }
+
+    /// Create a system turn with a single prose part.
+    ///
+    /// For new construction sites in this story (the reducer-driven path).
+    /// Existing `ChatMessage`-construction sites remain untouched until S16.4.
+    pub fn system(text: String, started_at: i64) -> Self {
+        let mut turn = Self::new(String::new(), started_at);
+        turn.role = MessageRole::System;
+        if !text.is_empty() {
+            turn.push_part(|id| TurnPart::Prose { id, text });
+        }
+        turn
     }
 
     /// Append a new part built from the next monotonic `PartId`.

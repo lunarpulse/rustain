@@ -47,6 +47,7 @@ pub fn render_conversation_markdown(
         let role = match msg.role {
             MessageRole::User => "User",
             MessageRole::Assistant => "Assistant",
+            MessageRole::System => "System",
         };
         out.push_str(&format!("## {} ({})\n\n", role, iso8601(msg.created_at)));
 
@@ -293,6 +294,7 @@ mod tests {
             id: "conv-abc12345".to_string(),
             title: title.to_string(),
             messages,
+            turns: Vec::new(),
             created_at: 1_700_000_000,
             updated_at: 1_700_000_060,
             last_response_at: None,

@@ -234,10 +234,12 @@ fn render_message<'a>(
     let role_text = match msg.role {
         MessageRole::User => "You:",
         MessageRole::Assistant => "Assistant:",
+        MessageRole::System => "System:",
     };
     let role_color = match msg.role {
         MessageRole::User => theme.colors.accent,
         MessageRole::Assistant => theme.colors.fg_secondary,
+        MessageRole::System => theme.colors.fg_secondary,
     };
     let mut role_spans: Vec<Span<'a>> = Vec::new();
     if is_fork_point {

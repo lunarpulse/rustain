@@ -431,6 +431,7 @@ mod tests {
             id: existing_id.clone(),
             title: "Existing".to_string(),
             messages: vec![],
+            turns: Vec::new(),
             created_at: 1700000000,
             updated_at: 1700000000,
             last_response_at: None,

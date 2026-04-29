@@ -44,6 +44,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
         id: id.to_string(),
         title: title.to_string(),
         messages,
+        turns: Vec::new(),
         created_at: 1700000000,
         updated_at: 1700000000 + msg_count as i64,
         last_response_at: Some(1700000000 + msg_count as i64),

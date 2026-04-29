@@ -162,6 +162,7 @@ mod tests {
             id: "conv-test".to_string(),
             title: "Test".to_string(),
             messages,
+            turns: Vec::new(),
             created_at: 1_700_000_000,
             updated_at: 1_700_000_000,
             last_response_at: None,

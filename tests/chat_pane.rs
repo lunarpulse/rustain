@@ -20,6 +20,7 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
         id: "test".to_string(),
         title: String::new(),
         messages,
+        turns: Vec::new(),
         created_at: 0,
         updated_at: 0,
         last_response_at: None,

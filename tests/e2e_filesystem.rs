@@ -45,6 +45,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 images: vec![],
             },
         ],
+        turns: Vec::new(),
         created_at: 1700000000,
         updated_at: 1700000001,
         last_response_at: None,

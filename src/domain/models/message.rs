@@ -7,6 +7,14 @@ use serde::{Deserialize, Serialize};
 pub enum MessageRole {
     User,
     Assistant,
+    #[serde(rename = "system")]
+    System,
+}
+
+impl Default for MessageRole {
+    fn default() -> Self {
+        MessageRole::Assistant
+    }
 }
 
 /// Provider-agnostic API message. Each adapter translates to its wire format.

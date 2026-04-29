@@ -401,6 +401,7 @@ fn make_test_conversation() -> Conversation {
         id: generate_conversation_id(),
         title: "Test".to_string(),
         messages: vec![],
+        turns: Vec::new(),
         created_at: 1700000000,
         updated_at: 1700000001,
         last_response_at: None,

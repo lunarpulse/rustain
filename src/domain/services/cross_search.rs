@@ -255,6 +255,7 @@ mod tests {
             id: id.to_string(),
             title: title.to_string(),
             messages: vec![msg(content)],
+            turns: Vec::new(),
             created_at: updated_at,
             updated_at,
             last_response_at: None,

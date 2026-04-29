@@ -51,6 +51,7 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
                 images: vec![],
             })
             .collect(),
+        turns: Vec::new(),
         created_at: 1_700_000_000,
         updated_at: 1_700_000_100,
         last_response_at: None,
