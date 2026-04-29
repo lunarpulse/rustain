@@ -436,4 +436,66 @@ mod tests {
         // The `[c] Copy result` action row still renders below the body.
         assert!(content.contains("[c] Copy result"));
     }
+
+    // ── Story 6.3-FU3 ────────────────────────────────────────────────────
+    // Storage no longer truncates `PlanTask.result.text`, so the drill-down
+    // widget must render large bodies without leaking a `(truncated)` marker
+    // and without panicking on scroll math at realistic upper bounds (1 MiB).
+    // Pathological million-line inputs are out-of-scope here — see 6.3-FU5.
+
+    #[test]
+    fn fu3_drill_down_renders_full_50kib_result() {
+        // AC5: a 50 KiB markdown body must render without producing the
+        // legacy "(truncated)" marker anywhere in the visible buffer.
+        let plan = make_plan();
+        let mut task = make_task(9, "Big result", PlanTaskStatus::Completed);
+        task.result = Some(TaskResult {
+            text: "x".repeat(50 * 1024),
+            tool_call_count: 0,
+            token_count: None,
+        });
+        let content = render_to_string_ex(Rect::new(0, 0, 80, 30), &plan, &task, true);
+        assert!(
+            !content.contains("(truncated)"),
+            "drill-down view must not display (truncated) once storage no longer caps"
+        );
+        assert!(
+            content.contains("xxxxx"),
+            "drill-down view must render body content, not just omit the truncation marker"
+        );
+    }
+
+    #[test]
+    fn fu3_drill_down_scroll_math_survives_1mib_result() {
+        // AC6: scroll math (offset clamp at top, middle, past end) must not
+        // panic, overflow, or stall on a 1 MiB single-blob result. Soft time
+        // budget: 1 second per render call. Pathological million-line cases
+        // are FU5's gate; this test pins only the in-scope ceiling of AC2.
+        let plan = make_plan();
+        let mut task = make_task(10, "1MiB blob", PlanTaskStatus::Completed);
+        task.result = Some(TaskResult {
+            text: "y".repeat(1_048_576),
+            tool_call_count: 0,
+            token_count: None,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        let t0 = std::time::Instant::now();
+        let (_, top_scroll) = render_to_string_full(area, &plan, &task, true, 0);
+        assert_eq!(top_scroll, 0);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(1), "top render under 1s");
+
+        let t1 = std::time::Instant::now();
+        let (_, mid_scroll) = render_to_string_full(area, &plan, &task, true, 1000);
+        assert!(t1.elapsed() < std::time::Duration::from_secs(1), "mid render under 1s");
+
+        let t2 = std::time::Instant::now();
+        let (_, end_scroll) = render_to_string_full(area, &plan, &task, true, u16::MAX);
+        assert!(t2.elapsed() < std::time::Duration::from_secs(1), "end render under 1s");
+
+        // Sanity: clamped scroll offsets must be monotone non-decreasing
+        // and bounded by u16::MAX (no overflow into garbage).
+        assert!(mid_scroll <= end_scroll, "mid_scroll <= end_scroll");
+        assert!(end_scroll < u16::MAX, "end scroll clamps strictly below u16::MAX");
+    }
 }

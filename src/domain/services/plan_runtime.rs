@@ -13,8 +13,6 @@ use crate::domain::models::MessageRole;
 use crate::domain::models::NoticeLevel;
 use crate::domain::ports::EventEmitter;
 
-const TASK_RESULT_TEXT_MAX_BYTES: usize = 4096;
-
 pub struct PlanRuntime {
     plans: RwLock<HashMap<String, PlanRuntimeState>>,
 }
@@ -195,7 +193,6 @@ impl PlanRuntime {
 
         match outcome {
             TaskTurnOutcome::Success { result_text, tool_call_count, token_count } => {
-                let truncated_text = truncate_result_text(&result_text);
                 {
                     let plan = match conversation.plans.get_mut(plan_id) {
                         Some(p) => p,
@@ -207,7 +204,7 @@ impl PlanRuntime {
                     plan.tasks[idx].status = PlanTaskStatus::Completed;
                     plan.tasks[idx].completed_at_ms = Some(now_ms);
                     plan.tasks[idx].result = Some(TaskResult {
-                        text: truncated_text,
+                        text: result_text,
                         tool_call_count,
                         token_count,
                     });
@@ -671,7 +668,9 @@ impl PlanRuntime {
                 error: extract_first_sentence(last_assistant_msg_content),
             }
         } else {
-            // G6-P21: do NOT truncate here — truncation happens at storage time in on_turn_complete
+            // G6-P21bis (Story 6.3-FU3): store full result; downstream consumers
+            // (drill-down, clipboard, summary) cap at render time. Storage no
+            // longer truncates — see AC1/AC2.
             TaskTurnOutcome::Success {
                 result_text: last_assistant_msg_content.to_string(),
                 tool_call_count,
@@ -1002,20 +1001,6 @@ fn extract_first_sentence(text: &str) -> String {
     }
 }
 
-fn truncate_result_text(text: &str) -> String {
-    if text.len() <= TASK_RESULT_TEXT_MAX_BYTES {
-        return text.to_string();
-    }
-    // G2-P5: find valid UTF-8 char boundary at or before the byte limit
-    let boundary = text
-        .char_indices()
-        .map(|(i, _)| i)
-        .take_while(|&i| i < TASK_RESULT_TEXT_MAX_BYTES)
-        .last()
-        .unwrap_or(0);
-    format!("{} (truncated)", &text[..boundary])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,5 +1145,37 @@ mod tests {
         assert!(md.contains("✓"));
         assert!(md.contains("✗"));
         assert!(md.contains("**Task 1 result:**"));
+    }
+
+    // Story 6.3-FU3 AC3: even after storage no longer truncates, the
+    // chat-summary projection MUST still cap each completed task's result
+    // entry at 500 bytes with the existing `(truncated)` suffix. This is the
+    // independent invariant that 6.3-FU3 deliberately preserves.
+    #[test]
+    fn plan_summary_md_caps_at_500_bytes_independent_of_storage() {
+        let big = "z".repeat(100 * 1024); // 100 KiB
+        let tasks = vec![(
+            1u32,
+            "Big".to_string(),
+            PlanTaskStatus::Completed,
+            Some(1_000i64),
+            None,
+            Some(TaskResult {
+                text: big,
+                tool_call_count: 0,
+                token_count: None,
+            }),
+        )];
+        let md = build_summary_markdown("P", 1, 1, 0, 0, 1_000, 0, &tasks);
+
+        let header = "**Task 1 result:**\n";
+        let start = md.find(header).expect("task result block present") + header.len();
+        let end = md[start..].find("\n").map(|n| start + n).unwrap_or(md.len());
+        let entry = &md[start..end];
+
+        assert!(entry.ends_with("(truncated)"), "entry must end with (truncated): {:?}", &entry[entry.len().saturating_sub(40)..]);
+        // Body cap is 500 bytes pre-suffix; allow the literal " (truncated)" tail.
+        assert!(entry.len() <= 500 + " (truncated)".len() + 1,
+            "entry must remain bounded; got {} bytes", entry.len());
     }
 }

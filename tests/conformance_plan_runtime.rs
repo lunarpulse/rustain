@@ -13,8 +13,9 @@ use rustain::domain::models::{
     Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
     generate_conversation_id, generate_message_id,
 };
-use rustain::domain::ports::EventEmitter;
+use rustain::domain::ports::{EventEmitter, StoragePort};
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
+use rustain::adapters::filesystem::FileSystemStorage;
 
 fn make_task(number: u32, title: &str) -> PlanTask {
     PlanTask {
@@ -214,6 +215,12 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
     assert_eq!(conv.plans[&plan_id].tasks[2].status, PlanTaskStatus::Skipped);
     assert!(conv.plans[&plan_id].tasks[2].error.as_ref().unwrap().contains("failed task 2"));
 
+    // Story 6.4: auto-skip cascade marks a deviation, stalling advancement.
+    // Task 4 (depends on 1, which completed) is blocked until the deviation is
+    // resolved. Clear it and resume.
+    runtime.clear_deviation_pending(&plan_id).await;
+    runtime.resume_advance(&conv_id, &plan_id, &mut conv, captured.as_ref()).await;
+
     // Task 4 depends on task 1 (completed), so it gets dispatched next
     assert_eq!(conv.plans[&plan_id].tasks[3].status, PlanTaskStatus::Running);
 
@@ -368,6 +375,11 @@ async fn ac6_summary_aggregation_math() {
         &mut conv, captured.as_ref(),
     ).await;
 
+    // Story 6.4: auto-skip of Task 3 (depends on 2) marks a deviation,
+    // stalling plan completion. Clear it and resume to finish the plan.
+    runtime.clear_deviation_pending(&plan_id).await;
+    runtime.resume_advance(&conv_id, &plan_id, &mut conv, captured.as_ref()).await;
+
     let last_msg = conv.messages.last().unwrap();
     let content = &last_msg.content;
     assert!(content.contains("1/3 tasks completed"));
@@ -471,4 +483,114 @@ async fn ac9_cancelled_task_stops_walk() {
     assert!(events.iter().any(|e| matches!(e, AppEvent::PlanCancelled { .. })));
     assert!(!events.iter().any(|e| matches!(e, AppEvent::PlanCompleted { .. })));
     assert!(!conv.messages.iter().any(|m| m.content_blocks.contains(&ContentBlockType::PlanSummary)));
+}
+
+// ── Story 6.3-FU3 — verbatim storage of result text ────────────────────────
+//
+// Replaces the legacy 4 KiB storage cap (`TASK_RESULT_TEXT_MAX_BYTES`) which
+// appended " (truncated)" to long task results before persistence. With the
+// G6-P21bis policy in place, `on_turn_complete` stores the raw `result_text`.
+
+#[tokio::test]
+async fn fu3_stores_full_result_text_when_exceeds_legacy_cap() {
+    // AC2: a 1 MiB result must round-trip byte-identical onto PlanTask.result.text
+    // and never gain a "(truncated)" suffix.
+    let plan = make_plan(vec![make_task(1, "Big")]);
+    let plan_id = plan.id.clone();
+    let mut conv = make_conv_with_plan(plan);
+    let captured = CapturedEvents::new();
+    let runtime = PlanRuntime::new();
+    let conv_id = conv.id.clone();
+
+    runtime.clone().start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+
+    let big = "x".repeat(1_048_576);
+    runtime.on_turn_complete(
+        &conv_id, &plan_id, 1,
+        TaskTurnOutcome::Success {
+            result_text: big.clone(),
+            tool_call_count: 0,
+            token_count: None,
+        },
+        &mut conv, captured.as_ref(),
+    ).await;
+
+    let result = conv.plans[&plan_id].tasks[0].result.as_ref().expect("result set");
+    assert_eq!(result.text.len(), 1_048_576);
+    assert_eq!(result.text, big, "stored text must equal input byte-for-byte");
+    assert!(!result.text.contains("(truncated)"), "no truncation marker on stored text");
+}
+
+#[tokio::test]
+async fn fu3_legacy_conversation_fixture_loads_verbatim() {
+    // AC7: a session file produced by a pre-FU3 build (whose result.text
+    // already contains the literal " (truncated)" suffix baked in) must load
+    // verbatim. We do NOT attempt to repair legacy data — the suffix is
+    // preserved as historical artifact.
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/plan_runtime/legacy_truncated_conversation.json");
+    let fixture_json = std::fs::read_to_string(&fixture_path)
+        .expect("fixture file present at tests/fixtures/plan_runtime/legacy_truncated_conversation.json");
+
+    // Stage the fixture in a tempdir under the Flat session layout
+    // ({sessions_dir}/{id}.meta.json) so FileSystemStorage::detect_layout
+    // resolves it.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sessions_dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let staged = sessions_dir.join("legacy-truncated.meta.json");
+    std::fs::write(&staged, &fixture_json).unwrap();
+
+    let storage = FileSystemStorage::new(sessions_dir);
+    let conv = storage
+        .load_conversation("legacy-truncated")
+        .await
+        .expect("load_conversation Ok")
+        .expect("conversation found");
+
+    let plan = conv.plans.get("legacy-plan-1").expect("plan present");
+    let task = &plan.tasks[0];
+    let result_text = &task.result.as_ref().expect("result present").text;
+
+    // The fixture's body is exactly 4096 bytes ending in " (truncated)".
+    assert_eq!(result_text.len(), 4096, "legacy text length preserved verbatim");
+    assert!(result_text.ends_with(" (truncated)"), "legacy suffix preserved");
+
+    // And: the fixture's text equals what's on disk byte-for-byte.
+    let parsed: serde_json::Value = serde_json::from_str(&fixture_json).unwrap();
+    let on_disk_text = parsed["plans"]["legacy-plan-1"]["tasks"][0]["result"]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(result_text, on_disk_text, "byte-equal round-trip");
+}
+
+#[tokio::test]
+async fn fu3_success_branch_no_length_mutation() {
+    // AC2 boundary check: at every size around the legacy 4 KiB cap, stored
+    // length equals input length.
+    for size in [10usize, 4095, 4096, 4097, 100_000] {
+        let plan = make_plan(vec![make_task(1, "Probe")]);
+        let plan_id = plan.id.clone();
+        let mut conv = make_conv_with_plan(plan);
+        let captured = CapturedEvents::new();
+        let runtime = PlanRuntime::new();
+        let conv_id = conv.id.clone();
+
+        runtime.clone().start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+
+        let payload = "y".repeat(size);
+        runtime.on_turn_complete(
+            &conv_id, &plan_id, 1,
+            TaskTurnOutcome::Success {
+                result_text: payload.clone(),
+                tool_call_count: 0,
+                token_count: None,
+            },
+            &mut conv, captured.as_ref(),
+        ).await;
+
+        let result = conv.plans[&plan_id].tasks[0].result.as_ref().expect("result set");
+        assert_eq!(result.text.len(), size, "stored length differs at size={}", size);
+        assert!(!result.text.contains("(truncated)"), "marker leaked at size={}", size);
+    }
 }

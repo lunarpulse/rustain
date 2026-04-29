@@ -574,3 +574,64 @@ pub fn resolve_panel_task_number(
     let idx = selected_index as usize;
     plan.tasks.get(idx).map(|t| t.number)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::plan::{Plan, PlanTask, TaskResult};
+    use std::collections::HashMap;
+
+    fn conv_with_completed_task(text: String) -> (Conversation, &'static str) {
+        let plan_id = "p1";
+        let plan = Plan {
+            id: plan_id.to_string(),
+            title: "Plan".to_string(),
+            tasks: vec![PlanTask {
+                number: 1,
+                title: "T".to_string(),
+                description: String::new(),
+                depends_on: vec![],
+                status: PlanTaskStatus::Completed,
+                started_at_ms: Some(0),
+                completed_at_ms: Some(1),
+                result: Some(TaskResult { text, tool_call_count: 0, token_count: None }),
+                error: None,
+                waiting_on: vec![],
+            }],
+            estimated_effort: None,
+            status: PlanStatus::Completed,
+            created_at: 0,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        let mut conv = Conversation {
+            id: "c1".to_string(),
+            title: "T".to_string(),
+            messages: vec![],
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans: HashMap::new(),
+            fork_source: None,
+        };
+        conv.plans.insert(plan_id.to_string(), plan);
+        (conv, plan_id)
+    }
+
+    // Story 6.3-FU3 AC4: with storage no longer truncating at 4 KiB, the
+    // [c] Copy result clipboard payload must equal the full result text.
+    #[test]
+    fn fu3_copy_result_emits_full_text() {
+        let body = "z".repeat(20_000);
+        let (conv, plan_id) = conv_with_completed_task(body.clone());
+
+        let outcome = resolve_copy_task_payload(&conv, Some(plan_id), 1, None)
+            .expect("payload resolved");
+
+        assert_eq!(outcome.text.len(), 20_000, "clipboard payload length");
+        assert_eq!(outcome.text, body, "clipboard payload byte-equal");
+        assert!(!outcome.text.contains("(truncated)"), "no truncation marker on clipboard");
+    }
+}

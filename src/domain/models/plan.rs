@@ -91,7 +91,8 @@ impl PlanTask {
 #[serde(rename_all = "camelCase")]
 pub struct TaskResult {
     /// Plain-text concatenation of the assistant message that closed the task's turn.
-    /// Truncated to 4 KiB at storage time.
+    /// Stored verbatim — no length cap (Story 6.3-FU3 reversed the legacy 4 KiB
+    /// storage truncation; downstream consumers cap at render time).
     pub text: String,
     pub tool_call_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
