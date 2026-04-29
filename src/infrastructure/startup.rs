@@ -9,6 +9,7 @@ use crate::adapters::project_context_loader::ProjectContextLoader;
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::security_adapter::SecurityAdapter;
 use crate::adapters::skill_activation::SkillActivator;
+use crate::adapters::skill_registry::SkillRegistry;
 use crate::domain::models::{PermissionMode, SandboxPolicy};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
@@ -163,7 +164,8 @@ pub async fn run() -> Result<()> {
         tools_sessions_dir.clone(),
         workspace_path.clone(),
     ));
-    let skill_activator = Arc::new(SkillActivator::new());
+    let shared_skill_registry = Arc::new(tokio::sync::RwLock::new(SkillRegistry::new()));
+    let skill_activator = Arc::new(SkillActivator::with_registry(shared_skill_registry));
     skill_activator.set_event_tx(domain_tx.clone()).await;
     let agent_activator = Arc::new(crate::adapters::agent_activation::AgentActivator::new(
         Arc::clone(&security),

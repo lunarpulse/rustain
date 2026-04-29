@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::adapters::agent_registry::AgentRegistry;
@@ -1085,7 +1086,12 @@ pub struct TuiState {
     // Covers: Story 4-4 AC12
     pub pending_export: Option<(std::path::PathBuf, String)>,
     /// Skill registry — populated by background discovery task (Story 5-1 AC6).
-    pub skill_registry: SkillRegistry,
+    /// Shared via Arc<tokio::sync::RwLock> between TuiState and SkillActivator
+    /// so autocomplete and tool-dispatch see the same catalog (DF-159, Story 16-0 AC1).
+    pub skill_registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+    /// Synchronous cache of skill names for the hot input path (Story 16-0).
+    /// Refreshed from the shared registry whenever skills are discovered.
+    pub skill_name_cache: HashSet<String>,
     pub active_skill_count: usize,
     pub agent_registry: AgentRegistry,
     pub agent_suggestions: Vec<AutocompleteSuggestion>,
@@ -1182,7 +1188,8 @@ impl TuiState {
             bookmark_list_count: 0,
             bookmark_undo_buffer: None,
             pending_export: None,
-            skill_registry: SkillRegistry::new(),
+            skill_registry: Arc::new(tokio::sync::RwLock::new(SkillRegistry::new())),
+            skill_name_cache: HashSet::new(),
             active_skill_count: 0,
             agent_registry: AgentRegistry::new(),
             agent_suggestions: Vec::new(),
@@ -1195,8 +1202,9 @@ impl TuiState {
         }
     }
 
-    pub fn replace_skill_registry(&mut self, registry: SkillRegistry) {
-        self.skill_registry = registry;
+    pub async fn refresh_skill_name_cache(&mut self) {
+        let guard = self.skill_registry.read().await;
+        self.skill_name_cache = guard.skills().iter().map(|s| s.name.clone()).collect();
     }
 
     pub fn replace_agent_registry(&mut self, registry: AgentRegistry) {

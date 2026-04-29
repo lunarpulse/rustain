@@ -17,7 +17,14 @@ pub struct SecurityAdapter {
     blocked_paths: Vec<String>,
     mode: Arc<AtomicU8>,
     /// Active skill directories that are readable regardless of workspace boundary (AC7).
-    active_skill_dirs: std::sync::RwLock<std::collections::HashSet<PathBuf>>,
+    ///
+    /// CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: held only for short critical sections
+    /// (HashSet::contains/insert/remove on a small set, ≤1µs), never across `.await`.
+    /// Verified by audit of all 26 call sites. Converting to `tokio::sync::RwLock`
+    /// would propagate `async fn` through `PermissionChain::check` into
+    /// the synchronous tool-execution path — cost disproportionate to risk.
+    /// See Story 16-0 AC3.
+    active_skill_dirs: std::sync::RwLock<std::collections::HashSet<PathBuf>>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: held only for short critical sections, never across await; see AC3 of Story 16-0.
 }
 
 impl SecurityAdapter {
@@ -50,7 +57,7 @@ impl SecurityAdapter {
             blocked_commands,
             blocked_paths,
             mode: Arc::new(AtomicU8::new(PermissionMode::Normal as u8)),
-            active_skill_dirs: std::sync::RwLock::new(std::collections::HashSet::new()),
+            active_skill_dirs: std::sync::RwLock::new(std::collections::HashSet::new()), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: held only for short critical sections, never across await; see AC3 of Story 16-0.
         }
     }
 

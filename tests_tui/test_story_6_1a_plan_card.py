@@ -302,15 +302,16 @@ def test_snapshot_plan_card_60x16(tui_60x16: RustainTUI):
         pytest.skip("API stream disconnected — plan card not rendered")
 
     # 16-row terminal: verbose assistant text pushes plan card above viewport.
-    # Scroll up to bring the header into view.
+    # Switch to chat mode so scroll keys are interpreted as navigation, not input.
+    # Then scroll up adaptively until the PlanCard header is visible.
     if "Plan:" not in screen:
-        tui.scroll_up(5)
-        tui.wait(0.3)
-        screen = tui.get_screen_text()
-    if "Plan:" not in screen:
-        tui.scroll_up(5)
-        tui.wait(0.3)
-        screen = tui.get_screen_text()
+        tui.chat_mode()
+        for _ in range(10):
+            if "Plan:" in screen:
+                break
+            tui.scroll_up(5)
+            tui.wait(0.3)
+            screen = tui.get_screen_text()
     assert "Plan:" in screen, (
         f"PlanCard header did not appear. Screen:\n{screen}"
     )

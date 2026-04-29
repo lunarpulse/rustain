@@ -92,6 +92,7 @@ pub async fn run(
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
+    state.skill_registry = skill_activator.registry_arc();
     state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
 
     // Cache multiplexer detection once at startup (UX-DR62)
@@ -219,12 +220,9 @@ pub async fn run(
     // Lazy-initialized command registry (NFR10: not scanned at startup)
     let mut command_registry = CommandRegistry::new();
 
-    // Shared slot for background skill discovery (Story 5-1 AC6).
-    // `tokio::sync::Mutex` is required because the slot is written from a tokio task
-    // and read from the async event loop — `std::sync::Mutex` can stall the runtime
-    // if contended across .await boundaries.
-    let skill_registry_slot: Arc<tokio::sync::Mutex<Option<SkillRegistry>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    // Shared skill registry: TuiState and SkillActivator share the same
+    // Arc<tokio::sync::RwLock<SkillRegistry>> (Story 16-0 AC1, DF-159).
+    // Background scan writes directly into the shared Arc.
     let agent_registry_slot: Arc<
         tokio::sync::Mutex<Option<crate::adapters::agent_registry::AgentRegistry>>,
     > = Arc::new(tokio::sync::Mutex::new(None));
@@ -326,9 +324,11 @@ pub async fn run(
     // Story 5-1 AC6: Spawn skill discovery as background task after first frame.
     // `SkillRegistry::discover` performs blocking filesystem I/O, so it runs on
     // a `spawn_blocking` thread to avoid stalling the async runtime (P7).
+    // Story 16-0 AC1: writes directly into the shared Arc<RwLock<SkillRegistry>>
+    // so TuiState and SkillActivator see the same catalog (DF-159).
     {
         let tx = domain_tx.clone();
-        let slot = skill_registry_slot.clone();
+        let shared_registry = state.skill_registry.clone();
         let ws = workspace_path.clone();
         let disabled = config.skills.disabled.clone();
         let home = dirs::home_dir();
@@ -349,8 +349,8 @@ pub async fn run(
                     let count = registry.skills().len();
                     let warnings = registry.warnings_count();
                     {
-                        let mut g = slot.lock().await;
-                        *g = Some(registry);
+                        let mut g = shared_registry.write().await;
+                        *g = registry;
                     }
                     let _ = tx.send(AppEvent::SkillsDiscovered { count, warnings });
                 }
@@ -506,7 +506,8 @@ pub async fn run(
                                     &mut state,
                                     &mut command_registry,
                                     &workspace_path,
-                                );
+                                )
+                                .await;
                             } else if !state.autocomplete.active {
                                 last_autocomplete_filter.clear();
                             }
@@ -521,7 +522,8 @@ pub async fn run(
                                     &mut command_registry,
                                     &mut palette_registry,
                                     &workspace_path,
-                                );
+                                )
+                                .await;
                             } else if !state.command_palette.active {
                                 last_palette_filter.clear();
                             }
@@ -1207,7 +1209,7 @@ pub async fn run(
                                         }
                                     } else {
                                         // Check if command matches a discovered skill name (Story 5-2 AC8)
-                                        if state.skill_registry.find(cmd_name).is_some() {
+                                        if state.skill_registry.read().await.find(cmd_name).is_some() {
                                             let conv_id = conversation.id.clone();
                                             let args_text = cmd_arg
                                                 .map(|s| s.trim().to_string())
@@ -4529,13 +4531,11 @@ pub async fn run(
                         state.needs_redraw = true;
                     }
                     AppEvent::SkillsDiscovered { count, warnings } => {
-                        {
-                            let mut slot = skill_registry_slot.lock().await;
-                            if let Some(registry) = slot.take() {
-                                skill_activator.set_registry(registry.clone()).await;
-                                state.replace_skill_registry(registry);
-                            }
-                        }
+                        // Story 16-0 AC1: registry was already written to the shared
+                        // Arc<RwLock<SkillRegistry>> by the background scan task.
+                        // Both TuiState and SkillActivator share the same Arc, so
+                        // no clone/set_registry/replace_skill_registry needed.
+                        state.refresh_skill_name_cache().await;
                         state.needs_redraw = true;
                         // AC6: if the user already has `/` autocomplete open when
                         // discovery finishes, refresh suggestions so newly
@@ -4546,7 +4546,8 @@ pub async fn run(
                                 &mut state,
                                 &mut command_registry,
                                 &workspace_path,
-                            );
+                            )
+                            .await;
                         }
                         if count > 0 {
                             app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -4581,7 +4582,8 @@ pub async fn run(
                                 &mut state,
                                 &mut command_registry,
                                 &workspace_path,
-                            );
+                            )
+                            .await;
                         }
                         if count > 0 {
                             app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -7452,7 +7454,7 @@ pub fn post_process_title(raw: &str) -> String {
 
 /// Populate autocomplete suggestions based on current state.
 /// Called after handle_input when autocomplete is active.
-fn populate_autocomplete_suggestions(
+async fn populate_autocomplete_suggestions(
     state: &mut TuiState,
     command_registry: &mut CommandRegistry,
     workspace_path: &std::path::Path,
@@ -7466,10 +7468,13 @@ fn populate_autocomplete_suggestions(
             // Filter-as-you-type uses the cached registry.
             if state.autocomplete.filter_text.is_empty() {
                 command_registry.refresh(workspace_path);
-                command_registry.warn_skill_shadows(&state.skill_registry);
             }
             let filtered = command_registry.filter(&state.autocomplete.filter_text);
-            let skill_results = state.skill_registry.filter(&state.autocomplete.filter_text);
+            let guard = state.skill_registry.read().await;
+            if state.autocomplete.filter_text.is_empty() {
+                command_registry.warn_skill_shadows(&guard);
+            }
+            let skill_results = guard.filter(&state.autocomplete.filter_text);
 
             state.autocomplete.suggestions =
                 build_slash_suggestions_ordered(&filtered, &skill_results);
@@ -7576,7 +7581,7 @@ pub fn build_slash_suggestions_ordered(
 
 /// Populate command palette filtered entries from the registry.
 /// Called after handle_input when palette is active and filter text changes.
-fn populate_palette_entries(
+async fn populate_palette_entries(
     state: &mut TuiState,
     command_registry: &mut CommandRegistry,
     palette_registry: &mut PaletteRegistry,
@@ -7585,7 +7590,8 @@ fn populate_palette_entries(
     // Ensure command registry is discovered
     if !command_registry.is_discovered() {
         command_registry.refresh(workspace_path);
-        command_registry.warn_skill_shadows(&state.skill_registry);
+        let guard = state.skill_registry.read().await;
+        command_registry.warn_skill_shadows(&guard);
     }
 
     // Populate palette from command registry (cached, only rebuilds if discovery state changed)

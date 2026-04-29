@@ -1986,7 +1986,7 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             // Discovered skill name → activate via ExecuteCommand so the event loop
             // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
             // user-defined-command SubmitWithContext if the name is NOT a skill.
-            if state.skill_registry.find(&cmd_name).is_some() {
+            if state.skill_name_cache.contains(&cmd_name) {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,

@@ -46,8 +46,20 @@ impl SkillActivator {
         }
     }
 
+    pub fn with_registry(registry: Arc<RwLock<SkillRegistry>>) -> Self {
+        Self {
+            registry,
+            conversation_sets: Arc::new(RwLock::new(HashMap::new())),
+            event_tx: RwLock::new(None),
+        }
+    }
+
     pub async fn set_event_tx(&self, tx: mpsc::UnboundedSender<AppEvent>) {
         *self.event_tx.write().await = Some(tx);
+    }
+
+    pub fn registry_arc(&self) -> Arc<RwLock<SkillRegistry>> {
+        self.registry.clone()
     }
 
     pub async fn set_registry(&self, registry: SkillRegistry) {
