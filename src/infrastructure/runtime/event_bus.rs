@@ -85,7 +85,10 @@ impl RawEvent {
     pub fn from_app_event(ev: &AppEvent) -> Option<Self> {
         let now = chrono::Utc::now().timestamp_millis();
         Some(match ev {
-            AppEvent::ProviderChunk { conversation_id, chunk } => RawEvent {
+            AppEvent::ProviderChunk {
+                conversation_id,
+                chunk,
+            } => RawEvent {
                 conversation_id: Some(conversation_id.clone()),
                 timestamp_ms: now,
                 kind: RawEventKind::Provider(chunk.clone()),
@@ -95,12 +98,22 @@ impl RawEvent {
                 timestamp_ms: now,
                 kind: RawEventKind::ModeChanged(*mode),
             },
-            AppEvent::SystemNotice { conversation_id, level, message } => RawEvent {
+            AppEvent::SystemNotice {
+                conversation_id,
+                level,
+                message,
+            } => RawEvent {
                 conversation_id: conversation_id.clone(),
                 timestamp_ms: now,
-                kind: RawEventKind::SystemNotice { level: *level, message: message.clone() },
+                kind: RawEventKind::SystemNotice {
+                    level: *level,
+                    message: message.clone(),
+                },
             },
-            AppEvent::ToolCallTransitionBridged { conversation_id, transition } => RawEvent {
+            AppEvent::ToolCallTransitionBridged {
+                conversation_id,
+                transition,
+            } => RawEvent {
                 conversation_id: Some(conversation_id.clone()),
                 timestamp_ms: now,
                 kind: RawEventKind::Tool(transition.clone()),
@@ -198,7 +211,8 @@ mod tests {
             .expect("channel closed");
         assert!(matches!(ev, AppEvent::Tick));
 
-        let result = tokio::time::timeout(std::time::Duration::from_millis(50), raw_rx.recv()).await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), raw_rx.recv()).await;
         assert!(result.is_err(), "Tick should not appear on raw channel");
     }
 
@@ -255,7 +269,10 @@ mod tests {
         let ev = AppEvent::SetPermissionMode(PermissionMode::Normal);
         let raw = RawEvent::from_app_event(&ev).unwrap();
         assert!(raw.conversation_id.is_none());
-        assert!(matches!(raw.kind, RawEventKind::ModeChanged(PermissionMode::Normal)));
+        assert!(matches!(
+            raw.kind,
+            RawEventKind::ModeChanged(PermissionMode::Normal)
+        ));
     }
 
     #[test]

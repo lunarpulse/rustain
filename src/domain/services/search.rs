@@ -351,10 +351,7 @@ mod tests {
             },
         );
 
-        let mut c = conv(vec![
-            msg(MessageRole::User, "go ahead"),
-            host_msg,
-        ]);
+        let mut c = conv(vec![msg(MessageRole::User, "go ahead"), host_msg]);
         c.plans = plans;
 
         let m = find_matches(&c, "database migration");

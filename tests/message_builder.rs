@@ -34,7 +34,7 @@ fn test_build_api_messages_maps_roles() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            },
+        },
         ChatMessage {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
@@ -46,7 +46,7 @@ fn test_build_api_messages_maps_roles() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            },
+        },
     ]);
 
     let messages = build_api_messages(&conv);

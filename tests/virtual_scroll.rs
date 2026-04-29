@@ -455,8 +455,11 @@ fn test_virtual_scroll_only_user_messages() {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
-            content: format!("User message {
-            }", i),
+            content: format!(
+                "User message {
+            }",
+                i
+            ),
             content_blocks: vec![],
             tool_calls: vec![],
             created_at: i as i64,

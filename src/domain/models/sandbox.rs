@@ -59,10 +59,7 @@ mod tests {
                 network,
             } => {
                 assert_eq!(writable_roots, vec![ws.to_path_buf()]);
-                assert_eq!(
-                    read_only_paths,
-                    vec![ws.join(".git"), ws.join(".rustain")]
-                );
+                assert_eq!(read_only_paths, vec![ws.join(".git"), ws.join(".rustain")]);
                 assert!(network);
             }
             other => panic!("expected WorkspaceWrite, got {:?}", other),

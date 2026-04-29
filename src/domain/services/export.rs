@@ -458,10 +458,7 @@ mod tests {
 
         let mut c = conv(
             "PlanTest",
-            vec![
-                msg(MessageRole::User, "Do it", 1_700_000_000),
-                plan_msg,
-            ],
+            vec![msg(MessageRole::User, "Do it", 1_700_000_000), plan_msg],
         );
         c.plans = plans;
 

@@ -137,10 +137,7 @@ pub fn handle_plan_execution_started(
         .map(|p| p.tasks.len())
         .unwrap_or(0);
 
-    if user_suppressed
-        && terminal_width >= sidebar_min_width
-        && auto_open_setting != "none"
-    {
+    if user_suppressed && terminal_width >= sidebar_min_width && auto_open_setting != "none" {
         // PD1 (Sally Option 1): honor user close. Update plan pointer + cursor
         // so a manual reopen renders correctly.
         state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
@@ -159,14 +156,12 @@ pub fn handle_plan_execution_started(
         {
             out.notices.push(PendingNotice {
                 level: NoticeLevel::Info,
-                message: "Tasks panel hidden for this session — Ctrl+X, T to reopen."
-                    .to_string(),
+                message: "Tasks panel hidden for this session — Ctrl+X, T to reopen.".to_string(),
                 conversation_id: conversation.id.clone(),
             });
         }
     } else if auto_open_setting != "none" && terminal_width >= sidebar_min_width {
-        let was_closed = !state.sidebar_visible
-            || state.sidebar_panel != Some(PanelType::Tasks);
+        let was_closed = !state.sidebar_visible || state.sidebar_panel != Some(PanelType::Tasks);
         state.sidebar_visible = true;
         state.sidebar_panel = Some(PanelType::Tasks);
         state.task_panel_state.last_executed_plan_id = Some(plan_id.to_string());
@@ -192,10 +187,9 @@ pub fn handle_plan_execution_started(
         out.narrow_skipped = true;
         out.notices.push(PendingNotice {
             level: NoticeLevel::Info,
-            message:
-                "Task panel auto-open skipped \u{2014} terminal too narrow (<120 cols). \
+            message: "Task panel auto-open skipped \u{2014} terminal too narrow (<120 cols). \
                  Press Ctrl+X, T after resize."
-                    .to_string(),
+                .to_string(),
             conversation_id: conversation.id.clone(),
         });
     }
@@ -230,7 +224,10 @@ pub fn handle_plan_task_status_changed(
 /// drill-down is active or the task/plan cannot be resolved.
 /// Used to gate status-conditional dispatch for `TaskPause`, `TaskSkip`, `TaskRetry`,
 /// and `TaskEdit` — Story 6.4 replaces the 6-3 `is_failed_drill_down` gate.
-pub fn drill_down_task_status(state: &TuiState, conversation: &Conversation) -> Option<PlanTaskStatus> {
+pub fn drill_down_task_status(
+    state: &TuiState,
+    conversation: &Conversation,
+) -> Option<PlanTaskStatus> {
     let n = state.task_panel_state.drill_down_task?;
     let plan_id = state.task_panel_state.last_executed_plan_id.as_ref()?;
     let plan = conversation.plans.get(plan_id)?;
@@ -277,10 +274,7 @@ pub fn resolve_copy_task_payload(
             },
         ),
         _ => (
-            format!(
-                "Task {}: {} — {:?}",
-                task.number, task.title, task.status
-            ),
+            format!("Task {}: {} — {:?}", task.number, task.title, task.status),
             "Copied task info to clipboard.".to_string(),
         ),
     };
@@ -387,7 +381,9 @@ pub fn handle_task_pause(
                 // Only resume dependents that are also Paused
                 for dep in &deps {
                     let dep_idx = (dep.saturating_sub(1)) as usize;
-                    if dep_idx < plan.tasks.len() && plan.tasks[dep_idx].status == PlanTaskStatus::Paused {
+                    if dep_idx < plan.tasks.len()
+                        && plan.tasks[dep_idx].status == PlanTaskStatus::Paused
+                    {
                         set.push(*dep);
                     }
                 }
@@ -425,7 +421,15 @@ pub fn handle_task_pause(
             let deps = dependents(plan, task_number);
             for dep in &deps {
                 let dep_idx = (dep.saturating_sub(1)) as usize;
-                if dep_idx < plan.tasks.len() && !matches!(plan.tasks[dep_idx].status, PlanTaskStatus::Completed | PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled) {
+                if dep_idx < plan.tasks.len()
+                    && !matches!(
+                        plan.tasks[dep_idx].status,
+                        PlanTaskStatus::Completed
+                            | PlanTaskStatus::Failed
+                            | PlanTaskStatus::Skipped
+                            | PlanTaskStatus::Cancelled
+                    )
+                {
                     plan.tasks[dep_idx].status = PlanTaskStatus::Paused;
                 }
             }
@@ -441,7 +445,15 @@ pub fn handle_task_pause(
             // Set dependents to Paused synchronously (they're not running)
             for dep in &deps {
                 let dep_idx = (dep.saturating_sub(1)) as usize;
-                if dep_idx < plan.tasks.len() && !matches!(plan.tasks[dep_idx].status, PlanTaskStatus::Completed | PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled) {
+                if dep_idx < plan.tasks.len()
+                    && !matches!(
+                        plan.tasks[dep_idx].status,
+                        PlanTaskStatus::Completed
+                            | PlanTaskStatus::Failed
+                            | PlanTaskStatus::Skipped
+                            | PlanTaskStatus::Cancelled
+                    )
+                {
                     plan.tasks[dep_idx].status = PlanTaskStatus::Paused;
                 }
             }
@@ -455,20 +467,18 @@ pub fn handle_task_pause(
                 running_task_paused: Some(task_number),
             }
         }
-        _ => {
-            PauseOutcome {
-                notices: vec![PendingNotice {
-                    level: NoticeLevel::Info,
-                    message: format!(
-                        "Task {} cannot be paused (status: {:?}).",
-                        task_number, task_status
-                    ),
-                    conversation_id: conversation.id.clone(),
-                }],
-                should_resume_advance: false,
-                running_task_paused: None,
-            }
-        }
+        _ => PauseOutcome {
+            notices: vec![PendingNotice {
+                level: NoticeLevel::Info,
+                message: format!(
+                    "Task {} cannot be paused (status: {:?}).",
+                    task_number, task_status
+                ),
+                conversation_id: conversation.id.clone(),
+            }],
+            should_resume_advance: false,
+            running_task_paused: None,
+        },
     }
 }
 
@@ -594,7 +604,11 @@ mod tests {
                 status: PlanTaskStatus::Completed,
                 started_at_ms: Some(0),
                 completed_at_ms: Some(1),
-                result: Some(TaskResult { text, tool_call_count: 0, token_count: None }),
+                result: Some(TaskResult {
+                    text,
+                    tool_call_count: 0,
+                    token_count: None,
+                }),
                 error: None,
                 waiting_on: vec![],
             }],
@@ -627,11 +641,14 @@ mod tests {
         let body = "z".repeat(20_000);
         let (conv, plan_id) = conv_with_completed_task(body.clone());
 
-        let outcome = resolve_copy_task_payload(&conv, Some(plan_id), 1, None)
-            .expect("payload resolved");
+        let outcome =
+            resolve_copy_task_payload(&conv, Some(plan_id), 1, None).expect("payload resolved");
 
         assert_eq!(outcome.text.len(), 20_000, "clipboard payload length");
         assert_eq!(outcome.text, body, "clipboard payload byte-equal");
-        assert!(!outcome.text.contains("(truncated)"), "no truncation marker on clipboard");
+        assert!(
+            !outcome.text.contains("(truncated)"),
+            "no truncation marker on clipboard"
+        );
     }
 }

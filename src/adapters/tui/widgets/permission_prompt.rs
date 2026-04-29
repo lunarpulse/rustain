@@ -83,9 +83,7 @@ pub fn render_permission_lines<'a>(
     let mut lines = Vec::new();
 
     // Line 1: optional prefix + tool name + command + optional queue indicator (AC6)
-    let mut line1_spans = vec![
-        Span::styled("┃ ", border_style),
-    ];
+    let mut line1_spans = vec![Span::styled("┃ ", border_style)];
     if !prefix.is_empty() {
         line1_spans.push(Span::styled(
             prefix,
@@ -98,7 +96,10 @@ pub fn render_permission_lines<'a>(
             .fg(theme.colors.tool_name)
             .add_modifier(Modifier::BOLD),
     ));
-    line1_spans.push(Span::styled(display, Style::default().fg(theme.colors.fg_primary)));
+    line1_spans.push(Span::styled(
+        display,
+        Style::default().fg(theme.colors.fg_primary),
+    ));
     if queue_len > 0 {
         line1_spans.push(Span::styled(
             format!("  [{} more queued]", queue_len),
@@ -209,7 +210,15 @@ mod tests {
     #[test]
     fn test_permission_prompt_renders_three_lines() {
         let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines =             render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "cargo test", &theme, 0);
+        let lines = render_permission_lines(
+            &ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash",
+            "cargo test",
+            &theme,
+            0,
+        );
         assert_eq!(lines.len(), 3);
 
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -234,8 +243,15 @@ mod tests {
     #[test]
     fn test_permission_prompt_five_action_glyphs() {
         let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines =
-            render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "ls", &theme, 0);
+        let lines = render_permission_lines(
+            &ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash",
+            "ls",
+            &theme,
+            0,
+        );
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -251,8 +267,15 @@ mod tests {
     #[test]
     fn test_permission_prompt_queue_indicator_present() {
         let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines =
-            render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "ls", &theme, 3);
+        let lines = render_permission_lines(
+            &ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash",
+            "ls",
+            &theme,
+            3,
+        );
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             line1.contains("[3 more queued]"),
@@ -264,8 +287,15 @@ mod tests {
     #[test]
     fn test_permission_prompt_queue_indicator_absent_when_zero() {
         let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines =
-            render_permission_lines(&ApprovalSource::ForegroundTurn { conversation_id: "c1".into() }, "Bash", "ls", &theme, 0);
+        let lines = render_permission_lines(
+            &ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash",
+            "ls",
+            &theme,
+            0,
+        );
         let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             !line1.contains("more queued"),

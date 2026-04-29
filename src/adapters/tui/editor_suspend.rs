@@ -10,7 +10,9 @@ impl std::fmt::Display for EditorSuspendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EditorSuspendError::Io(e) => write!(f, "I/O error: {}", e),
-            EditorSuspendError::EditorNonZeroExit => write!(f, "Editor exited with non-zero status"),
+            EditorSuspendError::EditorNonZeroExit => {
+                write!(f, "Editor exited with non-zero status")
+            }
             EditorSuspendError::Spawn(e) => write!(f, "Failed to spawn editor: {}", e),
             EditorSuspendError::Parse(s) => write!(f, "Parse error: {}", s),
         }
@@ -52,8 +54,8 @@ pub fn run_editor_on_path(
     path: &std::path::Path,
 ) -> Result<std::process::ExitStatus, EditorSuspendError> {
     suspend_terminal(|| {
-        let editor =
-            crate::infrastructure::utils::env_var_trimmed("EDITOR").unwrap_or_else(|| "vi".to_string());
+        let editor = crate::infrastructure::utils::env_var_trimmed("EDITOR")
+            .unwrap_or_else(|| "vi".to_string());
         let parts = shell_words::split(&editor).unwrap_or_else(|_| vec![editor.clone()]);
         if parts.is_empty() {
             return std::process::Command::new("vi").arg(path).status();
@@ -72,7 +74,8 @@ pub async fn run_editor_on_plan(
     let temp_dir = std::env::temp_dir();
     let temp_path = temp_dir.join(format!("rustain-plan-{}.toml", plan.id));
 
-    let toml_content = toml::to_string_pretty(plan).map_err(|e| EditorSuspendError::Parse(e.to_string()))?;
+    let toml_content =
+        toml::to_string_pretty(plan).map_err(|e| EditorSuspendError::Parse(e.to_string()))?;
     tokio::fs::write(&temp_path, &toml_content)
         .await
         .map_err(EditorSuspendError::Io)?;
@@ -103,14 +106,13 @@ pub async fn run_editor_on_plan(
 
     let _ = tokio::fs::remove_file(&temp_path).await;
 
-    let mut edited_plan: crate::domain::models::Plan =
-        match toml::from_str(&edited_content) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Plan edit parse error: {}", e);
-                return Ok(None);
-            }
-        };
+    let mut edited_plan: crate::domain::models::Plan = match toml::from_str(&edited_content) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Plan edit parse error: {}", e);
+            return Ok(None);
+        }
+    };
 
     if let Err(e) = crate::domain::services::plan_parser::validate_plan(&edited_plan) {
         tracing::warn!("Plan edit validation error: {}", e);

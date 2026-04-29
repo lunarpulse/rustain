@@ -401,7 +401,7 @@ impl TestHarness {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
         self.streaming.is_streaming = true;
         self.streaming.phase = StreamingPhase::AccumulatingText;
@@ -950,7 +950,7 @@ fn test_e2e_api_messages_valid_after_tool_use() {
         token_count: None,
         stop_reason: Some(StopReason::ToolUse),
         images: vec![],
-        });
+    });
 
     // Validate API messages — this is the critical regression test
     // The P0 bug caused empty text blocks here

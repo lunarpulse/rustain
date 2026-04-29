@@ -35,7 +35,9 @@ pub enum ToolRisk {
 /// default to `Elevated` (fail-safe) — matching is exact on the canonical capitalized builtin IDs.
 pub fn risk_for_builtin(tool_name: &str) -> ToolRisk {
     match tool_name {
-        "Read" | "Glob" | "Grep" | "activate_skill" | "exit_plan_mode" | "propose_plan" => ToolRisk::Safe,
+        "Read" | "Glob" | "Grep" | "activate_skill" | "exit_plan_mode" | "propose_plan" => {
+            ToolRisk::Safe
+        }
         "Write" | "Edit" => ToolRisk::Standard,
         "Bash" | "WebFetch" => ToolRisk::Elevated,
         _ => ToolRisk::Elevated,

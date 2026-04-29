@@ -43,7 +43,10 @@ pub fn render(
 
     if let Some(breadcrumb) = drill_down_breadcrumb {
         left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
-        left_spans.push(Span::styled(breadcrumb.to_string(), Style::default().fg(theme.colors.fg_muted)));
+        left_spans.push(Span::styled(
+            breadcrumb.to_string(),
+            Style::default().fg(theme.colors.fg_muted),
+        ));
     }
 
     // Session title (after model, if restored session)
@@ -84,7 +87,9 @@ pub fn render(
         if let Some(turn) = pending_plan_reminder_at_turn {
             left_spans.push(Span::styled(
                 format!("{}⟳ plan-reminder t+{}", sep, turn),
-                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
     }

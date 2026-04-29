@@ -17,8 +17,8 @@ use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::state::{HeightCache, SearchState, TuiState};
 use rustain::adapters::tui::theme::Theme;
-use rustain::domain::models::StatusState;
 use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
+use rustain::domain::models::StatusState;
 use rustain::domain::models::checkpoint::CheckpointId;
 use rustain::domain::models::conversation::{
     ChatMessage, Conversation, ForkSource, generate_conversation_id,
@@ -42,7 +42,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }
+    }
 }
 
 fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {

@@ -100,7 +100,7 @@ fn add_user_message(conv: &mut Conversation, content: &str) {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
 }
 
 // ── Test 5.1: apply_chunk sets trigger_title_generation only at 2 messages ──
@@ -333,7 +333,7 @@ fn test_no_title_generation_for_subsequent_turns() {
         token_count: None,
         stop_reason: Some(StopReason::EndTurn),
         images: vec![],
-        });
+    });
 
     // Add another user message + assistant response (messages.len() will be 4)
     add_user_message(&mut conv, "Second message");

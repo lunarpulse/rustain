@@ -3739,8 +3739,8 @@ mod tests {
     #[tokio::test]
     async fn fork_preserves_plans_within_truncated_range() {
         use crate::domain::models::ContentBlockType;
-        use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
         use crate::domain::models::checkpoint::CheckpointId;
+        use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus};
 
         let tmp = tempfile::tempdir().unwrap();
         let sessions_dir = tmp.path().join("sessions");

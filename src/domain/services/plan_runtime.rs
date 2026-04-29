@@ -4,13 +4,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::AppEvent;
 use crate::domain::models::ContentBlockType;
+use crate::domain::models::MessageRole;
+use crate::domain::models::NoticeLevel;
 use crate::domain::models::conversation::{ChatMessage, generate_message_id};
 use crate::domain::models::plan::{
     Plan, PlanDeviationKind, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
 };
 use crate::domain::models::tab::ConversationId;
-use crate::domain::models::MessageRole;
-use crate::domain::models::NoticeLevel;
 use crate::domain::ports::EventEmitter;
 
 pub struct PlanRuntime {
@@ -103,7 +103,11 @@ impl PlanRuntime {
             }
         }
 
-        let assistant_count = conversation.messages.iter().filter(|m| m.role == MessageRole::Assistant).count();
+        let assistant_count = conversation
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .count();
         let state = PlanRuntimeState {
             conversation_id: conversation_id.clone(),
             plan_id: plan_id.clone(),
@@ -134,7 +138,9 @@ impl PlanRuntime {
             {
                 let mut plans = self.plans.write().unwrap();
                 if let Some(state) = plans.get_mut(&plan_id) {
-                    state.task_cancels.insert(task_number, CancellationToken::new());
+                    state
+                        .task_cancels
+                        .insert(task_number, CancellationToken::new());
                 }
             }
 
@@ -171,11 +177,16 @@ impl PlanRuntime {
             if plan.status == PlanStatus::Cancelled {
                 return; // already cancelled; ignore stale TurnComplete
             }
-            let running_num = plan.tasks.iter().find(|t| t.status == PlanTaskStatus::Running).map(|t| t.number);
+            let running_num = plan
+                .tasks
+                .iter()
+                .find(|t| t.status == PlanTaskStatus::Running)
+                .map(|t| t.number);
             if running_num != Some(task_number) {
                 tracing::warn!(
                     "PlanRuntime::on_turn_complete: task_number {} does not match running task {:?}; ignoring",
-                    task_number, running_num
+                    task_number,
+                    running_num
                 );
                 return;
             }
@@ -192,7 +203,11 @@ impl PlanRuntime {
         }
 
         match outcome {
-            TaskTurnOutcome::Success { result_text, tool_call_count, token_count } => {
+            TaskTurnOutcome::Success {
+                result_text,
+                tool_call_count,
+                token_count,
+            } => {
                 {
                     let plan = match conversation.plans.get_mut(plan_id) {
                         Some(p) => p,
@@ -227,12 +242,17 @@ impl PlanRuntime {
                 // Check for whole-plan-cancel race (task completed before token cancel)
                 let is_whole_cancel = {
                     let plans = self.plans.read().unwrap();
-                    plans.get(plan_id).map(|s| s.whole_plan_cancel_pending).unwrap_or(false)
+                    plans
+                        .get(plan_id)
+                        .map(|s| s.whole_plan_cancel_pending)
+                        .unwrap_or(false)
                 };
                 if is_whole_cancel {
                     if let Some(plan) = conversation.plans.get_mut(plan_id) {
                         for task in &mut plan.tasks {
-                            if task.number == task_number { continue; }
+                            if task.number == task_number {
+                                continue;
+                            }
                             if !is_terminal(task.status) {
                                 task.status = PlanTaskStatus::Cancelled;
                                 task.completed_at_ms = Some(now_ms);
@@ -287,12 +307,17 @@ impl PlanRuntime {
                 // Check for whole-plan-cancel race (task failed before token cancel)
                 let is_whole_cancel = {
                     let plans = self.plans.read().unwrap();
-                    plans.get(plan_id).map(|s| s.whole_plan_cancel_pending).unwrap_or(false)
+                    plans
+                        .get(plan_id)
+                        .map(|s| s.whole_plan_cancel_pending)
+                        .unwrap_or(false)
                 };
                 if is_whole_cancel {
                     if let Some(plan) = conversation.plans.get_mut(plan_id) {
                         for task in &mut plan.tasks {
-                            if task.number == task_number { continue; }
+                            if task.number == task_number {
+                                continue;
+                            }
                             if !is_terminal(task.status) {
                                 task.status = PlanTaskStatus::Cancelled;
                                 task.completed_at_ms = Some(now_ms);
@@ -326,9 +351,15 @@ impl PlanRuntime {
                     let plan = conversation.plans.get_mut(plan_id).unwrap();
                     let pre_len = plan.tasks.len();
                     skip_blocked_tasks(conversation_id, plan_id, task_number, plan, event_emitter);
-                    let skipped: Vec<_> = plan.tasks.iter()
-                        .filter(|t| t.status == PlanTaskStatus::Skipped
-                            && t.error.as_ref().map_or(false, |e| e.contains("depends on failed task")))
+                    let skipped: Vec<_> = plan
+                        .tasks
+                        .iter()
+                        .filter(|t| {
+                            t.status == PlanTaskStatus::Skipped
+                                && t.error
+                                    .as_ref()
+                                    .map_or(false, |e| e.contains("depends on failed task"))
+                        })
                         .map(|t| t.number)
                         .collect();
                     let count = skipped.len() as u32;
@@ -347,7 +378,8 @@ impl PlanRuntime {
                     let deviation_kind = PlanDeviationKind::AutoSkipBlockedTasks {
                         source_task: task_number,
                     };
-                    self.mark_deviation_pending(plan_id, deviation_kind.clone()).await;
+                    self.mark_deviation_pending(plan_id, deviation_kind.clone())
+                        .await;
                     event_emitter.emit(AppEvent::PlanDeviation {
                         conversation_id: conversation_id.clone(),
                         plan_id: plan_id.to_string(),
@@ -366,9 +398,15 @@ impl PlanRuntime {
             TaskTurnOutcome::Cancelled { reason } => {
                 let (is_pause_pending, is_whole_cancel) = {
                     let plans = self.plans.read().unwrap();
-                    plans.get(plan_id).map(|s| {
-                        (s.pause_pending_tasks.contains(&task_number), s.whole_plan_cancel_pending)
-                    }).unwrap_or((false, false))
+                    plans
+                        .get(plan_id)
+                        .map(|s| {
+                            (
+                                s.pause_pending_tasks.contains(&task_number),
+                                s.whole_plan_cancel_pending,
+                            )
+                        })
+                        .unwrap_or((false, false))
                 };
 
                 if is_pause_pending {
@@ -392,9 +430,9 @@ impl PlanRuntime {
                         status: PlanTaskStatus::Paused,
                     });
                     // Remove from pause_pending set — it's been consumed
-                    self.plans.write().unwrap()
-                        .get_mut(plan_id)
-                        .map(|s| { s.pause_pending_tasks.remove(&task_number); });
+                    self.plans.write().unwrap().get_mut(plan_id).map(|s| {
+                        s.pause_pending_tasks.remove(&task_number);
+                    });
                     // Do NOT call skip_blocked_tasks or advance_after_task — runtime idles
                     return;
                 }
@@ -490,7 +528,9 @@ impl PlanRuntime {
             {
                 let mut plans = self.plans.write().unwrap();
                 if let Some(state) = plans.get_mut(plan_id) {
-                    state.task_cancels.insert(task_number, CancellationToken::new());
+                    state
+                        .task_cancels
+                        .insert(task_number, CancellationToken::new());
                 }
             }
 
@@ -520,7 +560,8 @@ impl PlanRuntime {
                 // (all remaining tasks are blocked by upstream failures/cancellations)
                 let blocker_list = {
                     let plan = conversation.plans.get(plan_id).unwrap();
-                    plan.tasks.iter()
+                    plan.tasks
+                        .iter()
                         .filter(|t| is_terminal(t.status) && t.status != PlanTaskStatus::Completed)
                         .map(|t| t.number.to_string())
                         .collect::<Vec<_>>()
@@ -567,11 +608,7 @@ impl PlanRuntime {
         })
     }
 
-    pub async fn mark_pause_pending(
-        &self,
-        plan_id: &str,
-        task_number: u32,
-    ) {
+    pub async fn mark_pause_pending(&self, plan_id: &str, task_number: u32) {
         let mut plans = self.plans.write().unwrap();
         if let Some(state) = plans.get_mut(plan_id) {
             state.pause_pending_tasks.insert(task_number);
@@ -586,11 +623,7 @@ impl PlanRuntime {
         }
     }
 
-    pub async fn mark_deviation_pending(
-        &self,
-        plan_id: &str,
-        kind: PlanDeviationKind,
-    ) {
+    pub async fn mark_deviation_pending(&self, plan_id: &str, kind: PlanDeviationKind) {
         let mut plans = self.plans.write().unwrap();
         if let Some(state) = plans.get_mut(plan_id) {
             state.pending_deviation = Some(kind);
@@ -613,7 +646,9 @@ impl PlanRuntime {
 
     async fn has_pending_deviation(&self, plan_id: &str) -> bool {
         let plans = self.plans.read().unwrap();
-        plans.get(plan_id).map_or(false, |s| s.pending_deviation.is_some())
+        plans
+            .get(plan_id)
+            .map_or(false, |s| s.pending_deviation.is_some())
     }
 
     /// Public wrapper for the private `advance_after_task`. Called by 6-4
@@ -627,7 +662,9 @@ impl PlanRuntime {
         event_emitter: &dyn EventEmitter,
     ) {
         if self.has_pending_deviation(plan_id).await {
-            tracing::debug!("PlanRuntime::resume_advance: short-circuited — pending_deviation is set");
+            tracing::debug!(
+                "PlanRuntime::resume_advance: short-circuited — pending_deviation is set"
+            );
             return;
         }
         self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
@@ -655,13 +692,16 @@ impl PlanRuntime {
         }
 
         let failure_keywords = [
-            "failed", "error", "cannot", "unable to", "could not", "not possible",
+            "failed",
+            "error",
+            "cannot",
+            "unable to",
+            "could not",
+            "not possible",
         ];
         let content_lower = last_assistant_msg_content.to_lowercase();
-        let looks_failed = !any_tool_succeeded
-            && failure_keywords
-                .iter()
-                .any(|kw| content_lower.contains(kw));
+        let looks_failed =
+            !any_tool_succeeded && failure_keywords.iter().any(|kw| content_lower.contains(kw));
 
         if looks_failed {
             TaskTurnOutcome::Failure {
@@ -788,29 +828,81 @@ pub(crate) fn finish_plan(
     conversation: &mut crate::domain::models::Conversation,
     event_emitter: &dyn EventEmitter,
 ) {
-    let (plan_title, tasks_snapshot, completed, failed, skipped, total, total_elapsed_ms, total_tokens) = {
+    let (
+        plan_title,
+        tasks_snapshot,
+        completed,
+        failed,
+        skipped,
+        total,
+        total_elapsed_ms,
+        total_tokens,
+    ) = {
         let plan = conversation.plans.get_mut(plan_id).unwrap();
         let total = plan.tasks.len() as u32;
-        let completed = plan.tasks.iter().filter(|t| t.status == PlanTaskStatus::Completed).count() as u32;
-        let failed = plan.tasks.iter().filter(|t| t.status == PlanTaskStatus::Failed).count() as u32;
-        let skipped = plan.tasks.iter().filter(|t| t.status == PlanTaskStatus::Skipped).count() as u32;
+        let completed = plan
+            .tasks
+            .iter()
+            .filter(|t| t.status == PlanTaskStatus::Completed)
+            .count() as u32;
+        let failed = plan
+            .tasks
+            .iter()
+            .filter(|t| t.status == PlanTaskStatus::Failed)
+            .count() as u32;
+        let skipped = plan
+            .tasks
+            .iter()
+            .filter(|t| t.status == PlanTaskStatus::Skipped)
+            .count() as u32;
         let total_elapsed_ms: i64 = plan.tasks.iter().filter_map(|t| t.elapsed_ms()).sum();
-        let total_tokens: u32 = plan.tasks.iter().filter_map(|t| t.result.as_ref().and_then(|r| r.token_count)).sum();
+        let total_tokens: u32 = plan
+            .tasks
+            .iter()
+            .filter_map(|t| t.result.as_ref().and_then(|r| r.token_count))
+            .sum();
 
         // Preserve Cancelled — whole-plan-cancel race set it before reaching here.
         if plan.status != PlanStatus::Cancelled {
             plan.status = PlanStatus::Completed;
         }
 
-        let snapshot = plan.tasks.iter().map(|t| {
-            (t.number, t.title.clone(), t.status, t.elapsed_ms(), t.error.clone(), t.result.clone())
-        }).collect::<Vec<_>>();
+        let snapshot = plan
+            .tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.number,
+                    t.title.clone(),
+                    t.status,
+                    t.elapsed_ms(),
+                    t.error.clone(),
+                    t.result.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
 
-        (plan.title.clone(), snapshot, completed, failed, skipped, total, total_elapsed_ms, total_tokens)
+        (
+            plan.title.clone(),
+            snapshot,
+            completed,
+            failed,
+            skipped,
+            total,
+            total_elapsed_ms,
+            total_tokens,
+        )
     };
 
     let summary = build_summary_markdown(
-        &plan_title, completed, total, failed, skipped, total_elapsed_ms, total_tokens, &tasks_snapshot,
+        &plan_title,
+        completed,
+        total,
+        failed,
+        skipped,
+        total_elapsed_ms,
+        total_tokens,
+        &tasks_snapshot,
     );
 
     let msg = ChatMessage {
@@ -845,7 +937,14 @@ fn build_summary_markdown(
     skipped: u32,
     total_elapsed_ms: i64,
     total_tokens: u32,
-    tasks: &[(u32, String, PlanTaskStatus, Option<i64>, Option<String>, Option<TaskResult>)],
+    tasks: &[(
+        u32,
+        String,
+        PlanTaskStatus,
+        Option<i64>,
+        Option<String>,
+        Option<TaskResult>,
+    )],
 ) -> String {
     let mut md = format!("## Plan complete: {}\n\n", plan_title);
 
@@ -858,7 +957,10 @@ fn build_summary_markdown(
         count_parts.push(format!("{} skipped", skipped));
     }
     let mut summary = count_parts.join(", ");
-    summary.push_str(&format!(" · ~{} elapsed", format_elapsed_ms(total_elapsed_ms)));
+    summary.push_str(&format!(
+        " · ~{} elapsed",
+        format_elapsed_ms(total_elapsed_ms)
+    ));
     if total_tokens > 0 {
         summary.push_str(&format!(" · {} tokens", total_tokens));
     }
@@ -871,11 +973,21 @@ fn build_summary_markdown(
             PlanTaskStatus::Completed => "✓".to_string(),
             PlanTaskStatus::Failed => format!(
                 "✗ {}",
-                error.as_deref().unwrap_or("error").lines().next().unwrap_or("")
+                error
+                    .as_deref()
+                    .unwrap_or("error")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
             ),
             PlanTaskStatus::Skipped => format!(
                 "⏭ {}",
-                error.as_deref().unwrap_or("skipped").lines().next().unwrap_or("")
+                error
+                    .as_deref()
+                    .unwrap_or("skipped")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
             ),
             _ => format!("{:?}", status),
         };
@@ -895,7 +1007,9 @@ fn build_summary_markdown(
                 if !r.text.is_empty() {
                     // G2-P5: use char boundary to avoid panic on multibyte chars
                     let display = if r.text.len() > 500 {
-                        let boundary = r.text.char_indices()
+                        let boundary = r
+                            .text
+                            .char_indices()
                             .map(|(i, _)| i)
                             .take_while(|&i| i < 500)
                             .last()
@@ -956,7 +1070,9 @@ pub fn is_terminal_pub(status: PlanTaskStatus) -> bool {
 /// `i` = current index of `task_number` in plan.tasks, `j` = target index.
 /// Pure function; no I/O.
 pub fn validate_reorder(plan: &Plan, task_number: u32, j: usize) -> Result<(), String> {
-    let i = plan.tasks.iter()
+    let i = plan
+        .tasks
+        .iter()
         .position(|t| t.number == task_number)
         .ok_or_else(|| format!("Task {} not found in plan", task_number))?;
 
@@ -980,7 +1096,13 @@ pub fn validate_reorder(plan: &Plan, task_number: u32, j: usize) -> Result<(), S
     // Can't push past a task that depends on it
     for t in &plan.tasks {
         if t.depends_on.contains(&task_number) {
-            if plan.tasks.iter().position(|pt| pt.number == t.number).unwrap_or(usize::MAX) <= j {
+            if plan
+                .tasks
+                .iter()
+                .position(|pt| pt.number == t.number)
+                .unwrap_or(usize::MAX)
+                <= j
+            {
                 return Err("Would push past a task that depends on it".to_string());
             }
         }
@@ -1007,12 +1129,7 @@ mod tests {
 
     #[test]
     fn classify_outcome_success_on_positive_message() {
-        let result = PlanRuntime::classify_outcome(
-            "Updated 4 files. Tests pass.",
-            2,
-            true,
-            None,
-        );
+        let result = PlanRuntime::classify_outcome("Updated 4 files. Tests pass.", 2, true, None);
         match result {
             TaskTurnOutcome::Success { .. } => {}
             other => panic!("Expected Success, got {:?}", other),
@@ -1021,12 +1138,8 @@ mod tests {
 
     #[test]
     fn classify_outcome_failure_on_cannot() {
-        let result = PlanRuntime::classify_outcome(
-            "I cannot find the auth module.",
-            0,
-            false,
-            None,
-        );
+        let result =
+            PlanRuntime::classify_outcome("I cannot find the auth module.", 0, false, None);
         match result {
             TaskTurnOutcome::Failure { error } => {
                 assert!(error.contains("cannot"));
@@ -1170,12 +1283,22 @@ mod tests {
 
         let header = "**Task 1 result:**\n";
         let start = md.find(header).expect("task result block present") + header.len();
-        let end = md[start..].find("\n").map(|n| start + n).unwrap_or(md.len());
+        let end = md[start..]
+            .find("\n")
+            .map(|n| start + n)
+            .unwrap_or(md.len());
         let entry = &md[start..end];
 
-        assert!(entry.ends_with("(truncated)"), "entry must end with (truncated): {:?}", &entry[entry.len().saturating_sub(40)..]);
+        assert!(
+            entry.ends_with("(truncated)"),
+            "entry must end with (truncated): {:?}",
+            &entry[entry.len().saturating_sub(40)..]
+        );
         // Body cap is 500 bytes pre-suffix; allow the literal " (truncated)" tail.
-        assert!(entry.len() <= 500 + " (truncated)".len() + 1,
-            "entry must remain bounded; got {} bytes", entry.len());
+        assert!(
+            entry.len() <= 500 + " (truncated)".len() + 1,
+            "entry must remain bounded; got {} bytes",
+            entry.len()
+        );
     }
 }

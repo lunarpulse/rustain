@@ -620,7 +620,9 @@ impl ToolSetAdapter {
                 plan,
             });
         } else {
-            tracing::warn!("execute_propose_plan: event_tx is None — plan parsed but never proposed");
+            tracing::warn!(
+                "execute_propose_plan: event_tx is None — plan parsed but never proposed"
+            );
         }
 
         Ok(ToolResult {
@@ -723,7 +725,11 @@ mod tests {
         let dir = std::env::current_dir().unwrap();
         let adapter = make_adapter(&dir);
         let result = adapter
-            .execute("Bash", serde_json::json!({"command": "echo hello"}), test_cancel())
+            .execute(
+                "Bash",
+                serde_json::json!({"command": "echo hello"}),
+                test_cancel(),
+            )
             .await
             .unwrap();
         assert_eq!(result.content.trim(), "hello");
@@ -766,9 +772,18 @@ mod tests {
             .await
             .expect("Read must not fail on binary content");
 
-        assert!(!result.is_error, "binary read should succeed via lossy decode");
-        assert!(result.content.contains('A'), "ASCII content must survive lossy decode");
-        assert!(result.content.contains('\u{FFFD}'), "invalid UTF-8 should map to replacement chars");
+        assert!(
+            !result.is_error,
+            "binary read should succeed via lossy decode"
+        );
+        assert!(
+            result.content.contains('A'),
+            "ASCII content must survive lossy decode"
+        );
+        assert!(
+            result.content.contains('\u{FFFD}'),
+            "invalid UTF-8 should map to replacement chars"
+        );
     }
 
     #[tokio::test]
@@ -849,7 +864,11 @@ mod tests {
             .unwrap();
 
         let snapshot_dir = sessions_dir.join(&conv_id).join("snapshots");
-        assert!(snapshot_dir.exists(), "snapshot dir should exist at {:?}", snapshot_dir);
+        assert!(
+            snapshot_dir.exists(),
+            "snapshot dir should exist at {:?}",
+            snapshot_dir
+        );
         let entries: Vec<_> = std::fs::read_dir(&snapshot_dir)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -862,7 +881,12 @@ mod tests {
         assert_eq!(snapshot["schema_version"].as_u64().unwrap(), 3);
         assert_eq!(snapshot["conversation_id"].as_str().unwrap(), conv_id);
         assert!(snapshot["file_existed"].as_bool().unwrap());
-        assert!(snapshot["original_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(
+            snapshot["original_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
 
         use base64::Engine as _;
         let decoded = base64::engine::general_purpose::STANDARD
@@ -875,7 +899,9 @@ mod tests {
     async fn test_unknown_tool_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = make_adapter(tmp.path());
-        let result = adapter.execute("UnknownTool", serde_json::json!({}), test_cancel()).await;
+        let result = adapter
+            .execute("UnknownTool", serde_json::json!({}), test_cancel())
+            .await;
         assert!(result.is_err());
     }
 
@@ -883,7 +909,9 @@ mod tests {
     async fn test_invalid_input_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = make_adapter(tmp.path());
-        let result = adapter.execute("Bash", serde_json::json!({}), test_cancel()).await;
+        let result = adapter
+            .execute("Bash", serde_json::json!({}), test_cancel())
+            .await;
         assert!(result.is_err());
     }
 
@@ -908,7 +936,11 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = adapter
-            .execute("Read", serde_json::json!({"file_path": file.to_str().unwrap()}), cancel)
+            .execute(
+                "Read",
+                serde_json::json!({"file_path": file.to_str().unwrap()}),
+                cancel,
+            )
             .await;
         assert!(matches!(result, Err(ToolError::Cancelled)));
     }

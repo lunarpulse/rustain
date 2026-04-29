@@ -175,7 +175,10 @@ impl TabManager {
     }
 
     /// Create a new TabManager with a pre-existing conversation in the first tab.
-    pub fn with_conversation(conversation: Conversation, session_cancel: CancellationToken) -> Self {
+    pub fn with_conversation(
+        conversation: Conversation,
+        session_cancel: CancellationToken,
+    ) -> Self {
         let tab = TabState::from_conversation_with_parent(0, conversation, &session_cancel);
         Self {
             tabs: vec![tab],
@@ -479,7 +482,11 @@ mod tests {
         let mut tm = TabManager::new(session_cancel);
         let id_a = tm.active_tab_id();
         let id_b = tm.create_tab();
-        let cancel_a = tm.find_by_conversation(&tm.tabs()[0].conversation.id).unwrap().turn_cancel.clone();
+        let cancel_a = tm
+            .find_by_conversation(&tm.tabs()[0].conversation.id)
+            .unwrap()
+            .turn_cancel
+            .clone();
 
         tm.switch_to_index(2);
         let cancel_b = tm.active_tab().turn_cancel.clone();

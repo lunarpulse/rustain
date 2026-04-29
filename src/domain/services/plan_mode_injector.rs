@@ -79,10 +79,10 @@ impl Default for DefaultPlanInjector {
 impl PlanModeInjector for DefaultPlanInjector {
     async fn pre_turn(&self, conv: &Conversation, plan_file: &Path) -> Option<String> {
         // Re-entry: file exists AND we haven't fired re-entry this activation.
-        if plan_file.exists()
-            && !self.reentry_fired.swap(true, Ordering::SeqCst)
-        {
-            let contents = tokio::fs::read_to_string(plan_file).await.unwrap_or_default();
+        if plan_file.exists() && !self.reentry_fired.swap(true, Ordering::SeqCst) {
+            let contents = tokio::fs::read_to_string(plan_file)
+                .await
+                .unwrap_or_default();
             return Some(format!(
                 "<plan-mode-reentry>\nResuming Plan mode. Existing plan at {}:\n\n{}\n</plan-mode-reentry>",
                 plan_file.display(),
@@ -132,7 +132,7 @@ mod tests {
                 token_count: None,
                 stop_reason: None,
                 synthetic: false,
-            images: vec![],
+                images: vec![],
             });
         }
         Conversation {

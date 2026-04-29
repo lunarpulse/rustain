@@ -37,7 +37,7 @@ fn make_message_with_images(
         token_count: None,
         stop_reason: None,
         images,
-        }
+    }
 }
 
 fn make_conversation(id: &str, messages: Vec<ChatMessage>) -> Conversation {

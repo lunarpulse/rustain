@@ -12,10 +12,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{RwLock, broadcast, oneshot};
 
-use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::ToolRisk;
+use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::{ApprovalOutcome, ApprovalScope};
 use crate::domain::ports::ApprovalPersistencePort;
 
@@ -31,11 +31,19 @@ pub struct SessionApprovalSet {
 
 impl SessionApprovalSet {
     /// Check whether the given tool/server/path is auto-approved.
-    pub fn is_auto_approved(&mut self, tool: &str, server: Option<&str>, path: Option<&str>) -> bool {
+    pub fn is_auto_approved(
+        &mut self,
+        tool: &str,
+        server: Option<&str>,
+        path: Option<&str>,
+    ) -> bool {
         if self.always_tools.contains(tool) {
             return true;
         }
-        if server.map(|s| self.always_servers.contains(s)).unwrap_or(false) {
+        if server
+            .map(|s| self.always_servers.contains(s))
+            .unwrap_or(false)
+        {
             return true;
         }
         if let Some(p) = path {
@@ -177,7 +185,13 @@ impl ApprovalRuntime {
             server_id: server_id_owned,
             path_hint: path_hint_owned,
         };
-        self.pending.write().await.insert(id.clone(), PendingRecord { request, responder: tx });
+        self.pending.write().await.insert(
+            id.clone(),
+            PendingRecord {
+                request,
+                responder: tx,
+            },
+        );
         let _ = self.events.send(ApprovalRuntimeEvent::Requested {
             id: id.clone(),
             source: source.clone(),
@@ -345,10 +359,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ApprovalPersistencePort for NoOpPersistence {
-        async fn load(&self) -> Result<SessionApprovalSet, crate::domain::errors::ApprovalPersistenceError> {
+        async fn load(
+            &self,
+        ) -> Result<SessionApprovalSet, crate::domain::errors::ApprovalPersistenceError> {
             Ok(SessionApprovalSet::default())
         }
-        async fn save(&self, _scope: ApprovalScope) -> Result<(), crate::domain::errors::ApprovalPersistenceError> {
+        async fn save(
+            &self,
+            _scope: ApprovalScope,
+        ) -> Result<(), crate::domain::errors::ApprovalPersistenceError> {
             Ok(())
         }
     }
@@ -361,14 +380,18 @@ mod tests {
     async fn fast_path_tool_auto_approved() {
         let rt = make_runtime();
         rt.session.write().await.always_tools.insert("Read".into());
-        let (id, rx) = rt.request(
-            ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-            "Read".into(),
-            serde_json::json!({"file_path": "/tmp/x"}),
-            ToolRisk::Safe,
-            None,
-            None,
-        ).await;
+        let (id, rx) = rt
+            .request(
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
+                "Read".into(),
+                serde_json::json!({"file_path": "/tmp/x"}),
+                ToolRisk::Safe,
+                None,
+                None,
+            )
+            .await;
         assert!(id.is_none(), "fast-path should return None id");
         assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
     }
@@ -377,14 +400,18 @@ mod tests {
     async fn slow_path_generates_unique_ids() {
         let rt = make_runtime();
         for _ in 0..100 {
-            let (id, _rx) = rt.request(
-                ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-                "Bash".into(),
-                serde_json::json!({"command": "echo hi"}),
-                ToolRisk::Elevated,
-                None,
-                None,
-            ).await;
+            let (id, _rx) = rt
+                .request(
+                    ApprovalSource::ForegroundTurn {
+                        conversation_id: "c1".into(),
+                    },
+                    "Bash".into(),
+                    serde_json::json!({"command": "echo hi"}),
+                    ToolRisk::Elevated,
+                    None,
+                    None,
+                )
+                .await;
             assert!(id.is_some());
         }
         assert_eq!(rt.pending.read().await.len(), 100);
@@ -393,17 +420,32 @@ mod tests {
     #[tokio::test]
     async fn resolve_side_effects() {
         let rt = make_runtime();
-        let (id, rx) = rt.request(
-            ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-            "Bash".into(),
-            serde_json::json!({"command": "echo hi"}),
-            ToolRisk::Elevated,
-            None,
-            None,
-        ).await;
+        let (id, rx) = rt
+            .request(
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
         let mut events = rt.subscribe();
-        rt.resolve(id.as_ref().unwrap(), ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() }).await;
-        assert_eq!(rx.await.unwrap(), ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() });
+        rt.resolve(
+            id.as_ref().unwrap(),
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Bash".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            rx.await.unwrap(),
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Bash".into()
+            }
+        );
         let snapshot = rt.snapshot_session().await;
         assert!(snapshot.always_tools.contains("Bash"));
         let ev = events.recv().await.unwrap();
@@ -413,27 +455,41 @@ mod tests {
     #[tokio::test]
     async fn cancel_by_source_drains_matching() {
         let rt = make_runtime();
-        let (_id1, _rx1) = rt.request(
-            ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-            "Bash".into(),
-            serde_json::json!({"command": "echo hi"}),
-            ToolRisk::Elevated,
-            None,
-            None,
-        ).await;
-        let (_id2, rx2) = rt.request(
-            ApprovalSource::ForegroundSubagent { conversation_id: "c1".into(), parent_tool_call_id: "t1".into(), subagent_type: "code-reviewer".into() },
-            "Bash".into(),
-            serde_json::json!({"command": "echo hi2"}),
-            ToolRisk::Elevated,
-            None,
-            None,
-        ).await;
-        rt.cancel_by_source(&ApprovalSource::ForegroundSubagent {
-            conversation_id: "c1".into(),
-            parent_tool_call_id: "t1".into(),
-            subagent_type: "code-reviewer".into(),
-        }, CancelReason::SourceAborted).await;
+        let (_id1, _rx1) = rt
+            .request(
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        let (_id2, rx2) = rt
+            .request(
+                ApprovalSource::ForegroundSubagent {
+                    conversation_id: "c1".into(),
+                    parent_tool_call_id: "t1".into(),
+                    subagent_type: "code-reviewer".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi2"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        rt.cancel_by_source(
+            &ApprovalSource::ForegroundSubagent {
+                conversation_id: "c1".into(),
+                parent_tool_call_id: "t1".into(),
+                subagent_type: "code-reviewer".into(),
+            },
+            CancelReason::SourceAborted,
+        )
+        .await;
         assert_eq!(rx2.await.unwrap(), ApprovalOutcome::Cancel);
         assert!(!rt.pending.read().await.is_empty());
     }

@@ -2,8 +2,8 @@
 //! Wraps blocklist, path validation, and mode management.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
 
@@ -148,9 +148,7 @@ impl SecurityAdapter {
                                         }
                                         final_resolved
                                     }
-                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                        resolved
-                                    }
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => resolved,
                                     Err(_) => {
                                         return Err(PermissionError::WorkspaceViolation(
                                             "Path resolution failed — rejecting for safety"
@@ -346,7 +344,11 @@ mod tests {
         let result = adapter.check_workspace_access(&path, FileOperation::Write);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not in workspace"), "Error should be user-friendly: {}", err_msg);
+        assert!(
+            err_msg.contains("not in workspace"),
+            "Error should be user-friendly: {}",
+            err_msg
+        );
     }
 
     #[test]
@@ -373,8 +375,16 @@ mod tests {
 
         let adapter = SecurityAdapter::new(workspace.path().to_path_buf());
 
-        assert!(adapter.check_workspace_access(&skill_file, FileOperation::Read).is_err());
-        assert!(adapter.check_workspace_access(&skill_file, FileOperation::Write).is_err());
+        assert!(
+            adapter
+                .check_workspace_access(&skill_file, FileOperation::Read)
+                .is_err()
+        );
+        assert!(
+            adapter
+                .check_workspace_access(&skill_file, FileOperation::Write)
+                .is_err()
+        );
 
         adapter.add_active_skill_dir(skill_dir.clone());
         let read = adapter.check_workspace_access(&skill_file, FileOperation::Read);
@@ -385,10 +395,18 @@ mod tests {
 
         let sibling = skill_root.path().join("not-a-skill.md");
         std::fs::write(&sibling, "x").unwrap();
-        assert!(adapter.check_workspace_access(&sibling, FileOperation::Read).is_err());
+        assert!(
+            adapter
+                .check_workspace_access(&sibling, FileOperation::Read)
+                .is_err()
+        );
 
         adapter.remove_active_skill_dir(&skill_dir);
-        assert!(adapter.check_workspace_access(&skill_file, FileOperation::Read).is_err());
+        assert!(
+            adapter
+                .check_workspace_access(&skill_file, FileOperation::Read)
+                .is_err()
+        );
     }
 
     #[test]

@@ -101,7 +101,10 @@ pub enum InputAction {
     /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
     OpenPanel(crate::domain::models::visual::PanelType),
     /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
-    CopyTaskResult { plan_id: Option<String>, task_number: u32 },
+    CopyTaskResult {
+        plan_id: Option<String>,
+        task_number: u32,
+    },
     /// Story 6.4: Pause/Resume task (panel `p` or drill-down `p` on Paused).
     TaskPause(u32),
     /// Story 6.4: Skip task (panel `s` or drill-down `s` on Failed).
@@ -508,15 +511,21 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     // Story 6.4: Skip cascade card key intercept (s/c/n)
     if state.task_panel_state.skip_cascade_pending.is_some() {
         match c {
-            's' => return InputAction::SkipCascadeAck(
-                crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip,
-            ),
-            'c' => return InputAction::SkipCascadeAck(
-                crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway,
-            ),
-            'n' => return InputAction::SkipCascadeAck(
-                crate::adapters::tui::state::SkipCascadeChoice::CancelSkip,
-            ),
+            's' => {
+                return InputAction::SkipCascadeAck(
+                    crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip,
+                );
+            }
+            'c' => {
+                return InputAction::SkipCascadeAck(
+                    crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway,
+                );
+            }
+            'n' => {
+                return InputAction::SkipCascadeAck(
+                    crate::adapters::tui::state::SkipCascadeChoice::CancelSkip,
+                );
+            }
             _ => return InputAction::Ignored,
         }
     }
@@ -621,7 +630,8 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     }
 
     // Plan approval card focus: y/a/n/e (Story 6-0d AC4)
-    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval)) {
+    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval))
+    {
         match c {
             'y' => return InputAction::PlanApproveNormal,
             'a' => return InputAction::PlanApproveAutoEdit,
@@ -635,14 +645,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     // Overlay PlanApproval (6-0d) takes precedence — handled above.
     if state.pending_plan_card.is_some() {
         match state.focus {
-            FocusState::Chat | FocusState::Input => {
-                match c {
-                    'y' => return InputAction::PlanCardApprove,
-                    'n' => return InputAction::PlanCardReject,
-                    'e' => return InputAction::PlanCardEdit,
-                    _ => {}
-                }
-            }
+            FocusState::Chat | FocusState::Input => match c {
+                'y' => return InputAction::PlanCardApprove,
+                'n' => return InputAction::PlanCardReject,
+                'e' => return InputAction::PlanCardEdit,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -757,7 +765,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             match c {
                 'c' => {
                     let plan_id = state.task_panel_state.last_executed_plan_id.clone();
-                    InputAction::CopyTaskResult { plan_id, task_number: n }
+                    InputAction::CopyTaskResult {
+                        plan_id,
+                        task_number: n,
+                    }
                 }
                 // Story 6.4: status-conditional dispatch — gating in event_loop.rs
                 'r' => InputAction::TaskRetry(n),
@@ -767,14 +778,18 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 // 6-3 AC7: scroll the result body within the drill-down view.
                 // Widget clamps the offset against actual content height.
                 'j' => {
-                    state.task_panel_state.detail_scroll_offset =
-                        state.task_panel_state.detail_scroll_offset.saturating_add(1);
+                    state.task_panel_state.detail_scroll_offset = state
+                        .task_panel_state
+                        .detail_scroll_offset
+                        .saturating_add(1);
                     state.needs_redraw = true;
                     InputAction::Consumed
                 }
                 'k' => {
-                    state.task_panel_state.detail_scroll_offset =
-                        state.task_panel_state.detail_scroll_offset.saturating_sub(1);
+                    state.task_panel_state.detail_scroll_offset = state
+                        .task_panel_state
+                        .detail_scroll_offset
+                        .saturating_sub(1);
                     state.needs_redraw = true;
                     InputAction::Consumed
                 }
@@ -1415,15 +1430,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 return submit_message(state);
             }
             // Story 6.4: reorder-mode Esc — cancel and restore
-            if state.focus == FocusState::Chat
-                && state.task_panel_state.reorder_mode_for.is_some()
+            if state.focus == FocusState::Chat && state.task_panel_state.reorder_mode_for.is_some()
             {
                 state.needs_redraw = true;
                 return InputAction::TaskReorderCancel;
             }
-            if state.focus == FocusState::Chat
-                && state.task_panel_state.drill_down_task.is_some()
-            {
+            if state.focus == FocusState::Chat && state.task_panel_state.drill_down_task.is_some() {
                 state.task_panel_state.drill_down_task = None;
                 state.task_panel_state.expanded_detail = false;
                 state.task_panel_state.detail_scroll_offset = 0;
@@ -1693,15 +1705,27 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
-        DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. })
-            && state.task_panel_state.reorder_mode_for.is_some() =>
+        DomainKey::Enter
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    ..
+                }
+            ) && state.task_panel_state.reorder_mode_for.is_some() =>
         {
             state.needs_redraw = true;
             InputAction::TaskReorderCommit
         }
 
-        DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. })
-            && state.task_panel_state.task_count > 0 =>
+        DomainKey::Enter
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    ..
+                }
+            ) && state.task_panel_state.task_count > 0 =>
         {
             let task_number = (state.task_panel_state.selected_index + 1) as u32;
             state.task_panel_state.drill_down_task = Some(task_number);
@@ -1725,8 +1749,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             if state.focus == FocusState::Chat
                 && state.task_panel_state.drill_down_task.is_some() =>
         {
-            state.task_panel_state.expanded_detail =
-                !state.task_panel_state.expanded_detail;
+            state.task_panel_state.expanded_detail = !state.task_panel_state.expanded_detail;
             state.task_panel_state.detail_scroll_offset = 0;
             state.needs_redraw = true;
             InputAction::Consumed
@@ -1806,8 +1829,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             if state.focus == FocusState::Chat
                 && state.task_panel_state.drill_down_task.is_some() =>
         {
-            state.task_panel_state.detail_scroll_offset =
-                state.task_panel_state.detail_scroll_offset.saturating_add(1);
+            state.task_panel_state.detail_scroll_offset = state
+                .task_panel_state
+                .detail_scroll_offset
+                .saturating_add(1);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1815,13 +1840,23 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             if state.focus == FocusState::Chat
                 && state.task_panel_state.drill_down_task.is_some() =>
         {
-            state.task_panel_state.detail_scroll_offset =
-                state.task_panel_state.detail_scroll_offset.saturating_sub(1);
+            state.task_panel_state.detail_scroll_offset = state
+                .task_panel_state
+                .detail_scroll_offset
+                .saturating_sub(1);
             state.needs_redraw = true;
             InputAction::Consumed
         }
 
-        DomainKey::Up if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. }) => {
+        DomainKey::Up
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    ..
+                }
+            ) =>
+        {
             let moved = if state.task_panel_state.selected_index > 0 {
                 state.task_panel_state.selected_index -= 1;
                 state.sidebar_selected = state.task_panel_state.selected_index;
@@ -1838,7 +1873,15 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             }
             InputAction::Consumed
         }
-        DomainKey::Down if matches!(state.focus, FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. }) => {
+        DomainKey::Down
+            if matches!(
+                state.focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    ..
+                }
+            ) =>
+        {
             let moved = if state.task_panel_state.task_count > 0 {
                 let max = state.task_panel_state.task_count.saturating_sub(1);
                 if state.task_panel_state.selected_index < max {

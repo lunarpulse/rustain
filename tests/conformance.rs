@@ -422,14 +422,18 @@ fn test_no_std_sync_lock_in_async_module() {
     for dir in dirs {
         let files = collect_rs_files(Path::new(dir));
         for file in &files {
-            let content = fs::read_to_string(file)
-                .unwrap_or_else(|e| panic!("conformance scan: failed to read {}: {e}", file.display()));
+            let content = fs::read_to_string(file).unwrap_or_else(|e| {
+                panic!("conformance scan: failed to read {}: {e}", file.display())
+            });
             for (line_num_0, line) in content.lines().enumerate() {
                 let line_num = line_num_0 + 1;
 
                 // Skip comments
                 let trimmed = line.trim();
-                if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                if trimmed.starts_with("//")
+                    || trimmed.starts_with("/*")
+                    || trimmed.starts_with('*')
+                {
                     continue;
                 }
 
@@ -440,8 +444,8 @@ fn test_no_std_sync_lock_in_async_module() {
 
                 let is_direct_usage =
                     line.contains("std::sync::RwLock") || line.contains("std::sync::Mutex");
-                let is_import =
-                    line.contains("use std::sync::") && (line.contains("RwLock") || line.contains("Mutex"));
+                let is_import = line.contains("use std::sync::")
+                    && (line.contains("RwLock") || line.contains("Mutex"));
                 if is_direct_usage || is_import {
                     violations.push(format!("{}:{}", file.display(), line_num));
                 }

@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use rustain::adapters::noop::NoOpSecurity;
 use rustain::adapters::security_adapter::SecurityAdapter;
-use rustain::domain::models::{PermissionMode};
-use rustain::domain::ports::SecurityPort;
-use rustain::domain::services::permission_chain::{self, PermissionDecision};
+use rustain::domain::models::PermissionMode;
 use rustain::domain::models::{ApprovalOutcome, ApprovalScope};
+use rustain::domain::ports::SecurityPort;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
+use rustain::domain::services::permission_chain::{self, PermissionDecision};
 
 fn make_test_adapter() -> SecurityAdapter {
     let adapter = SecurityAdapter::new(std::env::current_dir().unwrap());
@@ -30,7 +30,10 @@ async fn test_safe_bash_command_not_blocked() {
         None,
     )
     .await;
-    assert!(!matches!(result, PermissionDecision::Deny(_)), "Safe bash command should not be blocked");
+    assert!(
+        !matches!(result, PermissionDecision::Deny(_)),
+        "Safe bash command should not be blocked"
+    );
 }
 
 #[tokio::test]
@@ -211,8 +214,14 @@ async fn test_mode_risk_plan_standard_denies() {
 #[tokio::test]
 async fn test_mode_risk_plan_elevated_denies() {
     let sec = MockSecurity::new(PermissionMode::Plan);
-    let result =
-        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None, None).await;
+    let result = permission_chain::check(
+        &sec,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        None,
+        None,
+    )
+    .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
 }
 
@@ -250,8 +259,14 @@ async fn test_mode_risk_normal_standard_prompts() {
 #[tokio::test]
 async fn test_mode_risk_normal_elevated_prompts() {
     let sec = MockSecurity::new(PermissionMode::Normal);
-    let result =
-        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None, None).await;
+    let result = permission_chain::check(
+        &sec,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        None,
+        None,
+    )
+    .await;
     assert!(
         matches!(result, PermissionDecision::Prompt { .. }),
         "Normal + Elevated must return Prompt"
@@ -289,8 +304,14 @@ async fn test_mode_risk_autoedit_standard_auto_allows() {
 #[tokio::test]
 async fn test_mode_risk_autoedit_elevated_prompts() {
     let sec = MockSecurity::new(PermissionMode::AutoEdit);
-    let result =
-        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None, None).await;
+    let result = permission_chain::check(
+        &sec,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        None,
+        None,
+    )
+    .await;
     assert!(
         matches!(result, PermissionDecision::Prompt { .. }),
         "AutoEdit + Elevated must return Prompt"
@@ -328,8 +349,14 @@ async fn test_mode_risk_yolo_standard_auto_allows() {
 #[tokio::test]
 async fn test_mode_risk_yolo_elevated_auto_allows() {
     let sec = MockSecurity::new(PermissionMode::Yolo);
-    let result =
-        permission_chain::check(&sec, "Bash", &serde_json::json!({"command": "ls"}), None, None).await;
+    let result = permission_chain::check(
+        &sec,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(result, PermissionDecision::Allow);
 }
 
@@ -470,38 +497,63 @@ fn test_parse_mode_arg_unknown_and_missing() {
 
 #[tokio::test]
 async fn test_session_allow_bypasses_second_request() {
-    let runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
 
     // First request: resolve with AlwaysTool
     let mut events = runtime.subscribe();
-    let (_, rx1) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "ls"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx1) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "ls"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     // Need to get the request ID from the broadcast to resolve it
     let event = events.recv().await.unwrap();
     let id1 = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
 
-    runtime.resolve(&id1, ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() }).await;
-    assert_eq!(rx1.await.unwrap(), ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() });
+    runtime
+        .resolve(
+            &id1,
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Bash".into(),
+            },
+        )
+        .await;
+    assert_eq!(
+        rx1.await.unwrap(),
+        ApprovalOutcome::AlwaysTool {
+            tool_name: "Bash".into()
+        }
+    );
 
     // Second request for same tool should fast-path (no event broadcast)
-    let (_, rx2) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "ls -la"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx2) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "ls -la"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     // Fast path: receiver resolves immediately without needing a broadcast event
     let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx2).await;
@@ -513,26 +565,42 @@ async fn test_session_allow_bypasses_second_request() {
 
 #[tokio::test]
 async fn test_session_allow_not_persisted() {
-    let runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
 
     // Resolve a request with AlwaysTool (session-only)
     let mut events = runtime.subscribe();
-    let (_, rx) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "ls"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "ls"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
 
-    runtime.resolve(&id, ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() }).await;
+    runtime
+        .resolve(
+            &id,
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Bash".into(),
+            },
+        )
+        .await;
     let _ = rx.await;
 
     // With NoOpPersistence, nothing is saved. The test verifies the runtime
@@ -545,25 +613,41 @@ async fn test_session_allow_not_persisted() {
 
 #[tokio::test]
 async fn test_reject_propagates() {
-    let runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
 
     let mut events = runtime.subscribe();
-    let (_, rx) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "cargo test"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "cargo test"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
 
-    runtime.resolve(&id, ApprovalOutcome::Reject { feedback: Some("don't delete".into()) }).await;
+    runtime
+        .resolve(
+            &id,
+            ApprovalOutcome::Reject {
+                feedback: Some("don't delete".into()),
+            },
+        )
+        .await;
     let outcome = rx.await.unwrap();
     assert!(
         matches!(outcome, ApprovalOutcome::Reject { feedback: Some(ref s) } if s == "don't delete"),
@@ -693,26 +777,42 @@ async fn test_blocklist_overrides_yolo_conformance() {
 
 #[tokio::test]
 async fn test_mode_switch_preserves_session_allow() {
-    let runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
 
     // Register session-allow for Bash via AlwaysTool resolution
     let mut events = runtime.subscribe();
-    let (_, rx) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "ls"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "ls"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
 
-    runtime.resolve(&id, ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() }).await;
+    runtime
+        .resolve(
+            &id,
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Bash".into(),
+            },
+        )
+        .await;
     let _ = rx.await;
 
     let mut snap = runtime.snapshot_session().await;
@@ -754,26 +854,42 @@ async fn test_plan_mode_blocks_standard_tools() {
 
 #[tokio::test]
 async fn test_session_allow_does_not_persist() {
-    let runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
 
     let mut events = runtime.subscribe();
-    let (_, rx) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "ls"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "ls"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
 
     // AlwaysTool is session-only (not persisted)
-    runtime.resolve(&id, ApprovalOutcome::AlwaysTool { tool_name: "Bash".into() }).await;
+    runtime
+        .resolve(
+            &id,
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Bash".into(),
+            },
+        )
+        .await;
     let _ = rx.await;
 
     // With NoOpPersistence, verify the runtime still functions correctly
@@ -786,19 +902,31 @@ async fn test_session_allow_does_not_persist() {
 
 #[tokio::test]
 async fn test_approval_runtime_cancel_by_source() {
-    let runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
 
-    let source = rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() };
-    let (_, rx) = runtime.request(
-        source.clone(),
-        "Bash".into(),
-        serde_json::json!({"command": "ls"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let source = rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+        conversation_id: "c1".into(),
+    };
+    let (_, rx) = runtime
+        .request(
+            source.clone(),
+            "Bash".into(),
+            serde_json::json!({"command": "ls"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
-    runtime.cancel_by_source(&source, rustain::domain::services::approval_runtime::CancelReason::SourceAborted).await;
+    runtime
+        .cancel_by_source(
+            &source,
+            rustain::domain::services::approval_runtime::CancelReason::SourceAborted,
+        )
+        .await;
 
     let outcome = rx.await.unwrap();
     assert_eq!(outcome, ApprovalOutcome::Cancel);
@@ -806,30 +934,47 @@ async fn test_approval_runtime_cancel_by_source() {
 
 #[tokio::test]
 async fn test_approval_runtime_always_and_save_persists_scope() {
-
     let tmp = tempfile::tempdir().unwrap();
     let user_config = tmp.path().join("config.toml");
     let workspace_rules = tmp.path().join("permissions.toml");
-    let persistence = Arc::new(rustain::adapters::approval_persistence_toml::ApprovalPersistenceToml::new(user_config, workspace_rules));
+    let persistence = Arc::new(
+        rustain::adapters::approval_persistence_toml::ApprovalPersistenceToml::new(
+            user_config,
+            workspace_rules,
+        ),
+    );
     let runtime = ApprovalRuntime::new(16, persistence.clone());
 
     let mut events = runtime.subscribe();
-    let (_, rx) = runtime.request(
-        rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
-        "Bash".into(),
-        serde_json::json!({"command": "ls"}),
-        rustain::domain::models::ToolRisk::Elevated,
-        None,
-        None,
-    ).await;
+    let (_, rx) = runtime
+        .request(
+            rustain::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            serde_json::json!({"command": "ls"}),
+            rustain::domain::models::ToolRisk::Elevated,
+            None,
+            None,
+        )
+        .await;
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
 
-    runtime.resolve(&id, ApprovalOutcome::AlwaysAndSave { scope: ApprovalScope::Tool("Bash".into()) }).await;
+    runtime
+        .resolve(
+            &id,
+            ApprovalOutcome::AlwaysAndSave {
+                scope: ApprovalScope::Tool("Bash".into()),
+            },
+        )
+        .await;
     let _ = rx.await;
 
     // Verify session is updated

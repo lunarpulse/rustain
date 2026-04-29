@@ -444,8 +444,8 @@ fn test_status_bar_no_hint_when_none() {
                 0,
                 None,
                 None,
-                    None,
-                    );
+                None,
+            );
         })
         .unwrap();
 

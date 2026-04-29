@@ -12,8 +12,7 @@ use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::plan::{PlanDeviationKind, PlanTaskStatus};
 use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::{
-    ToolRisk,
-    FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo,
+    FeedbackBlock, FocusState, RetryState, StatusState, ToolRisk, UsageInfo,
 };
 use crate::domain::services::cross_search::CrossSearchResult;
 use crate::domain::services::search::SearchMatch;
@@ -852,7 +851,10 @@ impl WhichKeyState {
             ChordAction::Noop("Subagent panel — Epic 10".to_string()),
         );
         chord_map.insert('l', ChordAction::Noop("Log panel — Epic 14".to_string()));
-        chord_map.insert('t', ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks));
+        chord_map.insert(
+            't',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks),
+        );
         chord_map.insert('u', ChordAction::Noop("Usage/cost — Epic 7".to_string()));
         chord_map.insert('w', ChordAction::Noop("Watch/monitor — future".to_string()));
         chord_map.insert('d', ChordAction::Noop("Dashboard — future".to_string()));

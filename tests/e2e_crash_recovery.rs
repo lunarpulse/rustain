@@ -37,7 +37,7 @@ fn test_e2e_recovery_prompt_renders() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
     h.conversation.messages.push(ChatMessage {
         synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
@@ -49,7 +49,7 @@ fn test_e2e_recovery_prompt_renders() {
         token_count: Some(42),
         stop_reason: Some(StopReason::EndTurn),
         images: vec![],
-        });
+    });
     h.conversation.title = "Test Chat".to_string();
 
     // Inject recovery FeedbackBlock (as event_loop does on RecoveryPrompt event)
@@ -114,7 +114,7 @@ fn test_e2e_recovery_enter_continues() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
     h.state.feedback_blocks.insert(
         "recovery".to_string(),
         FeedbackBlock {
@@ -164,7 +164,7 @@ fn test_e2e_recovery_n_starts_fresh() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
     h.conversation.title = "Old Title".to_string();
     h.state.active_feedback_id = Some("recovery".to_string());
 
@@ -261,7 +261,7 @@ fn test_e2e_context_rebuild_api_messages() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
     h.conversation.messages.push(ChatMessage {
         synthetic: false,
         id: rustain::domain::models::generate_conversation_id(),
@@ -273,7 +273,7 @@ fn test_e2e_context_rebuild_api_messages() {
         token_count: Some(15),
         stop_reason: Some(StopReason::EndTurn),
         images: vec![],
-        });
+    });
 
     // Build context from prior messages (excluding the new user message)
     let context = build_history_context(&h.conversation.messages);
@@ -293,7 +293,7 @@ fn test_e2e_context_rebuild_api_messages() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
 
     // Build API messages and attach context_prefix to the new user message
     let mut messages =
@@ -361,13 +361,14 @@ fn test_e2e_context_rebuild_strips_xml_in_api() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            },
+        },
         ChatMessage {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::Assistant,
             content: "I see <file_content>fn main() {
-            }</file_content> the code".to_string(),
+            }</file_content> the code"
+                .to_string(),
             content_blocks: vec![],
             tool_calls: vec![],
             created_at: 1700000001,
@@ -422,7 +423,7 @@ fn test_e2e_context_rebuild_reversed_xml_tags_no_panic() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }];
+    }];
 
     // Should not panic — this was a bug before Fix #3
     let context = build_history_context(&messages);
@@ -448,7 +449,7 @@ fn test_e2e_context_rebuild_nested_xml_tags() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }];
+    }];
 
     // Should not panic with nested tags
     let context = build_history_context(&messages);
@@ -480,7 +481,7 @@ async fn test_e2e_crash_detection_full_cycle() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            }],
+        }],
         created_at: 1700000000,
         updated_at: 1700000001,
         last_response_at: None,
@@ -650,7 +651,7 @@ fn test_e2e_recovered_conversation_renders() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            },
+        },
         ChatMessage {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
@@ -662,7 +663,7 @@ fn test_e2e_recovered_conversation_renders() {
             token_count: Some(10),
             stop_reason: Some(StopReason::EndTurn),
             images: vec![],
-            },
+        },
         ChatMessage {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
@@ -674,7 +675,7 @@ fn test_e2e_recovered_conversation_renders() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            },
+        },
         ChatMessage {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
@@ -686,7 +687,7 @@ fn test_e2e_recovered_conversation_renders() {
             token_count: Some(12),
             stop_reason: Some(StopReason::Cancelled), // Partial — crashed mid-response,
             images: vec![],
-            },
+        },
     ];
     h.conversation.title = "Rust Discussion".to_string();
 

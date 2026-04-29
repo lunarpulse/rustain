@@ -40,7 +40,7 @@ fn msg(role: MessageRole, content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }
+    }
 }
 
 fn conv(title: &str) -> Conversation {

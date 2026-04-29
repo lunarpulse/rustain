@@ -24,7 +24,12 @@ async fn test_step1_active_skill_allowed_tools_denies_non_listed() {
     let skills: Option<&[ActiveSkill]> = Some(&[skill]);
 
     let decision = permission_chain::check(
-        &security, "Bash", &serde_json::json!({"command": "ls"}), skills, None)
+        &security,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        skills,
+        None,
+    )
     .await;
 
     match decision {
@@ -51,7 +56,12 @@ async fn test_step1_activate_skill_tool_always_allowed() {
     let skills: Option<&[ActiveSkill]> = Some(&[skill]);
 
     let decision = permission_chain::check(
-        &security, "activate_skill", &serde_json::json!({"name": "other"}), skills, None)
+        &security,
+        "activate_skill",
+        &serde_json::json!({"name": "other"}),
+        skills,
+        None,
+    )
     .await;
 
     assert!(
@@ -66,7 +76,12 @@ async fn test_step1_none_is_pass_through() {
     let skills: Option<&[ActiveSkill]> = None;
 
     let decision = permission_chain::check(
-        &security, "Bash", &serde_json::json!({"command": "ls"}), skills, None)
+        &security,
+        "Bash",
+        &serde_json::json!({"command": "ls"}),
+        skills,
+        None,
+    )
     .await;
 
     assert!(
@@ -82,7 +97,12 @@ async fn test_step1_empty_allowed_tools_denies_everything() {
     let skills: Option<&[ActiveSkill]> = Some(&[skill]);
 
     let decision = permission_chain::check(
-        &security, "Read", &serde_json::json!({"file_path": "/workspace/test.rs"}), skills, None)
+        &security,
+        "Read",
+        &serde_json::json!({"file_path": "/workspace/test.rs"}),
+        skills,
+        None,
+    )
     .await;
     assert!(matches!(decision, PermissionDecision::Deny(_)));
 }
@@ -98,13 +118,21 @@ async fn test_step1_multi_skill_intersection_enforced() {
     let skills: Option<&[ActiveSkill]> = Some(&[skill_a, skill_b]);
 
     let read_ok = permission_chain::check(
-        &security, "Read", &serde_json::json!({"file_path": "/workspace/test.rs"}), skills, None)
+        &security,
+        "Read",
+        &serde_json::json!({"file_path": "/workspace/test.rs"}),
+        skills,
+        None,
+    )
     .await;
     assert!(!matches!(read_ok, PermissionDecision::Deny(_)));
 
     let grep_deny = permission_chain::check(
-        &security, "Grep", &serde_json::json!({"pattern": "test", "path": "/workspace/src"}),
-        skills, None,
+        &security,
+        "Grep",
+        &serde_json::json!({"pattern": "test", "path": "/workspace/src"}),
+        skills,
+        None,
     )
     .await;
     assert!(matches!(grep_deny, PermissionDecision::Deny(_)));

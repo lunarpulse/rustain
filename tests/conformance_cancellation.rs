@@ -7,18 +7,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustain::adapters::filesystem::FileSystemStorage;
+use rustain::adapters::toolset_adapter::ToolSetAdapter;
 use rustain::domain::errors::ToolError;
 use rustain::domain::models::SandboxPolicy;
 use rustain::domain::ports::ToolSetPort;
 use rustain::domain::services::plan_manager::PlanManager;
 use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
-use rustain::adapters::toolset_adapter::ToolSetAdapter;
-use rustain::adapters::filesystem::FileSystemStorage;
 use tokio_util::sync::CancellationToken;
 
 fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
     let sessions_dir = dir.join(".claude").join("sessions");
-    let storage: Arc<dyn rustain::domain::ports::StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir));
+    let storage: Arc<dyn rustain::domain::ports::StoragePort> =
+        Arc::new(FileSystemStorage::new(sessions_dir));
     ToolSetAdapter::new(dir.to_path_buf(), storage)
 }
 
@@ -56,11 +57,13 @@ async fn ac2_bash_cancel_kills_subprocess() {
 
     let handle = tokio::spawn(async move {
         let tools: Arc<dyn ToolSetPort> = Arc::new(adapter);
-        tools.execute(
-            "Bash",
-            serde_json::json!({"command": "sleep 60", "timeout": 120000}),
-            cancel_clone,
-        ).await
+        tools
+            .execute(
+                "Bash",
+                serde_json::json!({"command": "sleep 60", "timeout": 120000}),
+                cancel_clone,
+            )
+            .await
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -82,12 +85,19 @@ async fn ac2_bash_cancel_kills_subprocess() {
         let sleepers: Vec<_> = all_procs
             .filter_map(|p| p.ok())
             .filter(|p| {
-                p.cmdline().ok().map(|cmd| {
-                    cmd.contains(&"sleep".to_string()) && cmd.contains(&"60".to_string())
-                }).unwrap_or(false)
+                p.cmdline()
+                    .ok()
+                    .map(|cmd| {
+                        cmd.contains(&"sleep".to_string()) && cmd.contains(&"60".to_string())
+                    })
+                    .unwrap_or(false)
             })
             .collect();
-        assert!(sleepers.is_empty(), "zombie sleep processes remain: {:?}", sleepers);
+        assert!(
+            sleepers.is_empty(),
+            "zombie sleep processes remain: {:?}",
+            sleepers
+        );
     }
 }
 
@@ -100,11 +110,13 @@ async fn ac2_bash_cancel_within_100ms() {
     let cancel_clone = cancel.clone();
     let adapter: Arc<dyn ToolSetPort> = Arc::new(adapter);
     let handle = tokio::spawn(async move {
-        adapter.execute(
-            "Bash",
-            serde_json::json!({"command": "sleep 5"}),
-            cancel_clone,
-        ).await
+        adapter
+            .execute(
+                "Bash",
+                serde_json::json!({"command": "sleep 5"}),
+                cancel_clone,
+            )
+            .await
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -113,7 +125,11 @@ async fn ac2_bash_cancel_within_100ms() {
 
     let result = tokio::time::timeout(Duration::from_millis(200), handle).await;
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_millis(100), "cancel took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "cancel took {:?}",
+        elapsed
+    );
     assert!(matches!(result, Ok(Ok(Err(ToolError::Cancelled)))));
 }
 
@@ -127,11 +143,13 @@ async fn ac2_read_cancel_returns_cancelled() {
     cancel.cancel();
 
     let tools: Arc<dyn ToolSetPort> = Arc::new(adapter);
-    let result = tools.execute(
-        "Read",
-        serde_json::json!({"file_path": file.to_str().unwrap()}),
-        cancel,
-    ).await;
+    let result = tools
+        .execute(
+            "Read",
+            serde_json::json!({"file_path": file.to_str().unwrap()}),
+            cancel,
+        )
+        .await;
 
     assert!(matches!(result, Err(ToolError::Cancelled)));
 }
@@ -145,11 +163,13 @@ async fn ac2_write_cancel_returns_cancelled() {
     cancel.cancel();
 
     let tools: Arc<dyn ToolSetPort> = Arc::new(adapter);
-    let result = tools.execute(
-        "Write",
-        serde_json::json!({"file_path": file.to_str().unwrap(), "content": "data"}),
-        cancel,
-    ).await;
+    let result = tools
+        .execute(
+            "Write",
+            serde_json::json!({"file_path": file.to_str().unwrap(), "content": "data"}),
+            cancel,
+        )
+        .await;
 
     assert!(matches!(result, Err(ToolError::Cancelled)));
     assert!(!file.exists());
@@ -197,7 +217,11 @@ async fn ac3_cancellation_cancels_pending_approval() {
 
     let result = tokio::time::timeout(Duration::from_millis(200), handle).await;
     let elapsed = start.elapsed();
-    assert!(elapsed < Duration::from_millis(200), "cancel took {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "cancel took {:?}",
+        elapsed
+    );
     assert!(matches!(result, Ok(Ok("cancelled"))));
 }
 
@@ -205,13 +229,16 @@ async fn ac3_cancellation_cancels_pending_approval() {
 async fn ac4_signal_cancel_before_shutdown() {
     use rustain::infrastructure::runtime::app_state::AppState;
 
-    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let (app_state, _domain_rx) = AppState::new(
         16,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
-        Arc::new(DefaultPlanInjector::new())
+        Arc::new(DefaultPlanInjector::new()),
     );
 
     app_state.session_cancel.cancel();

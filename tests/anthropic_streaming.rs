@@ -149,7 +149,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
         // Usage
         let a1 = apply_chunk(
@@ -280,7 +280,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
         let mut streaming = make_streaming();
 
         let mut actions = Vec::new();
@@ -613,7 +613,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
         let mut streaming = make_streaming();
 
         for chunk in chunks {
@@ -675,7 +675,8 @@ data: {\"type\":\"message_stop\"}\n\
         let security = Arc::new(rustain::adapters::noop::NoOpSecurity);
         let tools = Arc::new(rustain::adapters::noop::NoOpToolSet);
         let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
-            16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence)
+            16,
+            Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
         );
         let tool_scheduler = rustain::domain::services::tool_scheduler::ToolScheduler::new(
             security.clone(),

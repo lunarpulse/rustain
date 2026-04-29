@@ -263,7 +263,7 @@ fn test_e2e_new_command_creates_fresh_session() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
     let original_id = h.conversation.id.clone();
 

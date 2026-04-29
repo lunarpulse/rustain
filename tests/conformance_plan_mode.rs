@@ -12,10 +12,10 @@
 
 use std::sync::Arc;
 
-use rustain::domain::ports::ToolSetPort;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, PermissionMode, PlanApprovalOutcome, SandboxPolicy,
 };
+use rustain::domain::ports::ToolSetPort;
 use rustain::domain::services::permission_chain::{self, PermissionDecision};
 use rustain::domain::services::plan_manager::PlanManager;
 use rustain::domain::services::plan_mode_injector::{DefaultPlanInjector, PlanModeInjector};
@@ -224,19 +224,23 @@ async fn ac3_exit_plan_mode_emits_event() {
     use rustain::domain::ports::StoragePort;
 
     let tmp = tempfile::tempdir().unwrap();
-    let storage: Arc<dyn StoragePort> =
-        Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()));
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()),
+    );
     let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), storage);
 
     // Set up plan manager and event channel
     let plans_dir = tmp.path().join("plans");
     let plan_manager = Arc::new(PlanManager::new(plans_dir.clone()));
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<rustain::domain::events::AppEvent>();
 
     let mut adapter = adapter;
     adapter.set_plan_manager(plan_manager.clone());
     adapter.set_event_tx(event_tx);
-    adapter.set_plan_file(Some(tmp.path().join("plan.md"))).await;
+    adapter
+        .set_plan_file(Some(tmp.path().join("plan.md")))
+        .await;
 
     // Write a plan so there's content to emit
     let plan_path = tmp.path().join("plan.md");
@@ -255,7 +259,9 @@ async fn ac3_exit_plan_mode_emits_event() {
     assert!(!result.is_error);
 
     // Verify the event was emitted
-    let event = event_rx.try_recv().expect("Expected PlanApprovalRequested event");
+    let event = event_rx
+        .try_recv()
+        .expect("Expected PlanApprovalRequested event");
     match event {
         rustain::domain::events::AppEvent::PlanApprovalRequested {
             plan_path,
@@ -485,7 +491,11 @@ fn ac8_reminder_envelope_not_displayed() {
 fn ac8_status_bar_reminder_indicator() {
     // Verify TuiState has the pending_plan_reminder_at_turn field
     use rustain::adapters::tui::state::TuiState;
-    let state = TuiState::with_capability(80, 24, rustain::adapters::tui::color_detect::ColorCapability::TrueColor);
+    let state = TuiState::with_capability(
+        80,
+        24,
+        rustain::adapters::tui::color_detect::ColorCapability::TrueColor,
+    );
     // Default should be None
     assert_eq!(state.pending_plan_reminder_at_turn, None);
 }

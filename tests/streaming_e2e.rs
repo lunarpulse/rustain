@@ -82,7 +82,7 @@ fn test_e2e_message_to_streaming_response() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        });
+    });
 
     // Start streaming (typing indicator phase)
     streaming.is_streaming = true;

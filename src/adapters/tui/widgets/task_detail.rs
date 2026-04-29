@@ -26,7 +26,10 @@ use crate::adapters::tui::markdown;
 use crate::domain::models::plan::{Plan, PlanTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
-fn status_icon(status: PlanTaskStatus, theme: &crate::adapters::tui::theme::Theme) -> (&'static str, Color) {
+fn status_icon(
+    status: PlanTaskStatus,
+    theme: &crate::adapters::tui::theme::Theme,
+) -> (&'static str, Color) {
     match status {
         PlanTaskStatus::Pending => ("\u{23F3}", theme.colors.fg_muted),
         PlanTaskStatus::Running => ("\u{25CF}", theme.colors.tool_status_executing),
@@ -78,7 +81,10 @@ pub fn render(
     let (icon, icon_color) = status_icon(task.status, theme);
     let word = status_word(task.status);
 
-    let header = format!("Task {}. {}    {} {} \u{B7} {}", task.number, task.title, icon, word, elapsed_str);
+    let header = format!(
+        "Task {}. {}    {} {} \u{B7} {}",
+        task.number, task.title, icon, word, elapsed_str
+    );
     if y < max_y {
         buf.set_string(
             inner.x,
@@ -146,19 +152,20 @@ pub fn render(
         let end = (clamped + body_height as usize).min(total);
         let truncated = total > body_height as usize;
         if body_height > 0 && y < max_y {
-            let visible: Vec<Line<'static>> =
-                lines.into_iter().skip(clamped).take(body_height as usize).collect();
-            Paragraph::new(visible)
-                .wrap(Wrap { trim: false })
-                .render(
-                    Rect {
-                        x: inner.x,
-                        y,
-                        width: inner.width,
-                        height: body_height,
-                    },
-                    buf,
-                );
+            let visible: Vec<Line<'static>> = lines
+                .into_iter()
+                .skip(clamped)
+                .take(body_height as usize)
+                .collect();
+            Paragraph::new(visible).wrap(Wrap { trim: false }).render(
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: body_height,
+                },
+                buf,
+            );
             y += body_height;
         }
         if y < max_y {
@@ -208,7 +215,10 @@ pub fn render(
         }
     }
 
-    if matches!(task.status, PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled) {
+    if matches!(
+        task.status,
+        PlanTaskStatus::Failed | PlanTaskStatus::Skipped | PlanTaskStatus::Cancelled
+    ) {
         if let Some(error) = &task.error {
             if y < max_y {
                 buf.set_string(
@@ -225,12 +235,7 @@ pub fn render(
                 if y >= max_y {
                     break;
                 }
-                buf.set_string(
-                    inner.x,
-                    y,
-                    line,
-                    Style::default().fg(theme.colors.error),
-                );
+                buf.set_string(inner.x, y, line, Style::default().fg(theme.colors.error));
                 y += 1;
             }
             if y < max_y {
@@ -242,7 +247,9 @@ pub fn render(
     if y < max_y || inner.height >= 2 {
         let action_text = match task.status {
             PlanTaskStatus::Completed => "[c] Copy result   [Esc] Back".to_string(),
-            PlanTaskStatus::Failed => "[c] Copy error   [r] Retry   [s] Skip   [e] Edit task   [Esc] Back".to_string(),
+            PlanTaskStatus::Failed => {
+                "[c] Copy error   [r] Retry   [s] Skip   [e] Edit task   [Esc] Back".to_string()
+            }
             PlanTaskStatus::Paused => "[c] Copy info   [p] Resume   [Esc] Back".to_string(),
             _ => "[c] Copy info   [Esc] Back".to_string(),
         };
@@ -314,7 +321,16 @@ mod tests {
     ) -> (String, u16) {
         let mut buf = Buffer::empty(area);
         let mut clamped = scroll;
-        render(area, &mut buf, plan, task, &test_theme(), area.height, expanded, &mut clamped);
+        render(
+            area,
+            &mut buf,
+            plan,
+            task,
+            &test_theme(),
+            area.height,
+            expanded,
+            &mut clamped,
+        );
         let mut out = String::new();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
@@ -328,7 +344,11 @@ mod tests {
     fn render_completed_task() {
         let plan = make_plan();
         let mut task = make_task(1, "Do thing", PlanTaskStatus::Completed);
-        task.result = Some(TaskResult { text: "Result text here".to_string(), tool_call_count: 0, token_count: None });
+        task.result = Some(TaskResult {
+            text: "Result text here".to_string(),
+            tool_call_count: 0,
+            token_count: None,
+        });
         let content = render_to_string(Rect::new(0, 0, 80, 24), &plan, &task);
         assert!(content.contains("Task 1"));
         assert!(content.contains("Do thing"));
@@ -370,20 +390,27 @@ mod tests {
             .map(|i| format!("line-marker-{:02}", i))
             .collect::<Vec<_>>()
             .join("\n");
-        task.result = Some(TaskResult { text: body, tool_call_count: 0, token_count: None });
+        task.result = Some(TaskResult {
+            text: body,
+            tool_call_count: 0,
+            token_count: None,
+        });
 
         let collapsed = render_to_string_ex(Rect::new(0, 0, 80, 30), &plan, &task, false);
         let expanded = render_to_string_ex(Rect::new(0, 0, 80, 30), &plan, &task, true);
 
-        let count_markers = |s: &str| (1..=40)
-            .filter(|i| s.contains(&format!("line-marker-{:02}", i)))
-            .count();
+        let count_markers = |s: &str| {
+            (1..=40)
+                .filter(|i| s.contains(&format!("line-marker-{:02}", i)))
+                .count()
+        };
         let collapsed_n = count_markers(&collapsed);
         let expanded_n = count_markers(&expanded);
         assert!(
             expanded_n > collapsed_n,
             "expanded should render more rows than collapsed (collapsed={}, expanded={})",
-            collapsed_n, expanded_n
+            collapsed_n,
+            expanded_n
         );
         assert!(collapsed.contains("[Enter] expand"));
         assert!(expanded.contains("[Enter] collapse"));
@@ -401,21 +428,34 @@ mod tests {
             .map(|i| format!("line-marker-{:02}", i))
             .collect::<Vec<_>>()
             .join("\n");
-        task.result = Some(TaskResult { text: body, tool_call_count: 0, token_count: None });
+        task.result = Some(TaskResult {
+            text: body,
+            tool_call_count: 0,
+            token_count: None,
+        });
         let area = Rect::new(0, 0, 80, 30);
 
         let (top, top_scroll) = render_to_string_full(area, &plan, &task, true, 0);
         assert_eq!(top_scroll, 0);
         assert!(top.contains("line-marker-01"), "top view shows first line");
-        assert!(!top.contains("line-marker-40"), "top view does not show last line");
+        assert!(
+            !top.contains("line-marker-40"),
+            "top view does not show last line"
+        );
 
         let (mid, _) = render_to_string_full(area, &plan, &task, true, 10);
-        assert!(mid.contains("line-marker-15"), "scrolled view reveals middle line");
+        assert!(
+            mid.contains("line-marker-15"),
+            "scrolled view reveals middle line"
+        );
 
         // Scroll way past the end — widget should clamp and still show the tail.
         let (end, end_scroll) = render_to_string_full(area, &plan, &task, true, u16::MAX);
         assert!(end_scroll < 40, "clamped offset stays within content");
-        assert!(end.contains("line-marker-40"), "tail visible when scrolled to end");
+        assert!(
+            end.contains("line-marker-40"),
+            "tail visible when scrolled to end"
+        );
     }
 
     #[test]
@@ -483,19 +523,31 @@ mod tests {
         let t0 = std::time::Instant::now();
         let (_, top_scroll) = render_to_string_full(area, &plan, &task, true, 0);
         assert_eq!(top_scroll, 0);
-        assert!(t0.elapsed() < std::time::Duration::from_secs(1), "top render under 1s");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(1),
+            "top render under 1s"
+        );
 
         let t1 = std::time::Instant::now();
         let (_, mid_scroll) = render_to_string_full(area, &plan, &task, true, 1000);
-        assert!(t1.elapsed() < std::time::Duration::from_secs(1), "mid render under 1s");
+        assert!(
+            t1.elapsed() < std::time::Duration::from_secs(1),
+            "mid render under 1s"
+        );
 
         let t2 = std::time::Instant::now();
         let (_, end_scroll) = render_to_string_full(area, &plan, &task, true, u16::MAX);
-        assert!(t2.elapsed() < std::time::Duration::from_secs(1), "end render under 1s");
+        assert!(
+            t2.elapsed() < std::time::Duration::from_secs(1),
+            "end render under 1s"
+        );
 
         // Sanity: clamped scroll offsets must be monotone non-decreasing
         // and bounded by u16::MAX (no overflow into garbage).
         assert!(mid_scroll <= end_scroll, "mid_scroll <= end_scroll");
-        assert!(end_scroll < u16::MAX, "end scroll clamps strictly below u16::MAX");
+        assert!(
+            end_scroll < u16::MAX,
+            "end scroll clamps strictly below u16::MAX"
+        );
     }
 }

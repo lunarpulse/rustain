@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, BorderType, Clear, Paragraph, Wrap},
-    Frame,
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::adapters::tui::state::PendingPlanApproval;
@@ -45,7 +45,10 @@ pub fn render_plan_approval_card(
         .and_then(|s| s.to_str())
         .unwrap_or("plan");
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("Plan Approval — ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Plan Approval — ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("{}.md", slug)),
     ]));
     frame.render_widget(header, chunks[0]);
@@ -66,13 +69,31 @@ pub fn render_plan_approval_card(
 
     // Action footer
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled("[y]", Style::default().add_modifier(Modifier::BOLD).fg(Color::Green)),
+        Span::styled(
+            "[y]",
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Green),
+        ),
         Span::raw(" Approve  "),
-        Span::styled("[a]", Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan)),
+        Span::styled(
+            "[a]",
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        ),
         Span::raw(" Approve & AutoEdit  "),
-        Span::styled("[n]", Style::default().add_modifier(Modifier::BOLD).fg(Color::Red)),
+        Span::styled(
+            "[n]",
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::Red),
+        ),
         Span::raw(" Reject  "),
-        Span::styled("[e]", Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)),
+        Span::styled(
+            "[e]",
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Yellow),
+        ),
         Span::raw(" Revise"),
     ]))
     .alignment(Alignment::Center);

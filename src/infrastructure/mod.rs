@@ -1,7 +1,7 @@
 pub mod config;
-pub mod permission_rules;
 pub mod logging;
 pub mod paths;
+pub mod permission_rules;
 pub mod runtime;
 pub mod signals;
 pub mod startup;

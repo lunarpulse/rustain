@@ -7,6 +7,7 @@ use ratatui::widgets::Paragraph;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::adapters::tui::state::HeightCache;
+use crate::adapters::tui::state::PendingPlanCard;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::feedback_block;
 use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
@@ -14,7 +15,6 @@ use crate::domain::models::{
     ContentBlockType, Conversation, FeedbackBlock, MessageRole, StopReason, StreamingState,
 };
 use crate::domain::services::search::SearchMatch;
-use crate::adapters::tui::state::PendingPlanCard;
 
 use super::empty_state;
 use super::plan_card;
@@ -587,7 +587,10 @@ pub fn render_with_search(
                 .collect();
             plans_for_msg.sort_by_key(|p| p.created_at);
             if plans_for_msg.is_empty() {
-                tracing::warn!("PlanCard block in message {} has no matching plan in conversation.plans", msg.id);
+                tracing::warn!(
+                    "PlanCard block in message {} has no matching plan in conversation.plans",
+                    msg.id
+                );
                 h += plan_card::missing_plan_lines(&msg.id, theme).len();
                 block_boundaries.push(cumulative_offset + h);
             } else {
@@ -796,7 +799,10 @@ pub fn render_with_search(
                 plans_for_msg.sort_by_key(|p| p.created_at);
 
                 if plans_for_msg.is_empty() {
-                    tracing::warn!("PlanCard block in message {} has no matching plan in conversation.plans", msg.id);
+                    tracing::warn!(
+                        "PlanCard block in message {} has no matching plan in conversation.plans",
+                        msg.id
+                    );
                     let fallback = plan_card::missing_plan_lines(&msg.id, theme);
                     for (j, line) in fallback.into_iter().enumerate() {
                         let abs_line = tool_line_offset + j;
@@ -810,9 +816,8 @@ pub fn render_with_search(
                         let is_pending = pending_plan_card
                             .map(|ppc| ppc.plan_id == plan.id)
                             .unwrap_or(false);
-                        let pc_lines = plan_card::render_plan_card_lines(
-                            plan, theme, area.width, is_pending,
-                        );
+                        let pc_lines =
+                            plan_card::render_plan_card_lines(plan, theme, area.width, is_pending);
                         let pc_height = pc_lines.len();
                         for (j, line) in pc_lines.into_iter().enumerate() {
                             let abs_line = tool_line_offset + j;

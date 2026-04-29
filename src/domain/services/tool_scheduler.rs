@@ -19,13 +19,13 @@ use futures::stream::{FuturesOrdered, StreamExt as _};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::models::ActiveSkill;
 use crate::domain::models::tool_call::{
     ApprovalSource, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
-use crate::domain::models::ActiveSkill;
 use crate::domain::ports::{SecurityPort, ToolSetPort};
-use crate::domain::services::permission_chain;
 use crate::domain::services::approval_runtime::ApprovalRuntime;
+use crate::domain::services::permission_chain;
 use std::path::PathBuf;
 use tokio::sync::RwLock;
 
@@ -201,17 +201,23 @@ impl ToolScheduler {
                 );
             }
             Allow => { /* proceed */ }
-            Prompt { server_id, path_hint } => {
+            Prompt {
+                server_id,
+                path_hint,
+            } => {
                 let risk = crate::domain::models::risk_for_builtin(&req.tool_name);
 
-                let (approval_id, rx) = self.approval_runtime.request(
-                    source.clone(),
-                    req.tool_name.clone(),
-                    req.input.clone(),
-                    risk,
-                    server_id.as_deref(),
-                    path_hint.as_deref(),
-                ).await;
+                let (approval_id, rx) = self
+                    .approval_runtime
+                    .request(
+                        source.clone(),
+                        req.tool_name.clone(),
+                        req.input.clone(),
+                        risk,
+                        server_id.as_deref(),
+                        path_hint.as_deref(),
+                    )
+                    .await;
 
                 if let Some(ref real_id) = approval_id {
                     let call = ToolCall::AwaitingApproval {
@@ -240,23 +246,34 @@ impl ToolScheduler {
                 };
 
                 match outcome {
-                    crate::domain::models::ApprovalOutcome::Once |
-                    crate::domain::models::ApprovalOutcome::AlwaysTool { .. } |
-                    crate::domain::models::ApprovalOutcome::AlwaysServer { .. } |
-                    crate::domain::models::ApprovalOutcome::AlwaysAndSave { .. } => { /* proceed */ }
+                    crate::domain::models::ApprovalOutcome::Once
+                    | crate::domain::models::ApprovalOutcome::AlwaysTool { .. }
+                    | crate::domain::models::ApprovalOutcome::AlwaysServer { .. }
+                    | crate::domain::models::ApprovalOutcome::AlwaysAndSave { .. } => { /* proceed */
+                    }
                     crate::domain::models::ApprovalOutcome::Reject { feedback } => {
                         let error = match feedback {
                             Some(text) => permission_chain::format_feedback_message(&text),
                             None => "Permission denied by user".to_string(),
                         };
-                        return self.terminal(&conversation_id, ToolCall::Error {
-                            id, request: req, error,
-                        });
+                        return self.terminal(
+                            &conversation_id,
+                            ToolCall::Error {
+                                id,
+                                request: req,
+                                error,
+                            },
+                        );
                     }
                     crate::domain::models::ApprovalOutcome::Cancel => {
-                        return self.terminal(&conversation_id, ToolCall::Cancelled {
-                            id, request: req, reason: "user-cancel".into()
-                        });
+                        return self.terminal(
+                            &conversation_id,
+                            ToolCall::Cancelled {
+                                id,
+                                request: req,
+                                reason: "user-cancel".into(),
+                            },
+                        );
                     }
                 }
             }
@@ -337,7 +354,10 @@ mod tests {
             self.mode
         }
 
-        fn check_blocklist(&self, _command: &str) -> Result<(), crate::domain::errors::PermissionError> {
+        fn check_blocklist(
+            &self,
+            _command: &str,
+        ) -> Result<(), crate::domain::errors::PermissionError> {
             Ok(())
         }
 
@@ -345,7 +365,8 @@ mod tests {
             &self,
             _path: &std::path::Path,
             _op: crate::domain::models::FileOperation,
-        ) -> Result<crate::domain::models::PathAccessType, crate::domain::errors::PermissionError> {
+        ) -> Result<crate::domain::models::PathAccessType, crate::domain::errors::PermissionError>
+        {
             Ok(crate::domain::models::PathAccessType::Workspace)
         }
 
@@ -395,7 +416,8 @@ mod tests {
             parallel_safe,
             delay_ms,
         });
-        let approval_runtime = ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
+        let approval_runtime =
+            ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
         ToolScheduler::new(security, tools, approval_runtime, 16)
     }
 
@@ -430,7 +452,12 @@ mod tests {
         assert!(
             matches!(
                 &transitions[..],
-                [ToolCall::Validating { .. }, ToolCall::Scheduled { .. }, ToolCall::Executing { .. }, ToolCall::Success { .. }]
+                [
+                    ToolCall::Validating { .. },
+                    ToolCall::Scheduled { .. },
+                    ToolCall::Executing { .. },
+                    ToolCall::Success { .. }
+                ]
             ),
             "unexpected transitions: {:?}",
             transitions
@@ -526,15 +553,15 @@ mod tests {
     #[tokio::test]
     async fn scheduler_mixed_batch_sequential() {
         // One tool parallel_safe=false forces sequential fallback
-        let security: Arc<dyn SecurityPort> =
-            Arc::new(MockSecurity {
-                mode: crate::domain::models::PermissionMode::Yolo,
-            });
+        let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
+            mode: crate::domain::models::PermissionMode::Yolo,
+        });
         let tools: Arc<dyn ToolSetPort> = Arc::new(MockToolSet {
             parallel_safe: false,
             delay_ms: 50,
         });
-        let approval_runtime = ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
+        let approval_runtime =
+            ApprovalRuntime::new(16, Arc::new(crate::adapters::noop::NoOpApprovalPersistence));
         let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
         let batch: Vec<ToolCallRequest> = (0..3)
             .map(|i| ToolCallRequest {

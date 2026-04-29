@@ -51,11 +51,11 @@ use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
-    ApprovalOutcome,
-    AppConfig, ChatMessage, CompletionOptions, ContentBlockType, Conversation, FeedbackAction,
-    FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole, NoticeLevel,
-    PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager, SessionState, StatusState, StreamChunk,
-    StreamingState, UserMessage, apply_chunk, generate_conversation_id, next_delay,
+    AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
+    FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
+    NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager,
+    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, apply_chunk,
+    generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
@@ -6370,64 +6370,85 @@ fn cycle_mode(current: PermissionMode) -> PermissionMode {
 /// Call `start_turn_inner` directly when you need `synthetic: true`.
 #[allow(dead_code)]
 async fn start_turn(
-     text: &str,
-     images: Vec<ImageAttachment>,
-     conversation: &mut Conversation,
-     streaming: &mut StreamingState,
-     state: &mut TuiState,
-     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-     provider: &Arc<dyn ProviderPort>,
-     config: &AppConfig,
-     domain_tx: &mpsc::UnboundedSender<AppEvent>,
-     security: &Arc<dyn SecurityPort>,
-     tools: &Arc<dyn ToolSetPort>,
+    text: &str,
+    images: Vec<ImageAttachment>,
+    conversation: &mut Conversation,
+    streaming: &mut StreamingState,
+    state: &mut TuiState,
+    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+    provider: &Arc<dyn ProviderPort>,
+    config: &AppConfig,
+    domain_tx: &mpsc::UnboundedSender<AppEvent>,
+    security: &Arc<dyn SecurityPort>,
+    tools: &Arc<dyn ToolSetPort>,
     tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
-     persona: &Arc<dyn PersonaPort>,
-     workspace_path: &std::path::Path,
-     session_manager: &mut SessionManager,
-     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-     storage: &Arc<dyn StoragePort>,
-     _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
-     plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
-     _plan_file: Option<std::path::PathBuf>,
-     activation_set: Option<crate::domain::models::SkillActivationSet>,
-     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
-     turn_cancel: CancellationToken,
- ) {
+    persona: &Arc<dyn PersonaPort>,
+    workspace_path: &std::path::Path,
+    session_manager: &mut SessionManager,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+    storage: &Arc<dyn StoragePort>,
+    _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
+    plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
+    _plan_file: Option<std::path::PathBuf>,
+    activation_set: Option<crate::domain::models::SkillActivationSet>,
+    agent_snapshot: Option<crate::domain::models::ActiveAgent>,
+    turn_cancel: CancellationToken,
+) {
     start_turn_inner(
-        text, images, false, conversation, streaming, state, active_turn,
-        provider, config, domain_tx, security, tools, tool_scheduler,
-        persona, workspace_path, session_manager, fs_storage, storage,
-        _plan_manager, plan_injector, _plan_file, activation_set, agent_snapshot, turn_cancel,
-    ).await;
+        text,
+        images,
+        false,
+        conversation,
+        streaming,
+        state,
+        active_turn,
+        provider,
+        config,
+        domain_tx,
+        security,
+        tools,
+        tool_scheduler,
+        persona,
+        workspace_path,
+        session_manager,
+        fs_storage,
+        storage,
+        _plan_manager,
+        plan_injector,
+        _plan_file,
+        activation_set,
+        agent_snapshot,
+        turn_cancel,
+    )
+    .await;
 }
 
 async fn start_turn_inner(
-     text: &str,
-     images: Vec<ImageAttachment>,
-     synthetic: bool,
-     conversation: &mut Conversation,
-     streaming: &mut StreamingState,
-     state: &mut TuiState,
-     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-     provider: &Arc<dyn ProviderPort>,
-     config: &AppConfig,
-     domain_tx: &mpsc::UnboundedSender<AppEvent>,
-     security: &Arc<dyn SecurityPort>,
-     tools: &Arc<dyn ToolSetPort>,
+    text: &str,
+    images: Vec<ImageAttachment>,
+    synthetic: bool,
+    conversation: &mut Conversation,
+    streaming: &mut StreamingState,
+    state: &mut TuiState,
+    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+    provider: &Arc<dyn ProviderPort>,
+    config: &AppConfig,
+    domain_tx: &mpsc::UnboundedSender<AppEvent>,
+    security: &Arc<dyn SecurityPort>,
+    tools: &Arc<dyn ToolSetPort>,
     tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
-     persona: &Arc<dyn PersonaPort>,
-     workspace_path: &std::path::Path,
-     session_manager: &mut SessionManager,
-     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-     storage: &Arc<dyn StoragePort>,
-     _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
-     plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
-     _plan_file: Option<std::path::PathBuf>,
-     activation_set: Option<crate::domain::models::SkillActivationSet>,
-     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
-     turn_cancel: CancellationToken,
- ) {
+    persona: &Arc<dyn PersonaPort>,
+    workspace_path: &std::path::Path,
+    session_manager: &mut SessionManager,
+    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
+    storage: &Arc<dyn StoragePort>,
+    _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
+    plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
+    _plan_file: Option<std::path::PathBuf>,
+    activation_set: Option<crate::domain::models::SkillActivationSet>,
+    agent_snapshot: Option<crate::domain::models::ActiveAgent>,
+    turn_cancel: CancellationToken,
+) {
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
     // (Story 4-3a.1 AC3 / DF-067).
@@ -6458,10 +6479,16 @@ async fn start_turn_inner(
     if security.current_mode() == PermissionMode::Plan {
         if let Some(ref plan_path) = state.plan_file_path {
             if let Some(reminder) = plan_injector.pre_turn(conversation, plan_path).await {
-                if let Some(first_user_msg) = messages.iter_mut().find(|m| m.role == MessageRole::User) {
+                if let Some(first_user_msg) =
+                    messages.iter_mut().find(|m| m.role == MessageRole::User)
+                {
                     first_user_msg.context_prefix = Some(reminder);
                 }
-                let assistant_turns = conversation.messages.iter().filter(|m| m.role == MessageRole::Assistant).count() as u32;
+                let assistant_turns = conversation
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == MessageRole::Assistant)
+                    .count() as u32;
                 state.pending_plan_reminder_at_turn = Some(assistant_turns);
             } else {
                 state.pending_plan_reminder_at_turn = None;
@@ -6798,9 +6825,15 @@ fn render(
                                 conversation,
                                 state.task_panel_state.last_executed_plan_id.as_deref(),
                             );
-                            state.task_panel_state.task_count = plan_to_render.map(|p| p.tasks.len()).unwrap_or(0);
-                            let is_focused = matches!(state.focus,
-                                FocusState::Sidebar { panel: crate::domain::models::visual::PanelType::Tasks, .. });
+                            state.task_panel_state.task_count =
+                                plan_to_render.map(|p| p.tasks.len()).unwrap_or(0);
+                            let is_focused = matches!(
+                                state.focus,
+                                FocusState::Sidebar {
+                                    panel: crate::domain::models::visual::PanelType::Tasks,
+                                    ..
+                                }
+                            );
                             task_panel::render_task_panel(
                                 sidebar_area,
                                 frame.buffer_mut(),
@@ -6826,7 +6859,9 @@ fn render(
                             let block = ratatui::widgets::Block::default()
                                 .title(" (panel deferred) ")
                                 .borders(ratatui::widgets::Borders::ALL)
-                                .border_style(ratatui::style::Style::default().fg(theme.colors.fg_muted));
+                                .border_style(
+                                    ratatui::style::Style::default().fg(theme.colors.fg_muted),
+                                );
                             block.render(sidebar_area, frame.buffer_mut());
                         }
                     }
@@ -6862,7 +6897,9 @@ fn render(
                     let plan_data = conversation.plans.get(pid);
                     let (original, current, changed, summary) = if let Some(plan) = plan_data {
                         let original_count = plan.tasks.len() as u32;
-                        let changed_steps: Vec<u32> = plan.tasks.iter()
+                        let changed_steps: Vec<u32> = plan
+                            .tasks
+                            .iter()
                             .filter(|t| t.status == PlanTaskStatus::Skipped)
                             .map(|t| t.number)
                             .collect();
@@ -6888,16 +6925,27 @@ fn render(
                 // 2. Cancel plan confirm card (AC6)
                 else if let Some(ref pid) = state.task_panel_state.cancel_plan_confirm {
                     use crate::adapters::tui::widgets::cancel_plan_confirm_card;
-                    let (plan_title, n_pending, n_completed) =
-                        conversation.plans.get(pid).map(|plan| {
-                            let pending = plan.tasks.iter()
-                                .filter(|t| !crate::domain::services::plan_runtime::is_terminal_pub(t.status))
+                    let (plan_title, n_pending, n_completed) = conversation
+                        .plans
+                        .get(pid)
+                        .map(|plan| {
+                            let pending = plan
+                                .tasks
+                                .iter()
+                                .filter(|t| {
+                                    !crate::domain::services::plan_runtime::is_terminal_pub(
+                                        t.status,
+                                    )
+                                })
                                 .count() as u32;
-                            let completed = plan.tasks.iter()
+                            let completed = plan
+                                .tasks
+                                .iter()
                                 .filter(|t| t.status == PlanTaskStatus::Completed)
                                 .count() as u32;
                             (plan.title.clone(), pending, completed)
-                        }).unwrap_or_default();
+                        })
+                        .unwrap_or_default();
                     cancel_plan_confirm_card::render(
                         app_layout.chat_pane,
                         frame.buffer_mut(),
@@ -6919,7 +6967,9 @@ fn render(
                 }
                 // 4. Existing drill-down view (6-3)
                 else if let Some(task_number) = state.task_panel_state.drill_down_task {
-                    let plan_opt = state.task_panel_state.last_executed_plan_id
+                    let plan_opt = state
+                        .task_panel_state
+                        .last_executed_plan_id
                         .as_deref()
                         .and_then(|id| conversation.plans.get(id))
                         .or_else(|| {
@@ -7277,7 +7327,10 @@ fn render(
                 } else {
                     None
                 };
-                let drill_down_breadcrumb = state.task_panel_state.drill_down_task.map(|n| format!("Tasks > Task {}", n));
+                let drill_down_breadcrumb = state
+                    .task_panel_state
+                    .drill_down_task
+                    .map(|n| format!("Tasks > Task {}", n));
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -7396,8 +7449,7 @@ async fn generate_title(
     user_msg: &str,
     assistant_msg: &str,
 ) -> Result<String> {
-    use crate::domain::models::{
-    CompletionOptions, Message, MessageRole as MsgRole};
+    use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
 
     let prompt_content = format!("User: {}\n\nAssistant: {}", user_msg, assistant_msg);
     let messages = vec![Message {
@@ -8161,8 +8213,7 @@ mod tests {
     async fn test_rehydrate_index_parity_with_tool_results() {
         use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
         use crate::domain::models::ImageReference;
-        use crate::domain::models::{
-    ToolCallInfo, ToolResultInfo};
+        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();

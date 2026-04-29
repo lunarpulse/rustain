@@ -23,13 +23,16 @@ use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent, RawEventKi
 
 #[test]
 fn test_app_state_honors_raw_capacity() {
-    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(64, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+        64,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let (app_state, _domain_rx) = AppState::new(
         64,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
-        Arc::new(DefaultPlanInjector::new())
+        Arc::new(DefaultPlanInjector::new()),
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -38,13 +41,16 @@ fn test_app_state_honors_raw_capacity() {
 
 #[test]
 fn test_app_state_session_cancel_is_root_token() {
-    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let (app_state, _domain_rx) = AppState::new(
         16,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
-        Arc::new(DefaultPlanInjector::new())
+        Arc::new(DefaultPlanInjector::new()),
     );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());
@@ -153,7 +159,10 @@ async fn test_raw_subscriber_timeout_pattern() {
 
     // No events emitted — subscriber should idle-timeout
     let result = tokio::time::timeout(Duration::from_millis(50), raw_rx.recv()).await;
-    assert!(result.is_err(), "subscriber should idle-timeout when no events");
+    assert!(
+        result.is_err(),
+        "subscriber should idle-timeout when no events"
+    );
 
     // After timeout, subscriber should still be valid and receive next event
     bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
@@ -162,7 +171,10 @@ async fn test_raw_subscriber_timeout_pattern() {
         .await
         .expect("timed out")
         .expect("channel closed");
-    assert!(matches!(raw.kind, RawEventKind::ModeChanged(PermissionMode::Normal)));
+    assert!(matches!(
+        raw.kind,
+        RawEventKind::ModeChanged(PermissionMode::Normal)
+    ));
 }
 
 // ── AC5: Multiple raw subscribers receive same events ────────────────────────
@@ -184,8 +196,14 @@ async fn test_multiple_raw_subscribers_receive_events() {
         .expect("timed out")
         .expect("channel closed");
 
-    assert!(matches!(raw_a.kind, RawEventKind::ModeChanged(PermissionMode::Yolo)));
-    assert!(matches!(raw_b.kind, RawEventKind::ModeChanged(PermissionMode::Yolo)));
+    assert!(matches!(
+        raw_a.kind,
+        RawEventKind::ModeChanged(PermissionMode::Yolo)
+    ));
+    assert!(matches!(
+        raw_b.kind,
+        RawEventKind::ModeChanged(PermissionMode::Yolo)
+    ));
 }
 
 // ── AC6: RawEvent from_app_event mapping coverage ────────────────────────────
@@ -213,7 +231,9 @@ fn test_from_app_event_resize_returns_none() {
 #[test]
 fn test_from_app_event_input_event_returns_none() {
     use rustain::domain::events::DomainInputEvent;
-    assert!(RawEvent::from_app_event(&AppEvent::InputEvent(DomainInputEvent::KeyPress('a'))).is_none());
+    assert!(
+        RawEvent::from_app_event(&AppEvent::InputEvent(DomainInputEvent::KeyPress('a'))).is_none()
+    );
 }
 
 // ── AC5 / AC8: EventBus graceful shutdown when domain_rx dropped ─────────────

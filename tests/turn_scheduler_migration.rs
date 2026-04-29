@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
@@ -16,7 +17,6 @@ use rustain::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::runtime::turn::run_turn;
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -74,14 +74,18 @@ struct MockSecurity;
 
 #[async_trait]
 impl SecurityPort for MockSecurity {
-    fn check_blocklist(&self, _command: &str) -> Result<(), rustain::domain::errors::PermissionError> {
+    fn check_blocklist(
+        &self,
+        _command: &str,
+    ) -> Result<(), rustain::domain::errors::PermissionError> {
         Ok(())
     }
     fn check_workspace_access(
         &self,
         _path: &std::path::Path,
         _op: rustain::domain::models::FileOperation,
-    ) -> Result<rustain::domain::models::PathAccessType, rustain::domain::errors::PermissionError> {
+    ) -> Result<rustain::domain::models::PathAccessType, rustain::domain::errors::PermissionError>
+    {
         Ok(rustain::domain::models::PathAccessType::Workspace)
     }
 
@@ -132,7 +136,7 @@ fn make_conversation() -> Conversation {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            }],
+        }],
         created_at: 0,
         updated_at: 0,
         last_response_at: None,
@@ -154,7 +158,8 @@ async fn turn_scheduler_migration() {
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity);
     let tools: Arc<dyn ToolSetPort> = Arc::new(MockToolSet);
     let approval_runtime = rustain::domain::services::approval_runtime::ApprovalRuntime::new(
-        16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence)
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let tool_scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval_runtime, 16);
 
@@ -172,7 +177,11 @@ async fn turn_scheduler_migration() {
                             conversation_id: transition.conversation_id.clone(),
                             transition: transition.clone(),
                         };
-                        if let Some(raw) = rustain::infrastructure::runtime::event_bus::RawEvent::from_app_event(&ev) {
+                        if let Some(raw) =
+                            rustain::infrastructure::runtime::event_bus::RawEvent::from_app_event(
+                                &ev,
+                            )
+                        {
                             let _ = raw_tx.send(raw);
                         }
                         let _ = domain_tx.send(ev);
@@ -247,9 +256,9 @@ async fn turn_scheduler_migration() {
         raw_events.push(raw);
     }
     assert!(
-        raw_events.iter().any(|r| {
-            format!("{:?}", r.kind).contains("Tool")
-        }),
+        raw_events
+            .iter()
+            .any(|r| { format!("{:?}", r.kind).contains("Tool") }),
         "expected at least one RawEventKind::Tool on raw_rx"
     );
 }

@@ -117,12 +117,10 @@ pub fn render_tool_block_lines<'a>(
     match &tc.result {
         None => {
             // Executing state
-            let mut spans = vec![
-                Span::styled(
-                    "┄ ",
-                    Style::default().fg(theme.colors.tool_border_collapsed),
-                ),
-            ];
+            let mut spans = vec![Span::styled(
+                "┄ ",
+                Style::default().fg(theme.colors.tool_border_collapsed),
+            )];
             if let Some(ref chip) = tc.status {
                 spans.push(Span::styled(
                     format!("{} ", chip),
@@ -210,12 +208,10 @@ pub fn render_tool_block_lines<'a>(
         Some(result) => {
             if state.collapsed {
                 // Collapsed success
-                let mut spans = vec![
-                    Span::styled(
-                        "┄ ",
-                        Style::default().fg(theme.colors.tool_border_collapsed),
-                    ),
-                ];
+                let mut spans = vec![Span::styled(
+                    "┄ ",
+                    Style::default().fg(theme.colors.tool_border_collapsed),
+                )];
                 if let Some(ref chip) = tc.status {
                     spans.push(Span::styled(
                         format!("{} ", chip),

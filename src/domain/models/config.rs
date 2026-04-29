@@ -20,9 +20,7 @@ impl EventBusConfig {
 
 impl Default for EventBusConfig {
     fn default() -> Self {
-        Self {
-            raw_capacity: 1024,
-        }
+        Self { raw_capacity: 1024 }
     }
 }
 

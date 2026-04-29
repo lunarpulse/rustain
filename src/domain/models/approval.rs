@@ -53,10 +53,18 @@ mod tests {
     fn approval_outcome_roundtrip() {
         for outcome in [
             ApprovalOutcome::Once,
-            ApprovalOutcome::AlwaysTool { tool_name: "Read".into() },
-            ApprovalOutcome::AlwaysServer { server_id: "github-mcp".into() },
-            ApprovalOutcome::AlwaysAndSave { scope: ApprovalScope::Tool("Bash".into()) },
-            ApprovalOutcome::Reject { feedback: Some("don't delete".into()) },
+            ApprovalOutcome::AlwaysTool {
+                tool_name: "Read".into(),
+            },
+            ApprovalOutcome::AlwaysServer {
+                server_id: "github-mcp".into(),
+            },
+            ApprovalOutcome::AlwaysAndSave {
+                scope: ApprovalScope::Tool("Bash".into()),
+            },
+            ApprovalOutcome::Reject {
+                feedback: Some("don't delete".into()),
+            },
             ApprovalOutcome::Reject { feedback: None },
             ApprovalOutcome::Cancel,
         ] {

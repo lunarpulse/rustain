@@ -17,11 +17,11 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, permission_prompt, status_bar};
+use rustain::domain::models::tool_call::ApprovalSource;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, FocusState, MessageRole,
     PermissionMode, StatusState, StopReason, StreamingState, ToolCallInfo,
 };
-use rustain::domain::models::tool_call::ApprovalSource;
 
 fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
     Conversation {
@@ -85,8 +85,8 @@ fn render_full_layout(
                 0,
                 None,
                 None,
-                    None,
-                    );
+                None,
+            );
             input_box::render(
                 frame,
                 app_layout.input_area,
@@ -119,7 +119,7 @@ fn test_tool_block_in_full_layout() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            },
+        },
         ChatMessage {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
@@ -130,7 +130,7 @@ fn test_tool_block_in_full_layout() {
                 id: "toolu_test1".to_string(),
                 name: "Read".to_string(),
                 input: serde_json::json!({"file_path": "src/main.rs"
-            }),
+                }),
                 result: Some(rustain::domain::models::ToolResultInfo {
                     content: "fn main() {}".to_string(),
                     is_error: false,
@@ -189,7 +189,7 @@ fn test_feedback_block_in_full_layout() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
 
     let mut feedback_blocks = BTreeMap::new();
     feedback_blocks.insert(
@@ -244,7 +244,9 @@ fn test_permission_prompt_in_full_layout() {
             );
 
             let prompt_lines = permission_prompt::render_permission_lines(
-                &ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
+                &ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
                 "Bash",
                 "rm -rf /tmp/test",
                 &theme,
@@ -280,8 +282,8 @@ fn test_permission_prompt_in_full_layout() {
                 0,
                 None,
                 None,
-                    None,
-                    );
+                None,
+            );
             input_box::render(
                 frame,
                 app_layout.input_area,
@@ -378,8 +380,8 @@ fn test_ask_user_question_in_full_layout() {
                 0,
                 None,
                 None,
-                    None,
-                    );
+                None,
+            );
             input_box::render(
                 frame,
                 app_layout.input_area,

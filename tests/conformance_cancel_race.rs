@@ -143,9 +143,12 @@ async fn whole_plan_cancel_intent_honored_on_natural_success() {
     let runtime = PlanRuntime::new();
     let conv_id = conv.id.clone();
 
-    runtime
-        .clone()
-        .start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+    runtime.clone().start(
+        conv_id.clone(),
+        plan_id.clone(),
+        &mut conv,
+        captured.as_ref(),
+    );
 
     // Task 1 is now Running. User invokes `!cancel-plan`.
     runtime.mark_whole_plan_cancel_pending(&plan_id).await;
@@ -201,9 +204,12 @@ async fn whole_plan_cancel_intent_honored_on_natural_failure() {
     let runtime = PlanRuntime::new();
     let conv_id = conv.id.clone();
 
-    runtime
-        .clone()
-        .start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+    runtime.clone().start(
+        conv_id.clone(),
+        plan_id.clone(),
+        &mut conv,
+        captured.as_ref(),
+    );
 
     runtime.mark_whole_plan_cancel_pending(&plan_id).await;
 
@@ -244,9 +250,12 @@ async fn pause_pending_drained_after_natural_success() {
     let runtime = PlanRuntime::new();
     let conv_id = conv.id.clone();
 
-    runtime
-        .clone()
-        .start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+    runtime.clone().start(
+        conv_id.clone(),
+        plan_id.clone(),
+        &mut conv,
+        captured.as_ref(),
+    );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
     // Pre-condition: entry is present.
@@ -276,7 +285,10 @@ async fn pause_pending_drained_after_natural_success() {
         .await;
 
     // Task succeeded — that's correct.
-    assert_eq!(conv.plans[&plan_id].tasks[0].status, PlanTaskStatus::Completed);
+    assert_eq!(
+        conv.plans[&plan_id].tasks[0].status,
+        PlanTaskStatus::Completed
+    );
     // The pause-pending entry must NOT leak.
     let snapshot = runtime
         .snapshot(&plan_id)
@@ -300,9 +312,12 @@ async fn pause_pending_drained_after_natural_failure() {
     let runtime = PlanRuntime::new();
     let conv_id = conv.id.clone();
 
-    runtime
-        .clone()
-        .start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+    runtime.clone().start(
+        conv_id.clone(),
+        plan_id.clone(),
+        &mut conv,
+        captured.as_ref(),
+    );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
 
@@ -348,9 +363,12 @@ async fn on_turn_complete_ignores_mismatched_task_number() {
     let runtime = PlanRuntime::new();
     let conv_id = conv.id.clone();
 
-    runtime
-        .clone()
-        .start(conv_id.clone(), plan_id.clone(), &mut conv, captured.as_ref());
+    runtime.clone().start(
+        conv_id.clone(),
+        plan_id.clone(),
+        &mut conv,
+        captured.as_ref(),
+    );
 
     // Running is task 1. Stale event arrives for task 3.
     runtime
@@ -369,7 +387,13 @@ async fn on_turn_complete_ignores_mismatched_task_number() {
         .await;
 
     // Task 3 must NOT have been mutated to Completed.
-    assert_eq!(conv.plans[&plan_id].tasks[2].status, PlanTaskStatus::Pending);
+    assert_eq!(
+        conv.plans[&plan_id].tasks[2].status,
+        PlanTaskStatus::Pending
+    );
     // Task 1 (the actual Running task) is untouched.
-    assert_eq!(conv.plans[&plan_id].tasks[0].status, PlanTaskStatus::Running);
+    assert_eq!(
+        conv.plans[&plan_id].tasks[0].status,
+        PlanTaskStatus::Running
+    );
 }

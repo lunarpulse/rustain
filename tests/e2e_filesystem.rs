@@ -31,7 +31,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 token_count: None,
                 stop_reason: None,
                 images: vec![],
-                },
+            },
             ChatMessage {
                 synthetic: false,
                 id: generate_conversation_id(),
@@ -43,7 +43,7 @@ fn make_simple_conversation(id: &str) -> Conversation {
                 token_count: None,
                 stop_reason: None,
                 images: vec![],
-                },
+            },
         ],
         created_at: 1700000000,
         updated_at: 1700000001,

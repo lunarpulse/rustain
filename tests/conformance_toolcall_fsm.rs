@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use rustain::domain::errors::{PermissionError, ToolError};
 use rustain::domain::models::tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
@@ -14,10 +15,9 @@ use rustain::domain::models::tool_call::{
 use rustain::domain::models::{
     FileOperation, PathAccessType, PermissionMode, ToolDefinition, ToolResult,
 };
-use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::ports::{SecurityPort, ToolSetPort};
+use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 // ── AC1: Enum shape + serde round-trip ──────────────────────────────────────
@@ -82,8 +82,14 @@ fn ac1_enum_shape_and_serde_round_trip() {
 #[tokio::test]
 async fn ac2_scheduler_api_surface() {
     let security: Arc<dyn SecurityPort> = Arc::new(YoloSecurity);
-    let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet { delay_ms: 0, parallel_safe: true });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet {
+        delay_ms: 0,
+        parallel_safe: true,
+    });
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let mut rx = sched.subscribe();
 
@@ -113,7 +119,12 @@ async fn ac2_scheduler_api_surface() {
     assert!(
         matches!(
             &seen[..],
-            [ToolCall::Validating { .. }, ToolCall::Scheduled { .. }, ToolCall::Executing { .. }, ToolCall::Success { .. }]
+            [
+                ToolCall::Validating { .. },
+                ToolCall::Scheduled { .. },
+                ToolCall::Executing { .. },
+                ToolCall::Success { .. }
+            ]
         ),
         "unexpected transitions: {:?}",
         seen
@@ -143,29 +154,41 @@ async fn ac3_transition_with_approval() {
         delay_ms: 0,
         parallel_safe: true,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime.clone(), 16);
     let mut rx = sched.subscribe();
 
     // Subscribe to approval events BEFORE spawning run_one
     let mut events = approval_runtime.subscribe();
     let sched2 = sched.clone();
-    let handle = tokio::spawn(async move {
-        run_one(&sched2, "Sleep", serde_json::json!({})).await
-    });
+    let handle =
+        tokio::spawn(async move { run_one(&sched2, "Sleep", serde_json::json!({})).await });
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
-    approval_runtime.resolve(&id, rustain::domain::models::ApprovalOutcome::Once).await;
+    approval_runtime
+        .resolve(&id, rustain::domain::models::ApprovalOutcome::Once)
+        .await;
 
     let result = handle.await.unwrap();
     assert!(matches!(result, ToolCall::Success { .. }));
     assert_sequence(
         &mut rx,
-        &["validating", "scheduled", "awaiting_approval", "executing", "success"],
+        &[
+            "validating",
+            "scheduled",
+            "awaiting_approval",
+            "executing",
+            "success",
+        ],
     );
 }
 
@@ -175,7 +198,10 @@ async fn ac3_transition_invalid_input_fails_fast() {
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
         mode: PermissionMode::Yolo,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let mut rx = sched.subscribe();
     let result = run_one(&sched, "Sleep", serde_json::json!({})).await;
@@ -198,8 +224,13 @@ async fn ac3_transition_cancel_during_execute() {
     let tools: Arc<dyn ToolSetPort> = Arc::new(NotifyingSleepToolSet {
         started: started.clone(),
     });
-    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity { mode: PermissionMode::Yolo });
-    let approval_runtime = ApprovalRuntime::new(64, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
+        mode: PermissionMode::Yolo,
+    });
+    let approval_runtime = ApprovalRuntime::new(
+        64,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 64);
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
@@ -240,7 +271,10 @@ async fn ac3_transition_cancel_during_approval() {
         delay_ms: 0,
         parallel_safe: true,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
@@ -278,23 +312,34 @@ async fn ac3_transition_user_rejection_with_feedback() {
         delay_ms: 0,
         parallel_safe: true,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime.clone(), 16);
     let mut rx = sched.subscribe();
 
     // Subscribe to approval events BEFORE spawning run_one
     let mut events = approval_runtime.subscribe();
     let sched2 = sched.clone();
-    let handle = tokio::spawn(async move {
-        run_one(&sched2, "Sleep", serde_json::json!({})).await
-    });
+    let handle =
+        tokio::spawn(async move { run_one(&sched2, "Sleep", serde_json::json!({})).await });
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
-    approval_runtime.resolve(&id, rustain::domain::models::ApprovalOutcome::Reject { feedback: Some("nope".into()) }).await;
+    approval_runtime
+        .resolve(
+            &id,
+            rustain::domain::models::ApprovalOutcome::Reject {
+                feedback: Some("nope".into()),
+            },
+        )
+        .await;
 
     let result = handle.await.unwrap();
     assert!(matches!(result, ToolCall::Error { .. }));
@@ -354,7 +399,10 @@ async fn ac4_sequential_when_any_unsafe() {
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity {
         mode: PermissionMode::Yolo,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let batch: Vec<ToolCallRequest> = (0..3)
         .map(|i| ToolCallRequest {
@@ -388,12 +436,15 @@ fn ac4_builtin_parallel_safe_flags() {
     use rustain::adapters::toolset_adapter::ToolSetAdapter;
     use rustain::domain::ports::StoragePort;
     let tmp = tempfile::tempdir().unwrap();
-    let storage: Arc<dyn StoragePort> =
-        Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()));
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()),
+    );
     let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), storage);
     let defs = adapter.available_tools();
-    let map: std::collections::HashMap<String, bool> =
-        defs.iter().map(|d| (d.name.clone(), d.parallel_safe)).collect();
+    let map: std::collections::HashMap<String, bool> = defs
+        .iter()
+        .map(|d| (d.name.clone(), d.parallel_safe))
+        .collect();
     assert_eq!(map.get("Read"), Some(&true));
     assert_eq!(map.get("Bash"), Some(&false));
     assert_eq!(map.get("Write"), Some(&false));
@@ -430,29 +481,41 @@ async fn ac6_policy_ask_routes_to_approval_runtime() {
         delay_ms: 0,
         parallel_safe: true,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime.clone(), 16);
     let mut rx = sched.subscribe();
 
     // Subscribe to approval events BEFORE spawning run_one
     let mut events = approval_runtime.subscribe();
     let sched2 = sched.clone();
-    let handle = tokio::spawn(async move {
-        run_one(&sched2, "Sleep", serde_json::json!({})).await
-    });
+    let handle =
+        tokio::spawn(async move { run_one(&sched2, "Sleep", serde_json::json!({})).await });
 
     let event = events.recv().await.unwrap();
     let id = match event {
-        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested { id, .. } => id,
+        rustain::domain::services::approval_runtime::ApprovalRuntimeEvent::Requested {
+            id, ..
+        } => id,
         _ => panic!("expected Requested event"),
     };
-    approval_runtime.resolve(&id, rustain::domain::models::ApprovalOutcome::Once).await;
+    approval_runtime
+        .resolve(&id, rustain::domain::models::ApprovalOutcome::Once)
+        .await;
 
     let result = handle.await.unwrap();
     assert!(matches!(result, ToolCall::Success { .. }));
     assert_sequence(
         &mut rx,
-        &["validating", "scheduled", "awaiting_approval", "executing", "success"],
+        &[
+            "validating",
+            "scheduled",
+            "awaiting_approval",
+            "executing",
+            "success",
+        ],
     );
 }
 
@@ -460,8 +523,7 @@ async fn ac6_policy_ask_routes_to_approval_runtime() {
 
 #[test]
 fn ac7_turn_rs_delegates_to_scheduler() {
-    let turn_rs =
-        std::fs::read_to_string("src/infrastructure/runtime/turn.rs").unwrap();
+    let turn_rs = std::fs::read_to_string("src/infrastructure/runtime/turn.rs").unwrap();
     // permission_chain::check should not appear directly in turn.rs anymore
     assert!(
         !turn_rs.contains("permission_chain::check"),
@@ -479,13 +541,19 @@ fn ac7_turn_rs_delegates_to_scheduler() {
 fn make_test_scheduler(
     mode: PermissionMode,
     delay_ms: u64,
-) -> (Arc<ToolScheduler>, tokio::sync::broadcast::Receiver<ToolCallTransition>) {
+) -> (
+    Arc<ToolScheduler>,
+    tokio::sync::broadcast::Receiver<ToolCallTransition>,
+) {
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity { mode });
     let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet {
         delay_ms,
         parallel_safe: true,
     });
-    let approval_runtime = ApprovalRuntime::new(16, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        16,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 16);
     let rx = sched.subscribe();
     (sched, rx)
@@ -535,8 +603,7 @@ fn assert_sequence(
     assert_eq!(
         seen, expected,
         "transition sequence mismatch: got {:?}, expected {:?}",
-        seen,
-        expected
+        seen, expected
     );
 }
 

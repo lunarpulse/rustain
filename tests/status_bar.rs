@@ -81,8 +81,8 @@ fn render_status_bar_ml(
                 0,
                 None,
                 None,
-                    None,
-                    );
+                None,
+            );
         })
         .unwrap();
 
@@ -338,8 +338,8 @@ fn test_status_bar_hides_agent_when_none() {
                 0,
                 None,
                 None,
-                    None,
-                    );
+                None,
+            );
         })
         .unwrap();
 

@@ -38,7 +38,9 @@ impl RequestId {
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ApprovalSource {
-    ForegroundTurn { conversation_id: String },
+    ForegroundTurn {
+        conversation_id: String,
+    },
     ForegroundSubagent {
         conversation_id: String,
         parent_tool_call_id: String,
@@ -56,8 +58,12 @@ impl ApprovalSource {
     pub fn conversation_id(&self) -> &str {
         match self {
             ApprovalSource::ForegroundTurn { conversation_id } => conversation_id,
-            ApprovalSource::ForegroundSubagent { conversation_id, .. } => conversation_id,
-            ApprovalSource::BackgroundAgent { conversation_id, .. } => conversation_id,
+            ApprovalSource::ForegroundSubagent {
+                conversation_id, ..
+            } => conversation_id,
+            ApprovalSource::BackgroundAgent {
+                conversation_id, ..
+            } => conversation_id,
         }
     }
 }
@@ -142,7 +148,10 @@ impl ToolCall {
 
     /// True for terminal states (Success, Error, Cancelled).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, ToolCall::Success { .. } | ToolCall::Error { .. } | ToolCall::Cancelled { .. })
+        matches!(
+            self,
+            ToolCall::Success { .. } | ToolCall::Error { .. } | ToolCall::Cancelled { .. }
+        )
     }
 }
 
@@ -267,26 +276,130 @@ mod tests {
     #[test]
     fn is_terminal_table() {
         let req = sample_request();
-        assert!(!ToolCall::Validating { id: "a".into(), request: req.clone(), started_at: 0 }.is_terminal());
-        assert!(!ToolCall::Scheduled { id: "a".into(), request: req.clone() }.is_terminal());
-        assert!(!ToolCall::AwaitingApproval { id: "a".into(), request: req.clone(), approval_id: RequestId("req-default".into()) }.is_terminal());
-        assert!(!ToolCall::Executing { id: "a".into(), request: req.clone(), started_at: 0 }.is_terminal());
-        assert!(ToolCall::Success { id: "a".into(), request: req.clone(), result: ToolCallResult { output: "o".into(), is_error: false, duration_ms: 0 } }.is_terminal());
-        assert!(ToolCall::Error { id: "a".into(), request: req.clone(), error: "e".into() }.is_terminal());
-        assert!(ToolCall::Cancelled { id: "a".into(), request: req.clone(), reason: "r".into() }.is_terminal());
+        assert!(
+            !ToolCall::Validating {
+                id: "a".into(),
+                request: req.clone(),
+                started_at: 0
+            }
+            .is_terminal()
+        );
+        assert!(
+            !ToolCall::Scheduled {
+                id: "a".into(),
+                request: req.clone()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !ToolCall::AwaitingApproval {
+                id: "a".into(),
+                request: req.clone(),
+                approval_id: RequestId("req-default".into())
+            }
+            .is_terminal()
+        );
+        assert!(
+            !ToolCall::Executing {
+                id: "a".into(),
+                request: req.clone(),
+                started_at: 0
+            }
+            .is_terminal()
+        );
+        assert!(
+            ToolCall::Success {
+                id: "a".into(),
+                request: req.clone(),
+                result: ToolCallResult {
+                    output: "o".into(),
+                    is_error: false,
+                    duration_ms: 0
+                }
+            }
+            .is_terminal()
+        );
+        assert!(
+            ToolCall::Error {
+                id: "a".into(),
+                request: req.clone(),
+                error: "e".into()
+            }
+            .is_terminal()
+        );
+        assert!(
+            ToolCall::Cancelled {
+                id: "a".into(),
+                request: req.clone(),
+                reason: "r".into()
+            }
+            .is_terminal()
+        );
     }
 
     #[test]
     fn status_chip_exhaustive() {
         let req = sample_request();
         let cases: Vec<(ToolCall, &'static str)> = vec![
-            (ToolCall::Validating { id: "a".into(), request: req.clone(), started_at: 0 }, "⋯ Validating"),
-            (ToolCall::Scheduled { id: "a".into(), request: req.clone() }, "⧖ Scheduled"),
-            (ToolCall::AwaitingApproval { id: "a".into(), request: req.clone(), approval_id: RequestId("req-default".into()) }, "? Awaiting approval"),
-            (ToolCall::Executing { id: "a".into(), request: req.clone(), started_at: 0 }, "● Executing"),
-            (ToolCall::Success { id: "a".into(), request: req.clone(), result: ToolCallResult { output: "o".into(), is_error: false, duration_ms: 0 } }, "✓ Success"),
-            (ToolCall::Error { id: "a".into(), request: req.clone(), error: "e".into() }, "✗ Error"),
-            (ToolCall::Cancelled { id: "a".into(), request: req.clone(), reason: "r".into() }, "⊘ Cancelled"),
+            (
+                ToolCall::Validating {
+                    id: "a".into(),
+                    request: req.clone(),
+                    started_at: 0,
+                },
+                "⋯ Validating",
+            ),
+            (
+                ToolCall::Scheduled {
+                    id: "a".into(),
+                    request: req.clone(),
+                },
+                "⧖ Scheduled",
+            ),
+            (
+                ToolCall::AwaitingApproval {
+                    id: "a".into(),
+                    request: req.clone(),
+                    approval_id: RequestId("req-default".into()),
+                },
+                "? Awaiting approval",
+            ),
+            (
+                ToolCall::Executing {
+                    id: "a".into(),
+                    request: req.clone(),
+                    started_at: 0,
+                },
+                "● Executing",
+            ),
+            (
+                ToolCall::Success {
+                    id: "a".into(),
+                    request: req.clone(),
+                    result: ToolCallResult {
+                        output: "o".into(),
+                        is_error: false,
+                        duration_ms: 0,
+                    },
+                },
+                "✓ Success",
+            ),
+            (
+                ToolCall::Error {
+                    id: "a".into(),
+                    request: req.clone(),
+                    error: "e".into(),
+                },
+                "✗ Error",
+            ),
+            (
+                ToolCall::Cancelled {
+                    id: "a".into(),
+                    request: req.clone(),
+                    reason: "r".into(),
+                },
+                "⊘ Cancelled",
+            ),
         ];
         for (call, expected) in cases {
             assert_eq!(status_chip(&call), expected);
@@ -296,7 +409,11 @@ mod tests {
     #[test]
     fn id_and_request_helpers() {
         let req = sample_request();
-        let call = ToolCall::Executing { id: "xyz".into(), request: req.clone(), started_at: 0 };
+        let call = ToolCall::Executing {
+            id: "xyz".into(),
+            request: req.clone(),
+            started_at: 0,
+        };
         assert_eq!(call.id(), "xyz");
         assert_eq!(call.request().tool_name, "Read");
     }
@@ -304,9 +421,19 @@ mod tests {
     #[test]
     fn approval_source_serde_roundtrip() {
         let variants = vec![
-            ApprovalSource::ForegroundTurn { conversation_id: "conv-1".into() },
-            ApprovalSource::ForegroundSubagent { conversation_id: "conv-2".into(), parent_tool_call_id: "tc-1".into(), subagent_type: "explore".into() },
-            ApprovalSource::BackgroundAgent { conversation_id: "conv-3".into(), task_id: "task-1".into(), subagent_type: "general".into() },
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "conv-1".into(),
+            },
+            ApprovalSource::ForegroundSubagent {
+                conversation_id: "conv-2".into(),
+                parent_tool_call_id: "tc-1".into(),
+                subagent_type: "explore".into(),
+            },
+            ApprovalSource::BackgroundAgent {
+                conversation_id: "conv-3".into(),
+                task_id: "task-1".into(),
+                subagent_type: "general".into(),
+            },
         ];
         for original in variants {
             let json = serde_json::to_string(&original).unwrap();

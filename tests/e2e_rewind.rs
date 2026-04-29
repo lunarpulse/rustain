@@ -17,7 +17,9 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{HeightCache, RevertPreviewItem, RewindPreview, SearchState, TuiState};
+use rustain::adapters::tui::state::{
+    HeightCache, RevertPreviewItem, RewindPreview, SearchState, TuiState,
+};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::rewind_confirm::render_rewind_confirmation_lines;
 use rustain::domain::models::checkpoint::{CheckpointId, RevertStatus};
@@ -52,7 +54,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }
+    }
 }
 
 fn make_conversation_5_messages() -> Conversation {

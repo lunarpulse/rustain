@@ -27,7 +27,10 @@ async fn test_skill_registry_sharing_after_rescan() {
         let mut guard = shared.write().await;
         *guard = SkillRegistry::from_skills(vec![foo.clone()]);
     }
-    assert_eq!(activator.discovered_skill_names().await, vec!["foo".to_string()]);
+    assert_eq!(
+        activator.discovered_skill_names().await,
+        vec!["foo".to_string()]
+    );
 
     // Simulate a rescan that adds bar — matches AC4 Gherkin "When the test invokes a rescan that adds skill bar".
     let bar = rustain::domain::models::SkillDef {
@@ -52,11 +55,7 @@ async fn test_skill_registry_sharing_after_rescan() {
     // AC4: The shared Arc also sees [foo, bar] — same catalog, no divergence.
     {
         let guard = shared.read().await;
-        let filter_results: Vec<&str> = guard
-            .filter("")
-            .iter()
-            .map(|s| s.name.as_str())
-            .collect();
+        let filter_results: Vec<&str> = guard.filter("").iter().map(|s| s.name.as_str()).collect();
         assert_eq!(filter_results, vec!["bar", "foo"]);
     }
 }
@@ -103,7 +102,11 @@ async fn test_contended_write_then_read() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         // Read should see the new data.
         let guard = shared_clone.read().await;
-        guard.skills().iter().map(|s| s.name.clone()).collect::<Vec<_>>()
+        guard
+            .skills()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
     });
 
     // Main task waits for the write to complete, then reads concurrently.

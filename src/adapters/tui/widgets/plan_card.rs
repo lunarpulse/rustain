@@ -63,20 +63,14 @@ pub fn render_plan_card_lines<'a>(
             vertical_char,
             Style::default().fg(theme.colors.decision_border),
         ),
-        Span::styled(
-            " ".repeat(left_pad),
-            Style::default(),
-        ),
+        Span::styled(" ".repeat(left_pad), Style::default()),
         Span::styled(
             header_display,
             Style::default()
                 .fg(theme.colors.fg_primary)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            " ".repeat(right_pad),
-            Style::default(),
-        ),
+        Span::styled(" ".repeat(right_pad), Style::default()),
         Span::styled(
             vertical_char,
             Style::default().fg(theme.colors.decision_border),
@@ -99,7 +93,11 @@ pub fn render_plan_card_lines<'a>(
     for task in &plan.tasks {
         let task_title = format!("{}. {}", task.number, task.title);
         let title_display = if task_title.len() > inner_width.saturating_sub(2) {
-            format!("{}. {}...", task.number, &task.title[..inner_width.saturating_sub(6)])
+            format!(
+                "{}. {}...",
+                task.number,
+                &task.title[..inner_width.saturating_sub(6)]
+            )
         } else {
             task_title
         };
@@ -113,7 +111,17 @@ pub fn render_plan_card_lines<'a>(
             match task.status {
                 PlanTaskStatus::Pending => (String::new(), theme.colors.fg_muted),
                 PlanTaskStatus::Running => ("●".to_string(), theme.colors.tool_status_executing),
-                PlanTaskStatus::Waiting => (format!("⧖ (deps: {})", task.waiting_on.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")), theme.colors.tool_status_awaiting),
+                PlanTaskStatus::Waiting => (
+                    format!(
+                        "⧖ (deps: {})",
+                        task.waiting_on
+                            .iter()
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    theme.colors.tool_status_awaiting,
+                ),
                 PlanTaskStatus::Completed => ("✓".to_string(), theme.colors.tool_status_success),
                 PlanTaskStatus::Failed => ("✗".to_string(), theme.colors.tool_status_error),
                 PlanTaskStatus::Skipped => ("⏭".to_string(), theme.colors.tool_status_cancelled),
@@ -154,7 +162,10 @@ pub fn render_plan_card_lines<'a>(
         let padding = inner_width.saturating_sub(full_width_needed);
 
         let mut spans: Vec<Span<'_>> = vec![
-            Span::styled(vertical_char, Style::default().fg(theme.colors.decision_border)),
+            Span::styled(
+                vertical_char,
+                Style::default().fg(theme.colors.decision_border),
+            ),
             Span::styled(format!("  {}", title_display), title_style),
         ];
         if !icon_str.is_empty() {
@@ -170,7 +181,10 @@ pub fn render_plan_card_lines<'a>(
             ));
         }
         spans.push(Span::raw(" ".repeat(padding)));
-        spans.push(Span::styled(vertical_char, Style::default().fg(theme.colors.decision_border)));
+        spans.push(Span::styled(
+            vertical_char,
+            Style::default().fg(theme.colors.decision_border),
+        ));
         lines.push(Line::from(spans));
 
         if !task.description.is_empty() {
@@ -185,9 +199,7 @@ pub fn render_plan_card_lines<'a>(
                         format!("    {}", desc_line),
                         Style::default().fg(theme.colors.fg_muted),
                     ),
-                    Span::raw(" ".repeat(
-                        inner_width.saturating_sub(4 + desc_line.len())
-                    )),
+                    Span::raw(" ".repeat(inner_width.saturating_sub(4 + desc_line.len()))),
                     Span::styled(
                         vertical_char,
                         Style::default().fg(theme.colors.decision_border),
@@ -220,9 +232,7 @@ pub fn render_plan_card_lines<'a>(
                             .add_modifier(Modifier::ITALIC)
                             .add_modifier(Modifier::DIM),
                     ),
-                    Span::raw(" ".repeat(
-                        inner_width.saturating_sub(2 + effort_text.len())
-                    )),
+                    Span::raw(" ".repeat(inner_width.saturating_sub(2 + effort_text.len()))),
                     Span::styled(
                         vertical_char,
                         Style::default().fg(theme.colors.decision_border),
@@ -300,9 +310,7 @@ pub fn render_plan_card_lines<'a>(
                 format!("  {}", status_text),
                 Style::default().add_modifier(Modifier::DIM),
             ),
-            Span::raw(" ".repeat(
-                inner_width.saturating_sub(2 + status_text.len())
-            )),
+            Span::raw(" ".repeat(inner_width.saturating_sub(2 + status_text.len()))),
             Span::styled(
                 vertical_char,
                 Style::default().fg(theme.colors.decision_border),
@@ -377,10 +385,19 @@ fn format_timestamp(unix_ts: i64) -> String {
 }
 
 pub fn plan_card_height(plan: &Plan, width: u16, is_pending: bool) -> usize {
-    render_plan_card_lines(plan, &crate::adapters::tui::theme::Theme::dark(), width, is_pending).len()
+    render_plan_card_lines(
+        plan,
+        &crate::adapters::tui::theme::Theme::dark(),
+        width,
+        is_pending,
+    )
+    .len()
 }
 
-pub fn missing_plan_lines<'a>(plan_id: &str, theme: &crate::adapters::tui::theme::Theme) -> Vec<Line<'a>> {
+pub fn missing_plan_lines<'a>(
+    plan_id: &str,
+    theme: &crate::adapters::tui::theme::Theme,
+) -> Vec<Line<'a>> {
     vec![Line::from(Span::styled(
         format!("[plan unavailable: {}]", plan_id),
         Style::default()
@@ -536,7 +553,10 @@ mod tests {
     #[test]
     fn wrap_description_long_word() {
         let result = wrap_description("supercalifragilisticexpialidocious", 10);
-        assert_eq!(result, vec!["supercalif", "ragilistic", "expialidoc", "ious"]);
+        assert_eq!(
+            result,
+            vec!["supercalif", "ragilistic", "expialidoc", "ious"]
+        );
     }
 
     #[test]
@@ -573,7 +593,11 @@ mod tests {
                     .collect::<String>()
             })
             .collect();
-        assert!(text.contains("[approved"), "status footer should say 'approved', got: {}", text);
+        assert!(
+            text.contains("[approved"),
+            "status footer should say 'approved', got: {}",
+            text
+        );
         assert!(!text.contains("[executing"));
     }
 
@@ -582,11 +606,19 @@ mod tests {
         let plan = make_plan();
         let theme = crate::adapters::tui::theme::Theme::dark();
         let lines = render_plan_card_lines(&plan, &theme, 80, true);
-        let task_line = lines.iter().find(|l| {
-            l.spans.iter().any(|s| s.content.as_ref().contains("1. Step 1"))
-        }).unwrap();
+        let task_line = lines
+            .iter()
+            .find(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.as_ref().contains("1. Step 1"))
+            })
+            .unwrap();
         assert!(
-            task_line.spans.iter().any(|s| s.style.add_modifier == Modifier::BOLD),
+            task_line
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier == Modifier::BOLD),
             "task title should be BOLD when pending"
         );
     }
@@ -598,7 +630,12 @@ mod tests {
         let lines = render_plan_card_lines(&plan, &theme, 50, true);
         let text: String = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
         // Plain border should use ├ and ┤, not ╠ and ╣
         assert!(text.contains('├'), "plain separator should use ├");

@@ -13,8 +13,8 @@ pub mod palette;
 mod permission;
 pub mod plan;
 pub mod project_context;
-mod session;
 pub mod sandbox;
+mod session;
 pub mod session_meta;
 mod skill;
 mod stream;
@@ -22,6 +22,7 @@ pub mod tab;
 pub mod tool_call;
 mod tools;
 pub mod transaction;
+pub mod turn;
 mod usage;
 #[allow(dead_code)]
 pub mod visual;
@@ -33,6 +34,8 @@ pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
     validate_agent_frontmatter,
 };
+#[allow(unused_imports)]
+pub use approval::{ApprovalOutcome, ApprovalScope};
 #[allow(unused_imports)]
 pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
 #[allow(unused_imports)]
@@ -60,11 +63,8 @@ pub use notice::{
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
-pub use approval::{ApprovalOutcome, ApprovalScope};
-#[allow(unused_imports)]
 pub use permission::{
-    FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome, ToolRisk,
-    risk_for_builtin,
+    FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome, ToolRisk, risk_for_builtin,
 };
 #[allow(unused_imports)]
 pub use plan::{
@@ -88,8 +88,16 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState, apply_
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
-pub use tool_call::{ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition, status_chip};
+pub use tool_call::{
+    ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
+    status_chip,
+};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
+#[allow(unused_imports)]
+pub use turn::{
+    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
+    migrate_chat_message_to_turn,
+};
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};
 #[allow(unused_imports)]

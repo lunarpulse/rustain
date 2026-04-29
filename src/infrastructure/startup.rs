@@ -2,25 +2,25 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::cli::commands::{Cli, Command};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::project_context_loader::ProjectContextLoader;
-use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::security_adapter::SecurityAdapter;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
-use crate::domain::models::{PermissionMode, SandboxPolicy};
-use crate::domain::services::approval_runtime::ApprovalRuntime;
-use crate::domain::services::plan_manager::PlanManager;
-use crate::domain::services::plan_mode_injector::{DefaultPlanInjector, PlanModeInjector};
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
+use crate::domain::models::{PermissionMode, SandboxPolicy};
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
 };
+use crate::domain::services::approval_runtime::ApprovalRuntime;
+use crate::domain::services::plan_manager::PlanManager;
+use crate::domain::services::plan_mode_injector::{DefaultPlanInjector, PlanModeInjector};
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, paths, permission_rules, signals};
@@ -120,9 +120,14 @@ pub async fn run() -> Result<()> {
 
     // 6. Create AppState (owns EventBus + CancellationToken + ApprovalRuntime)
     let raw_capacity = app_config.runtime.event_bus.raw_capacity;
-    let user_config = paths::config_dir().unwrap_or_else(|_| workspace_path.join(".rustain")).join("config.toml");
+    let user_config = paths::config_dir()
+        .unwrap_or_else(|_| workspace_path.join(".rustain"))
+        .join("config.toml");
     let workspace_rules = workspace_path.join(".rustain").join("permissions.toml");
-    let persistence = Arc::new(ApprovalPersistenceToml::new(user_config.clone(), workspace_rules.clone()));
+    let persistence = Arc::new(ApprovalPersistenceToml::new(
+        user_config.clone(),
+        workspace_rules.clone(),
+    ));
     let approval_runtime = ApprovalRuntime::new(raw_capacity, persistence);
     approval_runtime.load_session().await;
     if let Ok(ruleset) = permission_rules::load_rules(&user_config, &workspace_rules) {

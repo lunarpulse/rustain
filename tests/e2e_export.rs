@@ -28,7 +28,7 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }
+    }
 }
 
 fn msg_with_tool_call(
@@ -51,7 +51,7 @@ fn msg_with_tool_call(
             result: Some(ToolResultInfo {
                 content: tool_result.to_string(),
                 is_error: false,
-        }),
+            }),
             started_at_ms: None,
             completed_at_ms: None,
             status: None,

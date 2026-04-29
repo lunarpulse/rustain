@@ -60,7 +60,7 @@ fn test_error_feedback_block_in_conversation() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
     let streaming = StreamingState::default();
 
     let backend = TestBackend::new(80, 24);

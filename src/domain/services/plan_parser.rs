@@ -7,9 +7,7 @@
 //! - Duplicate task numbers are rejected (defensive — auto-assigned at parse time)
 
 use crate::domain::errors::ToolError;
-use crate::domain::models::{
-    EffortEstimate, Plan, PlanStatus, PlanTask, PlanTaskStatus,
-};
+use crate::domain::models::{EffortEstimate, Plan, PlanStatus, PlanTask, PlanTaskStatus};
 use crate::domain::services::plan_effort::derive_effort_estimate;
 
 const MAX_PLAN_TITLE_LEN: usize = 80;
@@ -17,15 +15,18 @@ const MAX_TASK_TITLE_LEN: usize = 120;
 const MAX_TASK_DESCRIPTION_LEN: usize = 2000;
 const MAX_TASKS: usize = 20;
 
-fn parse_u32_field(
-    input: &serde_json::Value,
-    key: &str,
-) -> Result<Option<u32>, ToolError> {
+fn parse_u32_field(input: &serde_json::Value, key: &str) -> Result<Option<u32>, ToolError> {
     input
         .get(key)
         .map(|v| {
             v.as_u64()
-                .and_then(|n| if n <= u32::MAX as u64 { Some(n as u32) } else { None })
+                .and_then(|n| {
+                    if n <= u32::MAX as u64 {
+                        Some(n as u32)
+                    } else {
+                        None
+                    }
+                })
                 .ok_or_else(|| {
                     ToolError::InvalidInput(format!(
                         "propose_plan: '{}' must be an integer between 0 and {}",
@@ -37,16 +38,10 @@ fn parse_u32_field(
         .transpose()
 }
 
-fn parse_plan_input_inner(
-    input: &serde_json::Value,
-    plan_id: &str,
-) -> Result<Plan, ToolError> {
-    let title = input
-        .get("title")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            ToolError::InvalidInput("propose_plan: missing or non-string 'title'".to_string())
-        })?;
+fn parse_plan_input_inner(input: &serde_json::Value, plan_id: &str) -> Result<Plan, ToolError> {
+    let title = input.get("title").and_then(|v| v.as_str()).ok_or_else(|| {
+        ToolError::InvalidInput("propose_plan: missing or non-string 'title'".to_string())
+    })?;
 
     let tasks_arr = input
         .get("tasks")
@@ -166,7 +161,10 @@ pub fn validate_plan(plan: &Plan) -> Result<(), String> {
         return Err("plan title cannot be empty".to_string());
     }
     if plan.title.len() > MAX_PLAN_TITLE_LEN {
-        return Err(format!("plan title exceeds {} characters", MAX_PLAN_TITLE_LEN));
+        return Err(format!(
+            "plan title exceeds {} characters",
+            MAX_PLAN_TITLE_LEN
+        ));
     }
 
     if plan.tasks.is_empty() {
@@ -364,7 +362,10 @@ mod tests {
         });
         let err = parse_plan_input(&input, "p").unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(err.to_string().contains("depends_on[1] must be a positive integer"));
+        assert!(
+            err.to_string()
+                .contains("depends_on[1] must be a positive integer")
+        );
     }
 
     #[test]

@@ -84,7 +84,7 @@ fn test_chat_pane_shows_user_message() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
@@ -132,7 +132,7 @@ fn test_chat_pane_shows_assistant_message() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
@@ -265,7 +265,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
     let streaming = StreamingState {
         is_streaming: true,
         phase: StreamingPhase::AccumulatingText,
@@ -326,7 +326,7 @@ fn test_chat_pane_error_displays_in_red() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
@@ -437,8 +437,11 @@ fn test_feedback_block_visible_with_auto_scroll() {
             synthetic: false,
             id: rustain::domain::models::generate_conversation_id(),
             role: MessageRole::User,
-            content: format!("User message {
-            }", i),
+            content: format!(
+                "User message {
+            }",
+                i
+            ),
             content_blocks: vec![],
             tool_calls: vec![],
             created_at: 0,
@@ -529,7 +532,7 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         token_count: None,
         stop_reason: None,
         images: vec![],
-        }]);
+    }]);
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 

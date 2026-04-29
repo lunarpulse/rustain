@@ -130,11 +130,17 @@ pub fn render_task_panel(
     let (title, is_complete) = match plan {
         Some(p) if p.status == PlanStatus::Executing => {
             let t = format!(" Tasks \u{B7} {} ", p.title);
-            (truncate_to_width(&t, area.width.saturating_sub(2) as usize), false)
+            (
+                truncate_to_width(&t, area.width.saturating_sub(2) as usize),
+                false,
+            )
         }
         Some(p) if p.status == PlanStatus::Completed || p.status == PlanStatus::Cancelled => {
             let t = format!(" Tasks \u{B7} {} (last) ", p.title);
-            (truncate_to_width(&t, area.width.saturating_sub(2) as usize), true)
+            (
+                truncate_to_width(&t, area.width.saturating_sub(2) as usize),
+                true,
+            )
         }
         _ => (" Tasks ".to_string(), false),
     };
@@ -158,15 +164,21 @@ pub fn render_task_panel(
             let lines = vec![
                 Line::from(Span::styled(
                     "No active plan.",
-                    Style::default().fg(theme.colors.fg_muted).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(theme.colors.fg_muted)
+                        .add_modifier(Modifier::ITALIC),
                 )),
                 Line::from(Span::styled(
                     "Start one by asking for",
-                    Style::default().fg(theme.colors.fg_muted).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(theme.colors.fg_muted)
+                        .add_modifier(Modifier::ITALIC),
                 )),
                 Line::from(Span::styled(
                     "a complex task.",
-                    Style::default().fg(theme.colors.fg_muted).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(theme.colors.fg_muted)
+                        .add_modifier(Modifier::ITALIC),
                 )),
             ];
             let para = ratatui::widgets::Paragraph::new(lines).alignment(Alignment::Center);
@@ -183,10 +195,14 @@ pub fn render_task_panel(
                 let notice = "\u{2504} Plan complete \u{B7} open a new plan to refresh \u{2504}";
                 let notice_style = Style::default().fg(theme.colors.fg_muted);
                 let notice_line = Line::from(Span::styled(notice.to_string(), notice_style));
-                let notice_para = ratatui::widgets::Paragraph::new(notice_line).alignment(Alignment::Center);
+                let notice_para =
+                    ratatui::widgets::Paragraph::new(notice_line).alignment(Alignment::Center);
                 if inner_area.height > 0 {
                     notice_para.render(
-                        Rect { height: 1, ..inner_area },
+                        Rect {
+                            height: 1,
+                            ..inner_area
+                        },
                         buf,
                     );
                 }
@@ -212,10 +228,7 @@ pub fn render_task_panel(
                             format!("{}. ", task.number),
                             Style::default().fg(theme.colors.fg_secondary),
                         ),
-                        Span::styled(
-                            icon.symbol.to_string(),
-                            Style::default().fg(icon.color),
-                        ),
+                        Span::styled(icon.symbol.to_string(), Style::default().fg(icon.color)),
                         Span::styled(
                             format!(" {}", task.title),
                             Style::default().fg(theme.colors.fg_primary),
@@ -268,11 +281,13 @@ pub fn render_task_panel(
                     }
 
                     if i == selected_index && is_focused {
-                        ListItem::new(line.style(
-                            Style::default()
-                                .fg(theme.colors.fg_primary)
-                                .add_modifier(Modifier::REVERSED),
-                        ))
+                        ListItem::new(
+                            line.style(
+                                Style::default()
+                                    .fg(theme.colors.fg_primary)
+                                    .add_modifier(Modifier::REVERSED),
+                            ),
+                        )
                     } else {
                         ListItem::new(line)
                     }
@@ -333,8 +348,8 @@ mod tests {
     use super::*;
     use crate::adapters::tui::color_detect::ColorCapability;
     use crate::adapters::tui::theme::Theme;
-    use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult};
     use crate::domain::models::Conversation;
+    use crate::domain::models::plan::{Plan, PlanStatus, PlanTask, PlanTaskStatus, TaskResult};
 
     fn test_theme() -> Theme {
         Theme::for_capability(ColorCapability::TrueColor)
@@ -410,7 +425,10 @@ mod tests {
     fn render_completed_plan_shows_last() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 20));
         let area = Rect::new(0, 0, 40, 20);
-        let plan = make_plan(PlanStatus::Completed, vec![make_task(1, "Done task", PlanTaskStatus::Completed)]);
+        let plan = make_plan(
+            PlanStatus::Completed,
+            vec![make_task(1, "Done task", PlanTaskStatus::Completed)],
+        );
         render_task_panel(area, &mut buf, Some(&plan), 0, true, &test_theme());
         let content = collect_buffer(&buf, area);
         assert!(content.contains("(last)"));
@@ -423,7 +441,11 @@ mod tests {
         let area = Rect::new(0, 0, 30, 20);
         let plan = make_plan(
             PlanStatus::Executing,
-            vec![make_task(1, "A very long task title that exceeds width", PlanTaskStatus::Pending)],
+            vec![make_task(
+                1,
+                "A very long task title that exceeds width",
+                PlanTaskStatus::Pending,
+            )],
         );
         render_task_panel(area, &mut buf, Some(&plan), 0, true, &test_theme());
     }
@@ -442,8 +464,14 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
         };
-        let p1 = make_plan(PlanStatus::Completed, vec![make_task(1, "A", PlanTaskStatus::Completed)]);
-        let p2 = make_plan(PlanStatus::Executing, vec![make_task(1, "B", PlanTaskStatus::Running)]);
+        let p1 = make_plan(
+            PlanStatus::Completed,
+            vec![make_task(1, "A", PlanTaskStatus::Completed)],
+        );
+        let p2 = make_plan(
+            PlanStatus::Executing,
+            vec![make_task(1, "B", PlanTaskStatus::Running)],
+        );
         conv.plans.insert("p1".to_string(), p1);
         conv.plans.insert("p2".to_string(), p2);
         let result = resolve_panel_plan(&conv, Some("p1"));
@@ -465,7 +493,10 @@ mod tests {
             plans: std::collections::HashMap::new(),
             fork_source: None,
         };
-        let p2 = make_plan(PlanStatus::Executing, vec![make_task(1, "B", PlanTaskStatus::Running)]);
+        let p2 = make_plan(
+            PlanStatus::Executing,
+            vec![make_task(1, "B", PlanTaskStatus::Running)],
+        );
         conv.plans.insert("p2".to_string(), p2);
         let result = resolve_panel_plan(&conv, Some("nonexistent"));
         assert!(result.is_some());

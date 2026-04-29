@@ -93,7 +93,9 @@ pub async fn check(
     if tool_name == "exit_plan_mode" {
         return match security.current_mode() {
             PermissionMode::Plan => PermissionDecision::Allow,
-            _ => PermissionDecision::Deny("exit_plan_mode is only available in Plan mode".to_string()),
+            _ => PermissionDecision::Deny(
+                "exit_plan_mode is only available in Plan mode".to_string(),
+            ),
         };
     }
 
@@ -189,9 +191,10 @@ fn derive_server_id(tool_name: &str) -> Option<String> {
 /// Derive path_hint from tool_name and input (for Read/Write/Edit).
 fn derive_path_hint(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     match tool_name {
-        "Read" | "Write" | "Edit" => {
-            input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
+        "Read" | "Write" | "Edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         _ => None,
     }
 }

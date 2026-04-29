@@ -74,7 +74,8 @@ impl CommandRegistry {
             },
             SlashCommandDef {
                 name: "plan".to_string(),
-                description: "Toggle Plan mode (read-only exploration with reminder injection)".to_string(),
+                description: "Toggle Plan mode (read-only exploration with reminder injection)"
+                    .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
             },

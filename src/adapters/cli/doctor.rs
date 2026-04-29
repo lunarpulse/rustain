@@ -851,7 +851,10 @@ impl HealthCheck for PermissionRulesCheck {
                 name: self.name().to_string(),
                 status: CheckStatus::Warning,
                 message: "failed to load permission rules".to_string(),
-                fix: Some("Check ~/.rustain/config.toml and workspace/.rustain/permissions.toml".to_string()),
+                fix: Some(
+                    "Check ~/.rustain/config.toml and workspace/.rustain/permissions.toml"
+                        .to_string(),
+                ),
             },
         }
     }

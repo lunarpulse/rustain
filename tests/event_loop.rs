@@ -42,21 +42,25 @@ fn test_resize_event_updates_state() {
 #[test]
 fn test_permission_queue_push_pop() {
     use rustain::adapters::tui::state::{PendingPermission, PermissionQueue};
-    use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
     use rustain::domain::models::ToolRisk;
+    use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
 
     let mut queue = PermissionQueue::default();
 
     queue.push(PendingPermission {
         id: RequestId::new(),
-        source: ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
+        source: ApprovalSource::ForegroundTurn {
+            conversation_id: "c1".into(),
+        },
         tool_name: "Bash".to_string(),
         tool_input: "ls".to_string(),
         risk: ToolRisk::Elevated,
     });
     queue.push(PendingPermission {
         id: RequestId::new(),
-        source: ApprovalSource::ForegroundTurn { conversation_id: "c1".into() },
+        source: ApprovalSource::ForegroundTurn {
+            conversation_id: "c1".into(),
+        },
         tool_name: "Write".to_string(),
         tool_input: "a.rs".to_string(),
         risk: ToolRisk::Standard,

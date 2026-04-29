@@ -11,8 +11,8 @@ use async_trait::async_trait;
 
 use crate::domain::errors::ApprovalPersistenceError;
 use crate::domain::models::ApprovalScope;
-use crate::domain::services::approval_runtime::SessionApprovalSet;
 use crate::domain::ports::ApprovalPersistencePort;
+use crate::domain::services::approval_runtime::SessionApprovalSet;
 
 /// TOML persistence adapter with per-target-file locking.
 pub struct ApprovalPersistenceToml {
@@ -39,62 +39,73 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
         let mut set = SessionApprovalSet::default();
 
         match tokio::fs::read_to_string(&self.user_config_path).await {
-            Ok(content) => {
-                match content.parse::<toml::Table>() {
-                    Ok(table) => {
-                        if let Some(permissions) = table.get("permissions").and_then(|v| v.as_table()) {
-                            if let Some(tools) = permissions.get("always_tools").and_then(|v| v.as_array()) {
-                                for t in tools {
-                                    if let Some(s) = t.as_str() {
-                                        set.always_tools.insert(s.to_string());
-                                    }
+            Ok(content) => match content.parse::<toml::Table>() {
+                Ok(table) => {
+                    if let Some(permissions) = table.get("permissions").and_then(|v| v.as_table()) {
+                        if let Some(tools) =
+                            permissions.get("always_tools").and_then(|v| v.as_array())
+                        {
+                            for t in tools {
+                                if let Some(s) = t.as_str() {
+                                    set.always_tools.insert(s.to_string());
                                 }
                             }
-                            if let Some(servers) = permissions.get("always_servers").and_then(|v| v.as_array()) {
-                                for s in servers {
-                                    if let Some(s) = s.as_str() {
-                                        set.always_servers.insert(s.to_string());
-                                    }
+                        }
+                        if let Some(servers) =
+                            permissions.get("always_servers").and_then(|v| v.as_array())
+                        {
+                            for s in servers {
+                                if let Some(s) = s.as_str() {
+                                    set.always_servers.insert(s.to_string());
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Malformed user config TOML: {}", e);
-                    }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("Malformed user config TOML: {}", e);
+                }
+            },
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                tracing::warn!("Cannot read user config ({}): {}", self.user_config_path.display(), e);
+                tracing::warn!(
+                    "Cannot read user config ({}): {}",
+                    self.user_config_path.display(),
+                    e
+                );
             }
             Err(_) => {}
         }
 
         match tokio::fs::read_to_string(&self.workspace_rules_path).await {
-            Ok(content) => {
-                match content.parse::<toml::Table>() {
-                    Ok(table) => {
-                        if let Some(rules) = table.get("rules").and_then(|v| v.as_array()) {
-                            for r in rules {
-                                if let Some(rule) = r.as_table() {
-                                    if let Some(pattern) = rule.get("pattern").and_then(|v| v.as_str()) {
-                                        if let Some(action) = rule.get("action").and_then(|v| v.as_str()) {
-                                            if action == "allow" {
-                                                set.always_paths.push(pattern.to_string());
-                                            }
+            Ok(content) => match content.parse::<toml::Table>() {
+                Ok(table) => {
+                    if let Some(rules) = table.get("rules").and_then(|v| v.as_array()) {
+                        for r in rules {
+                            if let Some(rule) = r.as_table() {
+                                if let Some(pattern) = rule.get("pattern").and_then(|v| v.as_str())
+                                {
+                                    if let Some(action) =
+                                        rule.get("action").and_then(|v| v.as_str())
+                                    {
+                                        if action == "allow" {
+                                            set.always_paths.push(pattern.to_string());
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Malformed workspace permissions TOML: {}", e);
-                    }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("Malformed workspace permissions TOML: {}", e);
+                }
+            },
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                tracing::warn!("Cannot read workspace rules ({}): {}", self.workspace_rules_path.display(), e);
+                tracing::warn!(
+                    "Cannot read workspace rules ({}): {}",
+                    self.workspace_rules_path.display(),
+                    e
+                );
             }
             Err(_) => {}
         }
@@ -113,7 +124,9 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
                         "config path has no parent directory",
                     ))
                 })?;
-                tokio::fs::create_dir_all(parent).await.map_err(ApprovalPersistenceError::Io)?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(ApprovalPersistenceError::Io)?;
 
                 let mut table = match tokio::fs::read_to_string(path).await {
                     Ok(content) => content.parse::<toml::Table>().map_err(|e| {
@@ -124,19 +137,25 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
                     Err(e) => return Err(ApprovalPersistenceError::Io(e)),
                 };
 
-                let permissions = table.entry("permissions").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                let permissions = table
+                    .entry("permissions")
+                    .or_insert_with(|| toml::Value::Table(toml::Table::new()));
                 let perms_table = permissions.as_table_mut().unwrap();
 
                 match scope {
                     ApprovalScope::Tool(tool_name) => {
-                        let tools = perms_table.entry("always_tools").or_insert_with(|| toml::Value::Array(toml::value::Array::new()));
+                        let tools = perms_table
+                            .entry("always_tools")
+                            .or_insert_with(|| toml::Value::Array(toml::value::Array::new()));
                         let arr = tools.as_array_mut().unwrap();
                         if !arr.iter().any(|v| v.as_str() == Some(&tool_name)) {
                             arr.push(toml::Value::String(tool_name));
                         }
                     }
                     ApprovalScope::Server(server_id) => {
-                        let servers = perms_table.entry("always_servers").or_insert_with(|| toml::Value::Array(toml::value::Array::new()));
+                        let servers = perms_table
+                            .entry("always_servers")
+                            .or_insert_with(|| toml::Value::Array(toml::value::Array::new()));
                         let arr = servers.as_array_mut().unwrap();
                         if !arr.iter().any(|v| v.as_str() == Some(&server_id)) {
                             arr.push(toml::Value::String(server_id));
@@ -147,8 +166,11 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
 
                 let content = toml::to_string_pretty(&table)?;
                 let temp = tempfile::NamedTempFile::new_in(parent)?;
-                tokio::fs::write(temp.path(), content).await.map_err(ApprovalPersistenceError::Io)?;
-                temp.persist(path).map_err(|e| ApprovalPersistenceError::Io(e.error))?;
+                tokio::fs::write(temp.path(), content)
+                    .await
+                    .map_err(ApprovalPersistenceError::Io)?;
+                temp.persist(path)
+                    .map_err(|e| ApprovalPersistenceError::Io(e.error))?;
                 Ok(())
             }
             ApprovalScope::PathPrefix(pattern) => {
@@ -160,7 +182,9 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
                         "rules path has no parent directory",
                     ))
                 })?;
-                tokio::fs::create_dir_all(parent).await.map_err(ApprovalPersistenceError::Io)?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(ApprovalPersistenceError::Io)?;
 
                 let mut table = match tokio::fs::read_to_string(path).await {
                     Ok(content) => content.parse::<toml::Table>().map_err(|e| {
@@ -171,18 +195,25 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
                     Err(e) => return Err(ApprovalPersistenceError::Io(e)),
                 };
 
-                let rules = table.entry("rules").or_insert_with(|| toml::Value::Array(toml::value::Array::new()));
+                let rules = table
+                    .entry("rules")
+                    .or_insert_with(|| toml::Value::Array(toml::value::Array::new()));
                 let arr = rules.as_array_mut().unwrap();
                 let already_exists = arr.iter().any(|v| {
-                    v.as_table().map(|t| {
-                        t.get("pattern").and_then(|v| v.as_str()) == Some(&pattern)
-                            && t.get("scope").and_then(|v| v.as_str()) == Some("path")
-                    }).unwrap_or(false)
+                    v.as_table()
+                        .map(|t| {
+                            t.get("pattern").and_then(|v| v.as_str()) == Some(&pattern)
+                                && t.get("scope").and_then(|v| v.as_str()) == Some("path")
+                        })
+                        .unwrap_or(false)
                 });
                 if !already_exists {
                     let new_rule = toml::Table::from_iter([
                         ("pattern".to_string(), toml::Value::String(pattern)),
-                        ("action".to_string(), toml::Value::String("allow".to_string())),
+                        (
+                            "action".to_string(),
+                            toml::Value::String("allow".to_string()),
+                        ),
                         ("scope".to_string(), toml::Value::String("path".to_string())),
                     ]);
                     arr.push(toml::Value::Table(new_rule));
@@ -190,8 +221,11 @@ impl ApprovalPersistencePort for ApprovalPersistenceToml {
 
                 let content = toml::to_string_pretty(&table)?;
                 let temp = tempfile::NamedTempFile::new_in(parent)?;
-                tokio::fs::write(temp.path(), content).await.map_err(ApprovalPersistenceError::Io)?;
-                temp.persist(path).map_err(|e| ApprovalPersistenceError::Io(e.error))?;
+                tokio::fs::write(temp.path(), content)
+                    .await
+                    .map_err(ApprovalPersistenceError::Io)?;
+                temp.persist(path)
+                    .map_err(|e| ApprovalPersistenceError::Io(e.error))?;
                 Ok(())
             }
         }

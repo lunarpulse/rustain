@@ -5,18 +5,18 @@
 
 use std::collections::HashMap;
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use rustain::adapters::tui::app::handle_input;
-use rustain::adapters::tui::state::{TaskPanelState, TuiState};
 use rustain::adapters::tui::color_detect::ColorCapability;
+use rustain::adapters::tui::state::{TaskPanelState, TuiState};
 use rustain::adapters::tui::widgets::task_panel::{render_task_panel, resolve_panel_plan};
 use rustain::domain::events::{AppEvent, DomainInputEvent, DomainKey};
+use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{
     Conversation, FocusState, NoticeLevel, Plan, PlanStatus, PlanTask, PlanTaskStatus,
     generate_conversation_id,
 };
-use rustain::domain::models::visual::PanelType;
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 
 fn make_task(number: u32, title: &str, status: PlanTaskStatus) -> PlanTask {
     PlanTask {
@@ -155,10 +155,16 @@ fn ac9_most_recent_plan_fallback() {
         plans: HashMap::new(),
         fork_source: None,
     };
-    let mut p1 = make_plan(PlanStatus::Cancelled, vec![make_task(1, "Cancelled", PlanTaskStatus::Cancelled)]);
+    let mut p1 = make_plan(
+        PlanStatus::Cancelled,
+        vec![make_task(1, "Cancelled", PlanTaskStatus::Cancelled)],
+    );
     p1.id = "p1".to_string();
     p1.tasks[0].completed_at_ms = Some(1000);
-    let mut p2 = make_plan(PlanStatus::Completed, vec![make_task(1, "Completed", PlanTaskStatus::Completed)]);
+    let mut p2 = make_plan(
+        PlanStatus::Completed,
+        vec![make_task(1, "Completed", PlanTaskStatus::Completed)],
+    );
     p2.id = "p2".to_string();
     p2.tasks[0].completed_at_ms = Some(2000);
     conv.plans.insert("p1".to_string(), p1);
@@ -177,7 +183,9 @@ fn ac10_resize_clears_drill_down() {
     state.sidebar_visible = true;
     // Simulate resize to narrow
     state.terminal_width = 100;
-    if state.terminal_width < rustain::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
+    if state.terminal_width < rustain::adapters::tui::layout::SIDEBAR_MIN_WIDTH
+        && state.sidebar_visible
+    {
         state.sidebar_visible = false;
         state.sidebar_panel = None;
         state.task_panel_state.drill_down_task = None;
@@ -200,8 +208,14 @@ fn resolve_panel_plan_prefers_last_id() {
         plans: HashMap::new(),
         fork_source: None,
     };
-    let p1 = make_plan(PlanStatus::Completed, vec![make_task(1, "A", PlanTaskStatus::Completed)]);
-    let p2 = make_plan(PlanStatus::Executing, vec![make_task(1, "B", PlanTaskStatus::Running)]);
+    let p1 = make_plan(
+        PlanStatus::Completed,
+        vec![make_task(1, "A", PlanTaskStatus::Completed)],
+    );
+    let p2 = make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "B", PlanTaskStatus::Running)],
+    );
     conv.plans.insert("p1".to_string(), p1);
     conv.plans.insert("p2".to_string(), p2);
     let result = resolve_panel_plan(&conv, Some("p1"));
@@ -223,7 +237,10 @@ fn resolve_panel_plan_fallback_executing() {
         plans: HashMap::new(),
         fork_source: None,
     };
-    let p2 = make_plan(PlanStatus::Executing, vec![make_task(1, "B", PlanTaskStatus::Running)]);
+    let p2 = make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "B", PlanTaskStatus::Running)],
+    );
     conv.plans.insert("p2".to_string(), p2);
     let result = resolve_panel_plan(&conv, Some("nonexistent"));
     assert!(result.is_some());
@@ -253,8 +270,8 @@ fn resolve_panel_plan_returns_none_when_empty() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 use rustain::adapters::tui::task_panel_handlers::{
-    any_plan_has_running_task, drill_down_task_status, handle_open_panel_tasks, handle_plan_execution_started,
-    handle_plan_task_status_changed, resolve_copy_task_payload,
+    any_plan_has_running_task, drill_down_task_status, handle_open_panel_tasks,
+    handle_plan_execution_started, handle_plan_task_status_changed, resolve_copy_task_payload,
 };
 use rustain::domain::models::plan::TaskResult;
 
@@ -278,7 +295,10 @@ fn ac1_chord_opens_panel_at_wide_terminal() {
 
 #[test]
 fn ac1_chord_warns_at_narrow_terminal() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Pending)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Pending)],
+    ));
     let mut state = TuiState::new(80, 24);
     let outcome = handle_open_panel_tasks(&mut state, &conv, 80, SIDEBAR_MIN);
     assert!(!outcome.opened);
@@ -291,7 +311,10 @@ fn ac1_chord_warns_at_narrow_terminal() {
 
 #[test]
 fn ac1_chord_toggle_close_records_suppression() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Pending)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Pending)],
+    ));
     let mut state = TuiState::new(160, 24);
     let _ = handle_open_panel_tasks(&mut state, &conv, 160, SIDEBAR_MIN);
     assert!(state.sidebar_visible);
@@ -299,10 +322,12 @@ fn ac1_chord_toggle_close_records_suppression() {
     let outcome = handle_open_panel_tasks(&mut state, &conv, 160, SIDEBAR_MIN);
     assert!(outcome.closed);
     assert!(!state.sidebar_visible);
-    assert!(state
-        .task_panel_state
-        .auto_open_suppressed_conversations
-        .contains(&conv.id));
+    assert!(
+        state
+            .task_panel_state
+            .auto_open_suppressed_conversations
+            .contains(&conv.id)
+    );
 }
 
 #[test]
@@ -337,7 +362,10 @@ fn ac1_auto_open_on_plan_execution_started() {
 
 #[test]
 fn ac1_auto_open_suppressed_by_config() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Running)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Running)],
+    ));
     let mut state = TuiState::new(160, 24);
     let outcome = handle_plan_execution_started(
         &mut state,
@@ -357,31 +385,56 @@ fn ac1_auto_open_suppressed_by_config() {
 fn ac1_auto_open_honors_user_suppression_with_one_time_hint() {
     // PD1 (Sally A2): after user closes, next plan is suppressed AND emits
     // a one-time hint toast for that conversation.
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Pending)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Pending)],
+    ));
     let mut state = TuiState::new(160, 24);
     state
         .task_panel_state
         .auto_open_suppressed_conversations
         .insert(conv.id.clone());
     let first = handle_plan_execution_started(
-        &mut state, &conv, &conv.id, "test-plan", 160, SIDEBAR_MIN, "tasks",
+        &mut state,
+        &conv,
+        &conv.id,
+        "test-plan",
+        160,
+        SIDEBAR_MIN,
+        "tasks",
     );
     assert!(first.suppressed);
     assert!(!first.auto_opened);
     assert!(!state.sidebar_visible);
-    assert_eq!(first.notices.len(), 1, "one-time hint should fire on first suppression");
+    assert_eq!(
+        first.notices.len(),
+        1,
+        "one-time hint should fire on first suppression"
+    );
     assert!(first.notices[0].message.contains("hidden for this session"));
     // Second plan in same conversation: still suppressed, but NO toast.
     let second = handle_plan_execution_started(
-        &mut state, &conv, &conv.id, "test-plan", 160, SIDEBAR_MIN, "tasks",
+        &mut state,
+        &conv,
+        &conv.id,
+        "test-plan",
+        160,
+        SIDEBAR_MIN,
+        "tasks",
     );
     assert!(second.suppressed);
-    assert!(second.notices.is_empty(), "hint must be one-time per conversation");
+    assert!(
+        second.notices.is_empty(),
+        "hint must be one-time per conversation"
+    );
 }
 
 #[test]
 fn ac2_status_change_triggers_redraw_when_panel_open() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Running)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Running)],
+    ));
     let mut state = TuiState::new(160, 24);
     state.sidebar_visible = true;
     state.sidebar_panel = Some(PanelType::Tasks);
@@ -397,7 +450,10 @@ fn ac2_status_change_triggers_redraw_when_panel_open() {
 
 #[test]
 fn ac2_status_change_other_conversation_ignored() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Running)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Running)],
+    ));
     let mut state = TuiState::new(160, 24);
     state.sidebar_panel = Some(PanelType::Tasks);
     state.needs_redraw = false;
@@ -414,7 +470,10 @@ fn ac2_status_change_other_conversation_ignored() {
 
 #[test]
 fn ac2_status_change_unknown_plan_ignored() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Running)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Running)],
+    ));
     let mut state = TuiState::new(160, 24);
     state.sidebar_panel = Some(PanelType::Tasks);
     let bumped = handle_plan_task_status_changed(&mut state, &conv, &conv.id, "phantom-plan");
@@ -451,10 +510,16 @@ fn ac7_reserved_keys_only_emit_on_failed_drill_down() {
     state.task_panel_state.last_executed_plan_id = Some("test-plan".to_string());
     // Drill into Completed task → status is Completed (not Failed).
     state.task_panel_state.drill_down_task = Some(1);
-    assert_eq!(drill_down_task_status(&state, &conv), Some(PlanTaskStatus::Completed));
+    assert_eq!(
+        drill_down_task_status(&state, &conv),
+        Some(PlanTaskStatus::Completed)
+    );
     // Drill into Failed task → status is Failed.
     state.task_panel_state.drill_down_task = Some(2);
-    assert_eq!(drill_down_task_status(&state, &conv), Some(PlanTaskStatus::Failed));
+    assert_eq!(
+        drill_down_task_status(&state, &conv),
+        Some(PlanTaskStatus::Failed)
+    );
     // No drill-down at all → None.
     state.task_panel_state.drill_down_task = None;
     assert_eq!(drill_down_task_status(&state, &conv), None);
@@ -530,7 +595,10 @@ fn pd2_running_detector_only_true_for_executing_plan_with_running_task() {
 
 #[test]
 fn ac1_auto_open_event_for_other_conversation_ignored() {
-    let conv = make_conv_with_plan(make_plan(PlanStatus::Executing, vec![make_task(1, "T", PlanTaskStatus::Pending)]));
+    let conv = make_conv_with_plan(make_plan(
+        PlanStatus::Executing,
+        vec![make_task(1, "T", PlanTaskStatus::Pending)],
+    ));
     let mut state = TuiState::new(160, 24);
     let outcome = handle_plan_execution_started(
         &mut state,
@@ -575,7 +643,10 @@ fn ac6_enter_on_task_1_drills_into_task_1() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.task_count = 3;
     state.task_panel_state.selected_index = 0;
-    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 0 };
+    state.focus = FocusState::Sidebar {
+        panel: PanelType::Tasks,
+        selected: 0,
+    };
     let _action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(state.task_panel_state.drill_down_task, Some(1));
 }
@@ -588,27 +659,46 @@ fn ac7_enter_in_task_detail_toggles_expanded() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.task_count = 1;
     state.task_panel_state.selected_index = 0;
-    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 0 };
+    state.focus = FocusState::Sidebar {
+        panel: PanelType::Tasks,
+        selected: 0,
+    };
 
     // Drill in.
     let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(state.task_panel_state.drill_down_task, Some(1));
-    assert!(!state.task_panel_state.expanded_detail, "expanded resets on drill-in");
+    assert!(
+        !state.task_panel_state.expanded_detail,
+        "expanded resets on drill-in"
+    );
 
     // First Enter inside drill-down: expand.
     let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert!(state.task_panel_state.expanded_detail, "Enter expands result");
-    assert_eq!(state.task_panel_state.drill_down_task, Some(1), "still drilled in");
+    assert!(
+        state.task_panel_state.expanded_detail,
+        "Enter expands result"
+    );
+    assert_eq!(
+        state.task_panel_state.drill_down_task,
+        Some(1),
+        "still drilled in"
+    );
 
     // Second Enter: collapse.
     let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert!(!state.task_panel_state.expanded_detail, "Enter collapses result");
+    assert!(
+        !state.task_panel_state.expanded_detail,
+        "Enter collapses result"
+    );
 
     // Esc back: clears drill-down and expanded flag together.
     state.task_panel_state.expanded_detail = true;
     let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(state.task_panel_state.drill_down_task, None);
-    assert!(!state.task_panel_state.expanded_detail, "expanded clears on Esc");
+    assert!(
+        !state.task_panel_state.expanded_detail,
+        "expanded clears on Esc"
+    );
 }
 
 #[test]
@@ -616,7 +706,10 @@ fn ac6_enter_on_task_2_drills_into_task_2() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.task_count = 3;
     state.task_panel_state.selected_index = 1;
-    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 1 };
+    state.focus = FocusState::Sidebar {
+        panel: PanelType::Tasks,
+        selected: 1,
+    };
     let _action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(state.task_panel_state.drill_down_task, Some(2));
 }
@@ -626,7 +719,10 @@ fn ac6_arrow_down_navigates_task_panel() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.task_count = 3;
     state.task_panel_state.selected_index = 0;
-    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 0 };
+    state.focus = FocusState::Sidebar {
+        panel: PanelType::Tasks,
+        selected: 0,
+    };
     let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Down));
     assert_eq!(state.task_panel_state.selected_index, 1);
     assert_eq!(state.sidebar_selected, 1);
@@ -637,7 +733,10 @@ fn ac6_arrow_up_navigates_task_panel() {
     let mut state = TuiState::new(160, 24);
     state.task_panel_state.task_count = 3;
     state.task_panel_state.selected_index = 2;
-    state.focus = FocusState::Sidebar { panel: PanelType::Tasks, selected: 2 };
+    state.focus = FocusState::Sidebar {
+        panel: PanelType::Tasks,
+        selected: 2,
+    };
     let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Up));
     assert_eq!(state.task_panel_state.selected_index, 1);
     assert_eq!(state.sidebar_selected, 1);

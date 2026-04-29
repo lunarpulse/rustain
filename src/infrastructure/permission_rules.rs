@@ -62,7 +62,9 @@ impl RuleSet {
     /// Return true if a catch-all `*` / `ask` / `tool` rule exists.
     pub fn has_catchall(&self) -> bool {
         self.rules.iter().any(|r| {
-            r.pattern == "*" && matches!(r.action, RuleAction::Ask) && matches!(r.scope, RuleScope::Tool)
+            r.pattern == "*"
+                && matches!(r.action, RuleAction::Ask)
+                && matches!(r.scope, RuleScope::Tool)
         })
     }
 }
@@ -99,7 +101,8 @@ pub fn load_rules(
                         }
                     }
                 }
-                if let Some(servers) = permissions.get("always_servers").and_then(|v| v.as_array()) {
+                if let Some(servers) = permissions.get("always_servers").and_then(|v| v.as_array())
+                {
                     for s in servers {
                         if let Some(s) = s.as_str() {
                             rules.push(Rule {
@@ -121,8 +124,15 @@ pub fn load_rules(
             if let Some(rules_arr) = table.get("rules").and_then(|v| v.as_array()) {
                 for r in rules_arr {
                     if let Some(rule_table) = r.as_table() {
-                        let priority = rule_table.get("priority").and_then(|v| v.as_integer()).map(|v| v as i32);
-                        let pattern = rule_table.get("pattern").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let priority = rule_table
+                            .get("priority")
+                            .and_then(|v| v.as_integer())
+                            .map(|v| v as i32);
+                        let pattern = rule_table
+                            .get("pattern")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let action = match rule_table.get("action").and_then(|v| v.as_str()) {
                             Some("allow") => RuleAction::Allow,
                             Some("deny") => RuleAction::Deny,
@@ -133,7 +143,12 @@ pub fn load_rules(
                             Some("path") => RuleScope::Path,
                             Some("tool") | _ => RuleScope::Tool,
                         };
-                        rules.push(Rule { priority, pattern, action, scope });
+                        rules.push(Rule {
+                            priority,
+                            pattern,
+                            action,
+                            scope,
+                        });
                     }
                 }
             }
@@ -158,7 +173,10 @@ pub fn load_rules(
         }
     }
 
-    Ok(RuleSet { rules: compiled_rules, matchers: compiled_matchers })
+    Ok(RuleSet {
+        rules: compiled_rules,
+        matchers: compiled_matchers,
+    })
 }
 
 /// Error type for permission rule loading.

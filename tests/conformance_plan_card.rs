@@ -6,16 +6,16 @@
 
 use std::collections::HashMap;
 
+use rustain::domain::models::session_meta::SessionMeta;
 use rustain::domain::models::{
-    ChatMessage, ContentBlockType, Conversation, EffortEstimate, MessageRole, Plan, PlanDecision,
-    PlanStatus, PlanTask, PlanTaskStatus, PermissionMode, generate_conversation_id,
+    ChatMessage, ContentBlockType, Conversation, EffortEstimate, MessageRole, PermissionMode, Plan,
+    PlanDecision, PlanStatus, PlanTask, PlanTaskStatus, generate_conversation_id,
     generate_message_id,
 };
+use rustain::domain::services::export::render_conversation_markdown;
 use rustain::domain::services::plan_effort::derive_effort_estimate;
 use rustain::domain::services::plan_parser::{parse_plan_input, validate_plan};
-use rustain::domain::services::export::render_conversation_markdown;
 use rustain::domain::services::search::find_matches;
-use rustain::domain::models::session_meta::SessionMeta;
 
 fn make_task(number: u32, title: &str) -> PlanTask {
     PlanTask {
@@ -24,11 +24,11 @@ fn make_task(number: u32, title: &str) -> PlanTask {
         description: String::new(),
         depends_on: vec![],
         status: PlanTaskStatus::Pending,
-                started_at_ms: None,
-                completed_at_ms: None,
-                result: None,
-                error: None,
-                waiting_on: vec![],
+        started_at_ms: None,
+        completed_at_ms: None,
+        result: None,
+        error: None,
+        waiting_on: vec![],
     }
 }
 
@@ -39,11 +39,11 @@ fn make_task_with_desc(number: u32, title: &str, desc: &str) -> PlanTask {
         description: desc.to_string(),
         depends_on: vec![],
         status: PlanTaskStatus::Pending,
-                started_at_ms: None,
-                completed_at_ms: None,
-                result: None,
-                error: None,
-                waiting_on: vec![],
+        started_at_ms: None,
+        completed_at_ms: None,
+        result: None,
+        error: None,
+        waiting_on: vec![],
     }
 }
 
@@ -172,9 +172,9 @@ fn ac2_propose_plan_in_available_tools() {
     use rustain::domain::ports::ToolSetPort;
 
     let tmp = tempfile::tempdir().unwrap();
-    let storage = std::sync::Arc::new(
-        rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()),
-    );
+    let storage = std::sync::Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(
+        tmp.path().to_path_buf(),
+    ));
     let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), storage);
     let tools = adapter.available_tools();
     assert!(
@@ -306,7 +306,12 @@ fn ac5_plan_card_renders_pending() {
 
     let text: String = lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
         .collect();
     assert!(text.contains("Plan: Refactor"));
     assert!(text.contains("[y]"));
@@ -332,7 +337,12 @@ fn ac5_plan_card_renders_resolved() {
     let lines = render_plan_card_lines(&plan, &theme, 80, false);
     let text: String = lines
         .iter()
-        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
         .collect();
     assert!(text.contains("[completed"));
     assert!(!text.contains("[y]"));
@@ -365,8 +375,8 @@ fn ac6_plan_proposed_sets_pending() {
 
 #[test]
 fn ac6_pending_invariant_one_per_conversation() {
-    use rustain::adapters::tui::state::TuiState;
     use rustain::adapters::tui::color_detect::ColorCapability;
+    use rustain::adapters::tui::state::TuiState;
 
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
     assert!(state.pending_plan_card.is_none());
@@ -482,7 +492,10 @@ fn ac8_yolo_auto_approve_no_card() {
     assert_eq!(decision, PlanDecision::AutoApproveYolo);
 
     let needs_card = !matches!(decision, PlanDecision::AutoApproveYolo);
-    assert!(!needs_card, "YOLO mode should not display a pending plan card");
+    assert!(
+        !needs_card,
+        "YOLO mode should not display a pending plan card"
+    );
 }
 
 // ── AC9: Reload / Backward Compatibility ──────────────────────────────────
@@ -573,11 +586,11 @@ fn ac10_export_renders_plan() {
                     description: String::new(),
                     depends_on: vec![1],
                     status: PlanTaskStatus::Pending,
-                started_at_ms: None,
-                completed_at_ms: None,
-                result: None,
-                error: None,
-                waiting_on: vec![],
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    waiting_on: vec![],
                 },
             ],
             estimated_effort: Some(EffortEstimate {
@@ -652,17 +665,20 @@ fn ac10_export_renders_multiple_plans_per_message() {
         },
     );
 
-    let mut conv = make_conv(vec![
-        make_msg(MessageRole::User, "Do both"),
-        host_msg,
-    ]);
+    let mut conv = make_conv(vec![make_msg(MessageRole::User, "Do both"), host_msg]);
     conv.plans = plans;
 
     let meta = make_meta(2);
     let md = render_conversation_markdown(&conv, &meta, 1_700_000_123);
 
-    assert!(md.contains("### Plan: First Plan"), "first plan must be rendered");
-    assert!(md.contains("### Plan: Second Plan"), "second plan must be rendered");
+    assert!(
+        md.contains("### Plan: First Plan"),
+        "first plan must be rendered"
+    );
+    assert!(
+        md.contains("### Plan: Second Plan"),
+        "second plan must be rendered"
+    );
     assert!(md.contains("Step A"));
     assert!(md.contains("Step B"));
 }
@@ -741,18 +757,15 @@ fn ac10_fork_copies_plan() {
 
     let forked = conv.clone();
     assert_eq!(forked.plans.len(), 1);
-    assert_eq!(
-        forked.plans.get("plan-fork").unwrap().title,
-        "Fork Plan"
-    );
+    assert_eq!(forked.plans.get("plan-fork").unwrap().title, "Fork Plan");
 }
 
 // ── AC11: Interaction State Routing ───────────────────────────────────────
 
 #[test]
 fn ac11_interaction_state_review_plan() {
-    use rustain::adapters::tui::state::TuiState;
     use rustain::adapters::tui::color_detect::ColorCapability;
+    use rustain::adapters::tui::state::TuiState;
 
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
     assert!(state.pending_plan_card.is_none());
@@ -768,8 +781,8 @@ fn ac11_interaction_state_review_plan() {
 
 #[test]
 fn ac11_interaction_state_back_to_awaiting_on_reject() {
-    use rustain::adapters::tui::state::TuiState;
     use rustain::adapters::tui::color_detect::ColorCapability;
+    use rustain::adapters::tui::state::TuiState;
 
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
 

@@ -17,16 +17,36 @@ pub fn render(
         return;
     }
     let style = Style::default();
-    buf.set_string(area.x, area.y, format!("╔══ Plan deviation — reapproval required"), style);
+    buf.set_string(
+        area.x,
+        area.y,
+        format!("╔══ Plan deviation — reapproval required"),
+        style,
+    );
     if area.height > 1 {
         let skipped: Vec<String> = changed_steps.iter().map(|n| n.to_string()).collect();
-        buf.set_string(area.x, area.y + 1, format!("║ {} tasks → {} tasks. Skipped: {}", original_step_count, current_step_count, skipped.join(", ")), style);
+        buf.set_string(
+            area.x,
+            area.y + 1,
+            format!(
+                "║ {} tasks → {} tasks. Skipped: {}",
+                original_step_count,
+                current_step_count,
+                skipped.join(", ")
+            ),
+            style,
+        );
     }
     if area.height > 2 {
         buf.set_string(area.x, area.y + 2, format!("║ {}", summary), style);
     }
     if area.height > 3 {
-        buf.set_string(area.x, area.y + 3, "║ [y] Approve revised  [e] Edit  [n] Reject", style);
+        buf.set_string(
+            area.x,
+            area.y + 3,
+            "║ [y] Approve revised  [e] Edit  [n] Reject",
+            style,
+        );
     }
     if area.height > 4 {
         buf.set_string(area.x, area.y + 4, "╚════════════════════════", style);

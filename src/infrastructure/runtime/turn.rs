@@ -281,21 +281,26 @@ pub async fn run_turn(
                         }
 
                         if !regular.is_empty() {
-                            let batch_with_idx: Vec<(usize, crate::domain::models::ToolCallRequest)> = regular
+                            let batch_with_idx: Vec<(
+                                usize,
+                                crate::domain::models::ToolCallRequest,
+                            )> = regular
                                 .iter()
                                 .map(|(orig_idx, tc)| {
-                                    (*orig_idx, crate::domain::models::ToolCallRequest {
-                                        id: tc.id.clone(),
-                                        tool_name: tc.name.clone(),
-                                        input: tc.input.clone(),
-                                    })
+                                    (
+                                        *orig_idx,
+                                        crate::domain::models::ToolCallRequest {
+                                            id: tc.id.clone(),
+                                            tool_name: tc.name.clone(),
+                                            input: tc.input.clone(),
+                                        },
+                                    )
                                 })
                                 .collect();
                             let source = crate::domain::models::ApprovalSource::ForegroundTurn {
                                 conversation_id: conversation_id.clone(),
                             };
-                            let active_skills =
-                                activation_set.as_ref().map(|s| s.active_skills());
+                            let active_skills = activation_set.as_ref().map(|s| s.active_skills());
                             let requests: Vec<crate::domain::models::ToolCallRequest> =
                                 batch_with_idx.iter().map(|(_, req)| req.clone()).collect();
                             let terminal = tool_scheduler

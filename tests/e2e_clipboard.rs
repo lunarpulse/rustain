@@ -69,7 +69,7 @@ fn test_e2e_image_in_api_request() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
     // Build API messages
     let api_msgs = h.build_api_messages();
@@ -205,7 +205,7 @@ fn test_e2e_image_reference_stored() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
     // Message exists
     assert!(!h.conversation.messages.is_empty());
@@ -238,7 +238,7 @@ fn test_e2e_copy_key_in_chat_focus() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
     // Press 'c' - action depends on implementation
     // In actual app, this would copy focused content
@@ -277,7 +277,7 @@ fn test_e2e_copy_assistant_message() {
             token_count: None,
             stop_reason: None,
             images: vec![],
-            });
+        });
 
     // Verify message content available for copy
     assert_eq!(h.conversation.messages[0].content, "Full message content");
