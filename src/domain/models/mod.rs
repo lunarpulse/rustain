@@ -26,6 +26,7 @@ pub mod turn;
 mod usage;
 #[allow(dead_code)]
 pub mod visual;
+pub mod view_state;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
@@ -105,5 +106,9 @@ pub use turn::{
 };
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};
+#[allow(unused_imports)]
+pub use view_state::{
+    AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,
+};
 #[allow(unused_imports)]
 pub use visual::{BlockBorder, DensityMode, OverlayType, PanelType, symbols};

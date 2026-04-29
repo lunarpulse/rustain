@@ -133,19 +133,31 @@ impl Conversation {
     /// S16.4 alongside the chat_pane render flip.
     // TODO(S16.4): delete this method and the `messages` mirror
     pub fn rebuild_messages_mirror(&mut self) {
-        // Keep non-Assistant messages (user, system) — they aren't yet in `turns`
-        let mut new_messages: Vec<ChatMessage> = Vec::new();
+        // Preserve content_blocks from old messages so plan cards, tool
+        // blocks, etc survive across rebuilds (S16.2 spec: existing readers
+        // must keep working).
+        let mut old_blocks: std::collections::HashMap<String, Vec<ContentBlockType>> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| !m.content_blocks.is_empty())
+            .map(|m| (m.id.clone(), m.content_blocks.clone()))
+            .collect();
 
+        // Collect user messages (not yet in turns) to interleave by position.
+        // If appended in bulk before assistant messages, the chat order breaks
+        // after the 2nd turn: all user messages pile at the top.
+        let mut user_msgs: Vec<ChatMessage> = Vec::new();
         for msg in self.messages.drain(..) {
             if msg.role != MessageRole::Assistant {
-                new_messages.push(msg);
+                user_msgs.push(msg);
             }
         }
 
-        // Rebuild assistant messages from turns
+        // Rebuild assistant messages from turns in order
+        let mut assistant_msgs: Vec<ChatMessage> = Vec::new();
         for turn in &self.turns {
             if turn.role != MessageRole::Assistant {
-                // User/system turns should be kept if present (future migration)
                 continue;
             }
 
@@ -188,11 +200,11 @@ impl Conversation {
                 } = part
                 {
                     let status_str = match status {
-                        super::turn::InvocationStatus::Success => Some("Done"),
-                        super::turn::InvocationStatus::Error => Some("Error"),
+                        super::turn::InvocationStatus::Success => Some("✓ Success"),
+                        super::turn::InvocationStatus::Error => Some("✗ Error"),
                         super::turn::InvocationStatus::Running
                         | super::turn::InvocationStatus::Pending => None,
-                        super::turn::InvocationStatus::Cancelled => Some("Cancelled"),
+                        super::turn::InvocationStatus::Cancelled => Some("⊘ Cancelled"),
                     };
 
                     let result = tool_results.get(pid).and_then(|rp| {
@@ -206,7 +218,6 @@ impl Conversation {
                         }
                     });
 
-                    // Deterministic tool call ID based on turn id and part id
                     let tc_id = format!("tc_{}_{}", turn.id.0, pid.0);
 
                     tool_calls.push(ToolCallInfo {
@@ -221,19 +232,37 @@ impl Conversation {
                 }
             }
 
+            let created_at = turn.started_at / 1000;
+
             let msg = ChatMessage {
                 id: turn.id.0.clone(),
                 role: turn.role,
                 content,
-                content_blocks: vec![],
+                content_blocks: old_blocks
+                    .remove(&turn.id.0)
+                    .unwrap_or_default(),
                 tool_calls,
-                created_at: turn.started_at / 1000,
+                created_at,
                 token_count: self.usage.as_ref().map(|u| u.output_tokens),
                 stop_reason: turn.stop_reason.clone(),
                 synthetic: false,
                 images: vec![],
             };
-            new_messages.push(msg);
+            assistant_msgs.push(msg);
+        }
+
+        // Round-robin interleave: User[0], Assistant[0], User[1], Assistant[1], ...
+        // Both lists are already in chronological order. Extra entries (e.g. a
+        // user message typed before the response arrives) append at the end.
+        let n = user_msgs.len().max(assistant_msgs.len());
+        let mut new_messages = Vec::with_capacity(user_msgs.len() + assistant_msgs.len());
+        for i in 0..n {
+            if i < user_msgs.len() {
+                new_messages.push(user_msgs[i].clone());
+            }
+            if i < assistant_msgs.len() {
+                new_messages.push(assistant_msgs[i].clone());
+            }
         }
 
         self.messages = new_messages;

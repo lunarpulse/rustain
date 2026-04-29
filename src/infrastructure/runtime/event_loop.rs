@@ -4701,33 +4701,43 @@ pub async fn run(
                         }
                     }
                     AppEvent::AgentThenSubmit { conversation_id, text, synthetic } => {
-                        if conversation.id == *conversation_id && !streaming.is_streaming {
-                            let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
-                            let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                            start_turn_inner(
-                                &text,
-                                Vec::new(),
-                                synthetic,
-                                &mut conversation,
-                                &mut streaming,
-                                &mut state,
-                                &mut _active_turn,
-                                &provider,
-                                config,
-                                &domain_tx,
-                                &security,
-                                &tools, &tool_scheduler,
-                                &persona,
-                                &workspace_path,
-                                &mut session_manager,
-                                &fs_storage,
-                                &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                None,
-                                _skill_snap,
-                                _agent_snap,
-                                                                  tab_manager.reset_and_clone_turn_cancel(),
-                            ).await;
+                        if conversation.id == *conversation_id {
+                            if !streaming.is_streaming {
+                                let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                start_turn_inner(
+                                    &text,
+                                    Vec::new(),
+                                    synthetic,
+                                    &mut conversation,
+                                    &mut streaming,
+                                    &mut state,
+                                    &mut _active_turn,
+                                    &provider,
+                                    config,
+                                    &domain_tx,
+                                    &security,
+                                    &tools, &tool_scheduler,
+                                    &persona,
+                                    &workspace_path,
+                                    &mut session_manager,
+                                    &fs_storage,
+                                    &storage,
+                                                  &app_state.plan_manager, &app_state.plan_injector,
+                                    None,
+                                    _skill_snap,
+                                    _agent_snap,
+                                                                      tab_manager.reset_and_clone_turn_cancel(),
+                                ).await;
+                            } else {
+                                // Turn still streaming — re-emit so the dispatch
+                                // retries on the next event-loop iteration.
+                                app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
+                                    conversation_id,
+                                    text,
+                                    synthetic,
+                                });
+                            }
                         }
                     }
                     AppEvent::AskActivateSkill { conversation_id, name, arguments } => {
