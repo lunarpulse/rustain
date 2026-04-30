@@ -4033,10 +4033,44 @@ pub async fn run(
                         if conversation.id != conversation_id {
                             tracing::warn!("PlanProposed for unknown conversation {}", conversation_id);
                         } else {
+                            // Helper: find the ID of the turn that is currently proposing
+                            // this plan (open streaming turn, or last committed turn).
+                            // Using the turn ID ensures the PlanCard survives
+                            // rebuild_messages_mirror() because the message ID matches
+                            // the turn ID that gets committed.
+                            let current_turn_id = tab_manager
+                                .active_tab()
+                                .reducer
+                                .open_turn
+                                .as_ref()
+                                .map(|t| t.id.0.clone())
+                                .or_else(|| conversation.turns.last().map(|t| t.id.0.clone()));
+
                             let msg_id = if let Some(last_msg) = conversation.messages.last_mut() {
                                 if last_msg.role == MessageRole::Assistant {
                                     last_msg.content_blocks.push(ContentBlockType::PlanCard);
                                     last_msg.id.clone()
+                                } else if let Some(ref turn_id) = current_turn_id {
+                                    // Attach to existing message for this turn if present
+                                    if let Some(existing) = conversation.messages.iter_mut().find(|m| m.id == *turn_id) {
+                                        existing.content_blocks.push(ContentBlockType::PlanCard);
+                                        turn_id.clone()
+                                    } else {
+                                        let msg = ChatMessage {
+                                            id: turn_id.clone(),
+                                            role: MessageRole::Assistant,
+                                            content: String::new(),
+                                            content_blocks: vec![ContentBlockType::PlanCard],
+                                            tool_calls: vec![],
+                                            created_at: crate::domain::models::session_meta::now_unix(),
+                                            token_count: None,
+                                            stop_reason: None,
+                                            synthetic: false,
+                                            images: vec![],
+                                        };
+                                        conversation.messages.push(msg);
+                                        turn_id.clone()
+                                    }
                                 } else {
                                     let id = crate::domain::models::generate_message_id();
                                     let msg = ChatMessage {
@@ -4054,6 +4088,21 @@ pub async fn run(
                                     conversation.messages.push(msg);
                                     id
                                 }
+                            } else if let Some(ref turn_id) = current_turn_id {
+                                let msg = ChatMessage {
+                                    id: turn_id.clone(),
+                                    role: MessageRole::Assistant,
+                                    content: String::new(),
+                                    content_blocks: vec![ContentBlockType::PlanCard],
+                                    tool_calls: vec![],
+                                    created_at: crate::domain::models::session_meta::now_unix(),
+                                    token_count: None,
+                                    stop_reason: None,
+                                    synthetic: false,
+                                    images: vec![],
+                                };
+                                conversation.messages.push(msg);
+                                turn_id.clone()
                             } else {
                                 let id = crate::domain::models::generate_message_id();
                                 let msg = ChatMessage {
@@ -4701,43 +4750,33 @@ pub async fn run(
                         }
                     }
                     AppEvent::AgentThenSubmit { conversation_id, text, synthetic } => {
-                        if conversation.id == *conversation_id {
-                            if !streaming.is_streaming {
-                                let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
-                                let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                start_turn_inner(
-                                    &text,
-                                    Vec::new(),
-                                    synthetic,
-                                    &mut conversation,
-                                    &mut streaming,
-                                    &mut state,
-                                    &mut _active_turn,
-                                    &provider,
-                                    config,
-                                    &domain_tx,
-                                    &security,
-                                    &tools, &tool_scheduler,
-                                    &persona,
-                                    &workspace_path,
-                                    &mut session_manager,
-                                    &fs_storage,
-                                    &storage,
-                                                  &app_state.plan_manager, &app_state.plan_injector,
-                                    None,
-                                    _skill_snap,
-                                    _agent_snap,
-                                                                      tab_manager.reset_and_clone_turn_cancel(),
-                                ).await;
-                            } else {
-                                // Turn still streaming — re-emit so the dispatch
-                                // retries on the next event-loop iteration.
-                                app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
-                                    conversation_id,
-                                    text,
-                                    synthetic,
-                                });
-                            }
+                        if conversation.id == *conversation_id && !streaming.is_streaming {
+                            let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                            let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                            start_turn_inner(
+                                &text,
+                                Vec::new(),
+                                synthetic,
+                                &mut conversation,
+                                &mut streaming,
+                                &mut state,
+                                &mut _active_turn,
+                                &provider,
+                                config,
+                                &domain_tx,
+                                &security,
+                                &tools, &tool_scheduler,
+                                &persona,
+                                &workspace_path,
+                                &mut session_manager,
+                                &fs_storage,
+                                &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector,
+                                None,
+                                _skill_snap,
+                                _agent_snap,
+                                                                  tab_manager.reset_and_clone_turn_cancel(),
+                            ).await;
                         }
                     }
                     AppEvent::AskActivateSkill { conversation_id, name, arguments } => {
@@ -7054,11 +7093,26 @@ fn render(
                     }
                 }
                 if !skip_chat_render {
+                    // Extract view_state, open_turn, and clock from the active tab.
+                    // If no tab manager is available, use defaults (render-only views
+                    // like standalone conversation previews).
+                    let default_vs = crate::domain::models::view_state::ViewState::default();
+                    let default_clock = crate::domain::clock::SystemClock::default();
+                    let (view_state_ref, open_turn_ref, clock_ref): (&crate::domain::models::view_state::ViewState, Option<&crate::domain::models::turn::Turn>, &dyn crate::domain::clock::Clock) =
+                        if let Some(tm) = tab_manager_for_bar {
+                            let tab = tm.active_tab();
+                            (&tab.view_state, tab.reducer.open_turn.as_ref(), &*tab.clock as &dyn crate::domain::clock::Clock)
+                        } else {
+                            (&default_vs, None, &default_clock)
+                        };
                     let result = chat_pane::render_with_search(
                         frame,
                         app_layout.chat_pane,
                         conversation,
+                        open_turn_ref,
                         streaming,
+                        view_state_ref,
+                        clock_ref,
                         scroll_offset,
                         auto_scroll,
                         theme,

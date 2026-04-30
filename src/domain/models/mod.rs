@@ -102,7 +102,7 @@ pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use turn::{
     InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
-    migrate_chat_message_to_turn,
+    migrate_chat_message_to_turn, tool_call_id_for,
 };
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};

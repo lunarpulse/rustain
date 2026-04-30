@@ -765,7 +765,7 @@ fn test_e2e_simple_streaming_response() {
     // Verify screen rendering
     h.assert_screen_contains("You:", "User message prefix visible");
     h.assert_screen_contains("What is Rust?", "User question visible");
-    h.assert_screen_contains("Assistant:", "Assistant prefix visible");
+    h.assert_screen_contains("│", "Assistant gutter visible");
     h.assert_screen_contains(
         "Rust is a systems programming language.",
         "Response visible",

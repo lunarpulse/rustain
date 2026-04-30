@@ -33,12 +33,27 @@ use std::time::{Duration, Instant};
 /// ≈ 12.5 fps — matches existing TUI spinner UX.
 pub const FRAME_TICK_MS: u64 = 80;
 
+/// Braille spinner glyphs. 10-frame sequence at ~12.5 fps.
+/// Standard TUI convention — see `clock.rs` module doc for cadence rationale.
+pub const BRAILLE_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Return the current braille spinner glyph for the given clock.
+pub fn current_braille_frame(clock: &dyn Clock) -> &'static str {
+    BRAILLE_FRAMES[(clock.frame() % BRAILLE_FRAMES.len() as u64) as usize]
+}
+
 /// Abstraction over time sources so tests can be deterministic.
 pub trait Clock: Send + Sync {
     /// Current instant.
     fn now(&self) -> Instant;
     /// Current animation frame, derived from elapsed time divided by `FRAME_TICK_MS`.
     fn frame(&self) -> u64;
+    /// Current wall-clock time in unix milliseconds.
+    ///
+    /// This is the **sole crate-wide source** of `SystemTime::now()` post-migration
+    /// (P0-12 Round 2 convergence). All render-layer and tool-block elapsed-time
+    /// computation reads this method instead of calling `SystemTime::now()` directly.
+    fn wall_now_ms(&self) -> i64;
 }
 
 /// Wall-clock implementation.
@@ -61,6 +76,15 @@ impl Default for SystemClock {
     }
 }
 
+impl SystemClock {
+    fn unix_millis_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
+    }
+}
+
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
@@ -69,12 +93,18 @@ impl Clock for SystemClock {
     fn frame(&self) -> u64 {
         (self.start.elapsed().as_millis() / FRAME_TICK_MS as u128) as u64
     }
+
+    fn wall_now_ms(&self) -> i64 {
+        Self::unix_millis_now()
+    }
 }
 
 #[derive(Debug)]
 struct MockClockState {
     instant: Instant,
     frame: u64,
+    wall_anchor_ms: i64,
+    instant_anchor: Instant,
 }
 
 /// Test-only clock with interior mutability.
@@ -93,8 +123,30 @@ impl MockClock {
             state: Mutex::new(MockClockState {
                 instant: start,
                 frame: 0,
+                wall_anchor_ms: 0,
+                instant_anchor: start,
             }),
         }
+    }
+
+    /// Create a MockClock pinned to a fixed wall-clock anchor.
+    pub fn at_wall_ms(wall_ms: i64) -> Self {
+        let instant = Instant::now();
+        Self {
+            state: Mutex::new(MockClockState {
+                instant,
+                frame: 0,
+                wall_anchor_ms: wall_ms,
+                instant_anchor: instant,
+            }),
+        }
+    }
+
+    /// Set the wall-clock anchor for deterministic elapsed-time computation.
+    pub fn set_wall_anchor_ms(&self, wall_ms: i64) {
+        let mut s = self.state.lock().unwrap();
+        s.wall_anchor_ms = wall_ms;
+        s.instant_anchor = s.instant;
     }
 
     pub fn advance(&self, by: Duration) {
@@ -120,6 +172,12 @@ impl Clock for MockClock {
 
     fn frame(&self) -> u64 {
         self.state.lock().unwrap().frame
+    }
+
+    fn wall_now_ms(&self) -> i64 {
+        let s = self.state.lock().unwrap();
+        let delta_ms = s.instant.duration_since(s.instant_anchor).as_millis() as i64;
+        s.wall_anchor_ms.saturating_add(delta_ms)
     }
 }
 

@@ -1,0 +1,5 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ ▸ Let me find all the relevant files and examine them carefully.… · 3 tools ✓

@@ -1,0 +1,7 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ hello world
+│
+│

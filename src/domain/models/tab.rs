@@ -10,6 +10,7 @@ use crate::domain::models::conversation::{Conversation, generate_conversation_id
 use crate::domain::models::notice::FeedbackBlock;
 use crate::domain::models::session::{SessionManager, SessionState};
 use crate::domain::models::stream::StreamingState;
+use crate::domain::models::view_state::ViewState;
 use crate::domain::services::reducer::ReducerState;
 use crate::domain::services::turn_queue::TurnQueue;
 
@@ -28,6 +29,9 @@ pub struct TabState {
     /// Populated in the event loop; `streaming` is a render mirror synced
     /// from this via `update_streaming_mirror` after each `reduce()` call.
     pub reducer: ReducerState,
+    /// Per-tab view state for scroll anchoring, collapse policy, and
+    /// summary tier (Story 16.3). Read by the render path in Story 16.4.
+    pub view_state: ViewState,
     /// Injected clock for the reducer (testable via MockClock).
     pub clock: Arc<dyn Clock>,
     pub session: SessionManager,
@@ -97,6 +101,7 @@ impl TabState {
             conversation,
             streaming: StreamingState::default(),
             reducer: ReducerState::new(wall_anchor, instant_now),
+            view_state: ViewState::default(),
             clock: clock.clone(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
             session_meta,
@@ -166,6 +171,7 @@ impl TabState {
             conversation,
             streaming: StreamingState::default(),
             reducer: ReducerState::new(wall_anchor, instant_now),
+            view_state: ViewState::default(),
             clock: clock.clone(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
             session_meta,

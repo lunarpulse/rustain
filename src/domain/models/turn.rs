@@ -224,6 +224,21 @@ impl Turn {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical mirror tool-call id helper
+// ---------------------------------------------------------------------------
+
+/// Canonical mirror tool-call id format.
+///
+/// Used by `rebuild_messages_mirror` and the render-time `adapter_shim` so the
+/// two cannot drift. The format is `"tc_{turn_id}_{part_id}"` — locked here
+/// as the single source of truth.
+///
+/// Deleted in S16.10-cleanup alongside `Conversation.messages` mirror.
+pub fn tool_call_id_for(turn_id: &TurnId, pid: PartId) -> String {
+    format!("tc_{}_{}", turn_id.0, pid.0)
+}
+
+// ---------------------------------------------------------------------------
 // Migration helper
 // ---------------------------------------------------------------------------
 

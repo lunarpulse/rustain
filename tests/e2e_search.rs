@@ -21,7 +21,9 @@ use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::chat_pane::RenderResult;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane::render_with_search, search_bar};
+use rustain::domain::clock::SystemClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
+use rustain::domain::models::view_state::ViewState;
 use rustain::domain::models::visual::OverlayType;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FocusState, MessageRole, StreamingState,
@@ -100,7 +102,10 @@ fn render_once(
                 frame,
                 area,
                 conversation,
+                None,
                 &streaming,
+                &ViewState::default(),
+                &SystemClock::default(),
                 state.scroll_offset,
                 state.auto_scroll,
                 &theme,
@@ -449,7 +454,10 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
                 frame,
                 area,
                 &conv,
+                None,
                 &streaming,
+                &ViewState::default(),
+                &SystemClock::default(),
                 0,
                 true,
                 &theme,
@@ -548,7 +556,10 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
                 frame,
                 area,
                 &conv,
+                None,
                 &streaming,
+                &ViewState::default(),
+                &SystemClock::default(),
                 0,
                 true,
                 &theme,

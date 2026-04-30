@@ -234,8 +234,8 @@ fn test_e2e_message_to_streaming_response() {
         "Step 5: User question visible"
     );
     assert!(
-        text.contains("Assistant:"),
-        "Step 5: Assistant prefix visible"
+        text.contains('│'),
+        "Step 5: Assistant gutter visible"
     );
     assert!(
         text.contains("Rust is a systems programming language."),

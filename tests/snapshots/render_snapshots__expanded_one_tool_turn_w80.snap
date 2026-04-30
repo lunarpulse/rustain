@@ -1,0 +1,8 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ Let me read the config file.
+│
+│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│

@@ -19,7 +19,9 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::bookmark_list;
 use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
+use rustain::domain::clock::SystemClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
+use rustain::domain::models::view_state::ViewState;
 use rustain::domain::models::visual::OverlayType;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FocusState, MessageRole, StreamingState,
@@ -92,7 +94,10 @@ fn render_chat_pane_with_bookmarks(
                 frame,
                 area,
                 conversation,
+                None,
                 &streaming,
+                &ViewState::default(),
+                &SystemClock::default(),
                 state.scroll_offset,
                 state.auto_scroll,
                 &theme,

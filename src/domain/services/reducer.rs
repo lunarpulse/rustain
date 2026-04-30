@@ -169,6 +169,14 @@ impl ReducerState {
         self.progress.insert(tool_use_id.to_string(), (k, n));
     }
 
+    /// Current wall-clock time in unix milliseconds via the injected clock.
+    ///
+    /// Passthrough to `clock.wall_now_ms()` — centralized so render code
+    /// never calls `Instant::now()` or `SystemTime::now()` directly.
+    pub fn unix_millis_now(&self, clock: &dyn Clock) -> i64 {
+        clock.wall_now_ms()
+    }
+
     /// Ensure an open turn exists for content-bearing chunks.
     fn ensure_open_turn(&mut self, clock: &dyn Clock) -> &mut Turn {
         let wall_anchor = self.wall_anchor_ms;
@@ -446,7 +454,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
 /// shape so chat_pane / widgets keep compiling with no signature changes.
 ///
 /// Retired by S16.4 alongside the chat_pane render flip.
-// TODO(S16.4): retire update_streaming_mirror alongside chat_pane render flip
+// TODO(S16.10-cleanup): retire update_streaming_mirror alongside chat_pane render flip
 pub fn update_streaming_mirror(state: &ReducerState, mirror: &mut StreamingState) {
     mirror.is_streaming = state.open_turn.is_some();
     mirror.current_text_buffer = state.open_prose.clone().unwrap_or_default();

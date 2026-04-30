@@ -17,6 +17,7 @@ pub mod plan_runtime;
 pub mod reducer;
 pub mod search;
 pub mod session_index;
+pub mod summary_labeler;
 pub mod skill_context;
 pub mod tool_scheduler;
 pub use plan_runtime::{PlanRuntime, PlanRuntimeState, TaskTurnOutcome};

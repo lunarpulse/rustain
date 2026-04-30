@@ -4,6 +4,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::adapters::tui::theme::Theme;
+use crate::domain::clock::Clock;
 use crate::domain::models::ToolCallInfo;
 
 /// Map a status chip string to its theme color.
@@ -66,18 +67,13 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
 }
 
 /// Compute elapsed time string.
-fn elapsed_str(tc: &ToolCallInfo) -> String {
+fn elapsed_str(tc: &ToolCallInfo, clock: &dyn Clock) -> String {
     let start = tc.started_at_ms.unwrap_or(0);
     if start == 0 {
         return String::new();
     }
 
-    let end = tc.completed_at_ms.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    });
+    let end = tc.completed_at_ms.unwrap_or_else(|| clock.wall_now_ms().max(0) as u64);
 
     let elapsed_secs = (end.saturating_sub(start)) as f64 / 1000.0;
     format!("{:.1}s", elapsed_secs)
@@ -110,9 +106,10 @@ pub fn render_tool_block_lines<'a>(
     theme: &'a Theme,
     state: &ToolBlockState,
     width: u16,
+    clock: &dyn Clock,
 ) -> Vec<Line<'a>> {
     let summary = tool_summary(&tc.name, &tc.input);
-    let elapsed = elapsed_str(tc);
+    let elapsed = elapsed_str(tc, clock);
 
     match &tc.result {
         None => {
@@ -482,7 +479,12 @@ pub fn render_diff_lines<'a>(diff: &[DiffLine], theme: &'a Theme) -> Vec<Line<'a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::clock::MockClock;
     use crate::domain::models::ToolResultInfo;
+
+    fn test_clock() -> MockClock {
+        MockClock::at_wall_ms(0)
+    }
 
     fn make_tool_call(name: &str, result: Option<ToolResultInfo>) -> ToolCallInfo {
         let completed = result.as_ref().map(|_| 1002300u64);
@@ -569,7 +571,8 @@ mod tests {
         let tc = make_tool_call("Bash", None);
         let theme = crate::adapters::tui::theme::Theme::dark();
         let state = ToolBlockState::default();
-        let lines = render_tool_block_lines(&tc, &theme, &state, 80);
+        let clock = test_clock();
+        let lines = render_tool_block_lines(&tc, &theme, &state, 80, &clock);
         assert_eq!(lines.len(), 1);
         let line_str: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line_str.contains("Bash"));
@@ -587,7 +590,8 @@ mod tests {
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
         let state = ToolBlockState::default();
-        let lines = render_tool_block_lines(&tc, &theme, &state, 80);
+        let clock = test_clock();
+        let lines = render_tool_block_lines(&tc, &theme, &state, 80, &clock);
         assert_eq!(lines.len(), 1);
         let line_str: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line_str.contains("✓"));
@@ -607,7 +611,8 @@ mod tests {
             collapsed: false,
             peek_active: false,
         };
-        let lines = render_tool_block_lines(&tc, &theme, &state, 80);
+        let clock = test_clock();
+        let lines = render_tool_block_lines(&tc, &theme, &state, 80, &clock);
         assert!(lines.len() > 1);
         let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(first.contains("┌"));
@@ -624,7 +629,8 @@ mod tests {
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
         let state = ToolBlockState::default();
-        let lines = render_tool_block_lines(&tc, &theme, &state, 80);
+        let clock = test_clock();
+        let lines = render_tool_block_lines(&tc, &theme, &state, 80, &clock);
         assert!(lines.len() >= 2);
         let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(first.contains("✗"));

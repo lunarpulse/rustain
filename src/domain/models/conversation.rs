@@ -6,7 +6,7 @@ use super::content::ContentBlockType;
 use super::message::MessageRole;
 use super::stream::StopReason;
 use super::tools::{ToolCallInfo, ToolResultInfo};
-use super::turn::{Turn, TurnPart, migrate_chat_message_to_turn};
+use super::turn::{Turn, TurnPart, migrate_chat_message_to_turn, tool_call_id_for};
 use super::usage::UsageInfo;
 
 /// Returns `true` only if `s` matches the hash-addressed filename format produced by
@@ -144,18 +144,18 @@ impl Conversation {
             .map(|m| (m.id.clone(), m.content_blocks.clone()))
             .collect();
 
-        // Collect user messages (not yet in turns) to interleave by position.
-        // If appended in bulk before assistant messages, the chat order breaks
-        // after the 2nd turn: all user messages pile at the top.
-        let mut user_msgs: Vec<ChatMessage> = Vec::new();
-        for msg in self.messages.drain(..) {
-            if msg.role != MessageRole::Assistant {
-                user_msgs.push(msg);
-            }
-        }
+        // Build a map of existing assistant message indices by id for in-place replacement
+        let mut msg_indices: std::collections::HashMap<String, usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == MessageRole::Assistant)
+            .map(|(i, m)| (m.id.clone(), i))
+            .collect();
 
-        // Rebuild assistant messages from turns in order
-        let mut assistant_msgs: Vec<ChatMessage> = Vec::new();
+        // Track which turn ids were processed (for zombie cleanup)
+        let mut processed_turn_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for turn in &self.turns {
             if turn.role != MessageRole::Assistant {
                 continue;
@@ -218,7 +218,7 @@ impl Conversation {
                         }
                     });
 
-                    let tc_id = format!("tc_{}_{}", turn.id.0, pid.0);
+                    let tc_id = tool_call_id_for(&turn.id, *pid);
 
                     tool_calls.push(ToolCallInfo {
                         id: tc_id,
@@ -248,24 +248,22 @@ impl Conversation {
                 synthetic: false,
                 images: vec![],
             };
-            assistant_msgs.push(msg);
+
+            if let Some(&idx) = msg_indices.get(&turn.id.0) {
+                self.messages[idx] = msg;
+            } else {
+                self.messages.push(msg);
+            }
+            processed_turn_ids.insert(turn.id.0.clone());
         }
 
-        // Round-robin interleave: User[0], Assistant[0], User[1], Assistant[1], ...
-        // Both lists are already in chronological order. Extra entries (e.g. a
-        // user message typed before the response arrives) append at the end.
-        let n = user_msgs.len().max(assistant_msgs.len());
-        let mut new_messages = Vec::with_capacity(user_msgs.len() + assistant_msgs.len());
-        for i in 0..n {
-            if i < user_msgs.len() {
-                new_messages.push(user_msgs[i].clone());
+        // Remove zombie assistant messages (turns that no longer exist)
+        self.messages.retain(|m| {
+            if m.role != MessageRole::Assistant {
+                return true;
             }
-            if i < assistant_msgs.len() {
-                new_messages.push(assistant_msgs[i].clone());
-            }
-        }
-
-        self.messages = new_messages;
+            processed_turn_ids.contains(&m.id)
+        });
     }
 }
 
