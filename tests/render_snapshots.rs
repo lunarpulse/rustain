@@ -20,15 +20,15 @@ use rustain::adapters::tui::state::HeightCache;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::domain::clock::MockClock;
+use rustain::domain::models::turn::{PartId, TurnPart};
 use rustain::domain::models::{
-    ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason,
-    StreamingState, ViewState, Turn,
+    ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason, StreamingState, Turn,
+    ViewState,
 };
-use rustain::domain::models::turn::{TurnPart, PartId};
 
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 use std::collections::{BTreeMap, HashMap};
 
 // ---------------------------------------------------------------------------
@@ -77,11 +77,17 @@ fn make_turn(id: &str, parts: Vec<TurnPart>, stop_reason: Option<StopReason>) ->
 }
 
 fn prose(text: &str) -> TurnPart {
-    TurnPart::Prose { id: PartId(0), text: text.to_string() }
+    TurnPart::Prose {
+        id: PartId(0),
+        text: text.to_string(),
+    }
 }
 
 fn reasoning(text: &str) -> TurnPart {
-    TurnPart::Reasoning { id: PartId(0), text: text.to_string() }
+    TurnPart::Reasoning {
+        id: PartId(0),
+        text: text.to_string(),
+    }
 }
 
 fn tool(name: &str, status: InvocationStatus) -> TurnPart {
@@ -92,7 +98,27 @@ fn tool(name: &str, status: InvocationStatus) -> TurnPart {
         args: serde_json::json!({}),
         status,
         started_at: 1_700_000_000_000,
-        ended_at: if is_success { Some(1_700_000_005_000) } else { None },
+        ended_at: if is_success {
+            Some(1_700_000_005_000)
+        } else {
+            None
+        },
+    }
+}
+
+fn tool_with_path(name: &str, file_path: &str, status: InvocationStatus) -> TurnPart {
+    let is_success = status == InvocationStatus::Success;
+    TurnPart::ToolInvocation {
+        id: PartId(0),
+        tool: name.to_string(),
+        args: serde_json::json!({"file_path": file_path}),
+        status,
+        started_at: 1_700_000_000_000,
+        ended_at: if is_success {
+            Some(1_700_000_005_000)
+        } else {
+            None
+        },
     }
 }
 
@@ -110,13 +136,24 @@ fn render_text(
         let streaming = StreamingState::default();
         let mut height_cache = HeightCache::default();
         let _ = chat_pane::render_with_search(
-            frame, area,
-            conversation, open_turn, &streaming, view_state, clock,
-            0, true,
+            frame,
+            area,
+            conversation,
+            open_turn,
+            &streaming,
+            view_state,
+            clock,
+            0,
+            true,
             &Theme::dark(),
             &mut height_cache,
-            &HashMap::new(), &BTreeMap::new(),
-            None, None, &[], &[], None,
+            &HashMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+            &[],
+            None,
         );
     });
     use ratatui::buffer::Buffer;
@@ -141,45 +178,79 @@ fn render_text(
 /// Fixture helpers — each builds the conversation + turn + message for a fixture.
 
 fn fixture_1_live_streaming() -> (Conversation, Turn) {
-    let turn = make_turn("f1", vec![
-        prose("Let me check the codebase."),
-        tool("Read", InvocationStatus::Running),
-        prose("Now let me run the tests."),
-        tool("Bash", InvocationStatus::Running),
-    ], None);
+    let turn = make_turn(
+        "f1",
+        vec![
+            prose("Let me check the codebase."),
+            tool("Read", InvocationStatus::Running),
+            prose("Now let me run the tests."),
+            tool("Bash", InvocationStatus::Running),
+        ],
+        None,
+    );
     let msg = make_msg("f1", MessageRole::Assistant);
     (make_conversation(vec![msg], vec![turn.clone()]), turn)
 }
 
 fn fixture_2_post_collapse_tier1() -> (Conversation, Turn) {
-    let turn = make_turn("f2", vec![
-        prose("Let me find all the relevant files and examine them carefully."),
-        tool("Read", InvocationStatus::Success),
-        tool("Grep", InvocationStatus::Success),
-        tool("Bash", InvocationStatus::Success),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f2",
+        vec![
+            prose("Let me find all the relevant files and examine them carefully."),
+            tool("Read", InvocationStatus::Success),
+            tool("Grep", InvocationStatus::Success),
+            tool("Bash", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f2", MessageRole::Assistant);
     (make_conversation(vec![msg], vec![turn.clone()]), turn)
 }
 
+fn fixture_3_post_collapse_tier2_after_zs_toggle() -> (Conversation, ViewState, Turn) {
+    let turn = make_turn(
+        "f3",
+        vec![
+            prose("Let me check the auth module files."),
+            tool_with_path("Read", "src/auth/login.rs", InvocationStatus::Success),
+            tool_with_path("Read", "src/auth/jwt.rs", InvocationStatus::Success),
+            tool_with_path("Read", "src/auth/session.rs", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
+    let msg = make_msg("f3", MessageRole::Assistant);
+    let mut vs = ViewState::default();
+    vs.collapsed.insert(turn.id.clone(), true);
+    vs.summary_tier = rustain::domain::models::SummaryTier::Tier2;
+    (make_conversation(vec![msg], vec![turn.clone()]), vs, turn)
+}
+
 fn fixture_4_expanded_one_tool() -> (Conversation, Turn) {
-    let turn = make_turn("f4", vec![
-        prose("Let me read the config file."),
-        tool("Read", InvocationStatus::Success),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f4",
+        vec![
+            prose("Let me read the config file."),
+            tool("Read", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f4", MessageRole::Assistant);
     (make_conversation(vec![msg], vec![turn.clone()]), turn)
 }
 
 fn fixture_5_expanded_user_toggled() -> (Conversation, ViewState, Turn) {
-    let turn = make_turn("f5", vec![
-        prose("Analyzing."),
-        tool("Read", InvocationStatus::Success),
-        tool("Grep", InvocationStatus::Success),
-        tool("Bash", InvocationStatus::Success),
-        tool("Edit", InvocationStatus::Success),
-        tool("Read", InvocationStatus::Success),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f5",
+        vec![
+            prose("Analyzing."),
+            tool("Read", InvocationStatus::Success),
+            tool("Grep", InvocationStatus::Success),
+            tool("Bash", InvocationStatus::Success),
+            tool("Edit", InvocationStatus::Success),
+            tool("Read", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f5", MessageRole::Assistant);
     let mut vs = ViewState::default();
     vs.collapsed.insert(turn.id.clone(), false); // user explicit expand
@@ -187,29 +258,35 @@ fn fixture_5_expanded_user_toggled() -> (Conversation, ViewState, Turn) {
 }
 
 fn fixture_6_failed_auto_expanded() -> (Conversation, Turn) {
-    let turn = make_turn("f6", vec![
-        prose("Let me try building this."),
-        tool("Read", InvocationStatus::Success),
-        tool("Bash", InvocationStatus::Error),
-        tool("Read", InvocationStatus::Success),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f6",
+        vec![
+            prose("Let me try building this."),
+            tool("Read", InvocationStatus::Success),
+            tool("Bash", InvocationStatus::Error),
+            tool("Read", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f6", MessageRole::Assistant);
     (make_conversation(vec![msg], vec![turn.clone()]), turn)
 }
 
 fn fixture_7_prose_only() -> (Conversation, Turn) {
-    let turn = make_turn("f7", vec![
-        prose("hello world"),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn("f7", vec![prose("hello world")], Some(StopReason::EndTurn));
     let msg = make_msg("f7", MessageRole::Assistant);
     (make_conversation(vec![msg], vec![turn.clone()]), turn)
 }
 
 fn fixture_8_tool_only_no_prose() -> (Conversation, Turn) {
-    let turn = make_turn("f8", vec![
-        tool("Read", InvocationStatus::Success),
-        tool("Bash", InvocationStatus::Success),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f8",
+        vec![
+            tool("Read", InvocationStatus::Success),
+            tool("Bash", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f8", MessageRole::Assistant);
     let mut vs = ViewState::default();
     vs.collapsed.insert(turn.id.clone(), true);
@@ -217,20 +294,30 @@ fn fixture_8_tool_only_no_prose() -> (Conversation, Turn) {
 }
 
 fn fixture_9_mixed_with_reasoning() -> (Conversation, Turn) {
-    let turn = make_turn("f9", vec![
-        prose("Let me analyze this structure."),
-        reasoning("The design uses a hexagonal architecture pattern which separates domain from adapters."),
-        tool("Read", InvocationStatus::Success),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f9",
+        vec![
+            prose("Let me analyze this structure."),
+            reasoning(
+                "The design uses a hexagonal architecture pattern which separates domain from adapters.",
+            ),
+            tool("Read", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f9", MessageRole::Assistant);
     (make_conversation(vec![msg], vec![turn.clone()]), turn)
 }
 
 fn fixture_10_cancelled_respects_collapse() -> (Conversation, ViewState, Turn) {
-    let turn = make_turn("f10", vec![
-        prose("Running a long batch."),
-        tool("Bash", InvocationStatus::Cancelled),
-    ], Some(StopReason::EndTurn));
+    let turn = make_turn(
+        "f10",
+        vec![
+            prose("Running a long batch."),
+            tool("Bash", InvocationStatus::Cancelled),
+        ],
+        Some(StopReason::EndTurn),
+    );
     let msg = make_msg("f10", MessageRole::Assistant);
     let mut vs = ViewState::default();
     vs.collapsed.insert(turn.id.clone(), true);
@@ -292,6 +379,34 @@ fn post_collapse_tier1_default_w200() {
     let (conv, _turn) = fixture_2_post_collapse_tier1();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
     let text = render_text(&conv, None, &ViewState::default(), &clock, 200, 60);
+    insta::assert_snapshot!(text);
+}
+
+// Fixture 3: post_collapse_tier2_after_zs_toggle (w80, w120, w200)
+// Completed turn with 3×Read(Success) under src/auth/ — Tier-2 shows "3 reads in src/auth/".
+// This fixture was deferred from S16.4 (Task 10.3) because Tier-2 was a stub identical to Tier-1.
+
+#[test]
+fn post_collapse_tier2_after_zs_toggle_w80() {
+    let (conv, vs, _turn) = fixture_3_post_collapse_tier2_after_zs_toggle();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    let text = render_text(&conv, None, &vs, &clock, 80, 60);
+    insta::assert_snapshot!(text);
+}
+
+#[test]
+fn post_collapse_tier2_after_zs_toggle_w120() {
+    let (conv, vs, _turn) = fixture_3_post_collapse_tier2_after_zs_toggle();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    let text = render_text(&conv, None, &vs, &clock, 120, 60);
+    insta::assert_snapshot!(text);
+}
+
+#[test]
+fn post_collapse_tier2_after_zs_toggle_w200() {
+    let (conv, vs, _turn) = fixture_3_post_collapse_tier2_after_zs_toggle();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    let text = render_text(&conv, None, &vs, &clock, 200, 60);
     insta::assert_snapshot!(text);
 }
 

@@ -1,0 +1,5 @@
+---
+source: tests/snapshot_tier_divergence.rs
+expression: tier1_str
+---
+│ ▸ I need to read the auth files.… · 3 tools ✓

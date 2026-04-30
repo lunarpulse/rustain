@@ -91,7 +91,6 @@ anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 openai = []
 skills-validation = []
-tier2 = []
 
 [profile.release]
 lto = true
