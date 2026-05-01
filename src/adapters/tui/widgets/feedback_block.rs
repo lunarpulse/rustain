@@ -165,7 +165,7 @@ mod tests {
             .collect();
         assert!(first_line_text.contains('✗'));
         assert!(first_line_text.contains('┃'));
-        assert!(first_line_text.contains("[r]"));
+        assert!(first_line_text.contains("[Ctrl+K r]"));
     }
 
     #[test]
@@ -228,5 +228,30 @@ mod tests {
         assert_eq!(next_delay(4), 16000);
         // Capped at 4 shifts
         assert_eq!(next_delay(5), 16000);
+    }
+
+    #[test]
+    fn feedback_block_renders_chord_prefix_chips() {
+        let block = FeedbackBlock {
+            id: "fb-1".to_string(),
+            level: FeedbackLevel::Warning,
+            message: "Auto-skipped task 3".to_string(),
+            actions: vec![FeedbackAction::Retry, FeedbackAction::Compact, FeedbackAction::Dismiss],
+        };
+        let lines = render_feedback_lines(&block, 80, &test_theme());
+        assert!(!lines.is_empty());
+        // Actions appear on the last rendered line
+        let last_line_text: String = lines
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            last_line_text.contains("[Ctrl+K r]") && last_line_text.contains("[Ctrl+K c]") && last_line_text.contains("[Ctrl+K x]"),
+            "all action chips should use chord-prefix: {}",
+            last_line_text
+        );
     }
 }

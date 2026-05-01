@@ -69,14 +69,27 @@ pub enum FeedbackAction {
 }
 
 impl FeedbackAction {
-    /// Key binding label for display.
+    /// Key binding label for display (chord-prefix grammar per UX-DR-GLOBAL-CHORD-PREFIX).
     pub fn key_label(&self) -> &str {
         match self {
-            FeedbackAction::Retry => "[r] Retry",
-            FeedbackAction::Compact => "[c] Compact",
-            FeedbackAction::StartFresh => "[n] Start fresh",
-            FeedbackAction::Dismiss => "[d] Dismiss",
+            FeedbackAction::Retry => "[Ctrl+K r] Retry",
+            FeedbackAction::Compact => "[Ctrl+K c] Compact",
+            FeedbackAction::StartFresh => "[Ctrl+K n] Start fresh",
+            FeedbackAction::Dismiss => "[Ctrl+K x] Dismiss",
             FeedbackAction::Custom(label) => label,
+        }
+    }
+
+    /// Single source of truth: maps a chord key character to its FeedbackAction.
+    /// Co-located with key_label() so round-trip tests can verify parity.
+    /// The adapter layer (app.rs) bridges FeedbackAction -> InputAction.
+    pub fn dispatch_key(c: char) -> Option<FeedbackAction> {
+        match c.to_ascii_lowercase() {
+            'r' => Some(FeedbackAction::Retry),
+            'c' => Some(FeedbackAction::Compact),
+            'n' => Some(FeedbackAction::StartFresh),
+            'x' => Some(FeedbackAction::Dismiss),
+            _ => None,
         }
     }
 }
@@ -121,5 +134,55 @@ impl StatusState {
             self,
             StatusState::Streaming | StatusState::Executing { .. } | StatusState::Retrying { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_label_uses_chord_prefix() {
+        assert_eq!(FeedbackAction::Retry.key_label(), "[Ctrl+K r] Retry");
+        assert_eq!(FeedbackAction::Compact.key_label(), "[Ctrl+K c] Compact");
+        assert_eq!(
+            FeedbackAction::StartFresh.key_label(),
+            "[Ctrl+K n] Start fresh"
+        );
+        assert_eq!(FeedbackAction::Dismiss.key_label(), "[Ctrl+K x] Dismiss");
+    }
+
+    #[test]
+    fn dispatch_key_round_trips_every_variant() {
+        let variants = [
+            (FeedbackAction::Retry, "[Ctrl+K r] Retry"),
+            (FeedbackAction::Compact, "[Ctrl+K c] Compact"),
+            (FeedbackAction::StartFresh, "[Ctrl+K n] Start fresh"),
+            (FeedbackAction::Dismiss, "[Ctrl+K x] Dismiss"),
+        ];
+
+        for (expected_variant, label) in &variants {
+            let key_char = label
+                .split(']')
+                .next()
+                .and_then(|s| s.chars().last())
+                .expect("label should contain a key character before ']'");
+
+            let action = FeedbackAction::dispatch_key(key_char)
+                .unwrap_or_else(|| panic!("dispatch_key('{}') should return Some", key_char));
+
+            assert_eq!(
+                action, *expected_variant,
+                "dispatch_key('{}') returned {:?}, expected {:?}",
+                key_char, action, expected_variant
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_key_unknown_char_returns_none() {
+        assert!(FeedbackAction::dispatch_key('z').is_none());
+        assert!(FeedbackAction::dispatch_key('y').is_none());
+        assert!(FeedbackAction::dispatch_key('a').is_none());
     }
 }

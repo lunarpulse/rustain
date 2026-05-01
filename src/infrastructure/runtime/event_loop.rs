@@ -67,6 +67,23 @@ use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::turn;
 
+/// Apply a warning-level notice to TUI state.
+/// Creates a FeedbackBlock, sets active_feedback_id, and returns the block ID.
+/// Does NOT mutate focus — this is the regression guard for AC6.
+fn apply_warning_notice(state: &mut TuiState, msg: String) -> String {
+    static WFB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let fb_id = format!("wfb-{}", WFB_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let fb = FeedbackBlock {
+        id: fb_id.clone(),
+        level: FeedbackLevel::Warning,
+        message: msg,
+        actions: vec![FeedbackAction::Dismiss],
+    };
+    state.feedback_blocks.insert(fb_id.clone(), fb);
+    state.active_feedback_id = Some(fb_id.clone());
+    fb_id
+}
+
 /// Run the 4-branch tokio::select! event loop.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -1016,6 +1033,48 @@ pub async fn run(
                                             });
                                         }
                                     }
+                                }
+                                InputAction::FeedbackCompact => {
+                                    if let Some(fb_id) = state.active_feedback_id.take() {
+                                        state.feedback_blocks.remove(&fb_id);
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::FeedbackDismiss => {
+                                    if let Some(fb_id) = state.active_feedback_id.take() {
+                                        state.feedback_blocks.remove(&fb_id);
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::FeedbackStartFresh => {
+                                    if let Some(fb_id) = state.active_feedback_id.take() {
+                                        state.feedback_blocks.remove(&fb_id);
+                                    }
+                                    conversation.messages.clear();
+                                    conversation.title = String::new();
+                                    conversation.id = generate_conversation_id();
+                                    conversation.session_id = Some(generate_conversation_id());
+                                    conversation.created_at = crate::domain::models::session_meta::now_unix();
+                                    conversation.updated_at = crate::domain::models::session_meta::now_unix();
+                                    conversation.last_response_at = None;
+                                    conversation.usage = None;
+                                    state.focus = FocusState::Input;
+                                    state.needs_redraw = true;
+                                    let fs_ref = fs_storage.clone();
+                                    let conv_clone = conversation.clone();
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    _pending_save = Some(tokio::spawn(async move {
+                                        match tokio::time::timeout(
+                                            BACKGROUND_TASK_TIMEOUT,
+                                            fs_ref.save_conversation_with_exit(&conv_clone, true),
+                                        ).await {
+                                            Ok(Ok(())) => {}
+                                            Ok(Err(e)) => tracing::error!("Failed to persist new session: {}", e),
+                                            Err(_) => tracing::warn!("Background task 'new_session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs()),
+                                        }
+                                    }));
                                 }
                                 InputAction::SubmitQuestionAnswer(answer) => {
                                     // Send answer back via oneshot channel
@@ -3854,15 +3913,7 @@ pub async fn run(
                                     state.focus = FocusState::Chat;
                                 }
                                 crate::domain::models::NoticeLevel::Warning => {
-                                    static WFB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-                                    let fb_id = format!("wfb-{}", WFB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                                    let fb = FeedbackBlock {
-                                        id: fb_id.clone(),
-                                        level: FeedbackLevel::Warning,
-                                        message: msg,
-                                        actions: vec![FeedbackAction::Compact],
-                                    };
-                                    state.feedback_blocks.insert(fb_id, fb);
+                                    apply_warning_notice(&mut state, msg);
                                 }
                                 _ => {
                                     state.status_before_flash = Some(state.status.clone());
@@ -6267,6 +6318,7 @@ fn load_active_tab(
     state.total_content_height = tab.total_content_height;
     state.pending_anchor = tab.pending_anchor;
     state.active_tab_id = tab_manager.active_tab_id();
+    state.chord_leader_active = false;
     // tool_block_states is global (cleared on tab switch); version resets for new tab
     state.tool_block_states.clear();
     if let Some(trs) = state
@@ -7999,6 +8051,16 @@ fn resolve_command_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warning_notice_does_not_transfer_focus() {
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Input;
+        let fb_id = apply_warning_notice(&mut state, "Auto-skipped task 3".to_string());
+        assert_eq!(state.focus, FocusState::Input, "Warning notice must not transfer focus from Input");
+        assert_eq!(state.active_feedback_id, Some(fb_id.clone()), "Warning notice must set active_feedback_id");
+        assert!(state.feedback_blocks.contains_key(&fb_id), "Warning notice must insert feedback block");
+    }
 
     #[test]
     fn test_post_process_title_trims_whitespace() {

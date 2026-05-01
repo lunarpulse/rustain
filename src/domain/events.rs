@@ -257,6 +257,7 @@ pub enum DomainKey {
     CtrlE,
     CtrlF,
     CtrlH,
+    CtrlK,
     CtrlP,
     CtrlR,
     CtrlT,

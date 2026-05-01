@@ -996,6 +996,9 @@ pub struct TuiState {
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
     /// The ID of the most recent active (actionable) feedback block.
     pub active_feedback_id: Option<String>,
+    /// Whether a Ctrl+K chord leader has been pressed and the next character key
+    /// should be dispatched through FeedbackAction::dispatch_key().
+    pub chord_leader_active: bool,
     /// Active AskUserQuestion card state.
     pub ask_user_question: Option<AskUserQuestionState>,
     /// Oneshot sender for AskUserQuestion responses.
@@ -1187,6 +1190,7 @@ impl TuiState {
             retry_state: None,
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,
+            chord_leader_active: false,
             ask_user_question: None,
             question_response_tx: None,
             pending_skill_trust: None,
