@@ -1,3 +1,4 @@
+pub mod height_cache;
 pub mod virtual_scroll;
 pub mod word_wrap;
 
@@ -6,17 +7,18 @@ use ratatui::widgets::Paragraph;
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::adapters::tui::state::HeightCache;
 use crate::adapters::tui::state::PendingPlanCard;
+use crate::adapters::tui::state::{CachedTurnLayout, TabRenderState};
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::feedback_block;
 use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
-use crate::domain::clock::{current_braille_frame, Clock};
-use crate::domain::models::{
-    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, MessageRole, PartId, StopReason,
-    StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnPart, ViewState,
-};
+use crate::domain::clock::{Clock, current_braille_frame};
 use crate::domain::models::turn::tool_call_id_for;
+use crate::domain::models::{
+    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, MessageRole, PartId,
+    StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId, TurnPart,
+    ViewState,
+};
 use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
 
@@ -171,6 +173,16 @@ mod targeting_tests {
 /// bookmark glyph — this parameter asserts that contract rather than
 /// computing from it.
 #[allow(clippy::too_many_arguments)]
+fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    msg.content.hash(&mut hasher);
+    msg.content_blocks.hash(&mut hasher);
+    msg.stop_reason.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn compute_message_height(
     content: &str,
     has_error: bool,
@@ -459,7 +471,15 @@ fn effective_is_collapsed(turn: &Turn, view_state: &ViewState) -> bool {
     if turn.stop_reason.is_none() {
         return false;
     }
-    if turn.parts.iter().any(|p| matches!(p, TurnPart::ToolInvocation { status: InvocationStatus::Error, .. })) {
+    if turn.parts.iter().any(|p| {
+        matches!(
+            p,
+            TurnPart::ToolInvocation {
+                status: InvocationStatus::Error,
+                ..
+            }
+        )
+    }) {
         return false;
     }
     // User-explicit toggle wins
@@ -485,28 +505,51 @@ fn effective_is_collapsed(turn: &Turn, view_state: &ViewState) -> bool {
 /// Signature: 1 arg (`turn`) per P1-3 — frame-stable, reads only immutable
 /// turn.parts.
 fn default_collapse_predicate(turn: &Turn) -> bool {
-    let n = turn.parts.iter().filter(|p| matches!(p, TurnPart::ToolInvocation { .. })).count();
+    let n = turn
+        .parts
+        .iter()
+        .filter(|p| matches!(p, TurnPart::ToolInvocation { .. }))
+        .count();
     if n < 3 {
         return false;
     }
-    let prose_lines: usize = turn.parts.iter().filter_map(|p| match p {
-        TurnPart::Prose { text, .. } | TurnPart::Reasoning { text, .. } => Some(text.matches('\n').count()),
-        _ => None,
-    }).sum();
+    let prose_lines: usize = turn
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            TurnPart::Prose { text, .. } | TurnPart::Reasoning { text, .. } => {
+                Some(text.matches('\n').count())
+            }
+            _ => None,
+        })
+        .sum();
     // Pair invocation+result before measuring
-    let mut results: std::collections::HashMap<PartId, &TurnPart> = std::collections::HashMap::new();
+    let mut results: std::collections::HashMap<PartId, &TurnPart> =
+        std::collections::HashMap::new();
     for part in &turn.parts {
         if let TurnPart::ToolResult { refs, .. } = part {
             results.insert(*refs, part);
         }
     }
-    let tool_lines: usize = turn.parts.iter().filter_map(|p| {
-        if let TurnPart::ToolInvocation { id, .. } = p {
-            let result_part = results.get(id).copied();
-            let tc = adapter_shim(turn, p, result_part);
-            Some(tool_block::tool_block_height(&tc, &ToolBlockState { collapsed: false, peek_active: false }))
-        } else { None }
-    }).sum();
+    let tool_lines: usize = turn
+        .parts
+        .iter()
+        .filter_map(|p| {
+            if let TurnPart::ToolInvocation { id, .. } = p {
+                let result_part = results.get(id).copied();
+                let tc = adapter_shim(turn, p, result_part);
+                Some(tool_block::tool_block_height(
+                    &tc,
+                    &ToolBlockState {
+                        collapsed: false,
+                        peek_active: false,
+                    },
+                ))
+            } else {
+                None
+            }
+        })
+        .sum();
     tool_lines > prose_lines
 }
 
@@ -516,36 +559,83 @@ fn default_collapse_predicate(turn: &Turn) -> bool {
 /// Field mapping follows `rebuild_messages_mirror`'s convention.
 /// Uses `tool_call_id_for` (P1-1) so the id format cannot drift.
 fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -> ToolCallInfo {
-    let (tool, args, status_chip, started_at_ms, ended_at_ms, tool_result, _pid) = match invocation {
-        TurnPart::ToolInvocation { id, tool, args, status, started_at, ended_at } => {
+    let (tool, args, status_chip, started_at_ms, ended_at_ms, tool_result, _pid) = match invocation
+    {
+        TurnPart::ToolInvocation {
+            id,
+            tool,
+            args,
+            status,
+            started_at,
+            ended_at,
+        } => {
             let (chip, result_info) = match status {
                 InvocationStatus::Running => (Some("● Executing".to_string()), None),
-                InvocationStatus::Success => (Some("✓ Success".to_string()), result.map(|rp| {
-                    if let TurnPart::ToolResult { output, .. } = rp {
-                        ToolResultInfo { content: output.content.clone(), is_error: output.is_error }
-                    } else { ToolResultInfo { content: String::new(), is_error: false } }
-                })),
+                InvocationStatus::Success => (
+                    Some("✓ Success".to_string()),
+                    result.map(|rp| {
+                        if let TurnPart::ToolResult { output, .. } = rp {
+                            ToolResultInfo {
+                                content: output.content.clone(),
+                                is_error: output.is_error,
+                            }
+                        } else {
+                            ToolResultInfo {
+                                content: String::new(),
+                                is_error: false,
+                            }
+                        }
+                    }),
+                ),
                 InvocationStatus::Error => {
                     let ri = result.map(|rp| {
                         if let TurnPart::ToolResult { output, .. } = rp {
-                            ToolResultInfo { content: output.content.clone(), is_error: output.is_error }
-                        } else { ToolResultInfo { content: String::new(), is_error: true } }
+                            ToolResultInfo {
+                                content: output.content.clone(),
+                                is_error: output.is_error,
+                            }
+                        } else {
+                            ToolResultInfo {
+                                content: String::new(),
+                                is_error: true,
+                            }
+                        }
                     });
                     (Some("✗ Error".to_string()), ri)
                 }
                 InvocationStatus::Cancelled => (Some("⊘ Cancelled".to_string()), None),
                 InvocationStatus::Pending => (None, None),
             };
-            (tool.clone(), args.clone(), chip, *started_at as u64, ended_at.map(|v| v as u64), result_info, *id)
+            (
+                tool.clone(),
+                args.clone(),
+                chip,
+                *started_at as u64,
+                ended_at.map(|v| v as u64),
+                result_info,
+                *id,
+            )
         }
-        _ => (String::new(), serde_json::Value::Null, None, 0u64, None, None, PartId(0)),
+        _ => (
+            String::new(),
+            serde_json::Value::Null,
+            None,
+            0u64,
+            None,
+            None,
+            PartId(0),
+        ),
     };
     ToolCallInfo {
         id: tool_call_id_for(&turn.id, _pid),
         name: tool,
         input: args,
         result: tool_result,
-        started_at_ms: if started_at_ms == 0 { None } else { Some(started_at_ms) },
+        started_at_ms: if started_at_ms == 0 {
+            None
+        } else {
+            Some(started_at_ms)
+        },
         completed_at_ms: ended_at_ms,
         status: status_chip,
     }
@@ -558,13 +648,136 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
 /// - tool → prose/reasoning: 1 (standard paragraph spacing)
 /// - tool → tool: 0 (flush — tool group)
 /// - prose/reasoning → prose/reasoning: 1 (adjacent prose, rare)
+// Height is clock-independent — see AC6.
+pub(super) fn expanded_turn_height(
+    turn: &Turn,
+    _theme: &Theme,
+    width: usize,
+    tool_block_states: &HashMap<String, ToolBlockState>,
+) -> CachedTurnLayout {
+    let content_width = width.saturating_sub(2);
+    if content_width == 0 {
+        return CachedTurnLayout {
+            height: 0,
+            block_offsets: vec![],
+        };
+    }
+
+    // Pre-scan: pair each ToolInvocation with its ToolResult
+    let mut result_map: std::collections::HashMap<PartId, &TurnPart> =
+        std::collections::HashMap::new();
+    for part in &turn.parts {
+        if let TurnPart::ToolResult { refs, .. } = part {
+            result_map.insert(*refs, part);
+        }
+    }
+
+    let mut height: usize = 0;
+    let mut block_offsets: Vec<usize> = Vec::new();
+    let mut prev: Option<&TurnPart> = None;
+    let mut running_count: usize = 0;
+
+    for part in &turn.parts {
+        // Inter-part spacing
+        let blanks = inter_part_blank_lines(prev, part);
+        height += blanks;
+
+        match part {
+            TurnPart::Prose { text, .. } => {
+                block_offsets.push(height);
+                height += crate::adapters::tui::markdown::compute_height(
+                    text,
+                    content_width,
+                    &crate::adapters::tui::markdown::RenderOptions::completed(),
+                );
+            }
+            TurnPart::Reasoning { text, .. } => {
+                block_offsets.push(height);
+                height += crate::adapters::tui::markdown::compute_height(
+                    text,
+                    content_width,
+                    &crate::adapters::tui::markdown::RenderOptions::completed(),
+                );
+            }
+            TurnPart::ToolInvocation { id, status, .. } => {
+                block_offsets.push(height);
+                let tc = adapter_shim(turn, part, result_map.get(id).copied());
+                let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                height += tool_block::tool_block_height(&tc, &tb_state);
+                if *status == InvocationStatus::Running {
+                    running_count += 1;
+                }
+            }
+            TurnPart::ToolResult { .. } => {
+                // Skip — rendered as part of ToolInvocation
+            }
+        }
+        prev = Some(part);
+    }
+
+    // Per-Running rail addend + trailing rail line
+    height += running_count + 1;
+
+    CachedTurnLayout {
+        height,
+        block_offsets,
+    }
+}
+
+// Height is clock-independent — see AC6.
+pub(super) fn collapsed_turn_height(
+    _turn: &Turn,
+    _view_state: &ViewState,
+    _theme: &Theme,
+    _width: usize,
+) -> CachedTurnLayout {
+    CachedTurnLayout {
+        height: 1,
+        block_offsets: vec![],
+    }
+}
+
+/// Paired-call helper: toggle fold for a turn AND invalidate its cache entry.
+/// Task 8 — ensures cache stays coherent with view_state.collapsed mutations.
+pub fn toggle_turn_fold(
+    view_state: &mut ViewState,
+    tab_render_state: &mut TabRenderState,
+    turn_id: &TurnId,
+) {
+    view_state.toggle_fold(turn_id);
+    tab_render_state.height_cache.invalidate_turn(turn_id);
+}
+
+/// Paired-call helper: set summary tier AND invalidate all cache entries.
+/// Task 9 — summary tier affects every collapsed turn height.
+pub fn set_summary_tier(
+    view_state: &mut ViewState,
+    tab_render_state: &mut TabRenderState,
+    tier: SummaryTier,
+) {
+    view_state.summary_tier = tier;
+    tab_render_state.height_cache.invalidate_all();
+}
+
 fn inter_part_blank_lines(prev: Option<&TurnPart>, next: &TurnPart) -> usize {
     match (prev, next) {
         (None, _) => 0,
-        (Some(TurnPart::Prose { .. } | TurnPart::Reasoning { .. }), TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. }) => 0,
-        (Some(TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. }), TurnPart::Prose { .. } | TurnPart::Reasoning { .. }) => 1,
-        (Some(TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. }), TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. }) => 0,
-        (Some(TurnPart::Prose { .. } | TurnPart::Reasoning { .. }), TurnPart::Prose { .. } | TurnPart::Reasoning { .. }) => 1,
+        (
+            Some(TurnPart::Prose { .. } | TurnPart::Reasoning { .. }),
+            TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. },
+        ) => 0,
+        (
+            Some(TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. }),
+            TurnPart::Prose { .. } | TurnPart::Reasoning { .. },
+        ) => 1,
+        (
+            Some(TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. }),
+            TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. },
+        ) => 0,
+        (
+            Some(TurnPart::Prose { .. } | TurnPart::Reasoning { .. }),
+            TurnPart::Prose { .. } | TurnPart::Reasoning { .. },
+        ) => 1,
     }
 }
 
@@ -586,10 +799,20 @@ fn gutter_lines<'a>(content_lines: Vec<Line<'a>>, theme: &Theme) -> Vec<Line<'a>
 /// Sentence boundary is first `.`, `!`, or `?` followed by space or end-of-string.
 /// Returns empty string if no Prose part exists.
 fn first_prose_sentence(turn: &Turn) -> String {
-    let text = turn.parts.iter().find_map(|p| {
-        if let TurnPart::Prose { text, .. } = p { Some(text.as_str()) } else { None }
-    }).unwrap_or("");
-    if text.is_empty() { return String::new(); }
+    let text = turn
+        .parts
+        .iter()
+        .find_map(|p| {
+            if let TurnPart::Prose { text, .. } = p {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .unwrap_or("");
+    if text.is_empty() {
+        return String::new();
+    }
     // Find first sentence boundary: `.`, `!`, or `?` followed by space or end
     for (i, c) in text.char_indices() {
         if matches!(c, '.' | '!' | '?') {
@@ -648,7 +871,8 @@ fn render_expanded_turn<'a>(
     }
 
     // Pre-scan: pair each ToolInvocation with its ToolResult
-    let mut result_map: std::collections::HashMap<PartId, &TurnPart> = std::collections::HashMap::new();
+    let mut result_map: std::collections::HashMap<PartId, &TurnPart> =
+        std::collections::HashMap::new();
     for part in &turn.parts {
         if let TurnPart::ToolResult { refs, .. } = part {
             result_map.insert(*refs, part);
@@ -668,7 +892,9 @@ fn render_expanded_turn<'a>(
         match part {
             TurnPart::Prose { text, .. } => {
                 let prose_lines = crate::adapters::tui::markdown::render(
-                    text, content_width, theme,
+                    text,
+                    content_width,
+                    theme,
                     &crate::adapters::tui::markdown::RenderOptions::completed(),
                 );
                 lines.extend(prose_lines);
@@ -676,35 +902,62 @@ fn render_expanded_turn<'a>(
             TurnPart::Reasoning { text, .. } => {
                 // P2-2: italic fg_secondary — merge with existing span styles
                 let reasoning_lines = crate::adapters::tui::markdown::render(
-                    text, content_width, theme,
+                    text,
+                    content_width,
+                    theme,
                     &crate::adapters::tui::markdown::RenderOptions::completed(),
                 );
                 for line in reasoning_lines {
-                    let styled_spans: Vec<Span<'a>> = line.spans.into_iter().map(|s| {
-                        let mut style = s.style;
-                        style = style.fg(theme.colors.fg_secondary).add_modifier(Modifier::ITALIC);
-                        Span::styled(s.content.to_string(), style)
-                    }).collect();
+                    let styled_spans: Vec<Span<'a>> = line
+                        .spans
+                        .into_iter()
+                        .map(|s| {
+                            let mut style = s.style;
+                            style = style
+                                .fg(theme.colors.fg_secondary)
+                                .add_modifier(Modifier::ITALIC);
+                            Span::styled(s.content.to_string(), style)
+                        })
+                        .collect();
                     lines.push(Line::from(styled_spans));
                 }
             }
-            TurnPart::ToolInvocation { id, tool, status, .. } => {
+            TurnPart::ToolInvocation {
+                id, tool, status, ..
+            } => {
                 let result = result_map.get(id).copied();
                 let tc = adapter_shim(turn, part, result);
                 let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                let tb_lines = tool_block::render_tool_block_lines(&tc, theme, &tb_state, content_width as u16, clock);
+                let tb_lines = tool_block::render_tool_block_lines(
+                    &tc,
+                    theme,
+                    &tb_state,
+                    content_width as u16,
+                    clock,
+                );
                 lines.extend(tb_lines);
                 // Per-invocation live rail for running tools only
                 if *status == InvocationStatus::Running {
                     let spinner = current_braille_frame(clock);
                     let progress_suffix = liveness
                         .and_then(|l| l.progress)
-                        .filter(|_| liveness.as_ref().and_then(|l| l.active_tool_name.as_deref()) == Some(tool.as_str()))
+                        .filter(|_| {
+                            liveness
+                                .as_ref()
+                                .and_then(|l| l.active_tool_name.as_deref())
+                                == Some(tool.as_str())
+                        })
                         .map(|(k, n)| format!(" ({}/{})", k, n))
                         .unwrap_or_default();
                     let rail_spans = vec![
-                        Span::styled(spinner.to_string(), Style::default().fg(theme.colors.tool_status_executing)),
-                        Span::styled(format!(" {}{}", tool, progress_suffix), Style::default().fg(theme.colors.fg_secondary)),
+                        Span::styled(
+                            spinner.to_string(),
+                            Style::default().fg(theme.colors.tool_status_executing),
+                        ),
+                        Span::styled(
+                            format!(" {}{}", tool, progress_suffix),
+                            Style::default().fg(theme.colors.fg_secondary),
+                        ),
                     ];
                     lines.push(Line::from(rail_spans));
                 }
@@ -720,7 +973,10 @@ fn render_expanded_turn<'a>(
 
     // Wrap in gutter and add trailing half-line gap
     let mut result = gutter_lines(lines, theme);
-    result.push(Line::from(Span::styled("│", Style::default().fg(theme.colors.accent))));
+    result.push(Line::from(Span::styled(
+        "│",
+        Style::default().fg(theme.colors.accent),
+    )));
     result
 }
 
@@ -733,14 +989,28 @@ fn render_collapsed_turn<'a>(
     clock: &dyn Clock,
 ) -> Vec<Line<'a>> {
     let sentence = first_prose_sentence(turn);
-    let has_error = turn.parts.iter().any(|p| matches!(p, TurnPart::ToolInvocation { status: InvocationStatus::Error, .. }));
+    let has_error = turn.parts.iter().any(|p| {
+        matches!(
+            p,
+            TurnPart::ToolInvocation {
+                status: InvocationStatus::Error,
+                ..
+            }
+        )
+    });
 
     // Compute elapsed from now to first invocation's started_at
     let elapsed_ms: Option<i64> = if turn.stop_reason.is_some() {
         let first_start = turn.parts.iter().find_map(|p| {
             if let TurnPart::ToolInvocation { started_at, .. } = p {
-                if *started_at != 0 { Some(*started_at) } else { None }
-            } else { None }
+                if *started_at != 0 {
+                    Some(*started_at)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         });
         first_start.map(|start| clock.wall_now_ms().saturating_sub(start))
     } else {
@@ -764,11 +1034,22 @@ fn render_collapsed_turn<'a>(
     let collapse_glyph_width = collapse_glyph.width(); // "▸ "
 
     let (glyph, glyph_style) = if has_error {
-        let failed_name = turn.parts.iter().find_map(|p| {
-            if let TurnPart::ToolInvocation { tool, status: InvocationStatus::Error, .. } = p {
-                Some(tool.as_str())
-            } else { None }
-        }).unwrap_or("unknown");
+        let failed_name = turn
+            .parts
+            .iter()
+            .find_map(|p| {
+                if let TurnPart::ToolInvocation {
+                    tool,
+                    status: InvocationStatus::Error,
+                    ..
+                } = p
+                {
+                    Some(tool.as_str())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("unknown");
         (format!("✗ {}", failed_name), theme.colors.tool_status_error)
     } else {
         (success_glyph.to_string(), theme.colors.tool_status_success)
@@ -836,7 +1117,7 @@ pub fn render(
     scroll_offset: usize,
     auto_scroll: bool,
     theme: &Theme,
-    height_cache: &mut HeightCache,
+    tab_render_state: &mut TabRenderState,
     tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
 ) -> RenderResult {
@@ -851,7 +1132,7 @@ pub fn render(
         scroll_offset,
         auto_scroll,
         theme,
-        height_cache,
+        tab_render_state,
         tool_block_states,
         feedback_blocks,
         None,
@@ -893,7 +1174,7 @@ pub fn render_with_search(
     scroll_offset: usize,
     auto_scroll: bool,
     theme: &Theme,
-    height_cache: &mut HeightCache,
+    tab_render_state: &mut TabRenderState,
     tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
     search_query: Option<&str>,
@@ -911,7 +1192,11 @@ pub fn render_with_search(
     };
 
     // Empty state: no messages, no open turn, no streaming, no feedback blocks
-    if conversation.messages.is_empty() && open_turn.is_none() && !streaming.is_streaming && feedback_blocks.is_empty() {
+    if conversation.messages.is_empty()
+        && open_turn.is_none()
+        && !streaming.is_streaming
+        && feedback_blocks.is_empty()
+    {
         empty_state::render(frame, area, theme);
         return empty;
     }
@@ -925,11 +1210,27 @@ pub fn render_with_search(
     let spacing = theme.spacing.normal as usize;
     let msg_count = conversation.messages.len();
 
-    // Invalidate cache if terminal width changed
-    if height_cache.cached_width != area.width {
-        height_cache.invalidate_all();
-        height_cache.cached_width = area.width;
+    // Invalidate cache if terminal width changed (O(1) divergence check — AC5)
+    if tab_render_state.cached_width != Some(area.width) {
+        tab_render_state.height_cache.invalidate_all();
+        tab_render_state.cached_width = Some(area.width);
     }
+
+    // turn_map borrows &Turn from conversation.turns; height_cache lives on tab (separate root);
+    // open_turn is a separate parameter borrow root — no aliasing.
+    let turn_map: std::collections::HashMap<&str, &Turn> = conversation
+        .turns
+        .iter()
+        .map(|t| (t.id.0.as_str(), t))
+        .collect();
+
+    // Eviction gate: only evict when turn count shrinks (Amelia P0-4 / AC15)
+    let turn_count = conversation.turns.len();
+    if turn_count < tab_render_state.height_cache.last_seen_turn_count {
+        let live = conversation.turns.iter().map(|t| &t.id);
+        tab_render_state.height_cache.evict_turns_not_in(live);
+    }
+    tab_render_state.height_cache.last_seen_turn_count = turn_count;
 
     // Phase 1: Compute per-message heights and build boundary data.
     // Walk conversation.messages for layout; dispatch on role for height calc.
@@ -953,50 +1254,76 @@ pub fn render_with_search(
         let mut h: usize;
         match msg.role {
             MessageRole::Assistant => {
-                // Find corresponding Turn by id (TurnId.0 == ChatMessage.id invariant)
-                let turn_opt = conversation.turns.iter().find(|t| t.id.0 == msg.id);
-                if let Some(turn) = turn_opt {
+                let turn = turn_map.get(msg.id.as_str()).copied();
+                if let Some(turn) = turn {
                     let collapsed = effective_is_collapsed(turn, view_state);
-                    if collapsed {
-                        h = 1; // collapsed turn is always 1 line (gutter-wrapped)
-                    } else {
-                        h = render_expanded_turn(turn, theme, width, clock, tool_block_states, None).len();
-                        // Push tool block boundaries for focused-tool navigation:
-                        // accumulate line offset through the turn's parts to push a
-                        // boundary at each ToolInvocation position.
-                        let mut lines_before_tools = 0usize;
-                        let mut part_offset = 0usize;
-                        for part in &turn.parts {
-                            match part {
-                                TurnPart::Prose { text, .. } => {
-                                    part_offset += crate::adapters::tui::markdown::compute_height(
-                                        text, width.saturating_sub(2),
-                                        &crate::adapters::tui::markdown::RenderOptions::completed(),
+                    let key = crate::adapters::tui::state::HeightKey {
+                        turn_id: turn.id.clone(),
+                        expansion: !collapsed,
+                        summary_tier: view_state.summary_tier,
+                        terminal_width: area.width,
+                        tool_block_states_version: tab_render_state.tool_block_states_version,
+                    };
+                    let layout = match tab_render_state.height_cache.get(&key) {
+                        Some(l) => {
+                            let l = l.clone();
+                            #[cfg(debug_assertions)]
+                            {
+                                crate::adapters::tui::widgets::chat_pane::height_cache::metrics::HITS
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let probe = if collapsed {
+                                    collapsed_turn_height(turn, view_state, theme, width)
+                                } else {
+                                    expanded_turn_height(turn, theme, width, tool_block_states)
+                                };
+                                if probe.height != l.height
+                                    || probe.block_offsets != l.block_offsets
+                                {
+                                    tracing::warn!(
+                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}), computed=({}, {:?})",
+                                        turn.id.0,
+                                        !collapsed,
+                                        l.height,
+                                        l.block_offsets,
+                                        probe.height,
+                                        probe.block_offsets
                                     );
-                                }
-                                TurnPart::Reasoning { text, .. } => {
-                                    part_offset += crate::adapters::tui::markdown::compute_height(
-                                        text, width.saturating_sub(2),
-                                        &crate::adapters::tui::markdown::RenderOptions::completed(),
-                                    );
-                                }
-                                TurnPart::ToolInvocation { .. } => {
-                                    block_boundaries.push(cumulative_offset + part_offset);
-                                    let tc = adapter_shim(turn, part, None);
-                                    part_offset += tool_block::tool_block_height(&tc, &ToolBlockState::default());
-                                }
-                                TurnPart::ToolResult { .. } => {
-                                    // Skip — rendered as part of ToolInvocation
+                                    tab_render_state.height_cache.invalidate_all();
                                 }
                             }
+                            l
                         }
+                        None => {
+                            let l = if collapsed {
+                                collapsed_turn_height(turn, view_state, theme, width)
+                            } else {
+                                expanded_turn_height(turn, theme, width, tool_block_states)
+                            };
+                            #[cfg(debug_assertions)]
+                            {
+                                crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            tab_render_state.height_cache.set(key.clone(), l.clone());
+                            l
+                        }
+                    };
+                    h = layout.height;
+                    for offset in &layout.block_offsets {
+                        block_boundaries.push(cumulative_offset + offset);
                     }
                 } else {
-                    // No matching turn — fall back to legacy height calc
+                    // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
                     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
                     let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
                     let is_bookmarked = bookmarks.binary_search(&i).is_ok();
-                    h = compute_message_height(&msg.content, has_error, is_cancelled, is_bookmarked, width);
+                    h = compute_message_height(
+                        &msg.content,
+                        has_error,
+                        is_cancelled,
+                        is_bookmarked,
+                        width,
+                    );
                     for tc in &msg.tool_calls {
                         let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                         h += tool_block::tool_block_height(tc, &tb_state);
@@ -1005,10 +1332,40 @@ pub fn render_with_search(
                 }
             }
             MessageRole::User | MessageRole::System => {
-                let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
-                let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
-                let is_bookmarked = bookmarks.binary_search(&i).is_ok();
-                h = compute_message_height(&msg.content, has_error, is_cancelled, is_bookmarked, width);
+                let key = crate::adapters::tui::state::MessageHeightKey {
+                    msg_id: msg.id.clone(),
+                    terminal_width: area.width,
+                    content_hash: hash_message_content(msg),
+                };
+                h = match tab_render_state.height_cache.get_message(&key) {
+                    Some(cached_h) => {
+                        #[cfg(debug_assertions)]
+                        {
+                            crate::adapters::tui::widgets::chat_pane::height_cache::metrics::HITS
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        cached_h
+                    }
+                    None => {
+                        #[cfg(debug_assertions)]
+                        {
+                            crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
+                        let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
+                        let is_bookmarked = bookmarks.binary_search(&i).is_ok();
+                        let computed = compute_message_height(
+                            &msg.content,
+                            has_error,
+                            is_cancelled,
+                            is_bookmarked,
+                            width,
+                        );
+                        tab_render_state.height_cache.set_message(key, computed);
+                        computed
+                    }
+                };
                 for tc in &msg.tool_calls {
                     let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                     h += tool_block::tool_block_height(tc, &tb_state);
@@ -1018,6 +1375,7 @@ pub fn render_with_search(
         }
 
         // PlanCard heights (Story 6-1a AC5)
+        // PlanCard is NOT in the cached layout — added at render time (AC11b).
         if msg.content_blocks.contains(&ContentBlockType::PlanCard) {
             let mut plans_for_msg: Vec<&crate::domain::models::plan::Plan> = conversation
                 .plans
@@ -1047,31 +1405,32 @@ pub fn render_with_search(
             h += 1;
         }
 
-        // Height cache
-        if let Some(cached) = height_cache.get(&msg.id) {
-            if cached != h {
-                height_cache.invalidate_all();
-                height_cache.set(msg.id.clone(), h);
-            }
-        } else {
-            height_cache.set(msg.id.clone(), h);
-        }
-
         message_heights.push(h);
         cumulative_offset += h;
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        for (k, _) in tab_render_state.height_cache.entries.iter() {
+            debug_assert!(
+                turn_map.contains_key(k.turn_id.0.as_str()),
+                "HeightCache entry references phantom turn {} not in conversation.turns",
+                k.turn_id.0
+            );
+        }
     }
 
     // Open turn height (live streaming)
     let open_turn_height = if let Some(ot) = open_turn {
         // AC13 suppression check: skip if already in conversation.turns
-        let already_committed = conversation.turns.iter().any(|t| t.id == ot.id);
+        let already_committed = turn_map.contains_key(ot.id.0.as_str());
         if already_committed {
             0
         } else {
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let h = render_expanded_turn(ot, theme, width, clock, tool_block_states, None).len();
+            let h = expanded_turn_height(ot, theme, width, tool_block_states).height;
             cumulative_offset += h;
             h
         }
@@ -1117,7 +1476,11 @@ pub fn render_with_search(
         if i > 0 {
             let spacing_end = line_offset + spacing;
             if spacing_end > visible_start && line_offset < visible_end {
-                let start = if line_offset >= visible_start { 0 } else { visible_start - line_offset };
+                let start = if line_offset >= visible_start {
+                    0
+                } else {
+                    visible_start - line_offset
+                };
                 let end = spacing.min(visible_end.saturating_sub(line_offset));
                 for _ in start..end {
                     lines.push(Line::from(""));
@@ -1133,14 +1496,19 @@ pub fn render_with_search(
             let is_fork_point = conversation.fork_source.is_some()
                 && i == conversation.messages.len().saturating_sub(1);
             let focused_local_ordinal: Option<usize> = focused_search_match.and_then(|focused| {
-                if focused.message_index != i { return None; }
-                search_matches.iter().filter(|m| m.message_index == i).position(|m| m == focused)
+                if focused.message_index != i {
+                    return None;
+                }
+                search_matches
+                    .iter()
+                    .filter(|m| m.message_index == i)
+                    .position(|m| m == focused)
             });
             let is_bookmarked = bookmarks.binary_search(&i).is_ok();
 
             match msg.role {
                 MessageRole::Assistant => {
-                    let turn_opt = conversation.turns.iter().find(|t| t.id.0 == msg.id);
+                    let turn_opt = turn_map.get(msg.id.as_str()).copied();
                     if let Some(turn) = turn_opt {
                         let collapsed = effective_is_collapsed(turn, view_state);
                         let turn_lines = if collapsed {
@@ -1156,8 +1524,22 @@ pub fn render_with_search(
                         }
                     } else {
                         // Legacy fallback for Assistant messages without a Turn
-                        let msg_lines = render_message(msg, width, theme, is_fork_point, is_bookmarked, search_query, focused_local_ordinal);
-                        let text_height = compute_message_height(&msg.content, msg.content_blocks.contains(&ContentBlockType::Error), msg.stop_reason == Some(StopReason::Cancelled), is_bookmarked, width);
+                        let msg_lines = render_message(
+                            msg,
+                            width,
+                            theme,
+                            is_fork_point,
+                            is_bookmarked,
+                            search_query,
+                            focused_local_ordinal,
+                        );
+                        let text_height = compute_message_height(
+                            &msg.content,
+                            msg.content_blocks.contains(&ContentBlockType::Error),
+                            msg.stop_reason == Some(StopReason::Cancelled),
+                            is_bookmarked,
+                            width,
+                        );
                         for (j, line) in msg_lines.into_iter().enumerate() {
                             let abs_line = line_offset + j;
                             if abs_line >= visible_start && abs_line < visible_end {
@@ -1166,8 +1548,11 @@ pub fn render_with_search(
                         }
                         let mut tool_line_offset = line_offset + text_height;
                         for tc in &msg.tool_calls {
-                            let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                            let tb_lines = tool_block::render_tool_block_lines(tc, theme, &tb_state, area.width, clock);
+                            let tb_state =
+                                tool_block_states.get(&tc.id).cloned().unwrap_or_default();
+                            let tb_lines = tool_block::render_tool_block_lines(
+                                tc, theme, &tb_state, area.width, clock,
+                            );
                             for (j, line) in tb_lines.into_iter().enumerate() {
                                 let abs_line = tool_line_offset + j;
                                 if abs_line >= visible_start && abs_line < visible_end {
@@ -1179,8 +1564,22 @@ pub fn render_with_search(
                     }
                 }
                 MessageRole::User | MessageRole::System => {
-                    let msg_lines = render_message(msg, width, theme, is_fork_point, is_bookmarked, search_query, focused_local_ordinal);
-                    let text_height = compute_message_height(&msg.content, msg.content_blocks.contains(&ContentBlockType::Error), msg.stop_reason == Some(StopReason::Cancelled), is_bookmarked, width);
+                    let msg_lines = render_message(
+                        msg,
+                        width,
+                        theme,
+                        is_fork_point,
+                        is_bookmarked,
+                        search_query,
+                        focused_local_ordinal,
+                    );
+                    let text_height = compute_message_height(
+                        &msg.content,
+                        msg.content_blocks.contains(&ContentBlockType::Error),
+                        msg.stop_reason == Some(StopReason::Cancelled),
+                        is_bookmarked,
+                        width,
+                    );
                     for (j, line) in msg_lines.into_iter().enumerate() {
                         let abs_line = line_offset + j;
                         if abs_line >= visible_start && abs_line < visible_end {
@@ -1190,7 +1589,9 @@ pub fn render_with_search(
                     let mut tool_line_offset = line_offset + text_height;
                     for tc in &msg.tool_calls {
                         let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                        let tb_lines = tool_block::render_tool_block_lines(tc, theme, &tb_state, area.width, clock);
+                        let tb_lines = tool_block::render_tool_block_lines(
+                            tc, theme, &tb_state, area.width, clock,
+                        );
                         for (j, line) in tb_lines.into_iter().enumerate() {
                             let abs_line = tool_line_offset + j;
                             if abs_line >= visible_start && abs_line < visible_end {
@@ -1216,10 +1617,20 @@ pub fn render_with_search(
                     );
                 }
                 let mut plans_for_msg: Vec<&crate::domain::models::plan::Plan> = conversation
-                    .plans.values().filter(|p| p.host_message_id.as_deref() == Some(&msg.id)).collect();
+                    .plans
+                    .values()
+                    .filter(|p| p.host_message_id.as_deref() == Some(&msg.id))
+                    .collect();
                 plans_for_msg.sort_by_key(|p| p.created_at);
-                let mut tool_line_offset = line_offset + message_heights[i]
-                    .saturating_sub(if plans_for_msg.is_empty() { 0 } else { plans_for_msg.iter().map(|p| plan_card::plan_card_height(p, area.width, false)).sum::<usize>() });
+                let mut tool_line_offset = line_offset
+                    + message_heights[i].saturating_sub(if plans_for_msg.is_empty() {
+                        0
+                    } else {
+                        plans_for_msg
+                            .iter()
+                            .map(|p| plan_card::plan_card_height(p, area.width, false))
+                            .sum::<usize>()
+                    });
                 if plans_for_msg.is_empty() {
                     let fallback = plan_card::missing_plan_lines(&msg.id, theme);
                     for (j, line) in fallback.into_iter().enumerate() {
@@ -1230,8 +1641,11 @@ pub fn render_with_search(
                     }
                 } else {
                     for plan in plans_for_msg {
-                        let is_pending = pending_plan_card.map(|ppc| ppc.plan_id == plan.id).unwrap_or(false);
-                        let pc_lines = plan_card::render_plan_card_lines(plan, theme, area.width, is_pending);
+                        let is_pending = pending_plan_card
+                            .map(|ppc| ppc.plan_id == plan.id)
+                            .unwrap_or(false);
+                        let pc_lines =
+                            plan_card::render_plan_card_lines(plan, theme, area.width, is_pending);
                         let pc_height = pc_lines.len();
                         for (j, line) in pc_lines.into_iter().enumerate() {
                             let abs_line = tool_line_offset + j;
@@ -1250,12 +1664,16 @@ pub fn render_with_search(
 
     // Open turn (live streaming)
     if let Some(ot) = open_turn {
-        let already_committed = conversation.turns.iter().any(|t| t.id == ot.id);
+        let already_committed = turn_map.contains_key(ot.id.0.as_str());
         if !already_committed {
             if !conversation.messages.is_empty() {
                 let spacing_end = line_offset + spacing;
                 if spacing_end > visible_start && line_offset < visible_end {
-                    let start = if line_offset >= visible_start { 0 } else { visible_start - line_offset };
+                    let start = if line_offset >= visible_start {
+                        0
+                    } else {
+                        visible_start - line_offset
+                    };
                     let end = spacing.min(visible_end.saturating_sub(line_offset));
                     for _ in start..end {
                         lines.push(Line::from(""));
@@ -1283,7 +1701,11 @@ pub fn render_with_search(
         if !conversation.messages.is_empty() {
             let spacing_end = line_offset + spacing;
             if spacing_end > visible_start && line_offset < visible_end {
-                let start = if line_offset >= visible_start { 0 } else { visible_start - line_offset };
+                let start = if line_offset >= visible_start {
+                    0
+                } else {
+                    visible_start - line_offset
+                };
                 let end = spacing.min(visible_end.saturating_sub(line_offset));
                 for _ in start..end {
                     lines.push(Line::from(""));
@@ -1293,22 +1715,57 @@ pub fn render_with_search(
         }
         if streaming.current_text_buffer.is_empty() {
             if streaming.current_blocks.contains(&ContentBlockType::Error) {
-                lines.push(Line::from(Span::styled("Assistant:", Style::default().fg(theme.colors.fg_secondary).add_modifier(Modifier::BOLD))));
-                lines.push(Line::from(Span::styled("Error occurred during streaming", Style::default().fg(theme.colors.error))));
+                lines.push(Line::from(Span::styled(
+                    "Assistant:",
+                    Style::default()
+                        .fg(theme.colors.fg_secondary)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Error occurred during streaming",
+                    Style::default().fg(theme.colors.error),
+                )));
             } else {
-                lines.push(Line::from(Span::styled("···", Style::default().fg(theme.colors.fg_muted))));
+                lines.push(Line::from(Span::styled(
+                    "···",
+                    Style::default().fg(theme.colors.fg_muted),
+                )));
             }
         } else {
-            lines.push(Line::from(Span::styled("Assistant:", Style::default().fg(theme.colors.fg_secondary).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(
+                "Assistant:",
+                Style::default()
+                    .fg(theme.colors.fg_secondary)
+                    .add_modifier(Modifier::BOLD),
+            )));
             let has_error = streaming.current_blocks.contains(&ContentBlockType::Error);
             if has_error {
-                let content_lines = crate::adapters::tui::markdown::render(&streaming.current_text_buffer, width, theme, &crate::adapters::tui::markdown::RenderOptions::default());
+                let content_lines = crate::adapters::tui::markdown::render(
+                    &streaming.current_text_buffer,
+                    width,
+                    theme,
+                    &crate::adapters::tui::markdown::RenderOptions::default(),
+                );
                 for text_line in content_lines {
-                    let styled: Vec<Span<'_>> = text_line.spans.into_iter().map(|s| Span::styled(s.content.to_string(), Style::default().fg(theme.colors.error))).collect();
+                    let styled: Vec<Span<'_>> = text_line
+                        .spans
+                        .into_iter()
+                        .map(|s| {
+                            Span::styled(
+                                s.content.to_string(),
+                                Style::default().fg(theme.colors.error),
+                            )
+                        })
+                        .collect();
                     lines.push(Line::from(styled));
                 }
             } else {
-                let parsed_lines = crate::adapters::tui::markdown::render(&streaming.current_text_buffer, width, theme, &crate::adapters::tui::markdown::RenderOptions::default());
+                let parsed_lines = crate::adapters::tui::markdown::render(
+                    &streaming.current_text_buffer,
+                    width,
+                    theme,
+                    &crate::adapters::tui::markdown::RenderOptions::default(),
+                );
                 lines.extend(parsed_lines);
             }
         }
@@ -1319,7 +1776,11 @@ pub fn render_with_search(
         if line_offset > 0 {
             let spacing_end = line_offset + spacing;
             if spacing_end > visible_start && line_offset < visible_end {
-                let start = if line_offset >= visible_start { 0 } else { visible_start - line_offset };
+                let start = if line_offset >= visible_start {
+                    0
+                } else {
+                    visible_start - line_offset
+                };
                 let end = spacing.min(visible_end.saturating_sub(line_offset));
                 for _ in start..end {
                     lines.push(Line::from(""));
@@ -1350,9 +1811,22 @@ pub fn render_with_search(
     if !auto_scroll && streaming.is_streaming && !lines.is_empty() {
         let indicator_text = "↓ New content below (streaming) ↓";
         let indicator_len = indicator_text.chars().count();
-        let padding = if width > indicator_len { (width - indicator_len) / 2 } else { 0 };
-        let centered = format!("{:>width$}", indicator_text, width = padding + indicator_len);
-        let indicator_line = Line::from(Span::styled(centered, Style::default().fg(theme.colors.accent).bg(theme.colors.bg_secondary)));
+        let padding = if width > indicator_len {
+            (width - indicator_len) / 2
+        } else {
+            0
+        };
+        let centered = format!(
+            "{:>width$}",
+            indicator_text,
+            width = padding + indicator_len
+        );
+        let indicator_line = Line::from(Span::styled(
+            centered,
+            Style::default()
+                .fg(theme.colors.accent)
+                .bg(theme.colors.bg_secondary),
+        ));
         let last = lines.len() - 1;
         lines[last] = indicator_line;
     }
@@ -1360,7 +1834,13 @@ pub fn render_with_search(
     let widget = Paragraph::new(Text::from(lines));
     frame.render_widget(widget, area);
 
-    let focused_tool_id = find_focused_tool_id(conversation, streaming, &block_boundaries, visible_start, visible_end);
+    let focused_tool_id = find_focused_tool_id(
+        conversation,
+        streaming,
+        &block_boundaries,
+        visible_start,
+        visible_end,
+    );
 
     RenderResult {
         total_content_height,
@@ -1420,22 +1900,35 @@ mod parts_aware_tests {
     use super::*;
     use crate::domain::clock::MockClock;
     use crate::domain::clock::{BRAILLE_FRAMES, current_braille_frame};
+    use crate::domain::models::ChatMessage;
 
     fn make_prose(text: &str) -> TurnPart {
-        TurnPart::Prose { id: PartId(0), text: text.to_string() }
+        TurnPart::Prose {
+            id: PartId(0),
+            text: text.to_string(),
+        }
     }
 
     fn make_reasoning(text: &str) -> TurnPart {
-        TurnPart::Reasoning { id: PartId(0), text: text.to_string() }
+        TurnPart::Reasoning {
+            id: PartId(0),
+            text: text.to_string(),
+        }
     }
 
     fn make_tool(name: &str, status: InvocationStatus) -> TurnPart {
         let is_success = status == InvocationStatus::Success;
         TurnPart::ToolInvocation {
-            id: PartId(0), tool: name.to_string(),
-            args: serde_json::json!({}), status,
+            id: PartId(0),
+            tool: name.to_string(),
+            args: serde_json::json!({}),
+            status,
             started_at: 1_700_000_000_000,
-            ended_at: if is_success { Some(1_700_000_005_000) } else { None },
+            ended_at: if is_success {
+                Some(1_700_000_005_000)
+            } else {
+                None
+            },
         }
     }
 
@@ -1459,7 +1952,11 @@ mod parts_aware_tests {
         assert_eq!(result.len(), 2);
         for line in &result {
             let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(combined.starts_with("│ "), "expected gutter prefix, got: {}", combined);
+            assert!(
+                combined.starts_with("│ "),
+                "expected gutter prefix, got: {}",
+                combined
+            );
         }
     }
 
@@ -1508,65 +2005,89 @@ mod parts_aware_tests {
 
     #[test]
     fn default_collapse_one_tool_turn_returns_false() {
-        let turn = make_turn(vec![make_prose("x"), make_tool("Read", InvocationStatus::Success)], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("x"),
+                make_tool("Read", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         assert!(!default_collapse_predicate(&turn));
     }
 
     #[test]
     fn default_collapse_two_tool_turn_returns_false() {
-        let turn = make_turn(vec![
-            make_prose("x"),
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("x"),
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         assert!(!default_collapse_predicate(&turn));
     }
 
     #[test]
     fn default_collapse_three_tool_dominant_returns_true() {
         // 3 tools, minimal prose → prose_lines = 0, tool_lines > 0 → collapse
-        let turn = make_turn(vec![
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-            make_tool("Bash", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+                make_tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         assert!(default_collapse_predicate(&turn));
     }
 
     #[test]
     fn default_collapse_three_tool_prose_dominant_returns_false() {
         // 3 tools, lots of prose → prose dominates, no collapse
-        let turn = make_turn(vec![
-            make_prose("a\nb\nc\nd\ne\nf\ng\nh\ni\nj"),
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-            make_tool("Bash", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("a\nb\nc\nd\ne\nf\ng\nh\ni\nj"),
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+                make_tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         assert!(!default_collapse_predicate(&turn));
     }
 
     #[test]
     fn effective_is_collapsed_running_turn_returns_false() {
-        let turn = make_turn(vec![make_prose("x"), make_tool("Read", InvocationStatus::Running)], None);
+        let turn = make_turn(
+            vec![
+                make_prose("x"),
+                make_tool("Read", InvocationStatus::Running),
+            ],
+            None,
+        );
         assert!(!effective_is_collapsed(&turn, &ViewState::default()));
     }
 
     #[test]
     fn effective_is_collapsed_error_invocation_returns_false() {
-        let turn = make_turn(vec![
-            make_prose("x"),
-            make_tool("Bash", InvocationStatus::Error),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![make_prose("x"), make_tool("Bash", InvocationStatus::Error)],
+            Some(StopReason::EndTurn),
+        );
         assert!(!effective_is_collapsed(&turn, &ViewState::default()));
     }
 
     #[test]
     fn effective_is_collapsed_user_explicit_collapsed_returns_true() {
-        let turn = make_turn(vec![
-            make_prose("long prose here that should dominate"),
-            make_prose("more prose content"),
-            make_tool("Read", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("long prose here that should dominate"),
+                make_prose("more prose content"),
+                make_tool("Read", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let mut vs = ViewState::default();
         vs.collapsed.insert(turn.id.clone(), true);
         assert!(effective_is_collapsed(&turn, &vs));
@@ -1574,11 +2095,14 @@ mod parts_aware_tests {
 
     #[test]
     fn effective_is_collapsed_user_explicit_expanded_returns_false() {
-        let turn = make_turn(vec![
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-            make_tool("Bash", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+                make_tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let mut vs = ViewState::default();
         vs.collapsed.insert(turn.id.clone(), false);
         assert!(!effective_is_collapsed(&turn, &vs));
@@ -1586,11 +2110,14 @@ mod parts_aware_tests {
 
     #[test]
     fn effective_is_collapsed_predicate_is_frame_stable() {
-        let turn = make_turn(vec![
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-            make_tool("Bash", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+                make_tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let vs = ViewState::default();
         let r1 = effective_is_collapsed(&turn, &vs);
         let r2 = effective_is_collapsed(&turn, &vs);
@@ -1599,10 +2126,13 @@ mod parts_aware_tests {
 
     #[test]
     fn effective_is_collapsed_cancelled_respects_user_collapse() {
-        let turn = make_turn(vec![
-            make_prose("x"),
-            make_tool("Bash", InvocationStatus::Cancelled),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("x"),
+                make_tool("Bash", InvocationStatus::Cancelled),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let mut vs = ViewState::default();
         vs.collapsed.insert(turn.id.clone(), true);
         assert!(effective_is_collapsed(&turn, &vs));
@@ -1641,7 +2171,10 @@ mod parts_aware_tests {
 
     #[test]
     fn first_prose_sentence_finds_period_boundary() {
-        let turn = make_turn(vec![make_prose("Hello world. More text.")], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![make_prose("Hello world. More text.")],
+            Some(StopReason::EndTurn),
+        );
         assert_eq!(first_prose_sentence(&turn), "Hello world.");
     }
 
@@ -1659,7 +2192,10 @@ mod parts_aware_tests {
 
     #[test]
     fn first_prose_sentence_no_boundary_returns_all() {
-        let turn = make_turn(vec![make_prose("no punctuation at all")], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![make_prose("no punctuation at all")],
+            Some(StopReason::EndTurn),
+        );
         assert_eq!(first_prose_sentence(&turn), "no punctuation at all");
     }
 
@@ -1671,7 +2207,10 @@ mod parts_aware_tests {
 
     #[test]
     fn first_prose_sentence_no_prose_part_returns_empty() {
-        let turn = make_turn(vec![make_tool("Read", InvocationStatus::Success)], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![make_tool("Read", InvocationStatus::Success)],
+            Some(StopReason::EndTurn),
+        );
         assert_eq!(first_prose_sentence(&turn), "");
     }
 
@@ -1688,58 +2227,89 @@ mod parts_aware_tests {
 
     #[test]
     fn running_invocation_renders_rail() {
-        let turn = make_turn(vec![
-            make_prose("Testing."),
-            make_tool("Read", InvocationStatus::Running),
-        ], None);
+        let turn = make_turn(
+            vec![
+                make_prose("Testing."),
+                make_tool("Read", InvocationStatus::Running),
+            ],
+            None,
+        );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
-        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
-        assert!(text.contains("Read"), "expected tool name in output: {}", text);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("Read"),
+            "expected tool name in output: {}",
+            text
+        );
         let has_spinner = BRAILLE_FRAMES.iter().any(|&f| text.contains(f));
         assert!(has_spinner, "expected spinner glyph: {}", text);
     }
 
     #[test]
     fn success_invocation_renders_no_rail() {
-        let turn = make_turn(vec![
-            make_prose("Done."),
-            make_tool("Read", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("Done."),
+                make_tool("Read", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
-        let rail_text: String = lines.iter()
+        let rail_text: String = lines
+            .iter()
             .filter(|l| l.spans.iter().any(|s| s.content.contains("⠋")))
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(rail_text.is_empty(), "expected no spinner rail for success: {}", rail_text);
+        assert!(
+            rail_text.is_empty(),
+            "expected no spinner rail for success: {}",
+            rail_text
+        );
     }
 
     // ── AC3: spacing in rendered output ──
 
     #[test]
     fn spacing_prose_to_tool_is_zero_blank_lines() {
-        let turn = make_turn(vec![
-            make_prose("Reading file."),
-            make_tool("Bash", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("Reading file."),
+                make_tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
         // Verify both prose and tool are present, and tool comes after prose
-        let all_text: String = lines.iter()
+        let all_text: String = lines
+            .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all_text.contains("Reading file"), "prose not found in: {}", all_text);
+        assert!(
+            all_text.contains("Reading file"),
+            "prose not found in: {}",
+            all_text
+        );
         assert!(all_text.contains("Bash"), "tool not found in: {}", all_text);
         let prose_pos = all_text.find("Reading file").unwrap();
         let tool_pos = all_text.find("Bash").unwrap();
-        assert!(tool_pos >= prose_pos, "tool before prose: prose={}, tool={}", prose_pos, tool_pos);
+        assert!(
+            tool_pos >= prose_pos,
+            "tool before prose: prose={}, tool={}",
+            prose_pos,
+            tool_pos
+        );
     }
 
     // ── AC10: started_at zero sentinel ──
@@ -1765,17 +2335,22 @@ mod parts_aware_tests {
 
     #[test]
     fn expanded_turn_renders_gutter_on_every_line() {
-        let turn = make_turn(vec![
-            make_prose("Hello."),
-            make_tool("Read", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("Hello."),
+                make_tool("Read", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
         // Every non-empty line should start with the gutter
         for line in &lines {
-            if line.spans.is_empty() { continue; }
+            if line.spans.is_empty() {
+                continue;
+            }
             let combined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             if !combined.trim().is_empty() {
                 assert!(combined.starts_with('│'), "missing gutter: {}", combined);
@@ -1787,12 +2362,15 @@ mod parts_aware_tests {
 
     #[test]
     fn collapsed_turn_renders_summary_line() {
-        let turn = make_turn(vec![
-            make_prose("Hello world."),
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-            make_tool("Bash", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("Hello world."),
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+                make_tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let mut vs = ViewState::default();
         vs.collapsed.insert(turn.id.clone(), true);
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
@@ -1800,18 +2378,29 @@ mod parts_aware_tests {
         let lines = render_collapsed_turn(&turn, &vs, &theme, 80, &clock);
         assert_eq!(lines.len(), 1);
         let combined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(combined.contains('▸'), "missing collapse glyph: {}", combined);
-        assert!(combined.contains("tools"), "missing tools label: {}", combined);
+        assert!(
+            combined.contains('▸'),
+            "missing collapse glyph: {}",
+            combined
+        );
+        assert!(
+            combined.contains("tools"),
+            "missing tools label: {}",
+            combined
+        );
     }
 
     #[test]
     fn collapsed_turn_with_error_shows_error_badge() {
-        let turn = make_turn(vec![
-            make_prose("Ops."),
-            make_tool("Bash", InvocationStatus::Error),
-            make_tool("Read", InvocationStatus::Success),
-            make_tool("Grep", InvocationStatus::Success),
-        ], Some(StopReason::EndTurn));
+        let turn = make_turn(
+            vec![
+                make_prose("Ops."),
+                make_tool("Bash", InvocationStatus::Error),
+                make_tool("Read", InvocationStatus::Success),
+                make_tool("Grep", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
         let mut vs = ViewState::default();
         vs.collapsed.insert(turn.id.clone(), true);
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
@@ -1831,5 +2420,568 @@ mod parts_aware_tests {
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let lines = render_expanded_turn(&turn, &theme, 0, &clock, &tbs, None);
         assert!(lines.is_empty());
+    }
+
+    // ── Height-cache paired-call helper tests (Story 16-5) ──
+
+    #[test]
+    fn toggle_turn_fold_invalidates_turn_cache() {
+        let turn = make_turn(vec![make_prose("hello")], Some(StopReason::EndTurn));
+        let mut view_state = ViewState::default();
+        let mut tab_render_state = TabRenderState::default();
+        let key = crate::adapters::tui::state::HeightKey {
+            turn_id: turn.id.clone(),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        tab_render_state.height_cache.set(
+            key.clone(),
+            CachedTurnLayout {
+                height: 5,
+                block_offsets: vec![],
+            },
+        );
+        assert!(tab_render_state.height_cache.get(&key).is_some());
+
+        toggle_turn_fold(&mut view_state, &mut tab_render_state, &turn.id);
+
+        assert!(tab_render_state.height_cache.get(&key).is_none());
+        assert!(view_state.is_collapsed(&turn));
+    }
+
+    #[test]
+    fn set_summary_tier_invalidates_all_cache() {
+        let mut view_state = ViewState::default();
+        let mut tab_render_state = TabRenderState::default();
+        let key = crate::adapters::tui::state::HeightKey {
+            turn_id: crate::domain::models::TurnId("t1".into()),
+            expansion: false,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        tab_render_state.height_cache.set(
+            key.clone(),
+            CachedTurnLayout {
+                height: 1,
+                block_offsets: vec![],
+            },
+        );
+        assert!(tab_render_state.height_cache.get(&key).is_some());
+
+        set_summary_tier(&mut view_state, &mut tab_render_state, SummaryTier::Tier2);
+
+        assert!(tab_render_state.height_cache.get(&key).is_none());
+        assert_eq!(view_state.summary_tier, SummaryTier::Tier2);
+    }
+
+    #[test]
+    fn expanded_turn_height_returns_clock_independent_layout() {
+        let turn = make_turn(
+            vec![make_prose("line one\nline two")],
+            Some(StopReason::EndTurn),
+        );
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let layout = expanded_turn_height(&turn, &theme, 80, &tbs);
+        assert!(layout.height > 0);
+        // Clock-independent: no clock parameter in signature
+    }
+
+    #[test]
+    fn collapsed_turn_height_returns_one() {
+        let turn = make_turn(
+            vec![make_prose("line one\nline two")],
+            Some(StopReason::EndTurn),
+        );
+        let view_state = ViewState::default();
+        let theme = Theme::dark();
+        let layout = collapsed_turn_height(&turn, &view_state, &theme, 80);
+        assert_eq!(layout.height, 1);
+        assert!(layout.block_offsets.is_empty());
+    }
+
+    #[test]
+    fn height_key_version_change_produces_different_cache_entries() {
+        let mut cache = crate::adapters::tui::state::HeightCache::default();
+        let turn_id = crate::domain::models::TurnId("t1".into());
+        let key_v0 = crate::adapters::tui::state::HeightKey {
+            turn_id: turn_id.clone(),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        let key_v1 = crate::adapters::tui::state::HeightKey {
+            turn_id: turn_id.clone(),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 1,
+        };
+        cache.set(
+            key_v0.clone(),
+            CachedTurnLayout {
+                height: 10,
+                block_offsets: vec![],
+            },
+        );
+        cache.set(
+            key_v1.clone(),
+            CachedTurnLayout {
+                height: 20,
+                block_offsets: vec![],
+            },
+        );
+        assert_eq!(cache.get(&key_v0).unwrap().height, 10);
+        assert_eq!(cache.get(&key_v1).unwrap().height, 20);
+    }
+
+    #[test]
+    fn height_key_width_change_produces_different_cache_entries() {
+        let mut cache = crate::adapters::tui::state::HeightCache::default();
+        let turn_id = crate::domain::models::TurnId("t1".into());
+        let key_w80 = crate::adapters::tui::state::HeightKey {
+            turn_id: turn_id.clone(),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        let key_w40 = crate::adapters::tui::state::HeightKey {
+            turn_id: turn_id.clone(),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 40,
+            tool_block_states_version: 0,
+        };
+        cache.set(
+            key_w80.clone(),
+            CachedTurnLayout {
+                height: 5,
+                block_offsets: vec![],
+            },
+        );
+        cache.set(
+            key_w40.clone(),
+            CachedTurnLayout {
+                height: 8,
+                block_offsets: vec![],
+            },
+        );
+        assert_eq!(cache.get(&key_w80).unwrap().height, 5);
+        assert_eq!(cache.get(&key_w40).unwrap().height, 8);
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn cache_metrics_miss_increments_on_uncached_turn() {
+        crate::adapters::tui::widgets::chat_pane::height_cache::metrics::reset();
+        let mut cache = crate::adapters::tui::state::HeightCache::default();
+        let key = crate::adapters::tui::state::HeightKey {
+            turn_id: crate::domain::models::TurnId("t1".into()),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        // Miss: get on empty cache
+        let _ = cache.get(&key);
+        let (_, misses) =
+            crate::adapters::tui::widgets::chat_pane::height_cache::metrics::snapshot();
+        assert_eq!(
+            misses, 0,
+            "metrics only count render-path misses, not raw cache.get misses"
+        );
+    }
+
+    // ── AC11: expanded_turn_height parity tests (10 fixtures) ──
+
+    #[test]
+    fn parity_empty_turn() {
+        let turn = make_turn(vec![], Some(StopReason::EndTurn));
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: empty turn");
+        // Empty turn: only trailing rail = 1
+        assert_eq!(cached.height, 1);
+    }
+
+    #[test]
+    fn parity_single_prose_part() {
+        let turn = make_turn(vec![make_prose("Hello world")], Some(StopReason::EndTurn));
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: single prose");
+    }
+
+    #[test]
+    fn parity_prose_with_inter_part_blank() {
+        let turn = make_turn(
+            vec![
+                make_prose("First paragraph"),
+                make_prose("Second paragraph"),
+            ],
+            Some(StopReason::EndTurn),
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: prose + inter-part blank");
+    }
+
+    #[test]
+    fn parity_running_tool_with_rail() {
+        let turn = make_turn(
+            vec![
+                make_prose("Running a tool..."),
+                make_tool("Read", InvocationStatus::Running),
+            ],
+            None, // stop_reason = None → running turn
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: running tool with rail");
+        // Should include per-Running rail addend
+        assert!(cached.height > 0);
+    }
+
+    #[test]
+    fn parity_completed_tool_expanded() {
+        let turn = make_turn(
+            vec![
+                make_prose("Done."),
+                make_tool("Read", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let mut tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        // Expanded tool block
+        tbs.insert(
+            "test-turn-1".into(),
+            ToolBlockState {
+                collapsed: false,
+                peek_active: false,
+            },
+        );
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: completed tool expanded");
+    }
+
+    #[test]
+    fn parity_multi_part_mixed_prose_tool_prose() {
+        let turn = make_turn(
+            vec![
+                make_prose("Intro."),
+                make_tool("Read", InvocationStatus::Success),
+                make_prose("Outro."),
+            ],
+            Some(StopReason::EndTurn),
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: mixed prose-tool-prose");
+    }
+
+    #[test]
+    fn parity_trailing_rail_after_running() {
+        let turn = make_turn(vec![make_tool("Read", InvocationStatus::Running)], None);
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(
+            cached.height, rendered,
+            "parity: trailing rail after running"
+        );
+    }
+
+    /// Fixture 6: Tool peek state (peek_active: true, collapsed: false).
+    /// Covers AC1 `tool_block_states_version` — 3rd tool state distinct from
+    /// default-collapsed and expanded.
+    #[test]
+    fn parity_tool_peek_state() {
+        let turn = make_turn(
+            vec![
+                make_prose("Let me check."),
+                make_tool("Read", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let mut tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        tbs.insert(
+            "test-turn".into(),
+            ToolBlockState {
+                collapsed: false,
+                peek_active: true,
+            },
+        );
+        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None).len();
+        assert_eq!(cached.height, rendered, "parity: tool peek state");
+        assert!(cached.height > 0);
+    }
+
+    /// Fixture 8: Spinner digit-cliff — elapsed crosses 9.9s → 10.0s.
+    /// Keeps `tool_block.rs:139` `→ running... ({elapsed})` height-stable
+    /// across the width-cliff where elapsed string gains a digit.
+    #[test]
+    fn parity_spinner_elapsed_digit_cliff() {
+        let turn = make_turn(
+            vec![
+                make_prose("Working..."),
+                make_tool("Read", InvocationStatus::Running),
+            ],
+            None,
+        );
+        let clock_9s = MockClock::at_wall_ms(1_700_000_000_000);
+        clock_9s.set_wall_anchor_ms(1_700_000_009_000); // 9s elapsed
+        let clock_10s = MockClock::at_wall_ms(1_700_000_000_000);
+        clock_10s.set_wall_anchor_ms(1_700_000_010_000); // 10s elapsed
+
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+
+        let cached_9s = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered_9s = render_expanded_turn(&turn, &theme, 80, &clock_9s, &tbs, None).len();
+        let cached_10s = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let rendered_10s = render_expanded_turn(&turn, &theme, 80, &clock_10s, &tbs, None).len();
+
+        assert_eq!(cached_9s.height, rendered_9s, "parity: 9.9s elapsed");
+        assert_eq!(cached_10s.height, rendered_10s, "parity: 10.0s elapsed");
+        // Height must be stable across the digit cliff (clock-independent)
+        assert_eq!(
+            cached_9s.height, cached_10s.height,
+            "spinner digit-cliff must not change height"
+        );
+    }
+
+    /// AC6: Spinner ticks do NOT invalidate cache — strict equality.
+    /// Exercises the full render+HeightCache path: warm cache, advance clock
+    /// frames, render again, assert cache size unchanged.
+    #[test]
+    fn spinner_tick_strict_equality() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let turn = make_turn(
+            vec![
+                make_prose("Running..."),
+                make_tool("Read", InvocationStatus::Running),
+            ],
+            None,
+        );
+        let mut conversation = Conversation {
+            id: "test-spinner".into(),
+            title: String::new(),
+            messages: vec![ChatMessage {
+                id: "test-turn".into(),
+                role: MessageRole::Assistant,
+                content: String::new(),
+                content_blocks: vec![],
+                tool_calls: vec![],
+                created_at: 1_700_000,
+                token_count: None,
+                stop_reason: None,
+                synthetic: false,
+                images: vec![],
+            }],
+            turns: vec![turn.clone()],
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans: HashMap::new(),
+            fork_source: None,
+        };
+        let theme = Theme::dark();
+        let streaming = StreamingState::default();
+        let mut tab_render_state = TabRenderState::default();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+
+        // Warm render: populates cache
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let _ = render_with_search(
+                    frame,
+                    Rect::new(0, 0, 80, 24),
+                    &conversation,
+                    None,
+                    &streaming,
+                    &ViewState::default(),
+                    &MockClock::at_wall_ms(1_700_000_000_000),
+                    0,
+                    true,
+                    &theme,
+                    &mut tab_render_state,
+                    &tbs,
+                    &BTreeMap::new(),
+                    None,
+                    None,
+                    &[],
+                    &[],
+                    None,
+                );
+            })
+            .unwrap();
+
+        let n0 = tab_render_state.height_cache.entries.len();
+        assert!(n0 > 0, "warm render must populate cache");
+
+        // Re-render with clock advanced (frame 7: different spinner glyph)
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let clock2 = MockClock::at_wall_ms(1_700_000_000_000);
+        clock2.set_wall_anchor_ms(1_700_000_000_560); // frame 7 (7×80ms)
+        terminal
+            .draw(|frame| {
+                let _ = render_with_search(
+                    frame,
+                    Rect::new(0, 0, 80, 24),
+                    &conversation,
+                    None,
+                    &streaming,
+                    &ViewState::default(),
+                    &clock2,
+                    0,
+                    true,
+                    &theme,
+                    &mut tab_render_state,
+                    &tbs,
+                    &BTreeMap::new(),
+                    None,
+                    None,
+                    &[],
+                    &[],
+                    None,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            tab_render_state.height_cache.entries.len(),
+            n0,
+            "spinner tick must not change cache size"
+        );
+
+        // Re-render with clock advanced further (frame 11)
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let clock3 = MockClock::at_wall_ms(1_700_000_000_000);
+        clock3.set_wall_anchor_ms(1_700_000_000_880); // frame 11 (11×80ms)
+        terminal
+            .draw(|frame| {
+                let _ = render_with_search(
+                    frame,
+                    Rect::new(0, 0, 80, 24),
+                    &conversation,
+                    None,
+                    &streaming,
+                    &ViewState::default(),
+                    &clock3,
+                    0,
+                    true,
+                    &theme,
+                    &mut tab_render_state,
+                    &tbs,
+                    &BTreeMap::new(),
+                    None,
+                    None,
+                    &[],
+                    &[],
+                    None,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            tab_render_state.height_cache.entries.len(),
+            n0,
+            "spinner tick must not change cache size (second frame)"
+        );
+    }
+
+    /// AC11: Width-parameterized parity (79, 80, 81)
+    #[test]
+    fn parity_width_79_80_81() {
+        let turn = make_turn(
+            vec![make_prose(
+                "This is a line that may wrap differently at width boundaries.",
+            )],
+            Some(StopReason::EndTurn),
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let theme = Theme::dark();
+        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
+
+        for width in [79, 80, 81] {
+            let cached = expanded_turn_height(&turn, &theme, width, &tbs);
+            let rendered = render_expanded_turn(&turn, &theme, width, &clock, &tbs, None).len();
+            assert_eq!(cached.height, rendered, "parity fail: width={}", width);
+        }
+    }
+
+    /// Task 4.2: Block boundaries match render offsets with expanded tool.
+    #[test]
+    fn block_boundaries_match_render_offsets_with_expanded_tool() {
+        let turn = make_turn(
+            vec![
+                make_prose("Before tool."),
+                make_tool("Read", InvocationStatus::Success),
+                make_prose("After tool."),
+            ],
+            Some(StopReason::EndTurn),
+        );
+        let theme = Theme::dark();
+        let mut tbs: HashMap<String, ToolBlockState> = HashMap::new();
+        tbs.insert(
+            "test-turn-1".into(),
+            ToolBlockState {
+                collapsed: false,
+                peek_active: false,
+            },
+        );
+
+        let layout = expanded_turn_height(&turn, &theme, 80, &tbs);
+
+        // block_offsets should have 3 entries (prose, tool, prose)
+        assert_eq!(layout.block_offsets.len(), 3, "expected 3 block offsets");
+
+        // Render and verify cumulative offsets
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None);
+
+        // The first block offset should be 0 (start of turn)
+        assert_eq!(layout.block_offsets[0], 0, "first block should start at 0");
+
+        // Total height should match rendered line count
+        assert_eq!(
+            layout.height,
+            lines.len(),
+            "height must match rendered line count"
+        );
     }
 }

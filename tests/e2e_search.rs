@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{HeightCache, SearchState, SearchSubstate, TuiState};
+use rustain::adapters::tui::state::{SearchState, SearchSubstate, TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::chat_pane::RenderResult;
@@ -87,7 +87,7 @@ fn render_once(
     let mut terminal = Terminal::new(backend).unwrap();
     let streaming = StreamingState::default();
     let theme = Theme::dark();
-    let mut height_cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
     let mut rr = RenderResult {
         total_content_height: 0,
         block_boundaries: Vec::new(),
@@ -109,7 +109,7 @@ fn render_once(
                 state.scroll_offset,
                 state.auto_scroll,
                 &theme,
-                &mut height_cache,
+                &mut tab_render_state,
                 &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, FeedbackBlock>::new(),
                 search_query,
@@ -421,7 +421,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
     // rendered buffer for the role-line row does not contain any cell with
     // the reversed/highlight modifier — even though a naive rebuild would
     // have highlighted "Assistant" on that row.
-    use rustain::adapters::tui::state::HeightCache;
+    use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
     use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
     use rustain::domain::models::{FeedbackBlock, StreamingState};
@@ -438,7 +438,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
     let backend = TestBackend::new(60, 10);
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
-    let mut height_cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
     let streaming = StreamingState::default();
     let mut _rr = RenderResult {
         total_content_height: 0,
@@ -461,7 +461,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
                 0,
                 true,
                 &theme,
-                &mut height_cache,
+                &mut tab_render_state,
                 &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
                 Some("assistant"),
@@ -516,7 +516,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
     // focused_match_index to point at the middle match, and verify the
     // render path's `focused_local_ordinal` computation picks ordinal 1
     // (the second match, 0-indexed), not 0.
-    use rustain::adapters::tui::state::HeightCache;
+    use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
     use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
     use rustain::domain::models::{FeedbackBlock, StreamingState};
@@ -535,7 +535,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
     let backend = TestBackend::new(60, 10);
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
-    let mut height_cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
     let streaming = StreamingState::default();
     let mut _rr = RenderResult {
         total_content_height: 0,
@@ -563,7 +563,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
                 0,
                 true,
                 &theme,
-                &mut height_cache,
+                &mut tab_render_state,
                 &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
                 Some("foo"),

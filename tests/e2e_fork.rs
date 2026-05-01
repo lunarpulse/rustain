@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{HeightCache, SearchState, TuiState};
+use rustain::adapters::tui::state::{SearchState, TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
 use rustain::domain::models::StatusState;
@@ -299,7 +299,7 @@ fn test_e2e_fork_marker_on_forked_conversation() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::prelude::Rect;
-    use rustain::adapters::tui::state::HeightCache;
+    use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane;
     use rustain::domain::models::StreamingState;
     use std::collections::{BTreeMap, HashMap};
@@ -307,7 +307,7 @@ fn test_e2e_fork_marker_on_forked_conversation() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
-    let mut height_cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
 
     terminal
         .draw(|frame| {
@@ -320,7 +320,7 @@ fn test_e2e_fork_marker_on_forked_conversation() {
                 0,
                 true,
                 &theme,
-                &mut height_cache,
+                &mut tab_render_state,
                 &HashMap::new(),
                 &BTreeMap::new(),
             );
@@ -351,7 +351,7 @@ fn test_e2e_fork_no_marker_on_non_forked_conversation() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::prelude::Rect;
-    use rustain::adapters::tui::state::HeightCache;
+    use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane;
     use rustain::domain::models::StreamingState;
     use std::collections::{BTreeMap, HashMap};
@@ -359,7 +359,7 @@ fn test_e2e_fork_no_marker_on_non_forked_conversation() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
-    let mut height_cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
 
     terminal
         .draw(|frame| {
@@ -372,7 +372,7 @@ fn test_e2e_fork_no_marker_on_non_forked_conversation() {
                 0,
                 true,
                 &theme,
-                &mut height_cache,
+                &mut tab_render_state,
                 &HashMap::new(),
                 &BTreeMap::new(),
             );

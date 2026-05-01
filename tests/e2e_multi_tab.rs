@@ -235,32 +235,85 @@ fn test_switch_tabs_clears_thinking_buffer() {
 
 // ── HeightCache ID-keying tests ────────────────────────────────────────────────
 
+use rustain::adapters::tui::state::{HeightCache, MessageHeightKey};
+
 #[test]
-fn test_height_cache_set_and_get_by_id() {
-    let mut cache = rustain::adapters::tui::state::HeightCache::default();
-    cache.set("msg-abc-123".to_string(), 5);
-    assert_eq!(cache.get("msg-abc-123"), Some(5));
-    assert_eq!(cache.get("msg-xyz-999"), None);
+fn test_height_cache_message_set_and_get() {
+    let mut cache = HeightCache::default();
+    let key1 = MessageHeightKey {
+        msg_id: "msg-abc-123".to_string(),
+        terminal_width: 80,
+        content_hash: 0,
+    };
+    let key2 = MessageHeightKey {
+        msg_id: "msg-xyz-999".to_string(),
+        terminal_width: 80,
+        content_hash: 0,
+    };
+    cache.set_message(key1.clone(), 5);
+    assert_eq!(cache.get_message(&key1), Some(5));
+    assert_eq!(cache.get_message(&key2), None);
 }
 
 #[test]
 fn test_height_cache_invalidate_all() {
-    let mut cache = rustain::adapters::tui::state::HeightCache::default();
-    cache.set("msg-1".to_string(), 3);
-    cache.set("msg-2".to_string(), 7);
+    let mut cache = HeightCache::default();
+    let key1 = MessageHeightKey {
+        msg_id: "msg-1".to_string(),
+        terminal_width: 80,
+        content_hash: 0,
+    };
+    let key2 = MessageHeightKey {
+        msg_id: "msg-2".to_string(),
+        terminal_width: 80,
+        content_hash: 0,
+    };
+    cache.set_message(key1.clone(), 3);
+    cache.set_message(key2.clone(), 7);
     cache.invalidate_all();
-    assert_eq!(cache.get("msg-1"), None);
-    assert_eq!(cache.get("msg-2"), None);
+    assert_eq!(cache.get_message(&key1), None);
+    assert_eq!(cache.get_message(&key2), None);
 }
 
 #[test]
-fn test_height_cache_invalidate_last() {
-    let mut cache = rustain::adapters::tui::state::HeightCache::default();
-    cache.set("msg-1".to_string(), 3);
-    cache.set("msg-2".to_string(), 7);
-    cache.invalidate_last("msg-1");
-    assert_eq!(cache.get("msg-1"), None);
-    assert_eq!(cache.get("msg-2"), Some(7));
+fn test_height_cache_invalidate_turn() {
+    use rustain::adapters::tui::state::HeightKey;
+    use rustain::domain::models::turn::TurnId;
+    use rustain::domain::models::view_state::SummaryTier;
+    let mut cache = HeightCache::default();
+    let turn_a = TurnId("turn-a".to_string());
+    let turn_b = TurnId("turn-b".to_string());
+    let key_a = HeightKey {
+        turn_id: turn_a.clone(),
+        expansion: true,
+        summary_tier: SummaryTier::Tier1,
+        terminal_width: 80,
+        tool_block_states_version: 0,
+    };
+    let key_b = HeightKey {
+        turn_id: turn_b.clone(),
+        expansion: true,
+        summary_tier: SummaryTier::Tier1,
+        terminal_width: 80,
+        tool_block_states_version: 0,
+    };
+    cache.set(
+        key_a.clone(),
+        rustain::adapters::tui::state::CachedTurnLayout {
+            height: 3,
+            block_offsets: vec![],
+        },
+    );
+    cache.set(
+        key_b.clone(),
+        rustain::adapters::tui::state::CachedTurnLayout {
+            height: 7,
+            block_offsets: vec![],
+        },
+    );
+    cache.invalidate_turn(&turn_a);
+    assert!(cache.get(&key_a).is_none());
+    assert_eq!(cache.get(&key_b).map(|l| l.height), Some(7));
 }
 
 // ── ChatMessage.id tests ──────────────────────────────────────────────────────

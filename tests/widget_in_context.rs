@@ -12,7 +12,7 @@ use ratatui::prelude::Rect;
 use ratatui::widgets::{Clear, Paragraph};
 
 use rustain::adapters::tui::layout;
-use rustain::adapters::tui::state::HeightCache;
+use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
@@ -63,7 +63,7 @@ fn render_full_layout(
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 tool_block_states,
                 feedback_blocks,
             );
@@ -239,7 +239,7 @@ fn test_permission_prompt_in_full_layout() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
@@ -340,7 +340,7 @@ fn test_ask_user_question_in_full_layout() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );

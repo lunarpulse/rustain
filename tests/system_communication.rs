@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use rustain::adapters::tui::state::HeightCache;
+use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::{
     AskUserQuestionState, render_ask_user_lines,
@@ -78,7 +78,7 @@ fn test_error_feedback_block_in_conversation() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &feedback_blocks,
             );

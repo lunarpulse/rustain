@@ -10,7 +10,10 @@ use crate::domain::models::ImageAttachment;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::plan::{PlanDeviationKind, PlanTaskStatus};
+use crate::domain::models::tab::TabId;
 use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+use crate::domain::models::turn::TurnId;
+use crate::domain::models::view_state::SummaryTier;
 use crate::domain::models::{
     FeedbackBlock, FocusState, RetryState, StatusState, ToolRisk, UsageInfo,
 };
@@ -137,66 +140,97 @@ pub struct RewindPreview {
     pub files_to_revert: Vec<RevertPreviewItem>,
 }
 
-/// Cache of rendered line heights for each message, keyed by message ID (not index).
-/// Value: rendered line count.
+/// Five-axis key for turn height cache entries.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct HeightKey {
+    pub turn_id: TurnId,
+    pub expansion: bool,
+    pub summary_tier: SummaryTier,
+    pub terminal_width: u16,
+    pub tool_block_states_version: u64,
+}
+
+/// Key for user/system message height cache entries.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct MessageHeightKey {
+    pub msg_id: String,
+    pub terminal_width: u16,
+    pub content_hash: u64,
+}
+
+/// Cached layout for a turn, including height and per-part block offsets.
+#[derive(Clone, Debug)]
+pub struct CachedTurnLayout {
+    pub height: usize,
+    pub block_offsets: Vec<usize>,
+}
+
+/// Cache of rendered line heights, keyed by turn or message.
 ///
-/// # Positional invalidation invariant
+/// # Invalidation triggers
+/// - `invalidate_all()`: resize, tier toggle
+/// - `invalidate_turn(turn_id)`: fold toggle on a specific turn
+/// - `evict_turns_not_in(live)`: rewind / fork / compact (turn list shrinks)
 ///
-/// `truncate_from(message_index)` drops all entries at or after `message_index`.
-/// This is correct for rewind (truncate-only). In-place message editing would require
-/// keying by message ID alone; that is deferred until whatever future story introduces
-/// edit semantics. (DF-005 resolved in 4-3b.)
+/// # Key axes
+/// Turn entries use `HeightKey` (5-axis: turn_id, expansion, summary_tier,
+/// terminal_width, tool_block_states_version). Message entries use
+/// `MessageHeightKey` (3-axis: msg_id, terminal_width, content_hash).
 #[derive(Debug, Default)]
 pub struct HeightCache {
-    entries: HashMap<String, usize>,
-    /// Insertion-order tracking for positional invalidation via `truncate_from`.
-    /// Each push in `set` appends the message ID so index == insertion order.
-    id_order: Vec<String>,
-    /// Terminal width at which heights were computed.
-    pub cached_width: u16,
+    pub entries: HashMap<HeightKey, CachedTurnLayout>,
+    pub message_entries: HashMap<MessageHeightKey, usize>,
+    pub last_seen_turn_count: usize,
 }
 
 impl HeightCache {
-    /// Get cached height for a message ID.
-    pub fn get(&self, message_id: &str) -> Option<usize> {
-        self.entries.get(message_id).copied()
+    /// Get cached layout for a turn key.
+    pub fn get(&self, key: &HeightKey) -> Option<&CachedTurnLayout> {
+        self.entries.get(key)
     }
 
-    /// Set cached height for a message ID.
-    pub fn set(&mut self, message_id: String, height: usize) {
-        if !self.entries.contains_key(&message_id) {
-            self.id_order.push(message_id.clone());
-        }
-        self.entries.insert(message_id, height);
+    /// Get cached height for a message key.
+    pub fn get_message(&self, key: &MessageHeightKey) -> Option<usize> {
+        self.message_entries.get(key).copied()
     }
 
-    /// Full invalidation (e.g., on resize).
+    /// Set cached layout for a turn key.
+    pub fn set(&mut self, key: HeightKey, layout: CachedTurnLayout) {
+        self.entries.insert(key, layout);
+    }
+
+    /// Set cached height for a message key.
+    pub fn set_message(&mut self, key: MessageHeightKey, height: usize) {
+        self.message_entries.insert(key, height);
+    }
+
+    /// Full invalidation (resize, tier toggle, etc.).
     pub fn invalidate_all(&mut self) {
         self.entries.clear();
-        self.id_order.clear();
+        self.message_entries.clear();
+        self.last_seen_turn_count = 0;
     }
 
-    /// Positional invalidation: drop all cache entries at or after `message_index`.
-    ///
-    /// This is safe for rewind (which only truncates) because the positional order
-    /// of retained messages 0..message_index does not change. See the struct-level
-    /// comment for the full invariant.
-    pub fn truncate_from(&mut self, message_index: usize) {
-        if message_index >= self.id_order.len() {
-            return;
-        }
-        // Remove entries for all messages from message_index onward.
-        let ids_to_remove = self.id_order.split_off(message_index);
-        for id in ids_to_remove {
-            self.entries.remove(&id);
-        }
+    /// Surgical invalidation: remove all entries for a specific turn.
+    pub fn invalidate_turn(&mut self, turn_id: &TurnId) {
+        self.entries.retain(|k, _| &k.turn_id != turn_id);
     }
 
-    /// Incremental invalidation: only invalidate the given message ID (streaming).
-    #[allow(dead_code)]
-    pub fn invalidate_last(&mut self, message_id: &str) {
-        self.entries.remove(message_id);
+    /// Evict entries for turns not in the live set.
+    pub fn evict_turns_not_in<'a>(&mut self, live: impl Iterator<Item = &'a TurnId>) {
+        let live_set: std::collections::HashSet<&TurnId> = live.collect();
+        self.entries.retain(|k, _| live_set.contains(&k.turn_id));
     }
+}
+
+/// Per-tab render state holding the height cache and related render metadata.
+/// Lives in the adapter layer (TuiState side-table) to respect hexagonal
+/// architecture — TabState in domain/ cannot hold adapter types.
+#[derive(Debug, Default)]
+pub struct TabRenderState {
+    pub height_cache: HeightCache,
+    pub cached_width: Option<u16>,
+    pub tool_block_states_version: u64,
 }
 
 /// Session-scoped input history buffer for Up/Down navigation and Ctrl+R search.
@@ -910,6 +944,7 @@ impl Default for WhichKeyState {
 
 /// TUI-specific state for rendering.
 pub struct TuiState {
+    pub active_tab_id: TabId,
     pub focus: FocusState,
     pub needs_redraw: bool,
     pub terminal_width: u16,
@@ -937,8 +972,10 @@ pub struct TuiState {
     /// Line offsets for each **user** message boundary in rendered view.
     /// Drives `{`/`}` jump-between-turn navigation.
     pub user_message_boundaries: Vec<usize>,
-    /// Height cache for virtual scrolling.
-    pub height_cache: HeightCache,
+    /// Per-tab render states for height cache and related render metadata.
+    /// Side-table pattern respects hexagonal architecture (TabState in domain/
+    /// cannot hold adapter-side HeightCache).
+    pub tab_render_states: HashMap<TabId, TabRenderState>,
     /// Pending anchor message index for resize scroll preservation.
     /// Set by resize handler, consumed by next render to recompute scroll_offset.
     pub pending_anchor: Option<usize>,
@@ -1121,6 +1158,7 @@ impl TuiState {
 
     pub fn with_capability(width: u16, height: u16, capability: ColorCapability) -> Self {
         Self {
+            active_tab_id: 0,
             focus: FocusState::Input,
             needs_redraw: true,
             terminal_width: width,
@@ -1139,7 +1177,7 @@ impl TuiState {
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
             user_message_boundaries: Vec::new(),
-            height_cache: HeightCache::default(),
+            tab_render_states: HashMap::new(),
             pending_anchor: None,
             tool_block_states: HashMap::new(),
             focused_tool_id: None,
@@ -1239,6 +1277,11 @@ impl TuiState {
             });
         }
         self.agent_suggestions = suggestions;
+    }
+
+    /// Get or create the render state for a specific tab.
+    pub fn tab_render_state(&mut self, tab_id: TabId) -> &mut TabRenderState {
+        self.tab_render_states.entry(tab_id).or_default()
     }
 }
 
@@ -1377,5 +1420,236 @@ mod tests {
             state.pending_activation.as_ref().unwrap().skill_name,
             "first"
         );
+    }
+
+    // ── HeightCache tests (Story 16-5) ──
+
+    #[test]
+    fn height_cache_get_set_roundtrip() {
+        let mut cache = HeightCache::default();
+        let key = HeightKey {
+            turn_id: crate::domain::models::TurnId("t1".into()),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        let layout = CachedTurnLayout {
+            height: 42,
+            block_offsets: vec![0, 10, 20],
+        };
+        cache.set(key.clone(), layout.clone());
+        assert_eq!(cache.get(&key).unwrap().height, 42);
+        assert_eq!(cache.get(&key).unwrap().block_offsets, vec![0, 10, 20]);
+    }
+
+    #[test]
+    fn height_cache_miss_returns_none() {
+        let cache = HeightCache::default();
+        let key = HeightKey {
+            turn_id: crate::domain::models::TurnId("t1".into()),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[test]
+    fn height_cache_invalidate_all_clears_entries() {
+        let mut cache = HeightCache::default();
+        let key = HeightKey {
+            turn_id: crate::domain::models::TurnId("t1".into()),
+            expansion: true,
+            summary_tier: SummaryTier::Tier1,
+            terminal_width: 80,
+            tool_block_states_version: 0,
+        };
+        cache.set(
+            key.clone(),
+            CachedTurnLayout {
+                height: 5,
+                block_offsets: vec![],
+            },
+        );
+        cache.invalidate_all();
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.last_seen_turn_count, 0);
+    }
+
+    #[test]
+    fn height_cache_invalidate_turn_removes_only_target_turn() {
+        let mut cache = HeightCache::default();
+        let t1 = crate::domain::models::TurnId("t1".into());
+        let t2 = crate::domain::models::TurnId("t2".into());
+        cache.set(
+            HeightKey {
+                turn_id: t1.clone(),
+                expansion: true,
+                summary_tier: SummaryTier::Tier1,
+                terminal_width: 80,
+                tool_block_states_version: 0,
+            },
+            CachedTurnLayout {
+                height: 1,
+                block_offsets: vec![],
+            },
+        );
+        cache.set(
+            HeightKey {
+                turn_id: t2.clone(),
+                expansion: true,
+                summary_tier: SummaryTier::Tier1,
+                terminal_width: 80,
+                tool_block_states_version: 0,
+            },
+            CachedTurnLayout {
+                height: 2,
+                block_offsets: vec![],
+            },
+        );
+        cache.invalidate_turn(&t1);
+        assert!(
+            cache
+                .get(&HeightKey {
+                    turn_id: t1.clone(),
+                    expansion: true,
+                    summary_tier: SummaryTier::Tier1,
+                    terminal_width: 80,
+                    tool_block_states_version: 0
+                })
+                .is_none()
+        );
+        assert_eq!(
+            cache
+                .get(&HeightKey {
+                    turn_id: t2.clone(),
+                    expansion: true,
+                    summary_tier: SummaryTier::Tier1,
+                    terminal_width: 80,
+                    tool_block_states_version: 0
+                })
+                .unwrap()
+                .height,
+            2
+        );
+    }
+
+    #[test]
+    fn height_cache_evict_turns_not_in_removes_stale() {
+        let mut cache = HeightCache::default();
+        let t1 = crate::domain::models::TurnId("t1".into());
+        let t2 = crate::domain::models::TurnId("t2".into());
+        let t3 = crate::domain::models::TurnId("t3".into());
+        cache.set(
+            HeightKey {
+                turn_id: t1.clone(),
+                expansion: true,
+                summary_tier: SummaryTier::Tier1,
+                terminal_width: 80,
+                tool_block_states_version: 0,
+            },
+            CachedTurnLayout {
+                height: 1,
+                block_offsets: vec![],
+            },
+        );
+        cache.set(
+            HeightKey {
+                turn_id: t2.clone(),
+                expansion: true,
+                summary_tier: SummaryTier::Tier1,
+                terminal_width: 80,
+                tool_block_states_version: 0,
+            },
+            CachedTurnLayout {
+                height: 2,
+                block_offsets: vec![],
+            },
+        );
+        cache.set(
+            HeightKey {
+                turn_id: t3.clone(),
+                expansion: true,
+                summary_tier: SummaryTier::Tier1,
+                terminal_width: 80,
+                tool_block_states_version: 0,
+            },
+            CachedTurnLayout {
+                height: 3,
+                block_offsets: vec![],
+            },
+        );
+        cache.evict_turns_not_in([&t1, &t3].into_iter());
+        assert!(
+            cache
+                .get(&HeightKey {
+                    turn_id: t1.clone(),
+                    expansion: true,
+                    summary_tier: SummaryTier::Tier1,
+                    terminal_width: 80,
+                    tool_block_states_version: 0
+                })
+                .is_some()
+        );
+        assert!(
+            cache
+                .get(&HeightKey {
+                    turn_id: t2.clone(),
+                    expansion: true,
+                    summary_tier: SummaryTier::Tier1,
+                    terminal_width: 80,
+                    tool_block_states_version: 0
+                })
+                .is_none()
+        );
+        assert!(
+            cache
+                .get(&HeightKey {
+                    turn_id: t3.clone(),
+                    expansion: true,
+                    summary_tier: SummaryTier::Tier1,
+                    terminal_width: 80,
+                    tool_block_states_version: 0
+                })
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn height_cache_message_get_set_roundtrip() {
+        let mut cache = HeightCache::default();
+        let key = MessageHeightKey {
+            msg_id: "m1".into(),
+            terminal_width: 80,
+            content_hash: 12345,
+        };
+        cache.set_message(key.clone(), 17);
+        assert_eq!(cache.get_message(&key), Some(17));
+    }
+
+    #[test]
+    fn height_cache_message_miss_returns_none() {
+        let cache = HeightCache::default();
+        let key = MessageHeightKey {
+            msg_id: "m1".into(),
+            terminal_width: 80,
+            content_hash: 12345,
+        };
+        assert_eq!(cache.get_message(&key), None);
+    }
+
+    #[test]
+    fn height_cache_invalidate_all_clears_message_entries() {
+        let mut cache = HeightCache::default();
+        let key = MessageHeightKey {
+            msg_id: "m1".into(),
+            terminal_width: 80,
+            content_hash: 12345,
+        };
+        cache.set_message(key.clone(), 17);
+        cache.invalidate_all();
+        assert_eq!(cache.get_message(&key), None);
     }
 }

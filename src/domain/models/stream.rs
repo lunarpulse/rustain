@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::usage::UsageInfo;
 
 /// Reason the model stopped generating.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StopReason {
     EndTurn,

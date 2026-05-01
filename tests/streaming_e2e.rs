@@ -5,7 +5,7 @@ mod common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
-use rustain::adapters::tui::state::HeightCache;
+use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
@@ -60,7 +60,7 @@ fn test_e2e_message_to_streaming_response() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
@@ -103,7 +103,7 @@ fn test_e2e_message_to_streaming_response() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
@@ -166,7 +166,7 @@ fn test_e2e_message_to_streaming_response() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
@@ -219,7 +219,7 @@ fn test_e2e_message_to_streaming_response() {
                 0,
                 true,
                 &theme,
-                &mut HeightCache::default(),
+                &mut TabRenderState::default(),
                 &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
@@ -233,10 +233,7 @@ fn test_e2e_message_to_streaming_response() {
         text.contains("What is Rust?"),
         "Step 5: User question visible"
     );
-    assert!(
-        text.contains('│'),
-        "Step 5: Assistant gutter visible"
-    );
+    assert!(text.contains('│'), "Step 5: Assistant gutter visible");
     assert!(
         text.contains("Rust is a systems programming language."),
         "Step 5: Assistant response visible"

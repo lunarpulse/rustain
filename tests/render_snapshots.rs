@@ -16,7 +16,7 @@
 //! cargo insta accept   # after reviewing .snap.new files
 //! ```
 
-use rustain::adapters::tui::state::HeightCache;
+use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::domain::clock::MockClock;
@@ -134,7 +134,7 @@ fn render_text(
     let _ = terminal.draw(|frame| {
         let area = Rect::new(0, 0, width, height);
         let streaming = StreamingState::default();
-        let mut height_cache = HeightCache::default();
+        let mut tab_render_state = TabRenderState::default();
         let _ = chat_pane::render_with_search(
             frame,
             area,
@@ -146,7 +146,7 @@ fn render_text(
             0,
             true,
             &Theme::dark(),
-            &mut height_cache,
+            &mut tab_render_state,
             &HashMap::new(),
             &BTreeMap::new(),
             None,

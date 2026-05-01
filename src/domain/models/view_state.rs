@@ -137,7 +137,7 @@ pub struct AnchorRef {
 /// `Tier1` (cheap-form, default): model badge + top tool name.
 /// `Tier2` (rich): model + tool-count + top-k tool names + prose-preview line.
 /// Toggled by `zs` (S16.6) — `toggle_summary_tier` flips `Tier1 ↔ Tier2`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SummaryTier {
     #[default]
     Tier1,
@@ -289,6 +289,9 @@ impl ViewState {
     /// `is_collapsed`, not at write time. User toggles persist even while
     /// a turn is briefly auto-expanded due to running/error, and snap back
     /// to user intent once the override condition clears.
+    ///
+    /// S16.6 NOTE: pair every `toggle_fold` with `tab_render_state.height_cache.invalidate_turn(turn_id)`
+    /// via `chat_pane::toggle_turn_fold` — see S16.5 AC3 for cache coherence requirements.
     pub fn toggle_fold(&mut self, turn_id: &TurnId) {
         self.collapsed
             .entry(turn_id.clone())
@@ -318,6 +321,9 @@ impl ViewState {
 impl ViewState {
     /// Flip `Tier1 ↔ Tier2`. Does NOT mutate `mode` (tier is mode-orthogonal
     /// per UX-DR-ANCHOR-FSM transition table). Called by `zs` (S16.6).
+    ///
+    /// S16.6 NOTE: pair every `toggle_summary_tier` with `tab_render_state.height_cache.invalidate_all()`
+    /// via `chat_pane::set_summary_tier` — see S16.5 AC4 for cache coherence requirements.
     pub fn toggle_summary_tier(&mut self) {
         self.summary_tier = match self.summary_tier {
             SummaryTier::Tier1 => SummaryTier::Tier2,
@@ -428,9 +434,7 @@ impl ViewState {
                 return;
             }
             ScrollDelta::LineDown => -1,
-            ScrollDelta::HalfPageDown => {
-                -((viewport / 2).max(1).min(isize::MAX as usize) as isize)
-            }
+            ScrollDelta::HalfPageDown => -((viewport / 2).max(1).min(isize::MAX as usize) as isize),
             ScrollDelta::FullPageDown => -(viewport.max(1).min(isize::MAX as usize) as isize),
             ScrollDelta::WheelDown(n) => -(n.max(1) as isize),
             ScrollDelta::Bottom => {
@@ -482,9 +486,7 @@ impl ViewState {
             None => {
                 // Pinned turn not found in layout — defensive degradation.
                 self.mode = AnchorMode::Reading;
-                tracing::warn!(
-                    "Pinned turn_id no longer present; degrading to Reading"
-                );
+                tracing::warn!("Pinned turn_id no longer present; degrading to Reading");
                 // Leave scroll_offset clamped (no further action).
             }
         }
@@ -531,16 +533,14 @@ impl ViewState {
                 // pending_append_lines stays 0 in Following.
             }
             AnchorMode::Reading => {
-                self.pending_append_lines = self
-                    .pending_append_lines
-                    .saturating_add(appended_lines);
+                self.pending_append_lines =
+                    self.pending_append_lines.saturating_add(appended_lines);
                 // scroll_offset unchanged; clamp to new max.
                 self.scroll_offset = self.scroll_offset.min(max_offset(layout));
             }
             AnchorMode::Pinned(anchor) => {
-                self.pending_append_lines = self
-                    .pending_append_lines
-                    .saturating_add(appended_lines);
+                self.pending_append_lines =
+                    self.pending_append_lines.saturating_add(appended_lines);
                 let max_off = max_offset(layout);
                 match resolve_pinned_impl(&layout.turn_top_offsets, anchor, max_off) {
                     Some(off) => {
@@ -548,9 +548,7 @@ impl ViewState {
                     }
                     None => {
                         self.mode = AnchorMode::Reading;
-                        tracing::warn!(
-                            "Pinned turn_id no longer present; degrading to Reading"
-                        );
+                        tracing::warn!("Pinned turn_id no longer present; degrading to Reading");
                         self.scroll_offset = self.scroll_offset.min(max_off);
                     }
                 }

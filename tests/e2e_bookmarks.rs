@@ -14,7 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{HeightCache, TuiState};
+use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::bookmark_list;
 use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
@@ -79,7 +79,7 @@ fn render_chat_pane_with_bookmarks(
     let mut terminal = Terminal::new(backend).unwrap();
     let streaming = StreamingState::default();
     let theme = Theme::dark();
-    let mut height_cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
     let mut rr = RenderResult {
         total_content_height: 0,
         block_boundaries: Vec::new(),
@@ -101,7 +101,7 @@ fn render_chat_pane_with_bookmarks(
                 state.scroll_offset,
                 state.auto_scroll,
                 &theme,
-                &mut height_cache,
+                &mut tab_render_state,
                 &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
                 None,

@@ -1172,7 +1172,8 @@ pub async fn run(
                                         state.block_boundaries.clear();
                                         state.message_boundaries.clear();
                                         state.user_message_boundaries.clear();
-                                        state.height_cache.invalidate_all();
+                                        state.tab_render_state(state.active_tab_id).height_cache.invalidate_all();
+                                        state.tab_render_state(state.active_tab_id).tool_block_states_version = 0;
                                         state.tool_block_states.clear();
                                         state.focused_tool_id = None;
                                         state.feedback_blocks.clear();
@@ -2417,6 +2418,7 @@ pub async fn run(
                                         }
                                         // Close the tab (TabManager adjusts active index)
                                         tab_manager.close_tab(tab_id);
+                                        state.tab_render_states.remove(&tab_id);
                                         agent_activator.on_tab_closed(&closing_conv_id).await;
                                         // Load the new active tab into proxies
                                         let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
@@ -2730,6 +2732,7 @@ pub async fn run(
                                                         while turn_queue.dequeue().is_some() {}
                                                     }
                                                     tab_manager.close_tab(tab_id);
+                                                    state.tab_render_states.remove(&tab_id);
                                                     let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
@@ -2742,6 +2745,7 @@ pub async fn run(
                                                 } else if let Some(tab) = tab_manager.tabs().iter().find(|t| t.conversation.id == conv_id) {
                                                     let tab_id = tab.id;
                                                     tab_manager.close_tab(tab_id);
+                                                    state.tab_render_states.remove(&tab_id);
                                                 }
                                                 let fs_ref = fs_storage.clone();
                                                 let del_id = conv_id.clone();
@@ -2795,6 +2799,7 @@ pub async fn run(
                                                 while tab_manager.tab_count() > 1 {
                                                     let tab_id = tab_manager.tabs().last().map(|t| t.id).unwrap();
                                                     tab_manager.close_tab(tab_id);
+                                                    state.tab_render_states.remove(&tab_id);
                                                 }
                                                 conversation.messages.clear();
                                                 conversation.title = String::new();
@@ -3121,10 +3126,10 @@ pub async fn run(
                                                 tab_manager.active_tab_mut().conversation = truncated;
                                                 let _ = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
 
-                                                // 4. DF-005: invalidate height cache entries for removed messages.
-                                                // load_active_tab already called invalidate_all(); truncate_from
-                                                // is a no-op here but satisfies the API contract and unit tests.
-                                                state.height_cache.truncate_from(target_msg_idx + 1);
+                                                // 4. DF-005: height cache eviction for removed turns.
+                                                // Per-tab cache survives tab switches; rewind explicitly invalidates
+                                                // because the conversation shape changed.
+                                                state.tab_render_state(state.active_tab_id).height_cache.invalidate_all();
 
                                                 // 5. Cancel in-flight permission/question + drain queue (AC3 step 5)
                                                 // Dropping response_tx closes the channel → turn gets Err
@@ -6261,9 +6266,15 @@ fn load_active_tab(
     state.active_feedback_id = tab.active_feedback_id.clone();
     state.total_content_height = tab.total_content_height;
     state.pending_anchor = tab.pending_anchor;
-    // Reset per-tab renderer caches — rebuilt on next render
-    state.height_cache.invalidate_all();
+    state.active_tab_id = tab_manager.active_tab_id();
+    // tool_block_states is global (cleared on tab switch); version resets for new tab
     state.tool_block_states.clear();
+    if let Some(trs) = state
+        .tab_render_states
+        .get_mut(&tab_manager.active_tab_id())
+    {
+        trs.tool_block_states_version = 0;
+    }
     // Sync token usage from the loaded conversation
     state.token_usage = tab.conversation.usage.clone();
     // Infer status from loaded streaming state so the status bar reflects the tab being entered.
@@ -6824,10 +6835,9 @@ fn render(
 
     let permission_mode = security.current_mode();
 
-    // Split borrows: height_cache needs &mut, tool_block_states needs &
-    // Both are fields of state, so we extract refs before the closure.
+    // Split borrows: tool_block_states needs &, feedback_blocks needs &
+    // height_cache is now in tab_render_states (side-table) and borrowed inside the closure.
     let TuiState {
-        ref mut height_cache,
         ref tool_block_states,
         ref feedback_blocks,
         ref pending_permission,
@@ -7098,13 +7108,22 @@ fn render(
                     // like standalone conversation previews).
                     let default_vs = crate::domain::models::view_state::ViewState::default();
                     let default_clock = crate::domain::clock::SystemClock::default();
-                    let (view_state_ref, open_turn_ref, clock_ref): (&crate::domain::models::view_state::ViewState, Option<&crate::domain::models::turn::Turn>, &dyn crate::domain::clock::Clock) =
-                        if let Some(tm) = tab_manager_for_bar {
-                            let tab = tm.active_tab();
-                            (&tab.view_state, tab.reducer.open_turn.as_ref(), &*tab.clock as &dyn crate::domain::clock::Clock)
-                        } else {
-                            (&default_vs, None, &default_clock)
-                        };
+                    let (view_state_ref, open_turn_ref, clock_ref): (
+                        &crate::domain::models::view_state::ViewState,
+                        Option<&crate::domain::models::turn::Turn>,
+                        &dyn crate::domain::clock::Clock,
+                    ) = if let Some(tm) = tab_manager_for_bar {
+                        let tab = tm.active_tab();
+                        (
+                            &tab.view_state,
+                            tab.reducer.open_turn.as_ref(),
+                            &*tab.clock as &dyn crate::domain::clock::Clock,
+                        )
+                    } else {
+                        (&default_vs, None, &default_clock)
+                    };
+                    let tab_id = state.active_tab_id;
+                    let render_state = state.tab_render_states.entry(tab_id).or_default();
                     let result = chat_pane::render_with_search(
                         frame,
                         app_layout.chat_pane,
@@ -7116,7 +7135,7 @@ fn render(
                         scroll_offset,
                         auto_scroll,
                         theme,
-                        height_cache,
+                        render_state,
                         tool_block_states,
                         feedback_blocks,
                         search_query_opt,

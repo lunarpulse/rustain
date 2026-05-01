@@ -150,7 +150,10 @@ fn longest_common_path_prefix(paths: &[&str]) -> String {
     for ch in first.chars() {
         let ch_len = ch.len_utf8();
         let slice = first.get(byte_idx..byte_idx + ch_len);
-        if paths.iter().all(|p| p.get(byte_idx..byte_idx + ch_len) == slice) {
+        if paths
+            .iter()
+            .all(|p| p.get(byte_idx..byte_idx + ch_len) == slice)
+        {
             byte_idx += ch_len;
         } else {
             break;

@@ -73,7 +73,9 @@ fn elapsed_str(tc: &ToolCallInfo, clock: &dyn Clock) -> String {
         return String::new();
     }
 
-    let end = tc.completed_at_ms.unwrap_or_else(|| clock.wall_now_ms().max(0) as u64);
+    let end = tc
+        .completed_at_ms
+        .unwrap_or_else(|| clock.wall_now_ms().max(0) as u64);
 
     let elapsed_secs = (end.saturating_sub(start)) as f64 / 1000.0;
     format!("{:.1}s", elapsed_secs)

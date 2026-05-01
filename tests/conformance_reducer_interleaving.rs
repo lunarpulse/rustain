@@ -11,7 +11,7 @@ use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
     InvocationStatus, PartId, StopReason, StreamChunk, ToolOutput, TurnPart,
 };
-use rustain::domain::services::reducer::{test_reducer_state, reduce};
+use rustain::domain::services::reducer::{reduce, test_reducer_state};
 
 #[test]
 fn conformance_interleaved_streaming_produces_correct_parts() {
@@ -77,7 +77,10 @@ fn conformance_interleaved_streaming_produces_correct_parts() {
             (TurnPart::Prose { text: a, .. }, TurnPart::Prose { text: e, .. }) => {
                 assert_eq!(a, e, "prose text mismatch at part {i}");
             }
-            (TurnPart::ToolInvocation { tool: a, .. }, TurnPart::ToolInvocation { tool: e, .. }) => {
+            (
+                TurnPart::ToolInvocation { tool: a, .. },
+                TurnPart::ToolInvocation { tool: e, .. },
+            ) => {
                 assert_eq!(a, e, "tool name mismatch at part {i}");
             }
             (TurnPart::ToolResult { output: a, .. }, TurnPart::ToolResult { output: e, .. }) => {

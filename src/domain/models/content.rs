@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Discriminant for content block types in the rendering pipeline.
 /// MVP variants are active; later variants are defined with version comments.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ContentBlockType {
     // MVP (Sprint 2)

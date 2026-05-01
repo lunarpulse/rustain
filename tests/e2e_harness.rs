@@ -17,7 +17,7 @@ use ratatui::style::Style;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::layout;
-use rustain::adapters::tui::state::{HeightCache, TuiState};
+use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::errors::ProviderError;
@@ -160,7 +160,7 @@ pub struct TestHarness {
     pub clock: rustain::domain::clock::MockClock,
     #[allow(dead_code)]
     pub turn_queue: TurnQueue,
-    pub height_cache: HeightCache,
+    pub tab_render_state: TabRenderState,
     pub tool_block_states: HashMap<String, ToolBlockState>,
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
     pub theme: Theme,
@@ -212,7 +212,7 @@ impl TestHarness {
             reducer,
             clock,
             turn_queue: TurnQueue::default(),
-            height_cache: HeightCache::default(),
+            tab_render_state: TabRenderState::default(),
             tool_block_states: HashMap::new(),
             feedback_blocks: BTreeMap::new(),
             theme,
@@ -224,7 +224,7 @@ impl TestHarness {
         let conv = &self.conversation;
         let streaming = &self.streaming;
         let theme = &self.theme;
-        let height_cache = &mut self.height_cache;
+        let tab_render_state = &mut self.tab_render_state;
         let tool_states = &self.tool_block_states;
         let feedback = &self.feedback_blocks;
         let scroll_offset = self.state.scroll_offset;
@@ -254,7 +254,7 @@ impl TestHarness {
                         scroll_offset,
                         auto_scroll,
                         theme,
-                        height_cache,
+                        tab_render_state,
                         tool_states,
                         feedback,
                     );

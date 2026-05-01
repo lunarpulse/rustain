@@ -24,9 +24,9 @@ mod tools;
 pub mod transaction;
 pub mod turn;
 mod usage;
+pub mod view_state;
 #[allow(dead_code)]
 pub mod visual;
-pub mod view_state;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.

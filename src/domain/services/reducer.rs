@@ -258,7 +258,10 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         // ── Text ─────────────────────────────────────────────────────────
         StreamChunk::Text { content, .. } => {
             state.ensure_open_turn(clock);
-            state.open_prose.get_or_insert_with(String::new).push_str(&content);
+            state
+                .open_prose
+                .get_or_insert_with(String::new)
+                .push_str(&content);
             ChunkAction::NeedsRedraw
         }
 
@@ -266,7 +269,10 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         StreamChunk::Thinking { content, .. } => {
             state.ensure_open_turn(clock);
             state.flush_open_prose();
-            state.open_reasoning.get_or_insert_with(String::new).push_str(&content);
+            state
+                .open_reasoning
+                .get_or_insert_with(String::new)
+                .push_str(&content);
             ChunkAction::NeedsRedraw
         }
 

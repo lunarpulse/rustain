@@ -4,7 +4,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::layout;
-use rustain::adapters::tui::state::{HeightCache, TuiState};
+use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::models::{Conversation, StreamingState};
@@ -41,7 +41,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     state.scroll_offset,
                     state.auto_scroll,
                     &state.theme,
-                    &mut HeightCache::default(),
+                    &mut TabRenderState::default(),
                     &HashMap::<String, ToolBlockState>::new(),
                     &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );

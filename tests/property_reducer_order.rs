@@ -7,22 +7,36 @@
 //! `ToolResult` parts appear after their referenced invocations.
 
 use rustain::domain::models::{StopReason, StreamChunk, TurnPart};
-use rustain::domain::services::reducer::{test_reducer_state, reduce};
+use rustain::domain::services::reducer::{reduce, test_reducer_state};
 
 #[derive(Clone, Debug)]
 enum V {
-    T,  // Text
-    U,  // ToolUse (with id #0)
-    R,  // ToolResult (with id #0)
-    H,  // Thinking
+    T, // Text
+    U, // ToolUse (with id #0)
+    R, // ToolResult (with id #0)
+    H, // Thinking
 }
 
 fn chunk(v: &V) -> StreamChunk {
     match v {
-        V::T => StreamChunk::Text { content: "x".into(), parent_tool_use_id: None },
-        V::U => StreamChunk::ToolUse { id: "t0".into(), name: "test".into(), input: serde_json::json!({}) },
-        V::R => StreamChunk::ToolResult { id: "t0".into(), content: "r".into(), is_error: false },
-        V::H => StreamChunk::Thinking { content: "h".into(), parent_tool_use_id: None },
+        V::T => StreamChunk::Text {
+            content: "x".into(),
+            parent_tool_use_id: None,
+        },
+        V::U => StreamChunk::ToolUse {
+            id: "t0".into(),
+            name: "test".into(),
+            input: serde_json::json!({}),
+        },
+        V::R => StreamChunk::ToolResult {
+            id: "t0".into(),
+            content: "r".into(),
+            is_error: false,
+        },
+        V::H => StreamChunk::Thinking {
+            content: "h".into(),
+            parent_tool_use_id: None,
+        },
     }
 }
 
@@ -57,7 +71,13 @@ fn property_arrival_order_preserved() {
         for v in seq {
             let _ = reduce(&mut state, chunk(v), &clock);
         }
-        let _ = reduce(&mut state, StreamChunk::TurnComplete { stop_reason: StopReason::EndTurn }, &clock);
+        let _ = reduce(
+            &mut state,
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+            &clock,
+        );
 
         let turn = match state.committed_turn.take() {
             Some(t) => t,
@@ -65,29 +85,60 @@ fn property_arrival_order_preserved() {
         };
 
         // Count types
-        let prose_count = turn.parts.iter().filter(|p| matches!(p, TurnPart::Prose { .. })).count();
-        let inv_count = turn.parts.iter().filter(|p| matches!(p, TurnPart::ToolInvocation { .. })).count();
-        let res_count = turn.parts.iter().filter(|p| matches!(p, TurnPart::ToolResult { .. })).count();
-        let thinking_count = turn.parts.iter().filter(|p| matches!(p, TurnPart::Reasoning { .. })).count();
+        let prose_count = turn
+            .parts
+            .iter()
+            .filter(|p| matches!(p, TurnPart::Prose { .. }))
+            .count();
+        let inv_count = turn
+            .parts
+            .iter()
+            .filter(|p| matches!(p, TurnPart::ToolInvocation { .. }))
+            .count();
+        let res_count = turn
+            .parts
+            .iter()
+            .filter(|p| matches!(p, TurnPart::ToolResult { .. }))
+            .count();
+        let thinking_count = turn
+            .parts
+            .iter()
+            .filter(|p| matches!(p, TurnPart::Reasoning { .. }))
+            .count();
 
         // Result count cannot exceed invocation count
-        assert!(res_count <= inv_count,
-            "seq {}: ToolResult count ({}) exceeds ToolInvocation count ({})", si, res_count, inv_count);
+        assert!(
+            res_count <= inv_count,
+            "seq {}: ToolResult count ({}) exceeds ToolInvocation count ({})",
+            si,
+            res_count,
+            inv_count
+        );
 
         // Verify all parts are in structural order
-        let part_types: Vec<&str> = turn.parts.iter().map(|p| match p {
-            TurnPart::Prose { .. } => "Prose",
-            TurnPart::ToolInvocation { .. } => "ToolInv",
-            TurnPart::ToolResult { .. } => "ToolRes",
-            TurnPart::Reasoning { .. } => "Reason",
-        }).collect();
+        let part_types: Vec<&str> = turn
+            .parts
+            .iter()
+            .map(|p| match p {
+                TurnPart::Prose { .. } => "Prose",
+                TurnPart::ToolInvocation { .. } => "ToolInv",
+                TurnPart::ToolResult { .. } => "ToolRes",
+                TurnPart::Reasoning { .. } => "Reason",
+            })
+            .collect();
 
         // Check that no ToolResult appears before its matching ToolInvocation
         let mut inv_seen = false;
         for pt in &part_types {
-            if *pt == "ToolInv" { inv_seen = true; }
+            if *pt == "ToolInv" {
+                inv_seen = true;
+            }
             if *pt == "ToolRes" {
-                assert!(inv_seen, "seq {}: ToolResult without preceding ToolInvocation", si);
+                assert!(
+                    inv_seen,
+                    "seq {}: ToolResult without preceding ToolInvocation",
+                    si
+                );
             }
         }
         let _ = (prose_count, thinking_count, inv_seen);

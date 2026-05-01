@@ -301,7 +301,11 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
 
             state.terminal_width = *w;
             state.terminal_height = *h;
-            state.height_cache.invalidate_all();
+            state
+                .tab_render_state(state.active_tab_id)
+                .height_cache
+                .invalidate_all();
+            state.tab_render_state(state.active_tab_id).cached_width = Some(*w);
             // P11: Reset sidebar if terminal shrinks below minimum width
             if *w < crate::adapters::tui::layout::SIDEBAR_MIN_WIDTH && state.sidebar_visible {
                 state.sidebar_visible = false;
@@ -947,6 +951,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                     if entry.collapsed {
                         entry.peek_active = !entry.peek_active;
+                        let tab_id = state.active_tab_id;
+                        state.tab_render_state(tab_id).tool_block_states_version = state
+                            .tab_render_state(tab_id)
+                            .tool_block_states_version
+                            .wrapping_add(1);
                         state.needs_redraw = true;
                     }
                 }
@@ -1761,7 +1770,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
                 entry.collapsed = !entry.collapsed;
                 entry.peek_active = false;
-                state.height_cache.invalidate_all();
+                let tab_id = state.active_tab_id;
+                state.tab_render_state(tab_id).height_cache.invalidate_all();
+                state.tab_render_state(tab_id).tool_block_states_version = state
+                    .tab_render_state(tab_id)
+                    .tool_block_states_version
+                    .wrapping_add(1);
                 state.needs_redraw = true;
             }
             InputAction::Consumed

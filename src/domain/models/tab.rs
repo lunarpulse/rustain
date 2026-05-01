@@ -64,12 +64,20 @@ impl TabState {
     /// Creates a detached CancellationToken (not linked to any parent).
     /// For production use, prefer `new_with_parent` which creates a child token.
     pub fn new(id: TabId) -> Self {
-        Self::new_with_cancel(id, CancellationToken::new(), Arc::new(SystemClock::default()))
+        Self::new_with_cancel(
+            id,
+            CancellationToken::new(),
+            Arc::new(SystemClock::default()),
+        )
     }
 
     /// Create a new TabState whose `turn_cancel` is a child of `session_cancel`.
     pub fn new_with_parent(id: TabId, session_cancel: &CancellationToken) -> Self {
-        Self::new_with_cancel(id, session_cancel.child_token(), Arc::new(SystemClock::default()))
+        Self::new_with_cancel(
+            id,
+            session_cancel.child_token(),
+            Arc::new(SystemClock::default()),
+        )
     }
 
     /// Create a new TabState with an injected clock (test entrypoint).

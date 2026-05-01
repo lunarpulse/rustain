@@ -4,19 +4,19 @@
 //! - AC1: Interleaved parts walk in stream order
 //! - AC13: Single-source render guard at TurnComplete boundary
 
-use rustain::adapters::tui::state::HeightCache;
+use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::domain::clock::MockClock;
+use rustain::domain::models::turn::{PartId, TurnPart};
 use rustain::domain::models::{
-    ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason,
-    StreamingState, ViewState, Turn,
+    ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason, StreamingState, Turn,
+    ViewState,
 };
-use rustain::domain::models::turn::{TurnPart, PartId};
 
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
-use ratatui::Terminal;
 use std::collections::{BTreeMap, HashMap};
 
 fn make_conversation(messages: Vec<ChatMessage>, turns: Vec<Turn>) -> Conversation {
@@ -104,15 +104,26 @@ fn render_text(
     let _ = terminal.draw(|frame| {
         let area = Rect::new(0, 0, 120, 60);
         let streaming = StreamingState::default();
-        let mut height_cache = HeightCache::default();
+        let mut tab_render_state = TabRenderState::default();
         let _ = chat_pane::render_with_search(
-            frame, area,
-            conversation, open_turn, &streaming, view_state, clock,
-            0, true,
+            frame,
+            area,
+            conversation,
+            open_turn,
+            &streaming,
+            view_state,
+            clock,
+            0,
+            true,
             &Theme::dark(),
-            &mut height_cache,
-            &HashMap::new(), &BTreeMap::new(),
-            None, None, &[], &[], None,
+            &mut tab_render_state,
+            &HashMap::new(),
+            &BTreeMap::new(),
+            None,
+            None,
+            &[],
+            &[],
+            None,
         );
     });
     use ratatui::buffer::Buffer;
@@ -149,7 +160,11 @@ fn expanded_turn_renders_parts_in_order() {
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
     let text = render_text(&conv, None, &ViewState::default(), &clock);
     assert!(text.contains("Reading the file"), "Missing prose: {}", text);
-    assert!(text.contains("Looks like the bug"), "Missing prose: {}", text);
+    assert!(
+        text.contains("Looks like the bug"),
+        "Missing prose: {}",
+        text
+    );
 }
 
 #[test]
@@ -197,9 +212,16 @@ fn gutter_renders_on_assistant_turn() {
 #[test]
 fn user_message_renders_without_gutter() {
     let um = ChatMessage {
-        id: "u1".into(), role: MessageRole::User, content: "Hello".into(),
-        content_blocks: vec![], tool_calls: vec![], created_at: 1_700_000,
-        token_count: None, stop_reason: None, synthetic: false, images: vec![],
+        id: "u1".into(),
+        role: MessageRole::User,
+        content: "Hello".into(),
+        content_blocks: vec![],
+        tool_calls: vec![],
+        created_at: 1_700_000,
+        token_count: None,
+        stop_reason: None,
+        synthetic: false,
+        images: vec![],
     };
     let conv = make_conversation(vec![um], vec![]);
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
@@ -209,7 +231,14 @@ fn user_message_renders_without_gutter() {
 
 #[test]
 fn running_invocation_shows_spinner() {
-    let turn = make_assistant_turn("t5", vec![make_prose("Running."), make_tool("Read", InvocationStatus::Running)], None);
+    let turn = make_assistant_turn(
+        "t5",
+        vec![
+            make_prose("Running."),
+            make_tool("Read", InvocationStatus::Running),
+        ],
+        None,
+    );
     let msg = make_msg("t5", MessageRole::Assistant);
     let conv = make_conversation(vec![msg], vec![turn]);
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
@@ -222,7 +251,11 @@ fn running_invocation_shows_spinner() {
 fn error_turn_is_force_expanded() {
     let turn = make_assistant_turn(
         "t6",
-        vec![make_prose("Error."), make_tool("Bash", InvocationStatus::Error), make_result("failed", true)],
+        vec![
+            make_prose("Error."),
+            make_tool("Bash", InvocationStatus::Error),
+            make_result("failed", true),
+        ],
         Some(StopReason::EndTurn),
     );
     let msg = make_msg("t6", MessageRole::Assistant);

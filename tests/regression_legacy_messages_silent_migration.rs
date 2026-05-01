@@ -4,8 +4,8 @@
 //! Also validates round-trip: serialized JSON has both `messages` and `turns`,
 //! and re-reading produces an identical `Conversation`.
 
-use rustain::domain::models::{ChatMessage, MessageRole};
 use rustain::domain::models::conversation::{Conversation, PersistedConversation};
+use rustain::domain::models::{ChatMessage, MessageRole};
 
 #[test]
 fn legacy_messages_only_json_populates_turns_via_migration() {
@@ -62,8 +62,8 @@ fn legacy_messages_only_json_populates_turns_via_migration() {
         "updatedAt": 1700000003
     }"#;
 
-    let persisted: PersistedConversation =
-        serde_json::from_str(json).expect("legacy JSON should deserialize as PersistedConversation");
+    let persisted: PersistedConversation = serde_json::from_str(json)
+        .expect("legacy JSON should deserialize as PersistedConversation");
     let conversation = persisted.to_conversation();
 
     // Both turns and messages should be populated
@@ -100,14 +100,10 @@ fn legacy_messages_only_json_populates_turns_via_migration() {
 
     // The first turn should have correct content
     let first_turn = &conversation.turns[0];
-    assert!(
-        !first_turn.parts.is_empty(),
-        "first turn should have parts"
-    );
+    assert!(!first_turn.parts.is_empty(), "first turn should have parts");
 
     // Round-trip: serialize and deserialize again
-    let round_trip_json =
-        serde_json::to_string_pretty(&conversation).expect("should serialize");
+    let round_trip_json = serde_json::to_string_pretty(&conversation).expect("should serialize");
     let back: Conversation =
         serde_json::from_str(&round_trip_json).expect("round-trip should succeed");
 

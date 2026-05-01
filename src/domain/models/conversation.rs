@@ -154,7 +154,8 @@ impl Conversation {
             .collect();
 
         // Track which turn ids were processed (for zombie cleanup)
-        let mut processed_turn_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut processed_turn_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for turn in &self.turns {
             if turn.role != MessageRole::Assistant {
@@ -238,9 +239,7 @@ impl Conversation {
                 id: turn.id.0.clone(),
                 role: turn.role,
                 content,
-                content_blocks: old_blocks
-                    .remove(&turn.id.0)
-                    .unwrap_or_default(),
+                content_blocks: old_blocks.remove(&turn.id.0).unwrap_or_default(),
                 tool_calls,
                 created_at,
                 token_count: self.usage.as_ref().map(|u| u.output_tokens),

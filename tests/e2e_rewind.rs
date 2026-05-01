@@ -17,9 +17,7 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{
-    HeightCache, RevertPreviewItem, RewindPreview, SearchState, TuiState,
-};
+use rustain::adapters::tui::state::{HeightCache, MessageHeightKey, TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::rewind_confirm::render_rewind_confirmation_lines;
 use rustain::domain::models::checkpoint::{CheckpointId, RevertStatus};
@@ -862,42 +860,47 @@ fn test_e2e_rewind_other_tab_permission_unaffected() {
 // ── AC7: DF-005 — HeightCache Survives Message Truncation ────────────────────
 
 #[test]
-fn test_e2e_rewind_height_cache_truncated() {
+fn test_e2e_rewind_height_cache_invalidated() {
     // Given: HeightCache populated for messages 0..=4 (5 messages)
     let mut cache = HeightCache::default();
     let ids: Vec<String> = (0..5).map(|i| format!("msg-{i}")).collect();
     for (i, id) in ids.iter().enumerate() {
-        cache.set(id.clone(), 3 + i); // heights 3, 4, 5, 6, 7
+        let key = MessageHeightKey {
+            msg_id: id.clone(),
+            terminal_width: 80,
+            content_hash: 0,
+        };
+        cache.set_message(key, 3 + i); // heights 3, 4, 5, 6, 7
     }
 
     // Verify all 5 are cached
     for id in &ids {
+        let key = MessageHeightKey {
+            msg_id: id.clone(),
+            terminal_width: 80,
+            content_hash: 0,
+        };
         assert!(
-            cache.get(id).is_some(),
-            "Message {id} should be in cache before truncation"
+            cache.get_message(&key).is_some(),
+            "Message {id} should be in cache before invalidation"
         );
     }
 
-    // When: rewind truncates from message index 2 (messages 0/1 remain)
-    cache.truncate_from(2);
+    // When: rewind invalidates all (per-Tab cache survives switch; rewind explicitly invalidates)
+    cache.invalidate_all();
 
-    // Then: messages 0 and 1 are still cached
-    assert!(
-        cache.get(&ids[0]).is_some(),
-        "msg-0 should still be in cache"
-    );
-    assert!(
-        cache.get(&ids[1]).is_some(),
-        "msg-1 should still be in cache"
-    );
-
-    // And: messages 2, 3, 4 are evicted
-    assert!(
-        cache.get(&ids[2]).is_none(),
-        "msg-2 should be evicted (at truncation point)"
-    );
-    assert!(cache.get(&ids[3]).is_none(), "msg-3 should be evicted");
-    assert!(cache.get(&ids[4]).is_none(), "msg-4 should be evicted");
+    // Then: all messages are evicted
+    for id in &ids {
+        let key = MessageHeightKey {
+            msg_id: id.clone(),
+            terminal_width: 80,
+            content_hash: 0,
+        };
+        assert!(
+            cache.get_message(&key).is_none(),
+            "Message {id} should be evicted after invalidate_all"
+        );
+    }
 }
 
 // ── AC8: StoragePort — Checkpoint Protocol ────────────────────────────────────
@@ -1531,7 +1534,7 @@ fn test_e2e_amend2_render_produces_full_and_user_message_boundaries() {
     let theme = Theme::dark();
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut cache = HeightCache::default();
+    let mut tab_render_state = TabRenderState::default();
 
     terminal
         .draw(|frame| {
@@ -1544,7 +1547,7 @@ fn test_e2e_amend2_render_produces_full_and_user_message_boundaries() {
                 0,
                 true,
                 &theme,
-                &mut cache,
+                &mut tab_render_state,
                 &HashMap::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
