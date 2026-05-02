@@ -16,6 +16,10 @@ pub mod skill_activation;
 pub mod skill_registry;
 pub mod toolset_adapter;
 pub mod tui;
+pub mod provider;
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
+
+#[cfg(feature = "openai")]
+pub mod openai;

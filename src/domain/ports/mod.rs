@@ -33,7 +33,7 @@ pub use context::ContextPort;
 pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
 pub use persona::PersonaPort;
-pub use provider::ProviderPort;
+pub use provider::StreamingProvider;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
 pub use session_port::SessionPort;

@@ -2713,6 +2713,7 @@ mod tests {
                 output_tokens: 10,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
+                reasoning_tokens: None,
             }),
             turns: Vec::new(),
             plans: std::collections::HashMap::new(),

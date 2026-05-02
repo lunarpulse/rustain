@@ -95,7 +95,7 @@ fn test_error_feedback_block_in_conversation() {
     }
 
     assert!(content.contains('✗'), "Error symbol should be present");
-    assert!(content.contains("[r]"), "Retry action should be present");
+    assert!(content.contains("[Ctrl+K r]"), "Retry action should be present");
 }
 
 /// AC2: Warning FeedbackBlock max 3 lines.
@@ -184,6 +184,7 @@ fn test_token_usage_display_formatting() {
         output_tokens: 3400,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
+        reasoning_tokens: None,
     };
     assert_eq!(status_bar::format_token_usage(&usage), "↑1.2k ↓3.4k");
 
@@ -192,6 +193,7 @@ fn test_token_usage_display_formatting() {
         output_tokens: 100,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
+        reasoning_tokens: None,
     };
     assert_eq!(status_bar::format_token_usage(&small_usage), "↑50 ↓100");
 }

@@ -1,5 +1,28 @@
 use serde::{Deserialize, Serialize};
 
+/// Configuration for a single LLM provider.
+///
+/// `api_key_env` names an environment variable — the adapter reads
+/// the actual key at startup; the domain config never stores secrets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Unique provider identifier (e.g., `"anthropic"`).
+    pub provider_id: String,
+    /// The model to use (e.g., `"claude-sonnet-4-20250514"`).
+    pub model_id: String,
+    /// Environment variable name that holds the API key or bearer token.
+    pub api_key_env: String,
+    /// Whether this provider is enabled.
+    #[serde(default = "ProviderConfig::default_enabled")]
+    pub enabled: bool,
+}
+
+impl ProviderConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
     #[serde(default)]
@@ -106,6 +129,10 @@ pub struct AppConfig {
     /// Start new sessions in Plan mode by default.
     #[serde(default)]
     pub default_plan_mode: bool,
+    /// Provider configurations keyed by provider_id.
+    /// If no `[provider]` section exists, the default Anthropic config is used.
+    #[serde(default)]
+    pub provider: std::collections::HashMap<String, ProviderConfig>,
 }
 
 impl AppConfig {
@@ -138,6 +165,7 @@ impl Default for AppConfig {
             runtime: RuntimeConfig::default(),
             layout: LayoutConfig::default(),
             default_plan_mode: false,
+            provider: std::collections::HashMap::new(),
         }
     }
 }

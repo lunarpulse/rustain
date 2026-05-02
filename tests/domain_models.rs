@@ -54,6 +54,7 @@ fn test_stream_chunk_usage_roundtrip() {
             output_tokens: 50,
             cache_creation_input_tokens: Some(10),
             cache_read_input_tokens: None,
+            reasoning_tokens: None,
         },
         session_id: Some("sess_abc".into()),
     };

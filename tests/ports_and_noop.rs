@@ -13,7 +13,7 @@ use rustain::domain::models::{
     CompletionOptions, Message, MessageRole, PathAccessType, PermissionMode,
 };
 use rustain::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, ProviderPort, SchedulerPort, SecurityPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, StreamingProvider, SchedulerPort, SecurityPort,
     SessionPort, StoragePort, ToolSetPort,
 };
 
@@ -142,7 +142,7 @@ fn test_noop_empty_ports_instantiate() {
 fn test_port_traits_are_object_safe() {
     // Verify all port traits can be used as trait objects (required for ArcSwap<Box<dyn Port>>)
     fn assert_object_safe<T: ?Sized>() {}
-    assert_object_safe::<dyn ProviderPort>();
+    assert_object_safe::<dyn StreamingProvider>();
     assert_object_safe::<dyn StoragePort>();
     assert_object_safe::<dyn SecurityPort>();
     assert_object_safe::<dyn ToolSetPort>();

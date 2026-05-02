@@ -27,7 +27,7 @@ use rustain::domain::models::{
     PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
     ToolCallInfo, generate_conversation_id,
 };
-use rustain::domain::ports::ProviderPort;
+use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::message_builder;
 use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
 use rustain::domain::services::turn_queue::TurnQueue;
@@ -124,7 +124,7 @@ impl std::fmt::Debug for MockProvider {
 }
 
 #[async_trait]
-impl ProviderPort for MockProvider {
+impl StreamingProvider for MockProvider {
     async fn stream_completion(
         &self,
         _messages: Vec<Message>,
@@ -144,6 +144,14 @@ impl ProviderPort for MockProvider {
 
     fn provider_id(&self) -> &str {
         "mock"
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
     }
 }
 
@@ -1026,8 +1034,15 @@ fn test_e2e_scroll_navigation() {
         "Scroll offset should increase after k"
     );
 
-    // Jump to bottom with G
-    h.type_char('G');
+    // Jump to bottom with G (S16.6: returns JumpToLatestProseAnchor for event loop;
+    // harness has no event loop, so verify the action and simulate the result)
+    let action = h.type_char('G');
+    assert!(
+        matches!(action, InputAction::JumpToLatestProseAnchor),
+        "G should return JumpToLatestProseAnchor"
+    );
+    h.state.scroll_offset = 0;
+    h.state.auto_scroll = true;
     assert_eq!(h.state.scroll_offset, 0, "G should jump to bottom");
 }
 

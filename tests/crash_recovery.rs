@@ -54,6 +54,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
             output_tokens: 200,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            reasoning_tokens: None,
         }),
         plans: std::collections::HashMap::new(),
         fork_source: None,

@@ -12,7 +12,7 @@ use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
     StreamingState, generate_conversation_id,
 };
-use rustain::domain::ports::ProviderPort;
+use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
 
 // ── Mock Provider ──────────────────────────────────────────────
@@ -23,7 +23,7 @@ struct MockTitleProvider {
 }
 
 #[async_trait]
-impl ProviderPort for MockTitleProvider {
+impl StreamingProvider for MockTitleProvider {
     async fn stream_completion(
         &self,
         _messages: Vec<Message>,
@@ -48,13 +48,21 @@ impl ProviderPort for MockTitleProvider {
     fn provider_id(&self) -> &str {
         "mock-title"
     }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
 /// Mock provider that always fails.
 struct FailingProvider;
 
 #[async_trait]
-impl ProviderPort for FailingProvider {
+impl StreamingProvider for FailingProvider {
     async fn stream_completion(
         &self,
         _messages: Vec<Message>,
@@ -69,6 +77,14 @@ impl ProviderPort for FailingProvider {
 
     fn provider_id(&self) -> &str {
         "failing"
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
     }
 }
 

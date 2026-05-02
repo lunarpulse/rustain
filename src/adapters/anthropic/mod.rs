@@ -1,4 +1,4 @@
-//! Anthropic API adapter implementing the `ProviderPort` trait.
+//! Anthropic API adapter implementing the `StreamingProvider` trait.
 //! All Anthropic-specific types and SSE parsing live in this module.
 
 pub mod sse;
@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 
 use crate::domain::errors::ProviderError;
 use crate::domain::models::{CompletionOptions, Message, StreamChunk};
-use crate::domain::ports::ProviderPort;
+use crate::domain::ports::StreamingProvider;
 
 use self::sse::SseLineBuffer;
 use self::stream::StreamTransformer;
@@ -32,7 +32,7 @@ pub enum AuthMode {
     BearerToken(String),
 }
 
-/// Anthropic API adapter. Implements `ProviderPort` for streaming completions.
+/// Anthropic API adapter. Implements `StreamingProvider` for streaming completions.
 ///
 /// `Debug` is manually implemented to mask credentials (prevent accidental key leakage).
 pub struct AnthropicAdapter {
@@ -97,7 +97,7 @@ impl fmt::Debug for AnthropicAdapter {
 }
 
 #[async_trait]
-impl ProviderPort for AnthropicAdapter {
+impl StreamingProvider for AnthropicAdapter {
     async fn stream_completion(
         &self,
         messages: Vec<Message>,
@@ -243,6 +243,82 @@ impl ProviderPort for AnthropicAdapter {
 
     fn provider_id(&self) -> &str {
         "anthropic"
+    }
+
+    fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
+        use crate::domain::models::ModelCapability;
+        vec![
+            crate::domain::models::ModelDescriptor {
+                model_id: "claude-sonnet-4-20250514".to_string(),
+                display_name: "Claude Sonnet 4".to_string(),
+                provider_id: "anthropic".to_string(),
+                context_window: 200_000,
+                capabilities: std::collections::HashSet::from([
+                    ModelCapability::Vision,
+                    ModelCapability::ToolUse,
+                    ModelCapability::Thinking,
+                    ModelCapability::ParallelToolCalls,
+                ]),
+                pricing_tier: Some("flagship".to_string()),
+            },
+            crate::domain::models::ModelDescriptor {
+                model_id: "claude-opus-4-20250514".to_string(),
+                display_name: "Claude Opus 4".to_string(),
+                provider_id: "anthropic".to_string(),
+                context_window: 200_000,
+                capabilities: std::collections::HashSet::from([
+                    ModelCapability::Vision,
+                    ModelCapability::ToolUse,
+                    ModelCapability::Thinking,
+                    ModelCapability::ParallelToolCalls,
+                ]),
+                pricing_tier: Some("flagship".to_string()),
+            },
+            crate::domain::models::ModelDescriptor {
+                model_id: "claude-haiku-4-5-20251001".to_string(),
+                display_name: "Claude Haiku 4.5".to_string(),
+                provider_id: "anthropic".to_string(),
+                context_window: 200_000,
+                capabilities: std::collections::HashSet::from([
+                    ModelCapability::Vision,
+                    ModelCapability::ToolUse,
+                ]),
+                pricing_tier: Some("cheap".to_string()),
+            },
+        ]
+    }
+
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        let url = format!("{}/v1/messages", self.base_url);
+        let response = match &self.auth_mode {
+            AuthMode::ApiKey(key) => {
+                self.client
+                    .head(&url)
+                    .header("x-api-key", key.to_string())
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+            }
+            AuthMode::BearerToken(token) => {
+                self.client
+                    .head(&url)
+                    .header("authorization", format!("Bearer {}", token))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+            }
+        };
+        match response {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) if resp.status().as_u16() == 401 => {
+                Err(ProviderError::AuthenticationFailed)
+            }
+            Ok(resp) => Err(ProviderError::Other(format!(
+                "Health check failed: HTTP {}",
+                resp.status()
+            ))),
+            Err(e) => Err(ProviderError::ConnectionFailed(e.to_string())),
+        }
     }
 }
 

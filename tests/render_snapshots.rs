@@ -16,160 +16,18 @@
 //! cargo insta accept   # after reviewing .snap.new files
 //! ```
 
-use rustain::adapters::tui::state::TabRenderState;
-use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::chat_pane;
+#[path = "common/render_helpers.rs"]
+mod common;
+
+use common::*;
 use rustain::domain::clock::MockClock;
-use rustain::domain::models::turn::{PartId, TurnPart};
 use rustain::domain::models::{
-    ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason, StreamingState, Turn,
-    ViewState,
+    Conversation, InvocationStatus, MessageRole, StopReason, Turn, ViewState,
 };
 
-use ratatui::Terminal;
-use ratatui::backend::TestBackend;
-use ratatui::layout::Rect;
-use std::collections::{BTreeMap, HashMap};
-
 // ---------------------------------------------------------------------------
-// Test helpers
+// Test helpers (fixture builders live in common::)
 // ---------------------------------------------------------------------------
-
-fn make_conversation(messages: Vec<ChatMessage>, turns: Vec<Turn>) -> Conversation {
-    Conversation {
-        id: "test-conv".to_string(),
-        title: "Test".to_string(),
-        messages,
-        turns,
-        created_at: 1_700_000,
-        updated_at: 1_700_000,
-        last_response_at: Some(1_700_000),
-        session_id: Some("test-session".to_string()),
-        usage: None,
-        plans: HashMap::new(),
-        fork_source: None,
-    }
-}
-
-fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
-    ChatMessage {
-        id: id.to_string(),
-        role,
-        content: String::new(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: 1_700_000,
-        token_count: None,
-        stop_reason: None,
-        synthetic: false,
-        images: vec![],
-    }
-}
-
-fn make_turn(id: &str, parts: Vec<TurnPart>, stop_reason: Option<StopReason>) -> Turn {
-    let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
-    turn.id = rustain::domain::models::TurnId(id.to_string());
-    for part in parts {
-        turn.push_part(|_id| part);
-    }
-    turn.stop_reason = stop_reason;
-    turn
-}
-
-fn prose(text: &str) -> TurnPart {
-    TurnPart::Prose {
-        id: PartId(0),
-        text: text.to_string(),
-    }
-}
-
-fn reasoning(text: &str) -> TurnPart {
-    TurnPart::Reasoning {
-        id: PartId(0),
-        text: text.to_string(),
-    }
-}
-
-fn tool(name: &str, status: InvocationStatus) -> TurnPart {
-    let is_success = status == InvocationStatus::Success;
-    TurnPart::ToolInvocation {
-        id: PartId(0),
-        tool: name.to_string(),
-        args: serde_json::json!({}),
-        status,
-        started_at: 1_700_000_000_000,
-        ended_at: if is_success {
-            Some(1_700_000_005_000)
-        } else {
-            None
-        },
-    }
-}
-
-fn tool_with_path(name: &str, file_path: &str, status: InvocationStatus) -> TurnPart {
-    let is_success = status == InvocationStatus::Success;
-    TurnPart::ToolInvocation {
-        id: PartId(0),
-        tool: name.to_string(),
-        args: serde_json::json!({"file_path": file_path}),
-        status,
-        started_at: 1_700_000_000_000,
-        ended_at: if is_success {
-            Some(1_700_000_005_000)
-        } else {
-            None
-        },
-    }
-}
-
-fn render_text(
-    conversation: &Conversation,
-    open_turn: Option<&Turn>,
-    view_state: &ViewState,
-    clock: &dyn rustain::domain::clock::Clock,
-    width: u16,
-    height: u16,
-) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    let _ = terminal.draw(|frame| {
-        let area = Rect::new(0, 0, width, height);
-        let streaming = StreamingState::default();
-        let mut tab_render_state = TabRenderState::default();
-        let _ = chat_pane::render_with_search(
-            frame,
-            area,
-            conversation,
-            open_turn,
-            &streaming,
-            view_state,
-            clock,
-            0,
-            true,
-            &Theme::dark(),
-            &mut tab_render_state,
-            &HashMap::new(),
-            &BTreeMap::new(),
-            None,
-            None,
-            &[],
-            &[],
-            None,
-        );
-    });
-    use ratatui::buffer::Buffer;
-    let buffer: Buffer = terminal.backend().buffer().clone();
-    let mut lines: Vec<String> = Vec::new();
-    for y in 0..buffer.area().height {
-        let row: String = (0..buffer.area().width)
-            .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
-            .collect();
-        let trimmed = row.trim_end().to_string();
-        if !trimmed.is_empty() {
-            lines.push(trimmed);
-        }
-    }
-    lines.join("\n")
-}
 
 // ---------------------------------------------------------------------------
 // Snapshot fixtures (AC12 table)
@@ -335,7 +193,7 @@ fn fixture_10_cancelled_respects_collapse() -> (Conversation, ViewState, Turn) {
 fn live_streaming_two_running_tools_w80() {
     let (conv, turn) = fixture_1_live_streaming();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, Some(&turn), &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -343,7 +201,7 @@ fn live_streaming_two_running_tools_w80() {
 fn live_streaming_two_running_tools_w120() {
     let (conv, turn) = fixture_1_live_streaming();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, Some(&turn), &ViewState::default(), &clock, 120, 60);
+    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 120, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -351,7 +209,7 @@ fn live_streaming_two_running_tools_w120() {
 fn live_streaming_two_running_tools_w200() {
     let (conv, turn) = fixture_1_live_streaming();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, Some(&turn), &ViewState::default(), &clock, 200, 60);
+    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 200, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -362,7 +220,7 @@ fn live_streaming_two_running_tools_w200() {
 fn post_collapse_tier1_default_w80() {
     let (conv, _turn) = fixture_2_post_collapse_tier1();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -370,7 +228,7 @@ fn post_collapse_tier1_default_w80() {
 fn post_collapse_tier1_default_w120() {
     let (conv, _turn) = fixture_2_post_collapse_tier1();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 120, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 120, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -378,7 +236,7 @@ fn post_collapse_tier1_default_w120() {
 fn post_collapse_tier1_default_w200() {
     let (conv, _turn) = fixture_2_post_collapse_tier1();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 200, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 200, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -390,7 +248,7 @@ fn post_collapse_tier1_default_w200() {
 fn post_collapse_tier2_after_zs_toggle_w80() {
     let (conv, vs, _turn) = fixture_3_post_collapse_tier2_after_zs_toggle();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &vs, &clock, 80, 60);
+    let text = render_to_string(&conv, None, &vs, &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -398,7 +256,7 @@ fn post_collapse_tier2_after_zs_toggle_w80() {
 fn post_collapse_tier2_after_zs_toggle_w120() {
     let (conv, vs, _turn) = fixture_3_post_collapse_tier2_after_zs_toggle();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &vs, &clock, 120, 60);
+    let text = render_to_string(&conv, None, &vs, &clock, 120, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -406,7 +264,7 @@ fn post_collapse_tier2_after_zs_toggle_w120() {
 fn post_collapse_tier2_after_zs_toggle_w200() {
     let (conv, vs, _turn) = fixture_3_post_collapse_tier2_after_zs_toggle();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &vs, &clock, 200, 60);
+    let text = render_to_string(&conv, None, &vs, &clock, 200, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -416,7 +274,7 @@ fn post_collapse_tier2_after_zs_toggle_w200() {
 fn expanded_one_tool_turn_w80() {
     let (conv, _turn) = fixture_4_expanded_one_tool();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -426,7 +284,7 @@ fn expanded_one_tool_turn_w80() {
 fn expanded_user_toggled_against_default_w80() {
     let (conv, vs, _turn) = fixture_5_expanded_user_toggled();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &vs, &clock, 80, 60);
+    let text = render_to_string(&conv, None, &vs, &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -436,7 +294,7 @@ fn expanded_user_toggled_against_default_w80() {
 fn failed_invocation_auto_expanded_w80() {
     let (conv, _turn) = fixture_6_failed_auto_expanded();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -444,7 +302,7 @@ fn failed_invocation_auto_expanded_w80() {
 fn failed_invocation_auto_expanded_w120() {
     let (conv, _turn) = fixture_6_failed_auto_expanded();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 120, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 120, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -452,7 +310,7 @@ fn failed_invocation_auto_expanded_w120() {
 fn failed_invocation_auto_expanded_w200() {
     let (conv, _turn) = fixture_6_failed_auto_expanded();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 200, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 200, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -462,7 +320,7 @@ fn failed_invocation_auto_expanded_w200() {
 fn prose_only_turn_w80() {
     let (conv, _turn) = fixture_7_prose_only();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -473,7 +331,7 @@ fn prose_only_turn_w80() {
 fn tool_only_turn_no_prose_w80() {
     let (conv, _turn) = fixture_8_tool_only_no_prose();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -484,7 +342,7 @@ fn tool_only_turn_no_prose_w80() {
 fn mixed_with_reasoning_w80() {
     let (conv, _turn) = fixture_9_mixed_with_reasoning();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 80, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -492,7 +350,7 @@ fn mixed_with_reasoning_w80() {
 fn mixed_with_reasoning_w120() {
     let (conv, _turn) = fixture_9_mixed_with_reasoning();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 120, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 120, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -500,7 +358,7 @@ fn mixed_with_reasoning_w120() {
 fn mixed_with_reasoning_w200() {
     let (conv, _turn) = fixture_9_mixed_with_reasoning();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &ViewState::default(), &clock, 200, 60);
+    let text = render_to_string(&conv, None, &ViewState::default(), &clock, 200, 60, None);
     insta::assert_snapshot!(text);
 }
 
@@ -510,6 +368,158 @@ fn mixed_with_reasoning_w200() {
 fn cancelled_invocation_respects_user_collapse_w80() {
     let (conv, vs, _turn) = fixture_10_cancelled_respects_collapse();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_text(&conv, None, &vs, &clock, 80, 60);
+    let text = render_to_string(&conv, None, &vs, &clock, 80, 60, None);
+    insta::assert_snapshot!(text);
+}
+
+// ==========================================================================
+// S16.7 Phase B — New snapshot fixtures (Tasks 1-3)
+// ==========================================================================
+
+// Shared 3-turn builder for AC2 (zM) and AC3 (zR)
+fn fixture_11a_three_turn_setup() -> (
+    Conversation,
+    Turn, // turn-A
+    Turn, // turn-B
+    Turn, // turn-C
+) {
+    let turn_a = make_turn(
+        "a",
+        vec![
+            prose("Let me check the relevant files."),
+            tool("Read", InvocationStatus::Success),
+            tool("Grep", InvocationStatus::Success),
+            tool("Bash", InvocationStatus::Success),
+            prose("Found the relevant sections."),
+        ],
+        Some(StopReason::EndTurn),
+    );
+    let turn_b = make_turn(
+        "b",
+        vec![
+            prose("Now I will analyze the architecture and make changes."),
+            reasoning(
+                "The hexagonal architecture separates domain from adapters - I need to add the new model to domain/models/ and wire it through the ports.",
+            ),
+            tool("Read", InvocationStatus::Success),
+            tool("Read", InvocationStatus::Success),
+            tool("Edit", InvocationStatus::Success),
+            tool("Bash", InvocationStatus::Success),
+            tool("Grep", InvocationStatus::Success),
+            prose("All changes applied and tests pass."),
+        ],
+        Some(StopReason::EndTurn),
+    );
+    let turn_c = make_turn(
+        "c",
+        vec![
+            prose("Here is the summary of everything done."),
+            tool("Bash", InvocationStatus::Success),
+        ],
+        Some(StopReason::EndTurn),
+    );
+    let msg_a = make_msg("a", MessageRole::Assistant);
+    let msg_b = make_msg("b", MessageRole::Assistant);
+    let msg_c = make_msg("c", MessageRole::Assistant);
+    let conv = make_conversation(
+        vec![msg_a, msg_b, msg_c],
+        vec![turn_a.clone(), turn_b.clone(), turn_c.clone()],
+    );
+    (conv, turn_a, turn_b, turn_c)
+}
+
+// Fixture 11: zM global-collapsed (AC2)
+// AC2 - `zM` global-collapsed lock. 3 turns x Tier-1 default.
+// Width 80 only - collapsed lines at any width are visually identical
+// (truncation point shifts but format is fixed).
+
+#[allow(non_snake_case)]
+#[test]
+fn zM_global_collapsed_three_turn_conversation_w80() {
+    let (conv, turn_a, turn_b, turn_c) = fixture_11a_three_turn_setup();
+    let mut vs = ViewState::default();
+    vs.collapse_all(&[turn_a, turn_b, turn_c]);
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    let text = render_to_string(&conv, None, &vs, &clock, 80, 60, None);
+    insta::assert_snapshot!(text);
+}
+
+// Fixture 12: zR global-expanded (AC3)
+// AC3 - `zR` global-expanded lock. Same 3-turn fixture as Task 1;
+// expanded across full viewport. Locks UX-DR-GUTTER (single left-border
+// per turn) plus prose/tool spacing rules.
+
+#[allow(non_snake_case)]
+#[test]
+fn zR_global_expanded_three_turn_conversation_w80() {
+    let (conv, turn_a, turn_b, turn_c) = fixture_11a_three_turn_setup();
+    let mut vs = ViewState::default();
+    vs.expand_all(&[turn_a, turn_b, turn_c]);
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    let text = render_to_string(&conv, None, &vs, &clock, 80, 100, None);
+    insta::assert_snapshot!(text);
+}
+
+// Fixture 13: prose_interrupted_by_tool (AC4)
+// AC4 - interleaved-order regression lock. The output MUST show
+// prose1/tool1/prose2/tool2/prose3 vertically. If a future change
+// re-collapses prose runs (resurrecting the 2026-04-22 bug), this
+// snapshot fails. See architecture-amendment-epic4-kimi-learnings.md.
+
+fn fixture_12_prose_tool_prose_tool_prose() -> (Conversation, Turn) {
+    let turn = make_turn(
+        "p12",
+        vec![
+            prose("Let me check the codebase."),
+            tool("Read", InvocationStatus::Success),
+            prose("Now let me run the tests."),
+            tool("Bash", InvocationStatus::Success),
+            prose("Done - all green."),
+        ],
+        Some(StopReason::EndTurn),
+    );
+    let msg = make_msg("p12", MessageRole::Assistant);
+    (make_conversation(vec![msg], vec![turn.clone()]), turn)
+}
+
+#[test]
+fn prose_interrupted_by_tool_completed_w80() {
+    let (conv, turn) = fixture_12_prose_tool_prose_tool_prose();
+    let mut vs = ViewState::default();
+    vs.collapsed.insert(turn.id.clone(), false); // explicitly expanded
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    let text = render_to_string(&conv, None, &vs, &clock, 80, 60, None);
+    insta::assert_snapshot!(text);
+}
+
+// ==========================================================================
+// S16.7 Phase D - Live rail S16.9-OFF baseline (Task 5)
+// ==========================================================================
+
+// Fixture 14: live_rail_no_progress (AC6 + AC13)
+// AC6 + AC13 - S16.9-OFF baseline. Rail format `⠸ Bash` (frame=3 of
+// BRAILLE_FRAMES). When S16.9 lands, sibling `live_rail_with_progress_w80`
+// will lock `⠸ Bash (3/10)` and divergence-assert against this snapshot.
+// See [16-9-tool-progress-stdout-tail.md] DoD when ratcheted.
+
+fn fixture_13_live_rail_running_no_progress() -> (Conversation, Turn) {
+    let turn = make_turn(
+        "lr13",
+        vec![
+            prose("Let me run the build."),
+            tool("Bash", InvocationStatus::Running),
+        ],
+        None, // no stop_reason → running turn
+    );
+    let msg = make_msg("lr13", MessageRole::Assistant);
+    (make_conversation(vec![msg], vec![turn.clone()]), turn)
+}
+
+#[test]
+fn live_rail_no_progress_w80() {
+    let (conv, turn) = fixture_13_live_rail_running_no_progress();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    clock.set_frame(3);
+    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 80, 60, None);
     insta::assert_snapshot!(text);
 }

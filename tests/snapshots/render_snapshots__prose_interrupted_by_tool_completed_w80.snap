@@ -1,0 +1,15 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ Let me check the codebase.
+│
+│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│
+│ Now let me run the tests.
+│
+│ ┄ ✓ Success Bash "" → running... (5.0s) ┄
+│
+│ Done - all green.
+│
+│

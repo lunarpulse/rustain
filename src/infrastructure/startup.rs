@@ -16,7 +16,7 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
 use crate::domain::models::{PermissionMode, SandboxPolicy};
 use crate::domain::ports::{
-    ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
+    ClipboardPort, PersonaPort, StreamingProvider, SecurityPort, StoragePort, ToolSetPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
@@ -112,7 +112,25 @@ pub async fn run() -> Result<()> {
     }
 
     // 5a. Construct provider adapter
-    let provider: Arc<dyn ProviderPort> = build_provider(&app_config)?;
+    let provider: Arc<dyn StreamingProvider> = build_provider(&app_config)?;
+    // ArcSwap hot-swap holder: wraps the same Arc so ProviderRouter (Story 7.1b)
+    // can swap it atomically. Stored on AppState for future routing.
+    let provider_arc_for_swap = Arc::clone(&provider);
+    let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(provider_arc_for_swap));
+
+    // 5a.2 — ProviderRegistry: catalog of registered providers
+    let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
+    // TODO(S7.1b): register providers from config instead of hard-coding Anthropic
+    provider_registry.register(Box::new(crate::adapters::noop::NoOpProvider));
+    // Run health check; failures emit a warning notice but do not block startup (AC4)
+    match provider.health_check().await {
+        Ok(()) => {
+            tracing::info!("Provider '{}' health check passed", provider.provider_id());
+        }
+        Err(e) => {
+            tracing::warn!("Provider '{}' health check failed: {e}", provider.provider_id());
+        }
+    }
 
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
@@ -151,6 +169,7 @@ pub async fn run() -> Result<()> {
         sandbox_policy,
         plan_manager.clone(),
         plan_injector.clone(),
+        provider_swap,
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
@@ -382,7 +401,7 @@ pub async fn run() -> Result<()> {
 /// Auth precedence (CC-compatible): `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`.
 /// - `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer {token}` (gateways/proxies)
 /// - `ANTHROPIC_API_KEY` → `X-Api-Key: {key}` (direct Anthropic)
-fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn ProviderPort>> {
+fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn StreamingProvider>> {
     #[cfg(feature = "anthropic")]
     {
         use crate::adapters::anthropic::AuthMode;

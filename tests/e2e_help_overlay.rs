@@ -108,9 +108,10 @@ fn test_e2e_help_overlay_closes_with_esc() {
 #[test]
 fn test_e2e_help_overlay_shows_categories() {
     // Use larger terminal to fit all categories without scrolling.
-    // Height was increased from 50→65 in Story 3-6a (INPUT section expansion)
-    // and again from 65→85 in Story 4-4 (SEARCH & BOOKMARKS category: 11 new bindings).
-    let mut h = TestHarness::with_size(100, 85);
+    // Height was increased from 50→65 in Story 3-6a (INPUT section expansion),
+    // from 65→85 in Story 4-4 (SEARCH & BOOKMARKS category: 11 new bindings),
+    // and from 85→110 for S16.6 (VIM FOLD & MOTION: 11 bindings) + PERMISSIONS (6 bindings).
+    let mut h = TestHarness::with_size(100, 110);
 
     h.press_key(DomainKey::Esc);
     h.type_char('?');

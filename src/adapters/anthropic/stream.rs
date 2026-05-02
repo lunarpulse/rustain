@@ -79,6 +79,7 @@ impl StreamTransformer {
                             output_tokens: 0,
                             cache_creation_input_tokens: self.cache_creation_input_tokens,
                             cache_read_input_tokens: self.cache_read_input_tokens,
+                            reasoning_tokens: None,
                         },
                         session_id: None,
                     }];
@@ -165,6 +166,7 @@ impl StreamTransformer {
                         output_tokens: self.output_tokens,
                         cache_creation_input_tokens: self.cache_creation_input_tokens,
                         cache_read_input_tokens: self.cache_read_input_tokens,
+                        reasoning_tokens: None,
                     },
                     session_id: None,
                 }]

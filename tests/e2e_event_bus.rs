@@ -10,10 +10,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::sync::broadcast;
 
+use rustain::adapters::noop::NoOpProvider;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{NoticeLevel, PermissionMode, SandboxPolicy, StreamChunk};
+use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::plan_manager::PlanManager;
 use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
 use rustain::infrastructure::runtime::app_state::AppState;
@@ -27,12 +30,16 @@ fn test_app_state_honors_raw_capacity() {
         64,
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
+    let provider_swap = Arc::new(ArcSwap::from_pointee(
+        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>,
+    ));
     let (app_state, _domain_rx) = AppState::new(
         64,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
+        provider_swap.clone(),
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -45,12 +52,16 @@ fn test_app_state_session_cancel_is_root_token() {
         16,
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
+    let provider_swap2 = Arc::new(ArcSwap::from_pointee(
+        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>,
+    ));
     let (app_state, _domain_rx) = AppState::new(
         16,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
+        provider_swap2.clone(),
     );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());

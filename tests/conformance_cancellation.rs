@@ -7,10 +7,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use rustain::adapters::filesystem::FileSystemStorage;
+use rustain::adapters::noop::NoOpProvider;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
 use rustain::domain::errors::ToolError;
 use rustain::domain::models::SandboxPolicy;
+use rustain::domain::ports::StreamingProvider;
 use rustain::domain::ports::ToolSetPort;
 use rustain::domain::services::plan_manager::PlanManager;
 use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
@@ -233,12 +236,16 @@ async fn ac4_signal_cancel_before_shutdown() {
         16,
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
+    let provider_swap = Arc::new(ArcSwap::from_pointee(
+        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>,
+    ));
     let (app_state, _domain_rx) = AppState::new(
         16,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
+        provider_swap.clone(),
     );
 
     app_state.session_cancel.cancel();

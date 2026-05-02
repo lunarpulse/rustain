@@ -13,7 +13,7 @@ use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
     ToolDefinition, ToolResult, generate_conversation_id,
 };
-use rustain::domain::ports::{ProviderPort, SecurityPort, ToolSetPort};
+use rustain::domain::ports::{StreamingProvider, SecurityPort, ToolSetPort};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::runtime::turn::run_turn;
@@ -27,7 +27,7 @@ struct MockProvider {
 }
 
 #[async_trait]
-impl ProviderPort for MockProvider {
+impl StreamingProvider for MockProvider {
     async fn stream_completion(
         &self,
         _messages: Vec<Message>,
@@ -67,6 +67,14 @@ impl ProviderPort for MockProvider {
 
     fn provider_id(&self) -> &str {
         "mock"
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
     }
 }
 
@@ -153,7 +161,7 @@ async fn turn_scheduler_migration() {
     let (bus, _domain_rx) = EventBus::new(16);
     let mut raw_rx = bus.subscribe_raw();
 
-    let provider: Arc<dyn ProviderPort> = Arc::new(MockProvider {
+    let provider: Arc<dyn StreamingProvider> = Arc::new(MockProvider {
         call_count: AtomicUsize::new(0),
     });
     let security: Arc<dyn SecurityPort> = Arc::new(MockSecurity);

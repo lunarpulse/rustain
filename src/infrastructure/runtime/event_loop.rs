@@ -59,7 +59,7 @@ use crate::domain::models::{
 };
 use crate::domain::models::turn::TurnId;
 use crate::domain::ports::{
-    ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
+    ClipboardPort, PersonaPort, StreamingProvider, SecurityPort, StoragePort, ToolSetPort,
 };
 use crate::domain::services::message_builder;
 use crate::domain::services::plan_mode_injector::PlanModeInjector;
@@ -136,7 +136,7 @@ pub async fn run(
     mut domain_events_rx: mpsc::UnboundedReceiver<AppEvent>,
     app_state: AppState,
     config: &AppConfig,
-    provider: Arc<dyn ProviderPort>,
+    provider: Arc<dyn StreamingProvider>,
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     persona: Arc<dyn PersonaPort>,
@@ -6904,7 +6904,7 @@ async fn start_turn(
     streaming: &mut StreamingState,
     state: &mut TuiState,
     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-    provider: &Arc<dyn ProviderPort>,
+    provider: &Arc<dyn StreamingProvider>,
     config: &AppConfig,
     domain_tx: &mpsc::UnboundedSender<AppEvent>,
     security: &Arc<dyn SecurityPort>,
@@ -6959,7 +6959,7 @@ async fn start_turn_inner(
     streaming: &mut StreamingState,
     state: &mut TuiState,
     active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-    provider: &Arc<dyn ProviderPort>,
+    provider: &Arc<dyn StreamingProvider>,
     config: &AppConfig,
     domain_tx: &mpsc::UnboundedSender<AppEvent>,
     security: &Arc<dyn SecurityPort>,
@@ -7995,7 +7995,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 
 /// Generate a concise title for a conversation using the LLM provider.
 async fn generate_title(
-    provider: &dyn ProviderPort,
+    provider: &dyn StreamingProvider,
     model: &str,
     user_msg: &str,
     assistant_msg: &str,

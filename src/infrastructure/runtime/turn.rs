@@ -13,7 +13,7 @@ use crate::domain::models::{
     CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCall,
     ToolCallInfo, ToolResultMessage, ToolUseMessage,
 };
-use crate::domain::ports::{ProviderPort, SecurityPort, StoragePort, ToolSetPort};
+use crate::domain::ports::{StreamingProvider, SecurityPort, StoragePort, ToolSetPort};
 use crate::domain::services::tool_scheduler::ToolScheduler;
 
 /// Execute a turn: stream completion, execute tools, loop until EndTurn.
@@ -27,7 +27,7 @@ use crate::domain::services::tool_scheduler::ToolScheduler;
 const MAX_TOOL_ITERATIONS: usize = 25;
 
 pub async fn run_turn(
-    provider: Arc<dyn ProviderPort>,
+    provider: Arc<dyn StreamingProvider>,
     mut messages: Vec<Message>,
     options: CompletionOptions,
     event_tx: mpsc::UnboundedSender<AppEvent>,

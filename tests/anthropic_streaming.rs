@@ -165,6 +165,7 @@ data: {\"type\":\"message_stop\"}\n\
                     output_tokens: 0,
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
+                    reasoning_tokens: None,
                 },
                 session_id: None,
             },
@@ -208,6 +209,7 @@ data: {\"type\":\"message_stop\"}\n\
                     output_tokens: 8,
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
+                    reasoning_tokens: None,
                 },
                 session_id: None,
             },
@@ -255,6 +257,7 @@ data: {\"type\":\"message_stop\"}\n\
                     output_tokens: 0,
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
+                    reasoning_tokens: None,
                 },
                 session_id: None,
             },
@@ -268,6 +271,7 @@ data: {\"type\":\"message_stop\"}\n\
                     output_tokens: 3,
                     cache_creation_input_tokens: None,
                     cache_read_input_tokens: None,
+                    reasoning_tokens: None,
                 },
                 session_id: None,
             },
@@ -359,7 +363,7 @@ data: {\"type\":\"message_stop\"}\n\
     #[tokio::test]
     async fn test_anthropic_adapter_abort_succeeds() {
         use rustain::adapters::anthropic::AnthropicAdapter;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let adapter = AnthropicAdapter::new(
             AuthMode::ApiKey("test-key".into()),
@@ -380,7 +384,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_anthropic_adapter_401_returns_auth_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
         use rustain::domain::errors::ProviderError;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         // Use a mock server that returns 401
         let mut server = mockito::Server::new_async().await;
@@ -431,7 +435,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_anthropic_adapter_429_returns_rate_limit_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
         use rustain::domain::errors::ProviderError;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -484,7 +488,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_anthropic_adapter_500_returns_connection_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
         use rustain::domain::errors::ProviderError;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -538,7 +542,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_anthropic_adapter_streaming_with_mock_server() {
         use futures::StreamExt;
         use rustain::adapters::anthropic::AnthropicAdapter;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let mut server = mockito::Server::new_async().await;
         let sse_body = "\
@@ -651,7 +655,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_run_turn_emits_error_on_stream_disconnect() {
         use futures::stream;
         use rustain::domain::events::AppEvent;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
         use std::sync::Arc;
         use tokio::sync::mpsc;
 
@@ -659,7 +663,7 @@ data: {\"type\":\"message_stop\"}\n\
         struct DisconnectingProvider;
 
         #[async_trait::async_trait]
-        impl ProviderPort for DisconnectingProvider {
+        impl StreamingProvider for DisconnectingProvider {
             async fn stream_completion(
                 &self,
                 _messages: Vec<Message>,
@@ -683,10 +687,18 @@ data: {\"type\":\"message_stop\"}\n\
             fn provider_id(&self) -> &str {
                 "mock-disconnect"
             }
+
+            fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+                vec![]
+            }
+
+            async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+                Ok(())
+            }
         }
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let provider: Arc<dyn ProviderPort> = Arc::new(DisconnectingProvider);
+        let provider: Arc<dyn StreamingProvider> = Arc::new(DisconnectingProvider);
 
         let security = Arc::new(rustain::adapters::noop::NoOpSecurity);
         let tools = Arc::new(rustain::adapters::noop::NoOpToolSet);
@@ -780,7 +792,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_anthropic_adapter_empty_messages_returns_error() {
         use rustain::adapters::anthropic::AnthropicAdapter;
         use rustain::domain::errors::ProviderError;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let adapter = AnthropicAdapter::new(
             AuthMode::ApiKey("test-key".into()),
@@ -826,7 +838,7 @@ data: {\"type\":\"message_stop\"}\n\
     async fn test_anthropic_live_streaming() {
         use futures::StreamExt;
         use rustain::adapters::anthropic::AnthropicAdapter;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .expect("ANTHROPIC_API_KEY must be set for live test");
@@ -883,7 +895,7 @@ data: {\"type\":\"message_stop\"}\n\
     #[tokio::test]
     async fn test_api_key_auth_sends_x_api_key_header() {
         use rustain::adapters::anthropic::AnthropicAdapter;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -931,7 +943,7 @@ data: {\"type\":\"message_stop\"}\n\
     #[tokio::test]
     async fn test_bearer_token_auth_sends_authorization_header() {
         use rustain::adapters::anthropic::AnthropicAdapter;
-        use rustain::domain::ports::ProviderPort;
+        use rustain::domain::ports::StreamingProvider;
 
         let mut server = mockito::Server::new_async().await;
         let mock = server

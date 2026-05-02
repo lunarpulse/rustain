@@ -240,6 +240,7 @@ mod tests {
             output_tokens: 3400,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
+            reasoning_tokens: None,
         };
         assert_eq!(format_token_usage(&usage), "↑1.2k ↓3.4k");
     }

@@ -13,6 +13,7 @@ pub mod palette;
 mod permission;
 pub mod plan;
 pub mod project_context;
+pub mod provider;
 pub mod sandbox;
 mod session;
 pub mod session_meta;
@@ -45,7 +46,7 @@ pub use config::AppConfig;
 #[allow(unused_imports)]
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
-pub use config::{AutoPanelsConfig, LayoutConfig};
+pub use config::{AutoPanelsConfig, LayoutConfig, ProviderConfig};
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 #[allow(unused_imports)]
@@ -106,6 +107,8 @@ pub use turn::{
 };
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};
+#[allow(unused_imports)]
+pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 #[allow(unused_imports)]
 pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,

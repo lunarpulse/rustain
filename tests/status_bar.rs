@@ -215,6 +215,7 @@ fn test_status_bar_token_usage() {
         output_tokens: 3400,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
+        reasoning_tokens: None,
     };
     let terminal = render_status_bar(
         80,

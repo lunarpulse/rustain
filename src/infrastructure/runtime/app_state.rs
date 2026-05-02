@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::SandboxPolicy;
+use crate::domain::ports::StreamingProvider;
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
 use crate::domain::services::plan_mode_injector::DefaultPlanInjector;
@@ -18,6 +20,10 @@ pub struct AppState {
     pub sandbox_policy: Arc<RwLock<SandboxPolicy>>,
     pub plan_manager: Arc<PlanManager>,
     pub plan_injector: Arc<DefaultPlanInjector>,
+    /// Active LLM provider wrapped for future hot-swap (Story 7.1b).
+    /// Load with `.load()` → `Arc<dyn StreamingProvider>`.
+    // ProviderRouter added in Story 7.1b.
+    pub provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
 }
 
 impl AppState {
@@ -27,6 +33,7 @@ impl AppState {
         sandbox_policy: SandboxPolicy,
         plan_manager: Arc<PlanManager>,
         plan_injector: Arc<DefaultPlanInjector>,
+        provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
     ) -> (
         Self,
         tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
@@ -40,6 +47,7 @@ impl AppState {
                 sandbox_policy: Arc::new(RwLock::new(sandbox_policy)),
                 plan_manager,
                 plan_injector,
+                provider,
             },
             domain_rx,
         )

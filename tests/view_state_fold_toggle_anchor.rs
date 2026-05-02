@@ -144,6 +144,10 @@ fn no_focus_fallback_clamps_to_new_max() {
 
 #[test]
 fn following_mode_foldtoggle_is_noop() {
+    // Following + FoldToggle → Reading per transition table (view_state.rs:109).
+    // The offset is anchor-preserved, not snap-to-bottom. Since the focused
+    // turn is t2 at top=6 in the post-fold layout, max_offset=16, and
+    // scroll_offset = max_offset - focused_top = 16 - 6 = 10.
     let mut vs = ViewState::default();
     vs.mode = AnchorMode::Following;
     vs.scroll_offset = 0;
@@ -161,7 +165,7 @@ fn following_mode_foldtoggle_is_noop() {
         &layout_after,
     );
 
-    assert_eq!(vs.mode, AnchorMode::Following);
-    assert_eq!(result, 0);
-    assert_eq!(vs.scroll_offset, 0);
+    assert_eq!(vs.mode, AnchorMode::Reading);
+    assert_eq!(result, 10);
+    assert_eq!(vs.scroll_offset, 10);
 }

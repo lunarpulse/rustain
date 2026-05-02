@@ -1,0 +1,31 @@
+---
+source: tests/snapshot_semantic_clusters.rs
+expression: text
+---
+You:
+cluster_read_heavy_with_common_prefix
+│ ▸  · 5 reads in src/auth/ ✓
+You:
+cluster_mixed_kinds_with_separators
+│ ▸  · 2 reads in src/, 1 bash, 1 edit ✓
+You:
+cluster_failure_containing_does_not_filter
+│ ┄ ✗ Error Read "src/a.rs" → running... (5.0s) ┄
+│ ┄ ✓ Success Read "src/b.rs" → running... (5.0s) ┄
+│ ┄ ✓ Success Read "src/c.rs" → running... (5.0s) ┄
+│
+You:
+cluster_single_tool
+│ ▸  · 1 read ✓
+You:
+cluster_all_bash_no_path_qualifier
+│ ▸  · 4 bashes ✓
+You:
+cluster_grep_only_with_path
+│ ▸  · 2 greps in src/auth/ ✓
+You:
+cluster_mixed_paths_no_common_prefix
+│ ▸  · 3 reads ✓
+You:
+cluster_parallel_calls_one_each
+│ ▸  · 1 bash, 1 grep, 1 read, 1 write ✓

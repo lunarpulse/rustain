@@ -37,8 +37,12 @@ fn test_jump_to_bottom_enables_auto_scroll() {
     assert!(!state.auto_scroll);
     assert_eq!(state.scroll_offset, 2);
 
-    // Then jump to bottom
-    handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
+    // Then jump to bottom (S16.6: G returns JumpToLatestProseAnchor;
+    // event-loop handles fallback. Simulate here.)
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
+    assert_eq!(action, InputAction::JumpToLatestProseAnchor);
+    state.auto_scroll = true;
+    state.scroll_offset = 0;
     assert!(state.auto_scroll);
     assert_eq!(state.scroll_offset, 0);
 }

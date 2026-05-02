@@ -39,8 +39,12 @@ fn test_full_navigation_flow() {
         state.scroll_offset
     );
 
-    // Step 3: Jump to bottom with G
-    handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
+    // Step 3: Jump to bottom with G (S16.6: returns JumpToLatestProseAnchor;
+    // event-loop dispatcher handles fallback. Simulate here.)
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
+    assert_eq!(action, InputAction::JumpToLatestProseAnchor);
+    state.scroll_offset = 0;
+    state.auto_scroll = true;
     assert_eq!(state.scroll_offset, 0);
     assert!(state.auto_scroll);
 

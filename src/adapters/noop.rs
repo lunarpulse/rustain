@@ -15,19 +15,20 @@ use crate::domain::models::{
     PermissionMode, StreamChunk, ToolDefinition, ToolResult,
 };
 use crate::domain::ports::{
-    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, ProviderPort,
+    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, StreamingProvider,
     SchedulerPort, SecurityPort, SessionPort, StoragePort, ToolSetPort,
 };
 use crate::domain::services::approval_runtime::SessionApprovalSet;
+use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use tokio_util::sync::CancellationToken;
 
-// ── ProviderPort ────────────────────────────────────────────────
+// ── StreamingProvider ────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
 pub struct NoOpProvider;
 
 #[async_trait]
-impl ProviderPort for NoOpProvider {
+impl StreamingProvider for NoOpProvider {
     async fn stream_completion(
         &self,
         _messages: Vec<Message>,
@@ -44,6 +45,23 @@ impl ProviderPort for NoOpProvider {
 
     fn provider_id(&self) -> &str {
         "noop"
+    }
+
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn provider_descriptor(&self) -> ProviderDescriptor {
+        ProviderDescriptor {
+            provider_id: "noop".to_string(),
+            healthy: true,
+            model_count: 0,
+            display_name: "NoOp".to_string(),
+        }
     }
 }
 

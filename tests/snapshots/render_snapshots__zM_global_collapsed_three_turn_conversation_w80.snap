@@ -1,0 +1,7 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ ▸ Let me check the relevant files.… · 3 tools ✓
+│ ▸ Now I will analyze the architecture and make changes.… · 5 tools ✓
+│ ▸ Here is the summary of everything done.… · 1 tool ✓
