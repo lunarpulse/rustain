@@ -47,6 +47,7 @@ markers = [
     "story_6_1a: Story 6-1a — Inline Plan Card",
     "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
     "story_6_3: Story 6-3 — Task Panel & Progress Monitoring",
+    "story_16_6: Story 16-6 — Vim Keymap (Fold & Motion)",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

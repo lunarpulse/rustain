@@ -15,9 +15,9 @@ use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
 use crate::domain::clock::{Clock, current_braille_frame};
 use crate::domain::models::turn::tool_call_id_for;
 use crate::domain::models::{
-    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, MessageRole, PartId,
-    StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId, TurnPart,
-    ViewState,
+    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics, MessageRole,
+    PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId,
+    TurnPart, ViewState,
 };
 use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
@@ -748,6 +748,40 @@ pub fn toggle_turn_fold(
     tab_render_state.height_cache.invalidate_turn(turn_id);
 }
 
+/// Story 16.6: paired-call helper — set a turn's collapse state AND invalidate
+/// its cache entry. Used by `zc` / `zo` (ForceCollapse / ForceExpand).
+pub fn set_turn_collapsed(
+    view_state: &mut ViewState,
+    tab_render_state: &mut TabRenderState,
+    turn_id: &TurnId,
+    collapsed: bool,
+) {
+    view_state.collapsed.insert(turn_id.clone(), collapsed);
+    tab_render_state.height_cache.invalidate_turn(turn_id);
+}
+
+/// Story 16.6: paired-call helper — collapse all turns AND invalidate all cache entries.
+/// Used by `zM`.
+pub fn collapse_all_turns(
+    view_state: &mut ViewState,
+    tab_render_state: &mut TabRenderState,
+    turns: &[Turn],
+) {
+    view_state.collapse_all(turns);
+    tab_render_state.height_cache.invalidate_all();
+}
+
+/// Story 16.6: paired-call helper — expand all turns AND invalidate all cache entries.
+/// Used by `zR`.
+pub fn expand_all_turns(
+    view_state: &mut ViewState,
+    tab_render_state: &mut TabRenderState,
+    turns: &[Turn],
+) {
+    view_state.expand_all(turns);
+    tab_render_state.height_cache.invalidate_all();
+}
+
 /// Paired-call helper: set summary tier AND invalidate all cache entries.
 /// Task 9 — summary tier affects every collapsed turn height.
 pub fn set_summary_tier(
@@ -757,6 +791,89 @@ pub fn set_summary_tier(
 ) {
     view_state.summary_tier = tier;
     tab_render_state.height_cache.invalidate_all();
+}
+
+/// Story 16.6, Task 0 — Build LayoutMetrics from conversation turns using the
+/// HeightCache. Walks `conversation.turns`, calls `expanded_turn_height` /
+/// `collapsed_turn_height` (populating the height cache as a side effect),
+/// and produces `turn_top_offsets`, `total_content_height`, and `focused_turn_top`.
+///
+/// This is the first production consumer of `view_state::reconcile()` — the
+/// event-loop dispatcher calls this builder before and after fold mutations
+/// to create the `LayoutMetrics` that `reconcile()` consumes.
+pub fn build_layout_metrics(
+    conversation: &Conversation,
+    view_state: &ViewState,
+    tab_render_state: &mut TabRenderState,
+    theme: &Theme,
+    width: u16,
+    viewport_height: usize,
+    clock: &dyn Clock,
+    tool_block_states: &std::collections::HashMap<String, crate::adapters::tui::widgets::tool_block::ToolBlockState>,
+) -> LayoutMetrics {
+    let _ = clock; // reserved for spinner-frame stability in running-turn heights (S16.5 W4)
+    let width_usize = width as usize;
+    let spacing = theme.spacing.normal as usize;
+    let mut turn_top_offsets: Vec<(TurnId, usize)> = Vec::new();
+    let mut cumulative_offset: usize = 0;
+    let mut first_turn = true;
+
+    for turn in &conversation.turns {
+        if !first_turn {
+            cumulative_offset += spacing;
+        }
+        first_turn = false;
+        turn_top_offsets.push((turn.id.clone(), cumulative_offset));
+
+        let collapsed = effective_is_collapsed(turn, view_state);
+
+        let layout = if collapsed {
+            // Try cache first
+            let key = crate::adapters::tui::state::HeightKey {
+                turn_id: turn.id.clone(),
+                expansion: false, // collapsed
+                summary_tier: view_state.summary_tier,
+                terminal_width: width,
+                tool_block_states_version: tab_render_state.tool_block_states_version,
+            };
+            if let Some(cached) = tab_render_state.height_cache.get(&key) {
+                cached.clone()
+            } else {
+                let fresh = collapsed_turn_height(turn, view_state, theme, width_usize);
+                tab_render_state.height_cache.set(key, fresh.clone());
+                fresh
+            }
+        } else {
+            let key = crate::adapters::tui::state::HeightKey {
+                turn_id: turn.id.clone(),
+                expansion: true, // expanded
+                summary_tier: view_state.summary_tier,
+                terminal_width: width,
+                tool_block_states_version: tab_render_state.tool_block_states_version,
+            };
+            if let Some(cached) = tab_render_state.height_cache.get(&key) {
+                cached.clone()
+            } else {
+                let fresh = expanded_turn_height(turn, theme, width_usize, &tool_block_states);
+                tab_render_state.height_cache.set(key, fresh.clone());
+                fresh
+            }
+        };
+
+        cumulative_offset += layout.height;
+    }
+
+    let focused_turn_top = view_state
+        .focused_turn
+        .as_ref()
+        .and_then(|ft| turn_top_offsets.iter().find(|(tid, _)| *tid == *ft).map(|(_, off)| *off));
+
+    LayoutMetrics {
+        viewport_height,
+        total_content_height: cumulative_offset,
+        turn_top_offsets,
+        focused_turn_top,
+    }
 }
 
 fn inter_part_blank_lines(prev: Option<&TurnPart>, next: &TurnPart) -> usize {
@@ -1516,10 +1633,20 @@ pub fn render_with_search(
                         } else {
                             render_expanded_turn(turn, theme, width, clock, tool_block_states, None)
                         };
+                        let is_focused = view_state.focused_turn.as_ref().is_some_and(|ft| *ft == turn.id);
                         for (j, line) in turn_lines.into_iter().enumerate() {
                             let abs_line = line_offset + j;
                             if abs_line >= visible_start && abs_line < visible_end {
-                                lines.push(line);
+                                if is_focused && j == 0 {
+                                    let arrow = Span::styled("▶ ", Style::default()
+                                        .fg(theme.colors.accent)
+                                        .add_modifier(Modifier::BOLD));
+                                    let mut spans = vec![arrow];
+                                    spans.extend(line.spans);
+                                    lines.push(Line::from(spans));
+                                } else {
+                                    lines.push(line);
+                                }
                             }
                         }
                     } else {
@@ -2983,5 +3110,95 @@ mod parts_aware_tests {
             lines.len(),
             "height must match rendered line count"
         );
+    }
+
+    // ── build_layout_metrics unit tests (S16.6 Task 0.3) ──
+
+    #[test]
+    fn build_layout_metrics_handles_empty_conversation() {
+        let conversation = Conversation {
+            id: "empty".to_string(),
+            title: String::new(),
+            messages: vec![],
+            turns: vec![],
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans: std::collections::HashMap::new(),
+            fork_source: None,
+        };
+        let view_state = ViewState::default();
+        let mut trs = TabRenderState::default();
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(0);
+
+        let layout = build_layout_metrics(&conversation, &view_state, &mut trs, &theme, 80, 24, &clock, &std::collections::HashMap::new());
+
+        assert_eq!(layout.total_content_height, 0);
+        assert!(layout.turn_top_offsets.is_empty());
+        assert_eq!(layout.focused_turn_top, None);
+        assert_eq!(layout.viewport_height, 24);
+    }
+
+    #[test]
+    fn build_layout_metrics_returns_correct_turn_top_offsets() {
+        let mut turn1 = Turn::new("claude-3".to_string(), 1000);
+        turn1.stop_reason = Some(StopReason::EndTurn);
+        turn1.push_part(|id| TurnPart::Prose { id, text: "Hello world".to_string() });
+        let turn2 = Turn::user("User message".to_string(), 2000);
+
+        let conversation = Conversation {
+            id: "test".to_string(),
+            title: String::new(),
+            messages: vec![],
+            turns: vec![turn1.clone(), turn2],
+            created_at: 0, updated_at: 0, last_response_at: None,
+            session_id: None, usage: None,
+            plans: std::collections::HashMap::new(),
+            fork_source: None,
+        };
+        let view_state = ViewState::default();
+        let mut trs = TabRenderState::default();
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(0);
+        let layout = build_layout_metrics(&conversation, &view_state, &mut trs, &theme, 80, 24, &clock, &std::collections::HashMap::new());
+
+        assert!(!layout.turn_top_offsets.is_empty(), "should have entries");
+        // First turn at offset 0
+        assert_eq!(layout.turn_top_offsets[0], (turn1.id.clone(), 0));
+        // Second turn at some positive offset (after first turn's height)
+        assert!(layout.turn_top_offsets[1].1 > 0, "second turn should be after first");
+        assert!(layout.total_content_height > 0);
+    }
+
+    #[test]
+    fn build_layout_metrics_focused_turn_top_matches_focused_turn() {
+        let mut turn1 = Turn::new("claude-3".to_string(), 1000);
+        turn1.stop_reason = Some(StopReason::EndTurn);
+        turn1.push_part(|id| TurnPart::Prose { id, text: "First assistant".to_string() });
+        let mut turn2 = Turn::new("claude-3".to_string(), 2000);
+        turn2.stop_reason = Some(StopReason::EndTurn);
+        turn2.push_part(|id| TurnPart::Prose { id, text: "Second assistant".to_string() });
+
+        let conversation = Conversation {
+            id: "test".to_string(),
+            title: String::new(), messages: vec![],
+            turns: vec![turn1.clone(), turn2.clone()],
+            created_at: 0, updated_at: 0, last_response_at: None,
+            session_id: None, usage: None,
+            plans: std::collections::HashMap::new(),
+            fork_source: None,
+        };
+        let mut view_state = ViewState::default();
+        view_state.set_focused_turn(Some(turn2.id.clone()));
+
+        let mut trs = TabRenderState::default();
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(0);
+        let layout = build_layout_metrics(&conversation, &view_state, &mut trs, &theme, 80, 24, &clock, &std::collections::HashMap::new());
+
+        assert_eq!(layout.focused_turn_top, Some(layout.turn_top_offsets[1].1));
     }
 }

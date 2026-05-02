@@ -64,6 +64,66 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
             ],
         },
         HelpCategory {
+            name: "VIM FOLD & MOTION",
+            bindings: vec![
+                HelpBinding {
+                    key: "za",
+                    description: "Toggle fold on focused turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "zc",
+                    description: "Collapse focused turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "zo",
+                    description: "Expand focused turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "zM",
+                    description: "Collapse all turns (global)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "zR",
+                    description: "Expand all turns (global)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "zs",
+                    description: "Toggle summary tier (Tier1/Tier2) globally",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "zz",
+                    description: "Recenter view on focused (sticky-reply) anchor",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "]]",
+                    description: "Jump to next assistant-prose turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "[[",
+                    description: "Jump to previous assistant-prose turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Tab",
+                    description: "Cycle invocations within focused expanded turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "G",
+                    description: "Jump to latest assistant-prose turn",
+                    available: true,
+                },
+            ],
+        },
+        HelpCategory {
             name: "INPUT",
             bindings: vec![
                 HelpBinding {

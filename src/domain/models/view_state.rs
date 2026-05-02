@@ -106,7 +106,7 @@ use crate::domain::models::turn::{InvocationStatus, Turn, TurnId, TurnPart};
 /// | `Reading` | `Scroll(Bottom)` | `Following` | `0` |
 /// | `Pinned(_)` | `Scroll(*)` (any direction) | `Reading` (degrade) | per delta clamped |
 /// | any | `JumpTurn { turn_id }` | `Pinned(AnchorRef { turn_id, line_in_turn: 0 })` | resolved so turn-top is near viewport-top |
-/// | `Following` | `FoldToggle { .. }` | `Following` (unchanged) | `0` |
+/// | `Following` | `FoldToggle { .. }` | `Reading` (amended: anchor-preserved, not snap-to-bottom) | per AC7 anchor formula |
 /// | `Reading` or `Pinned(_)` | `FoldToggle { prev_focused_turn_top: Some(_), .. }` | unchanged | per AC7 anchor formula |
 /// | `Reading` or `Pinned(_)` | `FoldToggle { prev_focused_turn_top: None, .. }` | unchanged | viewport-top fallback clamped |
 /// | `Following` | `StreamAppend { .. }` | unchanged | `0` |
@@ -498,31 +498,25 @@ impl ViewState {
         prev_max_offset: usize,
         layout: &LayoutMetrics,
     ) {
-        match &self.mode {
-            AnchorMode::Following => {
-                // No-op — next frame snaps to bottom regardless.
-            }
-            _ => {
-                // Reading or Pinned.
-                if let Some(t_old) = prev_focused_turn_top {
-                    if let Some(t_new) = layout.focused_turn_top {
-                        // Anchor-preserved path.
-                        self.scroll_offset = fold_toggle_anchor_preserved(
-                            t_old,
-                            prev_max_offset,
-                            self.scroll_offset,
-                            t_new,
-                            layout,
-                        );
-                    } else {
-                        // Focused turn no longer in layout — viewport-top fallback.
-                        self.scroll_offset = self.scroll_offset.min(max_offset(layout));
-                    }
-                } else {
-                    // No focused turn — viewport-top fallback.
-                    self.scroll_offset = self.scroll_offset.min(max_offset(layout));
+        // Anchor-preserved path for ALL modes (amended: Following also preserves anchor,
+        // transitioning to Reading so the focused turn stays visible on screen).
+        if let Some(t_old) = prev_focused_turn_top {
+            if let Some(t_new) = layout.focused_turn_top {
+                self.scroll_offset = fold_toggle_anchor_preserved(
+                    t_old,
+                    prev_max_offset,
+                    self.scroll_offset,
+                    t_new,
+                    layout,
+                );
+                if matches!(self.mode, AnchorMode::Following) {
+                    self.mode = AnchorMode::Reading;
                 }
+            } else {
+                self.scroll_offset = self.scroll_offset.min(max_offset(layout));
             }
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max_offset(layout));
         }
     }
 
@@ -1122,7 +1116,10 @@ mod tests {
 
     // 13. transition_following_on_foldtoggle_stays_following_no_offset_change
     #[test]
-    fn transition_following_on_foldtoggle_stays_following_no_offset_change() {
+    fn transition_following_on_foldtoggle_with_focus_transitions_to_reading_and_preserves_anchor() {
+        // Amended: Following mode fold toggle transitions to Reading and preserves anchor.
+        // t_old=20, s_old=0, prev_max_offset=40 → focused_screen_row = 0 (clamped)
+        // t_new=20, new_max_offset=40 → new_top_visible=20, new_offset=40-20=20
         let mut vs = ViewState::default();
         vs.mode = AnchorMode::Following;
         vs.scroll_offset = 0;
@@ -1135,8 +1132,8 @@ mod tests {
             }),
             &layout,
         );
-        assert_eq!(vs.mode, AnchorMode::Following);
-        assert_eq!(vs.scroll_offset, 0);
+        assert_eq!(vs.mode, AnchorMode::Reading);
+        assert_eq!(vs.scroll_offset, 20);
     }
 
     // 14. transition_reading_on_foldtoggle_with_focus_preserves_focused_screen_row
@@ -1402,7 +1399,10 @@ mod tests {
     }
 
     #[test]
-    fn fold_toggle_in_following_is_noop_for_offset() {
+    fn fold_toggle_in_following_with_focus_transitions_to_reading_and_preserves_anchor() {
+        // Amended: Following + FoldToggle → Reading with anchor preserved.
+        // t_old=0, s_old=0, prev_max=40 → focused_screen_row=0, t_new=0,
+        // new_max=40 → new_offset=40
         let layout = make_layout(10, 50, &[("t1", 0)], Some(0));
         let mut vs = ViewState::default();
         vs.mode = AnchorMode::Following;
@@ -1415,8 +1415,8 @@ mod tests {
             }),
             &layout,
         );
-        assert_eq!(vs.mode, AnchorMode::Following);
-        assert_eq!(vs.scroll_offset, 0);
+        assert_eq!(vs.mode, AnchorMode::Reading);
+        assert_eq!(vs.scroll_offset, 40);
     }
 
     #[test]

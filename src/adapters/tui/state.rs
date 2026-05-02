@@ -999,6 +999,10 @@ pub struct TuiState {
     /// Whether a Ctrl+K chord leader has been pressed and the next character key
     /// should be dispatched through FeedbackAction::dispatch_key().
     pub chord_leader_active: bool,
+    /// Story 16.6: pending vim `z`-prefix chord (za/zc/zo/zM/zR/zs/zz). AC10
+    pub pending_z: bool,
+    /// Story 16.6: pending vim `]`/`[` bracket chord (]]/[[). AC10
+    pub pending_bracket: Option<char>,
     /// Active AskUserQuestion card state.
     pub ask_user_question: Option<AskUserQuestionState>,
     /// Oneshot sender for AskUserQuestion responses.
@@ -1191,6 +1195,8 @@ impl TuiState {
             feedback_blocks: BTreeMap::new(),
             active_feedback_id: None,
             chord_leader_active: false,
+            pending_z: false,
+            pending_bracket: None,
             ask_user_question: None,
             question_response_tx: None,
             pending_skill_trust: None,

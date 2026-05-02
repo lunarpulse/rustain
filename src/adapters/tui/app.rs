@@ -94,6 +94,7 @@ pub enum InputAction {
     /// Close the active tab (palette).
     CloseTab,
     /// Switch to the next tab (Tab key when focus is Chat).
+    #[allow(dead_code)] // constructed in integration tests, not in lib build
     SwitchToNextTab,
     /// Switch to the previous tab (Shift+Tab when focus is not Input).
     SwitchToPrevTab,
@@ -279,6 +280,27 @@ pub enum InputAction {
         name: String,
         then_submit: Option<String>,
     },
+    // === Story 16.6: vim keymap ===
+    /// vim `za` — toggle fold on focused turn. AC1
+    FoldToggleAtFocus,
+    /// vim `zc` — collapse focused turn. AC1 (idempotent)
+    CollapseFocus,
+    /// vim `zo` — expand focused turn. AC1 (idempotent)
+    ExpandFocus,
+    /// vim `zM` — collapse all turns (global). AC2
+    CollapseAllTurns,
+    /// vim `zR` — expand all turns (global). AC2
+    ExpandAllTurns,
+    /// vim `zs` — toggle summary tier (Tier1 <-> Tier2) globally. AC7
+    ToggleSummaryTier,
+    /// vim `zz` — recenter view on focused (sticky-reply) anchor. AC4
+    RecenterAnchor,
+    /// vim `]]` / `[[` — jump to next/previous assistant-prose turn. AC3
+    JumpProseAnchor(Direction),
+    /// vim `G` override — jump to latest assistant-prose turn. AC6
+    JumpToLatestProseAnchor,
+    /// vim `Tab` narrow override — cycle invocations within focused expanded turn. AC5
+    CycleInvocationInFocusedTurn,
 }
 
 /// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
@@ -304,6 +326,8 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
     // Cancel pending chord leader on any event that isn't a character key or Ctrl+K.
     if !matches!(event, DomainInputEvent::KeyPress(_) | DomainInputEvent::SpecialKey(DomainKey::CtrlK)) {
         state.chord_leader_active = false;
+        state.pending_z = false;
+        state.pending_bracket = None;
     }
     match event {
         DomainInputEvent::KeyPress(c) => handle_char(state, *c),
@@ -851,6 +875,55 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             }
         }
         FocusState::Chat => match c {
+            // --- Story 16.6: vim z-prefix chord state machine (AC10) ---
+            _z if state.pending_z => {
+                state.pending_z = false;
+                state.needs_redraw = true;
+                tracing::debug!("vim z-prefix chord: z + '{}'", c);
+                return match c {
+                    'a' => InputAction::FoldToggleAtFocus,
+                    'c' => InputAction::CollapseFocus,
+                    'o' => InputAction::ExpandFocus,
+                    'M' => InputAction::CollapseAllTurns,
+                    'R' => InputAction::ExpandAllTurns,
+                    's' => InputAction::ToggleSummaryTier,
+                    'z' => InputAction::RecenterAnchor,
+                    _ => {
+                        tracing::debug!("z-prefix chord cancelled with '{}'", c);
+                        InputAction::Consumed
+                    }
+                };
+            }
+            // --- Story 16.6: vim bracket-prefix chord state machine (AC10) ---
+            _b if state.pending_bracket.is_some() => {
+                let leader = state.pending_bracket.take().unwrap();
+                state.needs_redraw = true;
+                tracing::debug!("vim bracket chord: {} + '{}'", leader, c);
+                return match (leader, c) {
+                    (']', ']') => InputAction::JumpProseAnchor(Direction::Down),
+                    ('[', '[') => InputAction::JumpProseAnchor(Direction::Up),
+                    _ => {
+                        tracing::debug!("bracket-prefix chord cancelled with '{}{}'", leader, c);
+                        InputAction::Consumed
+                    }
+                };
+            }
+            // --- Story 16.6: z / [ / ] chord leaders (AC10) ---
+            'z' => {
+                state.pending_z = true;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            ']' => {
+                state.pending_bracket = Some(']');
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            '[' => {
+                state.pending_bracket = Some('[');
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
             // AC4: Large image confirmation
             'y' if state.pending_large_image.is_some() => {
                 return InputAction::ImageConfirmAttach;
@@ -887,13 +960,9 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
                 InputAction::Consumed
             }
-            // G = jump to bottom, re-enable auto-scroll
-            'G' => {
-                state.scroll_offset = 0;
-                state.auto_scroll = true;
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
+            // G = jump to latest assistant-prose turn (Story 16.6 AC6 override).
+            // Empty-transcript fallback: event_loop dispatcher handles.
+            'G' => InputAction::JumpToLatestProseAnchor,
             // g = jump to top (mirror of G). Sets scroll_offset to its max so
             // the first message is visible; auto_scroll off so the view doesn't
             // snap back to the bottom on the next render. Required for
@@ -1216,6 +1285,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Cancel pending chord on any special key other than Ctrl+K itself.
     if state.chord_leader_active && key != DomainKey::CtrlK {
         state.chord_leader_active = false;
+        state.needs_redraw = true;
+    }
+    // Cancel pending vim chords on any special key.
+    if state.pending_z || state.pending_bracket.is_some() {
+        state.pending_z = false;
+        state.pending_bracket = None;
         state.needs_redraw = true;
     }
 
@@ -1871,18 +1946,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
         // Tab/focus cycling (AC11):
-        // - Chat + sidebar visible → Sidebar
-        // - Chat + no sidebar → SwitchToNextTab (existing behavior)
-        // - Sidebar → Input
-        DomainKey::Tab if state.focus == FocusState::Chat && state.sidebar_visible => {
-            state.focus = FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::History,
-                selected: state.sidebar_selected,
-            };
-            state.needs_redraw = true;
-            InputAction::Consumed
+        // Story 16.6 AC5: Chat Tab now emits CycleInvocationInFocusedTurn first.
+        // The event-loop dispatcher checks the guard (focused turn + expanded + >= 2 invocations)
+        // and falls through to the legacy sidebar/tab-switch behavior when guard fails.
+        DomainKey::Tab if state.focus == FocusState::Chat => {
+            InputAction::CycleInvocationInFocusedTurn
         }
-        DomainKey::Tab if state.focus == FocusState::Chat => InputAction::SwitchToNextTab,
         DomainKey::Tab if matches!(state.focus, FocusState::Sidebar { .. }) => {
             state.focus = FocusState::Input;
             state.needs_redraw = true;
@@ -2677,7 +2746,14 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             }
 
             match code {
-                KeyCode::Char(c) => Some(DomainInputEvent::KeyPress(*c)),
+                KeyCode::Char(c) => {
+                    let c = if modifiers.contains(KeyModifiers::SHIFT) && !modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT) {
+                        c.to_ascii_uppercase()
+                    } else {
+                        *c
+                    };
+                    Some(DomainInputEvent::KeyPress(c))
+                }
                 KeyCode::Enter => {
                     if modifiers.contains(KeyModifiers::SHIFT) {
                         Some(DomainInputEvent::SpecialKey(DomainKey::ShiftEnter))
@@ -3336,5 +3412,139 @@ mod tests {
         let action = handle_char(&mut state, 'z');
         assert_eq!(action, InputAction::Consumed);
         assert!(!state.chord_leader_active);
+    }
+
+    // ── Story 16.6: Vim keymap unit tests (Task 11) ──
+
+    #[test]
+    fn z_prefix_chord_dispatches_z_actions() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        // Press 'z' leader
+        let action = handle_char(&mut state, 'z');
+        assert_eq!(action, InputAction::Consumed);
+        assert!(state.pending_z);
+
+        // za → FoldToggleAtFocus
+        assert_eq!(handle_char(&mut state, 'a'), InputAction::FoldToggleAtFocus);
+        assert!(!state.pending_z);
+
+        // Reset and test other chords
+        state.focus = FocusState::Chat;
+        state.pending_z = false;
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::Consumed);
+        assert_eq!(handle_char(&mut state, 'c'), InputAction::CollapseFocus);
+        assert!(!state.pending_z);
+
+        state.focus = FocusState::Chat;
+        state.pending_z = false;
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::Consumed);
+        assert_eq!(handle_char(&mut state, 'o'), InputAction::ExpandFocus);
+        assert!(!state.pending_z);
+
+        state.focus = FocusState::Chat;
+        state.pending_z = false;
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::Consumed);
+        assert_eq!(handle_char(&mut state, 'M'), InputAction::CollapseAllTurns);
+        assert!(!state.pending_z);
+
+        state.focus = FocusState::Chat;
+        state.pending_z = false;
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::Consumed);
+        assert_eq!(handle_char(&mut state, 'R'), InputAction::ExpandAllTurns);
+        assert!(!state.pending_z);
+
+        state.focus = FocusState::Chat;
+        state.pending_z = false;
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::Consumed);
+        assert_eq!(handle_char(&mut state, 's'), InputAction::ToggleSummaryTier);
+        assert!(!state.pending_z);
+
+        state.focus = FocusState::Chat;
+        state.pending_z = false;
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::Consumed);
+        assert_eq!(handle_char(&mut state, 'z'), InputAction::RecenterAnchor);
+        assert!(!state.pending_z);
+    }
+
+    #[test]
+    fn z_prefix_resets_on_invalid_followup() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        handle_char(&mut state, 'z');
+        assert!(state.pending_z);
+        // z followed by 'j' is consumed and cancels chord
+        let action = handle_char(&mut state, 'j');
+        assert_eq!(action, InputAction::Consumed);
+        assert!(!state.pending_z);
+    }
+
+    #[test]
+    fn z_prefix_resets_on_focus_change_via_special_key() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        handle_char(&mut state, 'z');
+        assert!(state.pending_z);
+        // ESC should reset
+        let esc = DomainInputEvent::SpecialKey(DomainKey::Esc);
+        handle_input(&mut state, &esc);
+        assert!(!state.pending_z);
+        assert!(state.pending_bracket.is_none());
+    }
+
+    #[test]
+    fn bracket_prefix_dispatches_jump_actions() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        // ]]
+        assert_eq!(handle_char(&mut state, ']'), InputAction::Consumed);
+        assert_eq!(state.pending_bracket, Some(']'));
+        assert_eq!(handle_char(&mut state, ']'), InputAction::JumpProseAnchor(Direction::Down));
+        assert!(state.pending_bracket.is_none());
+
+        // [[
+        assert_eq!(handle_char(&mut state, '['), InputAction::Consumed);
+        assert_eq!(state.pending_bracket, Some('['));
+        assert_eq!(handle_char(&mut state, '['), InputAction::JumpProseAnchor(Direction::Up));
+        assert!(state.pending_bracket.is_none());
+    }
+
+    #[test]
+    fn bracket_prefix_resets_on_invalid_followup() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        handle_char(&mut state, ']');
+        assert_eq!(state.pending_bracket, Some(']'));
+        // ] followed by 'a' cancels
+        let action = handle_char(&mut state, 'a');
+        assert_eq!(action, InputAction::Consumed);
+        assert!(state.pending_bracket.is_none());
+    }
+
+    #[test]
+    fn tab_in_chat_focus_emits_cycle_invocation() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let tab = DomainInputEvent::SpecialKey(DomainKey::Tab);
+        let action = handle_input(&mut state, &tab);
+        assert_eq!(action, InputAction::CycleInvocationInFocusedTurn);
+    }
+
+    #[test]
+    fn g_capital_emits_jump_to_latest_prose_anchor() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let action = handle_char(&mut state, 'G');
+        assert_eq!(action, InputAction::JumpToLatestProseAnchor);
+    }
+
+    #[test]
+    fn vim_keys_outside_chat_focus_are_inert() {
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        // 'z' in Input focus falls through to char input and is consumed as normal text
+        let _action = handle_char(&mut state, 'z');
+        // But pending_z must NOT be set (vim chords only activate in Chat focus)
+        assert!(!state.pending_z);
     }
 }

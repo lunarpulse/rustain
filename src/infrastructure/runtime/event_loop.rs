@@ -54,9 +54,10 @@ use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
     NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager,
-    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, generate_conversation_id,
+    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, ViewState, generate_conversation_id,
     next_delay,
 };
+use crate::domain::models::turn::TurnId;
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProviderPort, SecurityPort, StoragePort, ToolSetPort,
 };
@@ -82,6 +83,50 @@ fn apply_warning_notice(state: &mut TuiState, msg: String) -> String {
     state.feedback_blocks.insert(fb_id.clone(), fb);
     state.active_feedback_id = Some(fb_id.clone());
     fb_id
+}
+
+/// Story 16.6 helper: pre/post layout + reconcile + mirror for fold mutations.
+/// Eliminates ~30-line duplication across the five fold-toggle dispatch arms.
+fn reconcile_fold_toggle<F>(
+    tab_manager: &mut crate::domain::models::tab::TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    event_turn_id: TurnId,
+    mutate: F,
+) where
+    F: FnOnce(&mut ViewState, &mut crate::adapters::tui::state::TabRenderState),
+{
+    let vp_height = state.viewport_height as usize;
+    let width = state.terminal_width;
+    let theme = state.theme.clone();
+    let vs_before = tab_manager.active_tab().view_state.clone();
+    let clock = tab_manager.active_tab().clock.clone();
+    let tool_block_states = state.tool_block_states.clone();
+    let pre_layout = {
+        let rs = state.tab_render_state(state.active_tab_id);
+        chat_pane::build_layout_metrics(&conversation, &vs_before, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+    };
+    let prev_focused_turn_top = pre_layout.focused_turn_top;
+    let prev_max_offset = pre_layout.total_content_height.saturating_sub(pre_layout.viewport_height);
+    {
+        let tab = tab_manager.active_tab_mut();
+        let rs = state.tab_render_state(state.active_tab_id);
+        mutate(&mut tab.view_state, rs);
+    }
+    let tool_block_states = state.tool_block_states.clone();
+    let post_layout = {
+        let rs = state.tab_render_state(state.active_tab_id);
+        chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+    };
+    let resolved = tab_manager.active_tab_mut().view_state.reconcile(
+        Some(crate::domain::models::ViewEvent::FoldToggle { turn_id: event_turn_id, prev_focused_turn_top, prev_max_offset }),
+        &post_layout,
+    );
+    tab_manager.active_tab_mut().scroll_offset = resolved;
+    tab_manager.active_tab_mut().auto_scroll = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
+    state.scroll_offset = resolved;
+    state.auto_scroll = tab_manager.active_tab().auto_scroll;
+    state.needs_redraw = true;
 }
 
 /// Run the 4-branch tokio::select! event loop.
@@ -3551,6 +3596,342 @@ pub async fn run(
                                     });
                                     state.needs_redraw = true;
                                 }
+                                // === Story 16.6: Vim keymap dispatchers ===
+
+                                InputAction::FoldToggleAtFocus => {
+                                    let turn_id = match tab_manager.active_tab().view_state.focused_turn.clone() {
+                                        Some(t) => t,
+                                        None => {
+                                            tracing::warn!("z-fold key with no focused turn");
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
+                                    };
+                                    reconcile_fold_toggle(&mut tab_manager, &mut state, &conversation, turn_id.clone(), |vs, rs| {
+                                        chat_pane::toggle_turn_fold(vs, rs, &turn_id);
+                                    });
+                                }
+
+                                InputAction::CollapseFocus => {
+                                    let turn_id = match tab_manager.active_tab().view_state.focused_turn.clone() {
+                                        Some(t) => t,
+                                        None => {
+                                            tracing::warn!("z-fold key with no focused turn");
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
+                                    };
+                                    reconcile_fold_toggle(&mut tab_manager, &mut state, &conversation, turn_id.clone(), |vs, rs| {
+                                        chat_pane::set_turn_collapsed(vs, rs, &turn_id, true);
+                                    });
+                                }
+
+                                InputAction::ExpandFocus => {
+                                    let turn_id = match tab_manager.active_tab().view_state.focused_turn.clone() {
+                                        Some(t) => t,
+                                        None => {
+                                            tracing::warn!("z-fold key with no focused turn");
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
+                                    };
+                                    reconcile_fold_toggle(&mut tab_manager, &mut state, &conversation, turn_id.clone(), |vs, rs| {
+                                        chat_pane::set_turn_collapsed(vs, rs, &turn_id, false);
+                                    });
+                                }
+
+                                InputAction::CollapseAllTurns => {
+                                    let turns = conversation.turns.clone();
+                                    let focused_turn_id = tab_manager.active_tab().view_state.focused_turn.clone();
+                                    let event_turn_id = focused_turn_id.unwrap_or_else(|| turns.first().map(|t| t.id.clone()).unwrap_or_else(|| TurnId(String::new())));
+                                    reconcile_fold_toggle(&mut tab_manager, &mut state, &conversation, event_turn_id, |vs, rs| {
+                                        chat_pane::collapse_all_turns(vs, rs, &turns);
+                                    });
+                                }
+
+                                InputAction::ExpandAllTurns => {
+                                    let turns = conversation.turns.clone();
+                                    let focused_turn_id = tab_manager.active_tab().view_state.focused_turn.clone();
+                                    let event_turn_id = focused_turn_id.unwrap_or_else(|| turns.first().map(|t| t.id.clone()).unwrap_or_else(|| TurnId(String::new())));
+                                    reconcile_fold_toggle(&mut tab_manager, &mut state, &conversation, event_turn_id, |vs, rs| {
+                                        chat_pane::expand_all_turns(vs, rs, &turns);
+                                    });
+                                }
+
+                                InputAction::JumpProseAnchor(direction) => {
+                                    let turns = conversation.turns.clone();
+                                    let focused = tab_manager.active_tab().view_state.focused_turn.clone();
+                                    let vp_height = state.viewport_height as usize;
+                                    let width = state.terminal_width;
+                                    let theme = state.theme.clone();
+                                    let clock = tab_manager.active_tab().clock.clone();
+                                    let vs = tab_manager.active_tab().view_state.clone();
+                                    let layout = {
+                                        let tool_block_states = state.tool_block_states.clone();
+                                        let rs = state.tab_render_state(state.active_tab_id);
+                                        chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+                                    };
+                                    let scroll_offset = state.scroll_offset;
+                                    let total_h = layout.total_content_height;
+                                    let vp_h = layout.viewport_height;
+                                    let visible_bottom = total_h.saturating_sub(scroll_offset);
+                                    let visible_top = visible_bottom.saturating_sub(vp_h);
+                                    let topmost_on_screen = layout.turn_top_offsets.iter()
+                                        .filter(|(_, off)| *off >= visible_top && *off <= visible_bottom)
+                                        .find(|(tid, _)| {
+                                            turns.iter().any(|t| &t.id == tid && t.role == crate::domain::models::MessageRole::Assistant)
+                                        })
+                                        .map(|(tid, _)| tid.clone());
+                                    let validated_focused = focused.clone().filter(|ft| turns.iter().any(|t| &t.id == ft));
+                                    let start_ref = validated_focused.or(topmost_on_screen.clone());
+                                    tracing::debug!(
+                                        "JumpProseAnchor({:?}): focused={:?} topmost_on_screen={:?} start_ref={:?}",
+                                        direction, focused, topmost_on_screen, start_ref,
+                                    );
+                                    let target = if let Some(start_id) = start_ref {
+                                        let start_idx = match turns.iter().position(|t| t.id == start_id) {
+                                            Some(i) => i,
+                                            None => {
+                                                tracing::debug!("JumpProseAnchor: start_ref turn not found");
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        };
+                                        match direction {
+                                            crate::adapters::tui::state::Direction::Down => {
+                                                turns.iter().skip(start_idx + 1).find(|t| {
+                                                    t.role == crate::domain::models::MessageRole::Assistant
+                                                        && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
+                                                })
+                                            }
+                                            crate::adapters::tui::state::Direction::Up => {
+                                                turns.iter().take(start_idx).rev().find(|t| {
+                                                    t.role == crate::domain::models::MessageRole::Assistant
+                                                        && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
+                                                })
+                                            }
+                                        }
+                                    } else {
+                                        // No starting reference: pick the first (Down) or last (Up) prose turn
+                                        // and treat it as the START (not the target), then find next/prev from there
+                                        let fallback_start = match direction {
+                                            crate::adapters::tui::state::Direction::Down => {
+                                                turns.iter().position(|t| {
+                                                    t.role == crate::domain::models::MessageRole::Assistant
+                                                        && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
+                                                })
+                                            }
+                                            crate::adapters::tui::state::Direction::Up => {
+                                                turns.iter().rposition(|t| {
+                                                    t.role == crate::domain::models::MessageRole::Assistant
+                                                        && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
+                                                })
+                                            }
+                                        };
+                                        // For Down with no focus: go to first prose turn (idx 0, treat like "start before first")
+                                        // For Up with no focus: go to last prose turn
+                                        fallback_start.and_then(|start_idx| {
+                                            match direction {
+                                                crate::adapters::tui::state::Direction::Down => {
+                                                    // We're at the first turn, but `]]` means "next" — 
+                                                    // start_idx - 1 + 1 = start_idx. So just return the first.
+                                                    turns.get(start_idx)
+                                                }
+                                                crate::adapters::tui::state::Direction::Up => {
+                                                    // We're at the last turn, but `[[` means "previous" — same.
+                                                    turns.get(start_idx)
+                                                }
+                                            }
+                                        })
+                                    };
+                                    if let Some(t) = target {
+                                        tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
+                                        // Set Pinned mode via reconcile (correctly anchors the turn)
+                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
+                                        let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
+                                        // Override scroll with render-computed block_boundaries (same accuracy as {}/{})
+                                        if let Some(msg_idx) = conversation.messages.iter().position(|m| m.id == t.id.0) {
+                                            if msg_idx < state.block_boundaries.len() {
+                                                let block_top = state.block_boundaries[msg_idx];
+                                                let vp = state.viewport_height as usize;
+                                                let max_offset = state.total_content_height.saturating_sub(vp);
+                                                state.scroll_offset = max_offset.saturating_sub(block_top);
+                                                state.auto_scroll = false;
+                                                tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_offset;
+                                            }
+                                        }
+                                    } else {
+                                        tracing::debug!("JumpProseAnchor: no prose anchor in direction={:?}", direction);
+                                        let msg = match direction {
+                                            crate::adapters::tui::state::Direction::Down => "No next prose turn",
+                                            crate::adapters::tui::state::Direction::Up => "No previous prose turn",
+                                        };
+                                        state.status = StatusState::Flash { message: msg.to_string(), remaining_ms: 2000 };
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::JumpToLatestProseAnchor => {
+                                    let turns = conversation.turns.clone();
+                                    let latest_prose = turns.iter().rev().find(|t| {
+                                        t.role == crate::domain::models::MessageRole::Assistant
+                                            && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
+                                    });
+                                    if let Some(t) = latest_prose {
+                                        let vp_height = state.viewport_height as usize;
+                                        let width = state.terminal_width;
+                                        let theme = state.theme.clone();
+                                        tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
+                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let clock = tab_manager.active_tab().clock.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
+                                        let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
+                                        // Use render-computed block_boundaries for accurate scroll
+                                        if let Some(msg_idx) = conversation.messages.iter().position(|m| m.id == t.id.0) {
+                                            if msg_idx < state.block_boundaries.len() {
+                                                let block_top = state.block_boundaries[msg_idx];
+                                                let vp = state.viewport_height as usize;
+                                                let max_offset = state.total_content_height.saturating_sub(vp);
+                                                state.scroll_offset = max_offset.saturating_sub(block_top);
+                                                state.auto_scroll = false;
+                                                tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_offset;
+                                            }
+                                        }
+                                    } else {
+                                        tab_manager.active_tab_mut().scroll_offset = 0;
+                                        tab_manager.active_tab_mut().auto_scroll = true;
+                                        tab_manager.active_tab_mut().view_state.mode = crate::domain::models::AnchorMode::Following;
+                                        state.scroll_offset = 0;
+                                        state.auto_scroll = true;
+                                        tracing::debug!("JumpToLatestProseAnchor: empty transcript fallback");
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::RecenterAnchor => {
+                                    let focused = tab_manager.active_tab().view_state.focused_turn.clone();
+                                    let turns = conversation.turns.clone();
+                                    let vp_height = state.viewport_height as usize;
+                                    let width = state.terminal_width;
+                                    let theme = state.theme.clone();
+                                    let clock = tab_manager.active_tab().clock.clone();
+                                    let target = if let Some(ft) = focused {
+                                        Some(ft)
+                                    } else {
+                                        let vs = tab_manager.active_tab().view_state.clone();
+                                        let tool_block_states = state.tool_block_states.clone();
+                                        let layout = {
+                                            let rs = state.tab_render_state(state.active_tab_id);
+                                            chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+                                        };
+                                        let scroll_offset = state.scroll_offset;
+                                        let total_h = layout.total_content_height;
+                                        let vp_h = layout.viewport_height;
+                                        let visible_bottom = total_h.saturating_sub(scroll_offset);
+                                        let visible_top = visible_bottom.saturating_sub(vp_h);
+                                        layout.turn_top_offsets.iter()
+                                            .filter(|(_, off)| *off >= visible_top && *off <= visible_bottom)
+                                            .find(|(tid, _)| {
+                                                turns.iter().any(|t| &t.id == tid && t.role == crate::domain::models::MessageRole::Assistant)
+                                            })
+                                            .map(|(tid, _)| tid.clone())
+                                    };
+                                    if let Some(turn_id) = target {
+                                        tab_manager.active_tab_mut().view_state.set_focused_turn(Some(turn_id.clone()));
+                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
+                                        let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: turn_id.clone() }), &layout);
+                                        // Use render-computed block_boundaries for accurate scroll
+                                        if let Some(msg_idx) = conversation.messages.iter().position(|m| m.id == turn_id.0) {
+                                            if msg_idx < state.block_boundaries.len() {
+                                                let block_top = state.block_boundaries[msg_idx];
+                                                let vp = state.viewport_height as usize;
+                                                let max_offset = state.total_content_height.saturating_sub(vp);
+                                                state.scroll_offset = max_offset.saturating_sub(block_top);
+                                                state.auto_scroll = false;
+                                                tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_offset;
+                                            }
+                                        }
+                                        state.status = StatusState::Flash { message: format!("Recenter: turn snapshot to top"), remaining_ms: 2000 };
+                                    } else {
+                                        tracing::debug!("RecenterAnchor: no target turn");
+                                        state.status = StatusState::Flash { message: "No assistant turn to recenter".into(), remaining_ms: 2000 };
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::ToggleSummaryTier => {
+                                    tracing::debug!("ToggleSummaryTier: dispatching");
+                                    let next_tier = match tab_manager.active_tab().view_state.summary_tier {
+                                        crate::domain::models::SummaryTier::Tier1 => crate::domain::models::SummaryTier::Tier2,
+                                        crate::domain::models::SummaryTier::Tier2 => crate::domain::models::SummaryTier::Tier1,
+                                    };
+                                    {
+                                        let rs = state.tab_render_state(state.active_tab_id);
+                                        chat_pane::set_summary_tier(&mut tab_manager.active_tab_mut().view_state, rs, next_tier);
+                                    }
+                                    let tier_name = match next_tier {
+                                        crate::domain::models::SummaryTier::Tier1 => "Tier1 (terse)",
+                                        crate::domain::models::SummaryTier::Tier2 => "Tier2 (descriptive)",
+                                    };
+                                    state.status = StatusState::Flash { message: format!("Summary tier: {}", tier_name), remaining_ms: 2000 };
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::CycleInvocationInFocusedTurn => {
+                                    tracing::debug!("CycleInvocationInFocusedTurn: dispatching");
+                                    let turns = conversation.turns.clone();
+                                    let focused = tab_manager.active_tab().view_state.focused_turn.clone();
+                                    let can_cycle = focused.as_ref().is_some_and(|ft| {
+                                        if let Some(turn) = turns.iter().find(|t| &t.id == ft) {
+                                            if tab_manager.active_tab().view_state.is_collapsed(turn) {
+                                                return false;
+                                            }
+                                            turn.parts.iter().filter(|p| matches!(p, crate::domain::models::TurnPart::ToolInvocation { .. })).count() >= 2
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if can_cycle {
+                                        let ft = focused.expect("can_cycle ensures focused_turn is Some");
+                                        let turn = turns.iter().find(|t| t.id == ft).expect("can_cycle ensures turn exists");
+                                        let invocations: Vec<_> = turn.parts.iter()
+                                            .filter(|p| matches!(p, crate::domain::models::TurnPart::ToolInvocation { .. }))
+                                            .collect();
+                                        let current_idx = state.focused_tool_id.as_ref().and_then(|ftid| {
+                                            invocations.iter().position(|p| {
+                                                if let crate::domain::models::TurnPart::ToolInvocation { id, .. } = p {
+                                                    crate::domain::models::turn::tool_call_id_for(&ft, *id) == *ftid
+                                                } else { false }
+                                            })
+                                        });
+                                        let next_idx = match current_idx {
+                                            Some(idx) => (idx + 1) % invocations.len(),
+                                            None => 0, // first Tab press focuses first invocation
+                                        };
+                                        if let Some(crate::domain::models::TurnPart::ToolInvocation { id, .. }) = invocations.get(next_idx) {
+                                            state.focused_tool_id = Some(crate::domain::models::turn::tool_call_id_for(&ft, *id));
+                                        }
+                                        state.needs_redraw = true;
+                                    } else if state.sidebar_visible {
+                                        state.focus = FocusState::Sidebar {
+                                            panel: crate::domain::models::visual::PanelType::History,
+                                            selected: state.sidebar_selected,
+                                        };
+                                        state.needs_redraw = true;
+                                    } else if tab_manager.tab_count() > 1 {
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                        tab_manager.switch_to_next();
+                                        let should_drain = load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
+                                        if should_drain {
+                                            if let Some(queued_msg) = turn_queue.dequeue() {
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                            }
+                                        }
+                                        session_index.set_active(Some(&conversation.id));
+                                        state.needs_redraw = true;
+                                    }
+                                }
+
                                 InputAction::Consumed | InputAction::Ignored => {}
                             }
                         }

@@ -93,6 +93,22 @@ class Permission:
     DENY_FEEDBACK = "f"
 
 
+# ── Vim Keymap (Story 16.6) ─────────────────────────────────────────────────
+
+class Vim:
+    """Vim fold & motion keys active in Chat focus."""
+    Z_LEADER = "z"
+    ZA = "za"           # Toggle fold on focused turn
+    ZC = "zc"           # Collapse focused turn
+    ZO = "zo"           # Expand focused turn
+    ZM = "zM"           # Collapse all turns
+    ZR = "zR"           # Expand all turns
+    ZS = "zs"           # Toggle summary tier
+    ZZ = "zz"           # Recenter view on focused turn
+    BRACKET_RIGHT = "]]"  # Jump to next assistant-prose turn
+    BRACKET_LEFT = "[["   # Jump to previous assistant-prose turn
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
 class Sidebar:

@@ -7,6 +7,7 @@ use crate::domain::models::BlockBorder;
 use super::color_detect::ColorCapability;
 
 /// Complete design token system for consistent visual grammar.
+#[derive(Clone)]
 pub struct Theme {
     pub name: String,
     pub colors: ColorTokens,
@@ -34,6 +35,7 @@ pub struct Theme {
 }
 
 /// Semantic color tokens for all UI elements.
+#[derive(Clone)]
 pub struct ColorTokens {
     pub bg_primary: Color,
     pub bg_secondary: Color,
@@ -90,6 +92,7 @@ pub struct ColorTokens {
 }
 
 /// Spacing tokens for layout calculations.
+#[derive(Clone)]
 pub struct SpacingTokens {
     // Vertical spacing
     pub none: u16,
@@ -112,6 +115,7 @@ pub struct SpacingTokens {
 }
 
 /// Timing tokens for temporal behavior.
+#[derive(Clone)]
 pub struct TimingTokens {
     pub tick_interval_ms: u64,
     pub cursor_blink_ms: u64,
@@ -124,6 +128,7 @@ pub struct TimingTokens {
 }
 
 /// Border token for a single BlockBorder variant.
+#[derive(Clone)]
 pub struct BorderToken {
     pub border_type: BorderType,
     pub line_set: Option<line::Set<'static>>,
@@ -131,6 +136,7 @@ pub struct BorderToken {
 }
 
 /// Border tokens mapping each `BlockBorder` variant to rendering info.
+#[derive(Clone)]
 pub struct BorderTokens {
     pub none: BorderToken,
     pub dotted_thin: BorderToken,
@@ -141,6 +147,7 @@ pub struct BorderTokens {
 }
 
 /// Typography levels using ratatui Style modifiers.
+#[derive(Clone)]
 pub struct TypographyTokens {
     pub display: Style,
     pub heading: Style,
