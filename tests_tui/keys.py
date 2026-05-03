@@ -107,6 +107,8 @@ class Vim:
     ZZ = "zz"           # Recenter view on focused turn
     BRACKET_RIGHT = "]]"  # Jump to next assistant-prose turn
     BRACKET_LEFT = "[["   # Jump to previous assistant-prose turn
+    BRACKET_P = "]P"      # S16.8 (preflight rebinding 2026-05-03): jump to latest assistant-prose turn
+                          # (relocated from G by S16.8 per ADR-16-03; bracket-prefix avoids gp-flicker)
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────

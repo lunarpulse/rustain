@@ -1,7 +1,16 @@
 """Story 16.6: Vim Keymap — Fold & Motion.
 
-E2E tests for the vim-inspired keymap: z-prefix chords, bracket chords,
-G override, Tab narrow override, and help overlay integration.
+E2E tests for the vim-inspired keymap: z-prefix chords, bracket chords
+(]] / [[ / ]P), Tab narrow override, and help overlay integration.
+
+Note (S16.8 preflight rebinding 2026-05-03): The S16.6 G→JumpToLatestProseAnchor
+binding moved to the `]P` bracket-prefix chord (NOT a `gp` g-prefix chord — `gp`
+would have caused a TOP→BOTTOM flicker because Story 1.4's single-`g`=jump-to-top
+fires on the first keystroke; bracket-prefix has no such side effect). S16.8 can
+now return G to vim-bottom semantic. The dispatcher arm at
+event_loop.rs::JumpToLatestProseAnchor is unchanged — only the keystroke that
+produces the action moved. See ADR-16-03 for the "anchor as explicit user
+investment" principle that motivated the rebinding.
 """
 
 import pytest
@@ -35,8 +44,13 @@ class TestVimHelpOverlay:
         tui.assert_screen_contains("Jump to next assistant-prose turn")
         tui.assert_screen_contains("Tab")
         tui.assert_screen_contains("Cycle invocations")
-        tui.assert_screen_contains("G")
+        # S16.8 rebinding: jump-to-latest-prose moved from G to ]P bracket-prefix chord
+        # per ADR-16-03 (chosen over gp to avoid the single-g jump-to-top flicker)
+        tui.assert_screen_contains("]P")
         tui.assert_screen_contains("Jump to latest assistant-prose turn")
+        # G now reads as vim-bottom (restored by S16.8)
+        tui.assert_screen_contains("G")
+        tui.assert_screen_contains("Jump to bottom")
         tui.close_overlay()
 
 
@@ -120,11 +134,47 @@ class TestVimChordStateMachines:
         )
 
     def test_g_capital_in_empty_chat_no_crash(self, tui: RustainTUI):
-        """G with no conversation falls back safely (empty-transcript guard)."""
+        """G with no conversation falls back safely (empty-transcript guard).
+
+        Post-S16.8 rebinding (2026-05-03): G now means vim-bottom (legacy 2-mode
+        scroll_offset=0 + auto_scroll=true) rather than JumpToLatestProseAnchor.
+        Either binding must not crash on an empty transcript — the smoke test
+        invariant is unchanged.
+        """
         tui.chat_mode()
         tui.send(Chat.JUMP_BOTTOM)
         tui.wait(0.3)
         assert tui.child.isalive(), "TUI process should still be alive after key"
+
+    def test_rbracket_capital_p_chord_in_empty_chat_no_crash(self, tui: RustainTUI):
+        """]P chord with no conversation falls back safely (empty-transcript guard).
+
+        S16.8 preflight rebinding (2026-05-03): the JumpToLatestProseAnchor
+        behavior moved from G to the ]P bracket-prefix chord per ADR-16-03 (chosen
+        over gp to avoid the single-g jump-to-top flicker — bracket leader has no
+        first-key side effect). The event_loop.rs::JumpToLatestProseAnchor
+        dispatcher arm is unchanged; only the keystroke that produces it moved.
+        """
+        tui.chat_mode()
+        tui.send("]")           # arm pending_bracket = Some(']')
+        tui.wait(0.2)
+        tui.send("P")           # complete ]P chord (capital P)
+        tui.wait(0.3)
+        assert tui.child.isalive(), "TUI process should still be alive after ]P chord"
+
+    def test_rbracket_lowercase_p_does_not_dispatch(self, tui: RustainTUI):
+        """] + lowercase p (not the binding) is consumed; pending_bracket cleared.
+
+        Only ]P (capital P) dispatches JumpToLatestProseAnchor. Lowercase p falls
+        through the chord handler's catch-all → Consumed. Prevents accidental
+        dispatch on shift-key fumble.
+        """
+        tui.chat_mode()
+        tui.send("]")
+        tui.wait(0.2)
+        tui.send("p")  # lowercase — should NOT dispatch
+        tui.wait(0.3)
+        assert tui.child.isalive(), "TUI process should still be alive after ]p"
 
 
 # ── API-required tests: motions with actual conversation turns ───────────────

@@ -117,8 +117,13 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
-                    key: "G",
+                    key: "]P",
                     description: "Jump to latest assistant-prose turn",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "G",
+                    description: "Jump to bottom",
                     available: true,
                 },
             ],

@@ -1001,7 +1001,10 @@ pub struct TuiState {
     pub chord_leader_active: bool,
     /// Story 16.6: pending vim `z`-prefix chord (za/zc/zo/zM/zR/zs/zz). AC10
     pub pending_z: bool,
-    /// Story 16.6: pending vim `]`/`[` bracket chord (]]/[[). AC10
+    /// Story 16.6: pending vim `]`/`[` bracket chord (]]/[[/]P).
+    /// Story 16.8 preflight rebinding (2026-05-03) added `]P` as the home for
+    /// `JumpToLatestProseAnchor` (relocated from S16.6's `G` binding per ADR-16-03).
+    /// AC10
     pub pending_bracket: Option<char>,
     /// Active AskUserQuestion card state.
     pub ask_user_question: Option<AskUserQuestionState>,

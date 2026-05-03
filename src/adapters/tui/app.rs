@@ -297,7 +297,15 @@ pub enum InputAction {
     RecenterAnchor,
     /// vim `]]` / `[[` — jump to next/previous assistant-prose turn. AC3
     JumpProseAnchor(Direction),
-    /// vim `G` override — jump to latest assistant-prose turn. AC6
+    /// vim `]P` chord — jump to latest assistant-prose turn.
+    /// Originally bound to `G` by Story 16.6 AC6; relocated to `]P` by S16.8
+    /// preflight rebinding (2026-05-03) so `G` returns to vim-bottom semantic
+    /// per ADR-16-03 (Anchor as Explicit User Investment). The bracket-prefix
+    /// chord (vs a `g`-prefix chord) avoids the flicker problem where single-`g`
+    /// would fire `ScrollToTop` first; bracket leader has no first-key side
+    /// effect. Mnemonic: `]` family for "forward to last X"; capital `P` = "Prose".
+    /// The dispatcher arm at `event_loop.rs::JumpToLatestProseAnchor` is
+    /// unchanged — only the keystroke that produces this variant moved.
     JumpToLatestProseAnchor,
     /// vim `Tab` narrow override — cycle invocations within focused expanded turn. AC5
     CycleInvocationInFocusedTurn,
@@ -895,6 +903,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 };
             }
             // --- Story 16.6: vim bracket-prefix chord state machine (AC10) ---
+            // S16.8 preflight rebinding (2026-05-03): added `]P` arm — the new home
+            // for `JumpToLatestProseAnchor` (relocated from S16.6's `G` binding so
+            // S16.8 can return `G` to vim-bottom semantic per ADR-16-03). Bracket
+            // leader has no first-key side effect, so `]P` produces no flicker
+            // unlike a hypothetical `gp` chord (single-`g` would jump to top first).
+            // Mnemonic: `]` family for "forward to last X"; capital `P` = "Prose".
             _b if state.pending_bracket.is_some() => {
                 let leader = state.pending_bracket.take().unwrap();
                 state.needs_redraw = true;
@@ -902,6 +916,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 return match (leader, c) {
                     (']', ']') => InputAction::JumpProseAnchor(Direction::Down),
                     ('[', '[') => InputAction::JumpProseAnchor(Direction::Up),
+                    (']', 'P') => InputAction::JumpToLatestProseAnchor,
                     _ => {
                         tracing::debug!("bracket-prefix chord cancelled with '{}{}'", leader, c);
                         InputAction::Consumed
@@ -960,13 +975,31 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
                 InputAction::Consumed
             }
-            // G = jump to latest assistant-prose turn (Story 16.6 AC6 override).
-            // Empty-transcript fallback: event_loop dispatcher handles.
-            'G' => InputAction::JumpToLatestProseAnchor,
+            // G = jump to bottom (vim-native semantic restored).
+            // Story 16.6 had bound G to JumpToLatestProseAnchor (AC6 override);
+            // S16.8 preflight rebinding (2026-05-03) returned G to vim-bottom per
+            // ADR-16-03 (Anchor as Explicit User Investment). The displaced
+            // S16.6 behavior moved to the `gp` chord (see g-prefix chord block above).
+            // S16.8 dev will further migrate this direct mutation to
+            // `view_state.reconcile(Some(ViewEvent::Scroll(ScrollDelta::Bottom)), &layout)`
+            // per AC3 + AC15 (with mode-aware Pinned-mode teaching toast); pre-S16.8
+            // this matches the legacy 2-mode auto-follow pattern used in sidebar/task/help.
+            'G' => {
+                state.scroll_offset = 0;
+                state.auto_scroll = true;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
             // g = jump to top (mirror of G). Sets scroll_offset to its max so
             // the first message is visible; auto_scroll off so the view doesn't
             // snap back to the bottom on the next render. Required for
             // jump-to-top-then-rewind flows (Story 4-3b + Story 5-0 contract tests).
+            // S16.8 Task 6 will introduce a `pending_g` chord state on TuiState to
+            // detect the `gg` chord (idempotent jump-to-top per AC2). The S16.8
+            // preflight rebinding (2026-05-03) deliberately did NOT pre-ship that
+            // chord state — the `JumpToLatestProseAnchor` relocation went to the
+            // existing `]P` bracket-prefix chord (no flicker; see ADR-16-03 + the
+            // bracket-prefix handler block above).
             'g' => {
                 let max_offset = state
                     .total_content_height
@@ -3531,11 +3564,52 @@ mod tests {
     }
 
     #[test]
-    fn g_capital_emits_jump_to_latest_prose_anchor() {
+    fn g_capital_in_chat_focus_jumps_to_bottom_legacy_two_mode() {
+        // S16.8 preflight rebinding (2026-05-03): G returns to vim-bottom semantic
+        // per ADR-16-03. Pre-S16.8 this matches the legacy 2-mode auto-follow pattern
+        // (scroll_offset=0, auto_scroll=true). S16.8 dev migrates this to
+        // view_state.reconcile(Some(ViewEvent::Scroll(ScrollDelta::Bottom)), &layout)
+        // per AC3 + AC15 (mode-aware Pinned-mode teaching toast).
         let mut state = make_state();
         state.focus = FocusState::Chat;
+        state.scroll_offset = 5;
+        state.auto_scroll = false;
         let action = handle_char(&mut state, 'G');
-        assert_eq!(action, InputAction::JumpToLatestProseAnchor);
+        assert_eq!(action, InputAction::Consumed);
+        assert_eq!(state.scroll_offset, 0, "G must scroll to bottom");
+        assert!(state.auto_scroll, "G must re-enable auto-scroll");
+    }
+
+    #[test]
+    fn rbracket_capital_p_chord_emits_jump_to_latest_prose_anchor() {
+        // S16.8 preflight rebinding (2026-05-03): the S16.6 G→JumpToLatestProseAnchor
+        // binding moved to the ]P chord (bracket-prefix family). Bracket leader has
+        // no first-key side effect, so ]P produces no flicker (unlike a hypothetical
+        // gp chord where single-g would fire ScrollToTop first). See ADR-16-03.
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        // First press: ] — sets pending_bracket = Some(']'), no scroll, no flicker
+        let first = handle_char(&mut state, ']');
+        assert_eq!(first, InputAction::Consumed);
+        assert_eq!(state.pending_bracket, Some(']'));
+        // Second press: P (capital) — dispatches JumpToLatestProseAnchor + clears pending_bracket
+        let second = handle_char(&mut state, 'P');
+        assert_eq!(second, InputAction::JumpToLatestProseAnchor);
+        assert!(state.pending_bracket.is_none(), "]P chord must clear pending_bracket");
+    }
+
+    #[test]
+    fn rbracket_lowercase_p_does_not_dispatch_jump_to_latest_prose_anchor() {
+        // ]p (lowercase) is NOT the prose-anchor binding — only ]P (capital) dispatches.
+        // Lowercase keystroke falls through the chord handler's catch-all → Consumed,
+        // pending_bracket cleared. Prevents accidental dispatch on shift-key fumble.
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        handle_char(&mut state, ']');
+        assert_eq!(state.pending_bracket, Some(']'));
+        let action = handle_char(&mut state, 'p');
+        assert_eq!(action, InputAction::Consumed);
+        assert!(state.pending_bracket.is_none(), "invalid bracket chord must clear pending_bracket");
     }
 
     #[test]
