@@ -305,17 +305,18 @@ fn test_no_new_eventbus_bypass() {
     //                                                       PlanExecutionStarted x2 +
     //                                                       SystemNotice handlers in
     //                                                       plan-mode slash commands)
-    //   src/infrastructure/startup.rs               3 sites (bootstrap diagnostics —
+    //   src/infrastructure/startup.rs               4 sites (bootstrap diagnostics —
     //                                                       pre-event-loop, EventBus
-    //                                                       not yet observable)
+    //                                                       not yet observable; +1 for
+    //                                                       S16.8 AC14 mouse capture hint)
     //   src/adapters/toolset_adapter.rs             2 sites (tool execution streaming)
     //   src/infrastructure/signals.rs               1 site  (shutdown signal)
     //   src/adapters/skill_activation.rs            1 site  (activation event)
-    // Total: 37
+    // Total: 38
     //
     // To reduce: convert the call site to `event_bus.emit_domain(event)`.
     // Tracked in deferred-work as part of Epic 6 retro AI-6.2 follow-on.
-    const MAX_KNOWN_BYPASSES: usize = 37;
+    const MAX_KNOWN_BYPASSES: usize = 38;
 
     let src_dir = Path::new("src");
     let files = collect_rs_files(src_dir);

@@ -29,6 +29,10 @@ class TestVimHelpOverlay:
         """Help overlay contains 'VIM FOLD & MOTION' with expected bindings."""
         tui.chat_mode()
         tui.open_help()
+        for _ in range(15):
+            tui.send(Chat.SCROLL_DOWN)
+            tui.wait(0.05)
+        tui.wait(0.3)
         tui.wait_for_screen("VIM FOLD & MOTION")
         tui.assert_screen_contains("VIM FOLD & MOTION")
         # Spot-check key bindings from AC8 table
@@ -41,16 +45,16 @@ class TestVimHelpOverlay:
         tui.assert_screen_contains("zz")
         tui.assert_screen_contains("Recenter view")
         tui.assert_screen_contains("]]")
-        tui.assert_screen_contains("Jump to next assistant-prose turn")
+        tui.assert_screen_contains("Next assistant-prose turn")
         tui.assert_screen_contains("Tab")
         tui.assert_screen_contains("Cycle invocations")
         # S16.8 rebinding: jump-to-latest-prose moved from G to ]P bracket-prefix chord
         # per ADR-16-03 (chosen over gp to avoid the single-g jump-to-top flicker)
         tui.assert_screen_contains("]P")
-        tui.assert_screen_contains("Jump to latest assistant-prose turn")
+        tui.assert_screen_contains("Previous assistant-prose turn")
         # G now reads as vim-bottom (restored by S16.8)
         tui.assert_screen_contains("G")
-        tui.assert_screen_contains("Jump to bottom")
+        tui.assert_screen_contains("Jump to oldest message")
         tui.close_overlay()
 
 

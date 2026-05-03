@@ -64,6 +64,46 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
             ],
         },
         HelpCategory {
+            name: "SCROLL & MOUSE",
+            bindings: vec![
+                HelpBinding {
+                    key: "Ctrl+d",
+                    description: "Scroll half page down",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+u",
+                    description: "Scroll half page up",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+f",
+                    description: "Scroll full page down (Chat focus — search elsewhere)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+b",
+                    description: "Scroll full page up",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Mouse wheel",
+                    description: "Scroll by wheel_lines (default 3 lines)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Shift+Wheel",
+                    description: "Scroll half page per tick",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Hold Shift",
+                    description: "Select text for copy (bypasses mouse capture)",
+                    available: true,
+                },
+            ],
+        },
+        HelpCategory {
             name: "VIM FOLD & MOTION",
             bindings: vec![
                 HelpBinding {
@@ -103,12 +143,12 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "]]",
-                    description: "Jump to next assistant-prose turn",
+                    description: "Next assistant-prose turn / Release anchor (when pinned)",
                     available: true,
                 },
                 HelpBinding {
                     key: "[[",
-                    description: "Jump to previous assistant-prose turn",
+                    description: "Previous assistant-prose turn / Release anchor (when pinned)",
                     available: true,
                 },
                 HelpBinding {
@@ -123,7 +163,12 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "G",
-                    description: "Jump to bottom",
+                    description: "Jump to newest message — no effect if already at the bottom",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "gg (or g)",
+                    description: "Jump to oldest message (legacy single-g preserved from v1.4)",
                     available: true,
                 },
             ],

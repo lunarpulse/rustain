@@ -409,7 +409,7 @@ fn test_tui_renders_with_theme_colors() {
                     0,
                     None,
                     None,
-                    None,
+                    None, false,
                 );
             }
         })

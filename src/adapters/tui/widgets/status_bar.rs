@@ -27,6 +27,7 @@ pub fn render(
     active_agent_name: Option<&str>,
     pending_plan_reminder_at_turn: Option<u32>,
     drill_down_breadcrumb: Option<&str>,
+    pinned_active: bool,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -39,7 +40,19 @@ pub fn render(
     } else {
         format!(" {}", model)
     };
-    let mut left_spans: Vec<Span> = vec![Span::styled(model_label, Style::default().fg(fg))];
+    let mut left_spans: Vec<Span> = Vec::new();
+
+    // S16.8 AC15: Persistent anchor indicator when Pinned (LEFT slot).
+    if pinned_active {
+        left_spans.push(Span::styled(
+            " ⚓ ".to_string(),
+            Style::default()
+                .fg(theme.colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    left_spans.push(Span::styled(model_label, Style::default().fg(fg)));
 
     if let Some(breadcrumb) = drill_down_breadcrumb {
         left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));

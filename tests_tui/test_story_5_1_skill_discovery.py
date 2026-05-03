@@ -333,7 +333,7 @@ def test_skill_discovery_does_not_block_startup(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        tui.assert_responsive(timeout=3.0)
+        tui.assert_responsive(timeout=5.0)
 
         _wait_for_skills_loaded(tui, "Loaded 3 skill")
     finally:

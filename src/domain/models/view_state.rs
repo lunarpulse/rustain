@@ -184,6 +184,12 @@ pub enum ViewEvent {
     StreamAppend {
         appended_lines: usize,
     },
+    /// S16.8 AC15: Explicit anchor drop + scroll.  The two-stage confirmation
+    /// gate in `handle_input` emits this on the second scroll-intent within
+    /// 2000ms while Pinned.  Flips mode to Reading then applies the delta.
+    DropAnchorAndScroll {
+        delta: ScrollDelta,
+    },
 }
 
 /// Minimal layout POD — no `ratatui::Rect` (hexagonal boundary).
@@ -412,6 +418,11 @@ impl ViewState {
             } => self.apply_fold_toggle(prev_focused_turn_top, prev_max_offset, layout),
             ViewEvent::StreamAppend { appended_lines } => {
                 self.apply_stream_append(appended_lines, layout);
+            }
+            ViewEvent::DropAnchorAndScroll { delta } => {
+                // S16.8 AC15: Explicit drop — flip to Reading, then apply scroll.
+                self.mode = AnchorMode::Reading;
+                self.apply_scroll(delta, layout);
             }
         }
     }

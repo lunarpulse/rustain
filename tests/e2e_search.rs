@@ -106,8 +106,8 @@ fn render_once(
                 &streaming,
                 &ViewState::default(),
                 &SystemClock::default(),
-                state.scroll_offset,
-                state.auto_scroll,
+                state.scroll_offset(),
+                state.auto_scroll(),
                 &theme,
                 &mut tab_render_state,
                 &HashMap::<String, ToolBlockState>::new(),
@@ -127,7 +127,10 @@ fn render_once(
 
 #[test]
 fn test_e2e_ctrl_f_opens_search_bar() {
-    let mut state = make_state_with_focus(FocusState::Chat);
+    // S16.8: Ctrl+F in Chat focus → ScrollFullPageDown (narrow override).
+    // Search overlay opens via Ctrl+F in Input focus (empty buffer).
+    let mut state = make_state_with_focus(FocusState::Input);
+    state.input_buffer.clear();
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlF));
     assert_eq!(action, InputAction::OpenSearch);
     assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));

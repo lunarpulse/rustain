@@ -235,8 +235,8 @@ impl TestHarness {
         let tab_render_state = &mut self.tab_render_state;
         let tool_states = &self.tool_block_states;
         let feedback = &self.feedback_blocks;
-        let scroll_offset = self.state.scroll_offset;
-        let auto_scroll = self.state.auto_scroll;
+        let scroll_offset = self.state.scroll_offset();
+        let auto_scroll = self.state.auto_scroll();
         let status = &self.state.status;
         let input_buffer = &self.state.input_buffer;
         let cursor_position = self.state.cursor_position;
@@ -286,7 +286,7 @@ impl TestHarness {
                         0,
                         None,
                         None,
-                        None,
+                        None, false,
                     );
 
                     input_box::render(
@@ -423,7 +423,7 @@ impl TestHarness {
         self.streaming.is_streaming = true;
         self.streaming.phase = StreamingPhase::AccumulatingText;
         self.state.status = StatusState::Streaming;
-        self.state.auto_scroll = true;
+        self.state.set_auto_scroll(true);
         self.state.needs_redraw = true;
     }
 
@@ -1014,7 +1014,7 @@ fn test_e2e_scroll_navigation() {
 
     // Should be at bottom (auto_scroll)
     assert_eq!(
-        h.state.scroll_offset, 0,
+        h.state.scroll_offset(), 0,
         "Should be at bottom after messages"
     );
 
@@ -1022,28 +1022,28 @@ fn test_e2e_scroll_navigation() {
     // (In production, chat_pane::render returns the height and event_loop stores it)
     h.state.total_content_height = 100; // Simulate enough content to scroll
 
-    // Switch to chat focus and scroll up
+    // Switch to chat focus and scroll up.
+    // S16.8: k now returns ScrollLineUp (scroll mutation happens in event_loop,
+    // not handle_input). Simulate the scroll effect manually.
     h.focus_chat();
     let action = h.type_char('k');
+    assert_eq!(action, InputAction::ScrollLineUp, "k should emit ScrollLineUp");
+    // Simulate event_loop dispatch: scroll up by 1 line
+    let current = h.state.scroll_offset();
+    h.state.set_scroll_offset(current + 1);
+    h.state.set_auto_scroll(false);
     assert!(
-        matches!(action, InputAction::Consumed),
-        "k should scroll up"
-    );
-    assert!(
-        h.state.scroll_offset > 0,
+        h.state.scroll_offset() > 0,
         "Scroll offset should increase after k"
     );
 
-    // Jump to bottom with G (S16.6: returns JumpToLatestProseAnchor for event loop;
-    // harness has no event loop, so verify the action and simulate the result)
+    // Jump to bottom with G. S16.8: G returns ScrollToBottom (was JumpToLatestProseAnchor in S16.6).
     let action = h.type_char('G');
-    assert!(
-        matches!(action, InputAction::JumpToLatestProseAnchor),
-        "G should return JumpToLatestProseAnchor"
-    );
-    h.state.scroll_offset = 0;
-    h.state.auto_scroll = true;
-    assert_eq!(h.state.scroll_offset, 0, "G should jump to bottom");
+    assert_eq!(action, InputAction::ScrollToBottom, "G should emit ScrollToBottom");
+    // Simulate event_loop dispatch
+    h.state.set_scroll_offset(0);
+    h.state.set_auto_scroll(true);
+    assert_eq!(h.state.scroll_offset(), 0, "G should jump to bottom");
 }
 
 // Covers: FR22 (vim keybindings), FR16 (input controls)

@@ -14,7 +14,7 @@ use rustain::adapters::tui::terminal;
 #[ignore]
 fn test_terminal_setup_and_teardown() {
     // Setup should succeed on a real terminal
-    let result = terminal::setup();
+    let result = terminal::setup(true);
     assert!(
         result.is_ok(),
         "terminal::setup() failed: {:?}",
@@ -30,7 +30,7 @@ fn test_terminal_setup_and_teardown() {
     assert!(size.width > 0 && size.height > 0);
 
     // Teardown should succeed
-    let teardown_result = terminal::teardown();
+    let teardown_result = terminal::teardown(true);
     assert!(
         teardown_result.is_ok(),
         "terminal::teardown() failed: {:?}",

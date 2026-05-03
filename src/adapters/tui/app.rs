@@ -3,6 +3,7 @@ use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary
 use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
+use crate::domain::models::StatusState;
 use crate::domain::models::autocomplete::AutocompleteKind;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 
@@ -309,6 +310,31 @@ pub enum InputAction {
     JumpToLatestProseAnchor,
     /// vim `Tab` narrow override — cycle invocations within focused expanded turn. AC5
     CycleInvocationInFocusedTurn,
+    // === Story 16.8: fast scroll + mouse ===
+    /// Ctrl+d — scroll half page down (Chat focus). AC1
+    ScrollHalfPageDown,
+    /// Ctrl+u — scroll half page up (Chat focus). AC1
+    ScrollHalfPageUp,
+    /// Ctrl+b — scroll full page up (Chat focus). AC1
+    ScrollFullPageUp,
+    /// Ctrl+f — scroll full page down (Chat focus narrow override). AC1, AC9
+    ScrollFullPageDown,
+    /// `gg` or single `g` — jump to top (Reading mode). AC2
+    ScrollToTop,
+    /// `G` — jump to bottom (Following mode) or no-op when Pinned. AC3
+    ScrollToBottom,
+    /// Mouse wheel scroll event. AC4
+    MouseScroll(crate::domain::models::view_state::ScrollDelta),
+    /// Legacy `j` — scroll one line down. Migrated from direct mutation. AC7
+    ScrollLineDown,
+    /// Legacy `k` — scroll one line up. Migrated from direct mutation. AC7
+    ScrollLineUp,
+    /// Block-boundary jump (J/K/{/}) — carries pre-computed offset + auto_scroll.
+    /// The event-loop dispatcher sets view_state.scroll_offset directly. AC7
+    BlockJump {
+        offset: usize,
+        auto_scroll: bool,
+    },
 }
 
 /// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
@@ -336,17 +362,22 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
         state.chord_leader_active = false;
         state.pending_z = false;
         state.pending_bracket = None;
+        state.pending_g = false;
     }
     match event {
         DomainInputEvent::KeyPress(c) => handle_char(state, *c),
         DomainInputEvent::SpecialKey(key) => handle_special_key(state, *key),
+        DomainInputEvent::MouseScroll(delta) => {
+            state.needs_redraw = true;
+            InputAction::MouseScroll(*delta)
+        }
         DomainInputEvent::Resize(w, h) => {
             // Anchor-based scroll preservation: find the message index at the
             // top of the viewport using the *old* HeightCache before invalidation.
-            if state.scroll_offset > 0 && !state.block_boundaries.is_empty() {
+            if state.scroll_snapshot > 0 && !state.block_boundaries.is_empty() {
                 let old_vp = state.viewport_height as usize;
                 let max_offset = state.total_content_height.saturating_sub(old_vp);
-                let clamped = state.scroll_offset.min(max_offset);
+                let clamped = state.scroll_snapshot.min(max_offset);
                 let top_line = max_offset.saturating_sub(clamped);
 
                 // Find which message index contains this top_line by scanning
@@ -615,40 +646,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'a' => return InputAction::PermissionAlwaysAllow,
             's' => return InputAction::PermissionSessionAllow,
             'f' => return InputAction::PermissionDenyFeedback,
-            // AC6: chat-scroll preserved while the prompt is up
+            // AC6: chat-scroll preserved while the prompt is up.
+            // Story 16.8, AC7: migrated from direct mutation to InputAction emission.
             'j' => {
-                if state.scroll_offset > 0 {
-                    state.scroll_offset -= 1;
-                    state.auto_scroll = state.scroll_offset == 0;
-                    state.needs_redraw = true;
-                }
-                return InputAction::Consumed;
+                state.needs_redraw = true;
+                return InputAction::ScrollLineDown;
             }
             'k' => {
-                let max_offset = state
-                    .total_content_height
-                    .saturating_sub(state.viewport_height as usize);
-                if state.scroll_offset < max_offset {
-                    state.scroll_offset += 1;
-                    state.auto_scroll = false;
-                    state.needs_redraw = true;
-                }
-                return InputAction::Consumed;
+                state.needs_redraw = true;
+                return InputAction::ScrollLineUp;
             }
             'G' => {
-                state.scroll_offset = 0;
-                state.auto_scroll = true;
                 state.needs_redraw = true;
-                return InputAction::Consumed;
+                return InputAction::ScrollToBottom;
             }
             'g' => {
-                let max_offset = state
-                    .total_content_height
-                    .saturating_sub(state.viewport_height as usize);
-                state.scroll_offset = max_offset;
-                state.auto_scroll = false;
                 state.needs_redraw = true;
-                return InputAction::Consumed;
+                return InputAction::ScrollToTop;
             }
             _ => return InputAction::Consumed,
         }
@@ -673,24 +687,14 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'y' => return InputAction::SkillTrustAccept,
             'n' => return InputAction::SkillTrustDecline,
             'i' => return InputAction::SkillTrustInspect,
+            // AC6: chat-scroll preserved while the prompt is up. S16.8: migrated to InputActions.
             'j' => {
-                if state.scroll_offset > 0 {
-                    state.scroll_offset -= 1;
-                    state.auto_scroll = state.scroll_offset == 0;
-                    state.needs_redraw = true;
-                }
-                return InputAction::Consumed;
+                state.needs_redraw = true;
+                return InputAction::ScrollLineDown;
             }
             'k' => {
-                let max_offset = state
-                    .total_content_height
-                    .saturating_sub(state.viewport_height as usize);
-                if state.scroll_offset < max_offset {
-                    state.scroll_offset += 1;
-                    state.auto_scroll = false;
-                    state.needs_redraw = true;
-                }
-                return InputAction::Consumed;
+                state.needs_redraw = true;
+                return InputAction::ScrollLineUp;
             }
             _ => return InputAction::Consumed,
         }
@@ -882,10 +886,19 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 _ => InputAction::Ignored,
             }
         }
-        FocusState::Chat => match c {
+        FocusState::Chat => {
+            // Story 16.8 AC2: reset pending_g on any non-`g` key (falls through
+            // to normal handler — unlike z/bracket prefixes which discard non-matching keys).
+            if state.pending_g && c != 'g' {
+                state.pending_g = false;
+            }
+            match c {
             // --- Story 16.6: vim z-prefix chord state machine (AC10) ---
             _z if state.pending_z => {
                 state.pending_z = false;
+                // P8: Let 'g' through — user intended jump-to-top, not a cancelled z-chord.
+                // 'g' is also reserved for future z-g chord expansion; consume it
+                // as ScrollToTop rather than as a discarded cancelled-chord keystroke.
                 state.needs_redraw = true;
                 tracing::debug!("vim z-prefix chord: z + '{}'", c);
                 return match c {
@@ -896,6 +909,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     'R' => InputAction::ExpandAllTurns,
                     's' => InputAction::ToggleSummaryTier,
                     'z' => InputAction::RecenterAnchor,
+                    'g' => InputAction::ScrollToTop,
                     _ => {
                         tracing::debug!("z-prefix chord cancelled with '{}'", c);
                         InputAction::Consumed
@@ -952,122 +966,108 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 InputAction::Consumed
             }
             'q' => InputAction::Quit,
-            // j = scroll down (toward newer content) = decrement offset-from-bottom
-            // offset=0 means "at bottom"; j moves toward bottom, so offset decreases
+            // j = scroll down (toward newer content). Story 16.8, AC7:
+            // migrated from direct mutation to InputAction emission;
+            // event-loop dispatcher calls dispatch_view_scroll(LineDown).
             'j' => {
-                if state.scroll_offset > 0 {
-                    state.scroll_offset -= 1;
-                    state.auto_scroll = state.scroll_offset == 0;
-                    state.needs_redraw = true;
-                }
-                InputAction::Consumed
+                state.needs_redraw = true;
+                InputAction::ScrollLineDown
             }
-            // k = scroll up (toward older content) = increment offset-from-bottom
-            // Clamped to max scrollable range to prevent unbounded growth
+            // k = scroll up (toward older content). Story 16.8, AC7:
+            // migrated from direct mutation to InputAction emission;
+            // event-loop dispatcher calls dispatch_view_scroll(LineUp).
             'k' => {
-                let max_offset = state
-                    .total_content_height
-                    .saturating_sub(state.viewport_height as usize);
-                if state.scroll_offset < max_offset {
-                    state.scroll_offset += 1;
-                    state.auto_scroll = false;
-                    state.needs_redraw = true;
-                }
-                InputAction::Consumed
+                state.needs_redraw = true;
+                InputAction::ScrollLineUp
             }
             // G = jump to bottom (vim-native semantic restored).
             // Story 16.6 had bound G to JumpToLatestProseAnchor (AC6 override);
             // S16.8 preflight rebinding (2026-05-03) returned G to vim-bottom per
             // ADR-16-03 (Anchor as Explicit User Investment). The displaced
-            // S16.6 behavior moved to the `gp` chord (see g-prefix chord block above).
-            // S16.8 dev will further migrate this direct mutation to
-            // `view_state.reconcile(Some(ViewEvent::Scroll(ScrollDelta::Bottom)), &layout)`
-            // per AC3 + AC15 (with mode-aware Pinned-mode teaching toast); pre-S16.8
-            // this matches the legacy 2-mode auto-follow pattern used in sidebar/task/help.
+            // S16.8 binding moved to the `]P` bracket chord.
+            // Mode-aware dispatcher: Pinned → no-op + teaching toast; else ScrollToBottom.
+            // See event_loop.rs dispatcher for the mode check (AC3 + AC15).
             'G' => {
-                state.scroll_offset = 0;
-                state.auto_scroll = true;
                 state.needs_redraw = true;
-                InputAction::Consumed
+                InputAction::ScrollToBottom
             }
-            // g = jump to top (mirror of G). Sets scroll_offset to its max so
-            // the first message is visible; auto_scroll off so the view doesn't
-            // snap back to the bottom on the next render. Required for
-            // jump-to-top-then-rewind flows (Story 4-3b + Story 5-0 contract tests).
-            // S16.8 Task 6 will introduce a `pending_g` chord state on TuiState to
-            // detect the `gg` chord (idempotent jump-to-top per AC2). The S16.8
-            // preflight rebinding (2026-05-03) deliberately did NOT pre-ship that
-            // chord state — the `JumpToLatestProseAnchor` relocation went to the
-            // existing `]P` bracket-prefix chord (no flicker; see ADR-16-03 + the
-            // bracket-prefix handler block above).
+            // g = jump to top (mirror of G). Single-`g` immediately fires
+            // ScrollToTop (legacy alias preserved from Story 1.4) AND sets
+            // pending_g so a follow-up `g` is detected as `gg` chord.
+            // Idempotent: if already at top, ScrollToTop is a no-op.
+            // S16.8 Task 6, AC2.
             'g' => {
-                let max_offset = state
-                    .total_content_height
-                    .saturating_sub(state.viewport_height as usize);
-                state.scroll_offset = max_offset;
-                state.auto_scroll = false;
+                let was_gg = state.pending_g;
+                // P6: On gg chord, the first g already jumped to top — second g
+                // is idempotent, so skip the redundant dispatch.
+                state.pending_g = !was_gg;
                 state.needs_redraw = true;
-                InputAction::Consumed
+                if was_gg {
+                    tracing::debug!("gg chord: second g, idempotent skip");
+                    InputAction::Consumed
+                } else {
+                    InputAction::ScrollToTop
+                }
             }
-            // J (shift+j) = jump to next content block boundary (down, toward newer)
+            // J = jump to next content block boundary. S16.8, AC7: migrated to BlockJump.
             'J' => {
                 if let Some(new_offset) = find_next_boundary(
-                    state.scroll_offset,
+                    state.scroll_snapshot,
                     &state.block_boundaries,
                     Direction::Down,
                     state.total_content_height,
                     state.viewport_height as usize,
                 ) {
-                    state.scroll_offset = new_offset;
-                    state.auto_scroll = new_offset == 0;
                     state.needs_redraw = true;
+                    InputAction::BlockJump { offset: new_offset, auto_scroll: new_offset == 0 }
+                } else {
+                    InputAction::Consumed
                 }
-                InputAction::Consumed
             }
-            // K (shift+k) = jump to previous content block boundary (up, toward older)
+            // K = jump to previous content block boundary
             'K' => {
                 if let Some(new_offset) = find_next_boundary(
-                    state.scroll_offset,
+                    state.scroll_snapshot,
                     &state.block_boundaries,
                     Direction::Up,
                     state.total_content_height,
                     state.viewport_height as usize,
                 ) {
-                    state.scroll_offset = new_offset;
-                    state.auto_scroll = false;
                     state.needs_redraw = true;
+                    InputAction::BlockJump { offset: new_offset, auto_scroll: false }
+                } else {
+                    InputAction::Consumed
                 }
-                InputAction::Consumed
             }
             // { = jump to previous user message
             '{' => {
                 if let Some(new_offset) = find_next_boundary(
-                    state.scroll_offset,
+                    state.scroll_snapshot,
                     &state.user_message_boundaries,
                     Direction::Up,
                     state.total_content_height,
                     state.viewport_height as usize,
                 ) {
-                    state.scroll_offset = new_offset;
-                    state.auto_scroll = false;
                     state.needs_redraw = true;
+                    InputAction::BlockJump { offset: new_offset, auto_scroll: false }
+                } else {
+                    InputAction::Consumed
                 }
-                InputAction::Consumed
             }
             // } = jump to next user message
             '}' => {
                 if let Some(new_offset) = find_next_boundary(
-                    state.scroll_offset,
+                    state.scroll_snapshot,
                     &state.user_message_boundaries,
                     Direction::Down,
                     state.total_content_height,
                     state.viewport_height as usize,
                 ) {
-                    state.scroll_offset = new_offset;
-                    state.auto_scroll = new_offset == 0;
                     state.needs_redraw = true;
+                    InputAction::BlockJump { offset: new_offset, auto_scroll: new_offset == 0 }
+                } else {
+                    InputAction::Consumed
                 }
-                InputAction::Consumed
             }
             // ? = toggle help overlay
             // Covers: FR108, UX-DR94 (AC1: ? opens help from any non-Input focus)
@@ -1113,6 +1113,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             // ' = open the bookmark list panel (Story 4-4, AC10; UX-DR91)
             '\'' => InputAction::OpenBookmarkList,
             _ => InputAction::Ignored,
+        }
         },
         FocusState::Sidebar {
             panel: _panel,
@@ -1321,9 +1322,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         state.needs_redraw = true;
     }
     // Cancel pending vim chords on any special key.
-    if state.pending_z || state.pending_bracket.is_some() {
+    if state.pending_z || state.pending_bracket.is_some() || state.pending_g {
         state.pending_z = false;
         state.pending_bracket = None;
+        state.pending_g = false;
         state.needs_redraw = true;
     }
 
@@ -1961,12 +1963,13 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
 
         DomainKey::CtrlC => InputAction::CancelOrQuit,
-        // Ctrl+F in Chat OR Input focus (when nothing pending): open the
-        // within-conversation search overlay (Story 4-4 AC1). No-op from
-        // other focus states — Tier-1 overlays intercept earlier.
+        // Ctrl+F — narrow-override per S16.8: page-down in Chat focus, search elsewhere
+        // (Story 4-4 AC1, UX-DR86 preserved for non-Chat focus).
+        DomainKey::CtrlF if state.focus == FocusState::Chat => {
+            InputAction::ScrollFullPageDown
+        }
         DomainKey::CtrlF
-            if state.focus == FocusState::Chat
-                || (state.focus == FocusState::Input && state.input_buffer.is_empty()) =>
+            if state.focus == FocusState::Input && state.input_buffer.is_empty() =>
         {
             let prior = state.focus.clone();
             state.search_state = crate::adapters::tui::state::SearchState::new();
@@ -1975,6 +1978,31 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             state.focus = FocusState::Overlay(OverlayType::Search);
             state.needs_redraw = true;
             InputAction::OpenSearch
+        }
+        // P11: Ctrl+F in Input with non-empty buffer — give user feedback
+        // instead of silently consuming.
+        DomainKey::CtrlF
+            if state.focus == FocusState::Input && !state.input_buffer.is_empty() =>
+        {
+            state.status = StatusState::Flash {
+                message: "Clear input or press Esc to search".into(),
+                remaining_ms: 1500,
+            };
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // Ctrl+D — scroll half page down (Chat focus only). Story 16.8, AC1.
+        DomainKey::CtrlD if state.focus == FocusState::Chat => {
+            InputAction::ScrollHalfPageDown
+        }
+        // Ctrl+U — scroll half page up (Chat focus); clear-buffer in Input focus.
+        // Story 16.8, AC1.
+        DomainKey::CtrlU if state.focus == FocusState::Chat => {
+            InputAction::ScrollHalfPageUp
+        }
+        // Ctrl+B — scroll full page up (Chat focus only). Story 16.8, AC1.
+        DomainKey::CtrlB if state.focus == FocusState::Chat => {
+            InputAction::ScrollFullPageUp
         }
         DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
@@ -2717,10 +2745,31 @@ fn handle_search_overlay_key(state: &mut TuiState, key: DomainKey) -> InputActio
 /// Convert a crossterm key event into a domain input event.
 /// This is the ONLY place where crossterm types are mapped to domain types.
 // Covers: FR16, UX-DR76, UX-DR74
-pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<DomainInputEvent> {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+pub fn convert_crossterm_event(event: &crossterm::event::Event, mouse_cfg: &crate::domain::models::MouseConfig) -> Option<DomainInputEvent> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     match event {
+        // Mouse wheel events. Story 16.8, AC4.
+        Event::Mouse(MouseEvent {
+            kind, modifiers, ..
+        }) => {
+            let wheel_lines = mouse_cfg.wheel_lines.max(1);
+            match (kind, modifiers.contains(KeyModifiers::SHIFT)) {
+                (MouseEventKind::ScrollUp, true) => {
+                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::HalfPageUp))
+                }
+                (MouseEventKind::ScrollDown, true) => {
+                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::HalfPageDown))
+                }
+                (MouseEventKind::ScrollUp, false) => {
+                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::WheelUp(wheel_lines)))
+                }
+                (MouseEventKind::ScrollDown, false) => {
+                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::WheelDown(wheel_lines)))
+                }
+                _ => None, // ScrollLeft/ScrollRight ignored
+            }
+        }
         Event::Key(KeyEvent {
             code, modifiers, ..
         }) => {
@@ -2728,13 +2777,23 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event) -> Option<Domain
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('c') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlC));
             }
+            // Ctrl+D → scroll half page down (Chat focus). Story 16.8, AC1.
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('d') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlD));
+            }
             // Ctrl+E → toggle multi-line mode
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
             }
             // Ctrl+F → within-conversation search (Story 4-4 AC1, UX-DR86)
+            // NOTE: S16.8 narrow-override — in Chat focus this emits ScrollFullPageDown
+            // via handle_special_key; convert_crossterm_event still maps to CtrlF.
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('f') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlF));
+            }
+            // Ctrl+B → scroll full page up (Chat focus). Story 16.8, AC1.
+            if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('b') {
+                return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlB));
             }
             // Ctrl+H → toggle history sidebar
             // Covers: FR107, UX-DR20
@@ -2870,7 +2929,7 @@ mod tests {
     fn alt_v_maps_to_alt_v_domain_key() {
         let event = alt_key('v');
         assert!(matches!(
-            convert_crossterm_event(&event),
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default()),
             Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
         ));
     }
@@ -2880,7 +2939,7 @@ mod tests {
         // Regression: ensure AltM still works after AltV addition
         let event = alt_key('m');
         assert!(matches!(
-            convert_crossterm_event(&event),
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default()),
             Some(DomainInputEvent::SpecialKey(DomainKey::AltM))
         ));
     }
@@ -2889,7 +2948,7 @@ mod tests {
     fn ctrl_v_does_not_map_to_alt_v() {
         // Ctrl+V must not accidentally trigger clipboard paste (terminals intercept it)
         let event = ctrl_key('v');
-        let result = convert_crossterm_event(&event);
+        let result = convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default());
         assert!(!matches!(
             result,
             Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
@@ -2934,10 +2993,28 @@ mod tests {
     use crate::adapters::tui::state::SearchSubstate;
 
     fn open_search(state: &mut TuiState) {
+        // S16.8 narrow-override: Ctrl+F in Chat focus emits ScrollFullPageDown.
+        // To open search, use Input focus (or send Ctrl+F with Chat→open_search helper).
+        state.focus = FocusState::Input;
+        state.input_buffer.clear();
+        let evt = ctrl_key('f');
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+            handle_input(state, &DomainInputEvent::SpecialKey(key));
+        }
+    }
+
+    #[test]
+    fn ctrl_f_in_chat_now_emits_scroll_full_page_down() {
+        // S16.8 narrow-override: Ctrl+F in Chat focus → ScrollFullPageDown.
+        // Search overlay is still accessible via Ctrl+F in Input focus.
+        let mut state = make_state();
         state.focus = FocusState::Chat;
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt) {
-            handle_input(state, &DomainInputEvent::SpecialKey(key));
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+            let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
+            assert_eq!(action, InputAction::ScrollFullPageDown);
+        } else {
+            panic!("Ctrl+F must produce a domain event");
         }
     }
 
@@ -2952,6 +3029,22 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_f_in_input_focus_opens_search() {
+        // S16.8: Ctrl+F from Input (empty buffer) still opens search.
+        // This test replaces the old ctrl_f_in_chat_... test path.
+        let mut state = make_state();
+        state.focus = FocusState::Input;
+        state.input_buffer.clear();
+        let evt = ctrl_key('f');
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+            let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
+            assert_eq!(action, InputAction::OpenSearch);
+        } else {
+            panic!("Ctrl+F must produce a domain event");
+        }
+    }
+
+    #[test]
     fn ctrl_f_from_input_with_empty_buffer_opens_search() {
         // AC1 (party-mode Fix 16): Ctrl+F opens the search overlay from
         // either `Chat` OR `Input` focus when the input buffer is empty.
@@ -2959,7 +3052,7 @@ mod tests {
         state.focus = FocusState::Input;
         state.input_buffer.clear();
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt) {
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
         }
         assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
@@ -2975,7 +3068,7 @@ mod tests {
         state.focus = FocusState::Input;
         state.input_buffer = "hello".to_string();
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt) {
+        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
         }
         assert_ne!(state.focus, FocusState::Overlay(OverlayType::Search));
@@ -3429,7 +3522,7 @@ mod tests {
     fn ctrl_k_maps_to_ctrl_k_domain_key() {
         let event = ctrl_key('k');
         assert!(matches!(
-            convert_crossterm_event(&event),
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default()),
             Some(DomainInputEvent::SpecialKey(DomainKey::CtrlK))
         ));
     }
@@ -3564,20 +3657,15 @@ mod tests {
     }
 
     #[test]
-    fn g_capital_in_chat_focus_jumps_to_bottom_legacy_two_mode() {
-        // S16.8 preflight rebinding (2026-05-03): G returns to vim-bottom semantic
-        // per ADR-16-03. Pre-S16.8 this matches the legacy 2-mode auto-follow pattern
-        // (scroll_offset=0, auto_scroll=true). S16.8 dev migrates this to
-        // view_state.reconcile(Some(ViewEvent::Scroll(ScrollDelta::Bottom)), &layout)
-        // per AC3 + AC15 (mode-aware Pinned-mode teaching toast).
+    fn g_capital_in_chat_focus_emits_scroll_to_bottom() {
+        // S16.8: G handler now emits ScrollToBottom InputAction instead of
+        // direct mutation. The event-loop dispatcher handles the actual scroll
+        // (via dispatch_view_scroll) and mode-aware Pinned no-op (AC3).
         let mut state = make_state();
         state.focus = FocusState::Chat;
-        state.scroll_offset = 5;
-        state.auto_scroll = false;
         let action = handle_char(&mut state, 'G');
-        assert_eq!(action, InputAction::Consumed);
-        assert_eq!(state.scroll_offset, 0, "G must scroll to bottom");
-        assert!(state.auto_scroll, "G must re-enable auto-scroll");
+        assert_eq!(action, InputAction::ScrollToBottom);
+        assert!(state.needs_redraw, "G must request redraw");
     }
 
     #[test]

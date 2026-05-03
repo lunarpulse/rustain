@@ -591,6 +591,7 @@ class RustainTUI:
 
     def open_search(self) -> None:
         """Open within-conversation search (Ctrl+F)."""
+        self.send(ESC)
         self.send(CTRL_F)
         time.sleep(0.5)
 

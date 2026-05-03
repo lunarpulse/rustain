@@ -46,7 +46,7 @@ pub use config::AppConfig;
 #[allow(unused_imports)]
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
-pub use config::{AutoPanelsConfig, LayoutConfig, ProviderConfig};
+pub use config::{AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig};
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 #[allow(unused_imports)]

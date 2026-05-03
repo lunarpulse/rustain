@@ -122,10 +122,100 @@ fn reconcile_fold_toggle<F>(
         Some(crate::domain::models::ViewEvent::FoldToggle { turn_id: event_turn_id, prev_focused_turn_top, prev_max_offset }),
         &post_layout,
     );
-    tab_manager.active_tab_mut().scroll_offset = resolved;
-    tab_manager.active_tab_mut().auto_scroll = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
-    state.scroll_offset = resolved;
-    state.auto_scroll = tab_manager.active_tab().auto_scroll;
+    tab_manager.active_tab_mut().view_state.scroll_offset = resolved;
+    state.scroll_snapshot = resolved;
+    state.auto_snapshot = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
+    state.needs_redraw = true;
+}
+
+/// S16.8 AC15: Two-stage anchor-confirmation gate for scroll-intent events.
+///
+/// When the user is Pinned and emits a scroll-intent (j/k/wheel/page-scroll):
+/// first tick shows a toast and no-ops; second tick within 2000ms drops the
+/// anchor via `ViewEvent::DropAnchorAndScroll` and applies the scroll.
+///
+/// Jump-intents (G, gg) and non-scroll inputs (BlockJump) are NOT gated here.
+fn apply_scroll_intent(
+    tab_manager: &mut crate::domain::models::tab::TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    app_state: &AppState,
+    delta: crate::domain::models::view_state::ScrollDelta,
+) {
+    use crate::domain::models::AnchorMode;
+    use crate::domain::models::ViewEvent;
+
+    let is_pinned = matches!(
+        tab_manager.active_tab().view_state.mode,
+        AnchorMode::Pinned(_)
+    );
+
+    if !is_pinned {
+        dispatch_view_scroll(tab_manager, state, conversation, delta);
+        return;
+    }
+
+    // Pinned: two-stage confirmation (AC15 clauses 1-3).
+    let clock = tab_manager.active_tab().clock.clone();
+    let now = clock.now();
+    let needs_toast = match state.pending_anchor_drop {
+        None => true,
+        Some(t) => now.duration_since(t) > std::time::Duration::from_millis(2000),
+    };
+
+    if needs_toast {
+        state.pending_anchor_drop = Some(now);
+        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: Some(conversation.id.clone()),
+            level: crate::domain::models::NoticeLevel::Info,
+            message: "Anchored to this turn. Scroll again to release, or press ]] .".to_string(),
+        });
+        state.needs_redraw = true;
+    } else {
+        // Second tick within 2000ms: drop anchor via explicit ViewEvent.
+        state.pending_anchor_drop = None;
+        // Pre-flip mode to Reading so apply_scroll sees Reading not Pinned.
+        tab_manager.active_tab_mut().view_state.mode = AnchorMode::Reading;
+        dispatch_view_scroll(tab_manager, state, conversation, delta);
+    }
+}
+
+/// Dispatch a scroll delta through `view_state.reconcile()` — the single
+/// write-path into ViewState.
+///
+/// D1 (2026-05-03): Rewritten from direct mutation to the reconcile pathway.
+/// Uses a minimal LayoutMetrics built from state.total_content_height (the
+/// render-derived height from `chat_pane::render`, which walks `messages`)
+/// rather than from `build_layout_metrics` (which walks `conversation.turns`).
+/// These can diverge; the renderer's value is what the user sees on screen.
+///
+/// Scroll math is exclusively in `view_state.rs::apply_scroll`.
+fn dispatch_view_scroll(
+    tab_manager: &mut crate::domain::models::tab::TabManager,
+    state: &mut TuiState,
+    _conversation: &Conversation,
+    delta: crate::domain::models::view_state::ScrollDelta,
+) {
+    use crate::domain::models::ViewEvent;
+    use crate::domain::models::view_state::LayoutMetrics;
+
+    let layout = LayoutMetrics {
+        viewport_height: state.viewport_height as usize,
+        total_content_height: state.total_content_height,
+        turn_top_offsets: vec![],
+        focused_turn_top: None,
+    };
+
+    let resolved = tab_manager.active_tab_mut().view_state.reconcile(
+        Some(ViewEvent::Scroll(delta)),
+        &layout,
+    );
+
+    state.scroll_snapshot = resolved;
+    state.auto_snapshot = matches!(
+        tab_manager.active_tab().view_state.mode,
+        crate::domain::models::AnchorMode::Following
+    );
     state.needs_redraw = true;
 }
 
@@ -489,7 +579,7 @@ pub async fn run(
             Some(event_result) = terminal_events.next() => {
                 match event_result {
                     Ok(event) => {
-                        if let Some(domain_event) = convert_crossterm_event(&event) {
+                        if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
                             // Intercept input when recovery prompt is active
                             if state.active_feedback_id.as_deref() == Some("recovery") {
                                 use crate::domain::events::DomainInputEvent;
@@ -1275,8 +1365,8 @@ pub async fn run(
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
-                                        state.scroll_offset = 0;
-                                        state.auto_scroll = true;
+                                        state.scroll_snapshot = 0;
+                                        state.auto_snapshot = true;
                                         state.total_content_height = 0;
                                         state.block_boundaries.clear();
                                         state.message_boundaries.clear();
@@ -2971,12 +3061,12 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     } else {
                                         // Determine which message is focused
-                                        let fork_message_index = if state.auto_scroll {
+                                        let fork_message_index = if state.auto_snapshot {
                                             conversation.messages.len().saturating_sub(1)
                                         } else {
                                             let vp = state.viewport_height as usize;
                                             let max_off = state.total_content_height.saturating_sub(vp);
-                                            let clamped = state.scroll_offset.min(max_off);
+                                            let clamped = state.scroll_snapshot.min(max_off);
                                             let top_line = max_off.saturating_sub(clamped);
                                             match state.message_boundaries.binary_search(&top_line) {
                                                 Ok(i) => i,
@@ -3116,12 +3206,12 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     } else {
                                         // MIRRORED FROM FORK: same message-targeting algorithm
-                                        let target_message_index = if state.auto_scroll {
+                                        let target_message_index = if state.auto_snapshot {
                                             conversation.messages.len().saturating_sub(1)
                                         } else {
                                             let vp = state.viewport_height as usize;
                                             let max_off = state.total_content_height.saturating_sub(vp);
-                                            let clamped = state.scroll_offset.min(max_off);
+                                            let clamped = state.scroll_snapshot.min(max_off);
                                             let top_line = max_off.saturating_sub(clamped);
                                             match state.message_boundaries.binary_search(&top_line) {
                                                 Ok(i) => i,
@@ -3664,6 +3754,7 @@ pub async fn run(
                                 }
 
                                 InputAction::JumpProseAnchor(direction) => {
+                                    state.pending_anchor_drop = None; // S16.8 AC15: explicit anchor action resets gate
                                     let turns = conversation.turns.clone();
                                     let focused = tab_manager.active_tab().view_state.focused_turn.clone();
                                     let vp_height = state.viewport_height as usize;
@@ -3676,7 +3767,7 @@ pub async fn run(
                                         let rs = state.tab_render_state(state.active_tab_id);
                                         chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states)
                                     };
-                                    let scroll_offset = state.scroll_offset;
+                                    let scroll_offset = state.scroll_snapshot;
                                     let total_h = layout.total_content_height;
                                     let vp_h = layout.viewport_height;
                                     let visible_bottom = total_h.saturating_sub(scroll_offset);
@@ -3754,16 +3845,33 @@ pub async fn run(
                                         // Set Pinned mode via reconcile (correctly anchors the turn)
                                         let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
-                                        // Override scroll with render-computed block_boundaries (same accuracy as {}/{})
-                                        if let Some(msg_idx) = conversation.messages.iter().position(|m| m.id == t.id.0) {
-                                            if msg_idx < state.block_boundaries.len() {
-                                                let block_top = state.block_boundaries[msg_idx];
-                                                let vp = state.viewport_height as usize;
-                                                let max_offset = state.total_content_height.saturating_sub(vp);
-                                                state.scroll_offset = max_offset.saturating_sub(block_top);
-                                                state.auto_scroll = false;
-                                                tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_offset;
-                                            }
+                                        // Compute scroll position using the same render-driven approach
+                                        // as {}/{}.  Try the TurnId→MessageId mapping (rebuild_messages_mirror
+                                        // guarantees it for assistant turns); fall back to a content-based
+                                        // linear scan for conversations loaded from disk where IDs diverge.
+                                        let msg_idx = conversation.messages.iter().position(|m| m.id == t.id.0)
+                                            .or_else(|| {
+                                                // Fallback: match by turn's first prose part text prefix
+                                                let first_prose = t.parts.iter().find_map(|p| {
+                                                    if let crate::domain::models::TurnPart::Prose { text, .. } = p {
+                                                        Some(text.as_str())
+                                                    } else { None }
+                                                });
+                                                first_prose.and_then(|prose| {
+                                                    conversation.messages.iter()
+                                                        .filter(|m| m.role == crate::domain::models::MessageRole::Assistant)
+                                                        .position(|m| m.content.starts_with(prose) || prose.starts_with(&m.content))
+                                                })
+                                            });
+                                        if let Some(idx) = msg_idx {
+                                            state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
+                                                idx,
+                                                &state.message_boundaries,
+                                                state.total_content_height,
+                                                state.viewport_height as usize,
+                                            );
+                                            state.auto_snapshot = state.scroll_snapshot == 0;
+                                            tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_snapshot;
                                         }
                                     } else {
                                         tracing::debug!("JumpProseAnchor: no prose anchor in direction={:?}", direction);
@@ -3789,23 +3897,35 @@ pub async fn run(
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
                                         let layout = { let tool_block_states = state.tool_block_states.clone(); let clock = tab_manager.active_tab().clock.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
-                                        // Use render-computed block_boundaries for accurate scroll
-                                        if let Some(msg_idx) = conversation.messages.iter().position(|m| m.id == t.id.0) {
-                                            if msg_idx < state.block_boundaries.len() {
-                                                let block_top = state.block_boundaries[msg_idx];
-                                                let vp = state.viewport_height as usize;
-                                                let max_offset = state.total_content_height.saturating_sub(vp);
-                                                state.scroll_offset = max_offset.saturating_sub(block_top);
-                                                state.auto_scroll = false;
-                                                tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_offset;
-                                            }
+                                        // Use render-driven message_boundaries with ID-match + fallback
+                                        let msg_idx = conversation.messages.iter().position(|m| m.id == t.id.0)
+                                            .or_else(|| {
+                                                let first_prose = t.parts.iter().find_map(|p| {
+                                                    if let crate::domain::models::TurnPart::Prose { text, .. } = p {
+                                                        Some(text.as_str())
+                                                    } else { None }
+                                                });
+                                                first_prose.and_then(|prose| {
+                                                    conversation.messages.iter()
+                                                        .filter(|m| m.role == crate::domain::models::MessageRole::Assistant)
+                                                        .position(|m| m.content.starts_with(prose) || prose.starts_with(&m.content))
+                                                })
+                                            });
+                                        if let Some(idx) = msg_idx {
+                                            state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
+                                                idx,
+                                                &state.message_boundaries,
+                                                state.total_content_height,
+                                                state.viewport_height as usize,
+                                            );
+                                            state.auto_snapshot = state.scroll_snapshot == 0;
+                                            tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_snapshot;
                                         }
                                     } else {
-                                        tab_manager.active_tab_mut().scroll_offset = 0;
-                                        tab_manager.active_tab_mut().auto_scroll = true;
+                                        tab_manager.active_tab_mut().view_state.scroll_offset = 0;
                                         tab_manager.active_tab_mut().view_state.mode = crate::domain::models::AnchorMode::Following;
-                                        state.scroll_offset = 0;
-                                        state.auto_scroll = true;
+                                        state.scroll_snapshot = 0;
+                                        state.auto_snapshot = true;
                                         tracing::debug!("JumpToLatestProseAnchor: empty transcript fallback");
                                     }
                                     state.needs_redraw = true;
@@ -3827,7 +3947,7 @@ pub async fn run(
                                             let rs = state.tab_render_state(state.active_tab_id);
                                             chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states)
                                         };
-                                        let scroll_offset = state.scroll_offset;
+                                        let scroll_offset = state.scroll_snapshot;
                                         let total_h = layout.total_content_height;
                                         let vp_h = layout.viewport_height;
                                         let visible_bottom = total_h.saturating_sub(scroll_offset);
@@ -3843,16 +3963,30 @@ pub async fn run(
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(turn_id.clone()));
                                         let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: turn_id.clone() }), &layout);
-                                        // Use render-computed block_boundaries for accurate scroll
-                                        if let Some(msg_idx) = conversation.messages.iter().position(|m| m.id == turn_id.0) {
-                                            if msg_idx < state.block_boundaries.len() {
-                                                let block_top = state.block_boundaries[msg_idx];
-                                                let vp = state.viewport_height as usize;
-                                                let max_offset = state.total_content_height.saturating_sub(vp);
-                                                state.scroll_offset = max_offset.saturating_sub(block_top);
-                                                state.auto_scroll = false;
-                                                tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_offset;
-                                            }
+                                        // Use render-driven message_boundaries with ID-match + content fallback
+                                        let msg_idx = conversation.messages.iter().position(|m| m.id == turn_id.0)
+                                            .or_else(|| {
+                                                let target_turn = turns.iter().find(|t| t.id == turn_id);
+                                                let first_prose = target_turn.and_then(|t| t.parts.iter().find_map(|p| {
+                                                    if let crate::domain::models::TurnPart::Prose { text, .. } = p {
+                                                        Some(text.as_str())
+                                                    } else { None }
+                                                }));
+                                                first_prose.and_then(|prose| {
+                                                    conversation.messages.iter()
+                                                        .filter(|m| m.role == crate::domain::models::MessageRole::Assistant)
+                                                        .position(|m| m.content.starts_with(prose) || prose.starts_with(&m.content))
+                                                })
+                                            });
+                                        if let Some(idx) = msg_idx {
+                                            state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
+                                                idx,
+                                                &state.message_boundaries,
+                                                state.total_content_height,
+                                                state.viewport_height as usize,
+                                            );
+                                            state.auto_snapshot = state.scroll_snapshot == 0;
+                                            tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_snapshot;
                                         }
                                         state.status = StatusState::Flash { message: format!("Recenter: turn snapshot to top"), remaining_ms: 2000 };
                                     } else {
@@ -3935,6 +4069,61 @@ pub async fn run(
                                         session_index.set_active(Some(&conversation.id));
                                         state.needs_redraw = true;
                                     }
+                                }
+
+                                // === Story 16.8: Fast scroll + mouse dispatchers ===
+
+                                InputAction::ScrollLineDown => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::LineDown);
+                                }
+                                InputAction::ScrollLineUp => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::LineUp);
+                                }
+                                InputAction::BlockJump { offset, auto_scroll } => {
+                                    // S16.8, AC7: Block-boundary jumps set absolute scroll offset.
+                                    tab_manager.active_tab_mut().view_state.scroll_offset = offset;
+                                    if auto_scroll {
+                                        tab_manager.active_tab_mut().view_state.mode = crate::domain::models::AnchorMode::Following;
+                                    } else {
+                                        // P3: Jumps away from bottom enter Reading so mode and offset stay consistent.
+                                        tab_manager.active_tab_mut().view_state.mode = crate::domain::models::AnchorMode::Reading;
+                                    }
+                                    state.scroll_snapshot = offset;
+                                    state.auto_snapshot = auto_scroll;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ScrollHalfPageDown => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::HalfPageDown);
+                                }
+                                InputAction::ScrollHalfPageUp => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::HalfPageUp);
+                                }
+                                InputAction::ScrollFullPageDown => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::FullPageDown);
+                                }
+                                InputAction::ScrollFullPageUp => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::FullPageUp);
+                                }
+                                InputAction::ScrollToTop => {
+                                    dispatch_view_scroll(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::Top);
+                                }
+                                InputAction::ScrollToBottom => {
+                                    // Mode-aware G handler: Pinned → no-op + teaching toast; else ScrollToBottom.
+                                    // AC3 + AC15 (G is jump-intent, not scroll-intent).
+                                    let mode = tab_manager.active_tab().view_state.mode.clone();
+                                    if matches!(mode, crate::domain::models::AnchorMode::Pinned(_)) {
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: crate::domain::models::NoticeLevel::Info,
+                                            message: "Anchored. Press ]] to release, then G to jump.".to_string(),
+                                        });
+                                        state.needs_redraw = true;
+                                    } else {
+                                        dispatch_view_scroll(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::Bottom);
+                                    }
+                                }
+                                InputAction::MouseScroll(delta) => {
+                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, delta);
                                 }
 
                                 InputAction::Consumed | InputAction::Ignored => {}
@@ -5770,13 +5959,13 @@ fn apply_search_rescan(conversation: &Conversation, state: &mut TuiState) {
     if should_jump && !state.search_state.matches.is_empty() {
         state.search_state.focused_match_index = 0;
         let target_msg = state.search_state.matches[0].message_index;
-        state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+        state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
             target_msg,
             &state.message_boundaries,
             state.total_content_height,
             state.viewport_height as usize,
         );
-        state.auto_scroll = state.scroll_offset == 0;
+        state.auto_snapshot = state.scroll_snapshot == 0;
     }
     state.needs_redraw = true;
 }
@@ -5950,13 +6139,13 @@ fn apply_search_navigate(state: &mut TuiState, delta: i32) {
     };
     state.search_state.focused_match_index = new_idx;
     let target_msg = state.search_state.matches[new_idx].message_index;
-    state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
         target_msg,
         &state.message_boundaries,
         state.total_content_height,
         state.viewport_height as usize,
     );
-    state.auto_scroll = state.scroll_offset == 0;
+    state.auto_snapshot = state.scroll_snapshot == 0;
 
     // Wrap-around flash (only fires when len > 1 — a single match never wraps visibly).
     if len > 1 {
@@ -6016,8 +6205,8 @@ async fn apply_bookmark_toggle(
     }
 
     let target_idx = find_message_index_from_scroll_offset(
-        state.auto_scroll,
-        state.scroll_offset,
+        state.auto_snapshot,
+        state.scroll_snapshot,
         &state.message_boundaries,
         state.total_content_height,
         state.viewport_height as usize,
@@ -6120,13 +6309,13 @@ fn apply_jump_bookmark(tab_manager: &TabManager, state: &mut TuiState) {
     }
     let sel = state.bookmark_list_selected.min(bookmarks.len() - 1);
     let target_msg = bookmarks[sel];
-    state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
         target_msg,
         &state.message_boundaries,
         state.total_content_height,
         state.viewport_height as usize,
     );
-    state.auto_scroll = state.scroll_offset == 0;
+    state.auto_snapshot = state.scroll_snapshot == 0;
     state.focus = FocusState::Chat;
     state.bookmark_list_selected = 0;
     state.needs_redraw = true;
@@ -6630,13 +6819,13 @@ async fn apply_open_cross_search_result(
     // activated tab will be computed on the next render tick, so this scroll
     // may be briefly off until the first repaint — acceptable for v1.
     use crate::adapters::tui::widgets::chat_pane;
-    state.scroll_offset = chat_pane::find_scroll_offset_for_message(
+    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
         result.first_match_message_index,
         &state.message_boundaries,
         state.total_content_height,
         state.viewport_height as usize,
     );
-    state.auto_scroll = state.scroll_offset == 0;
+    state.auto_snapshot = state.scroll_snapshot == 0;
     state.focus = FocusState::Chat;
 
     // Preserve the query on state.search_state.query (inactive) so Ctrl+F
@@ -6695,8 +6884,13 @@ fn save_active_tab(
     tab.conversation = conversation.clone();
     tab.streaming = streaming.clone();
     tab.session = session_manager.clone();
-    tab.scroll_offset = state.scroll_offset;
-    tab.auto_scroll = state.auto_scroll;
+    tab.view_state.scroll_offset = state.scroll_snapshot;
+    // P1: Always persist mode so Reading/Pinned is not lost on tab switch.
+    if state.auto_snapshot {
+        tab.view_state.mode = crate::domain::models::AnchorMode::Following;
+    } else {
+        // Keep the current mode (Reading or Pinned) — don't clobber with stale.
+    }
     tab.block_boundaries = state.block_boundaries.clone();
     tab.message_boundaries = state.message_boundaries.clone();
     tab.user_message_boundaries = state.user_message_boundaries.clone();
@@ -6724,14 +6918,14 @@ fn load_active_tab(
     *streaming = tab.streaming.clone();
     *session_manager = tab.session.clone();
     *turn_queue = tab.turn_queue.clone();
-    state.scroll_offset = tab.scroll_offset;
-    // If the tab is not actively streaming, snap to bottom so the user always lands
-    // at the latest content (complete response or empty tab). If still streaming,
-    // preserve the user's scroll position (they may have scrolled up intentionally).
-    state.auto_scroll = if !tab.streaming.is_streaming {
-        true
+    state.scroll_snapshot = tab.view_state.scroll_offset;
+    // P2: Restore saved mode. Non-streaming tabs keep their view_state.mode
+    // (Reading, Following, or Pinned) rather than unconditionally forcing Following.
+    // Streaming tabs also restore the saved mode so Pinned anchors survive tab switch.
+    state.auto_snapshot = if tab.streaming.is_streaming {
+        matches!(tab.view_state.mode, crate::domain::models::AnchorMode::Following)
     } else {
-        tab.auto_scroll
+        matches!(tab.view_state.mode, crate::domain::models::AnchorMode::Following)
     };
     state.block_boundaries = tab.block_boundaries.clone();
     state.message_boundaries = tab.message_boundaries.clone();
@@ -7251,7 +7445,7 @@ fn handle_render_error(
 
     // Attempt terminal recovery
     crate::adapters::tui::terminal::restore_terminal_raw();
-    match crate::adapters::tui::terminal::setup() {
+    match crate::adapters::tui::terminal::setup(crate::adapters::tui::terminal::is_mouse_enabled()) {
         Ok(new_terminal) => {
             *terminal = new_terminal;
             tracing::info!("Terminal recovered after render failure");
@@ -7301,8 +7495,8 @@ fn render(
     tab_manager_for_bar: Option<&crate::domain::models::tab::TabManager>,
     session_index: &SessionIndex,
 ) -> Result<()> {
-    let scroll_offset = state.scroll_offset;
-    let auto_scroll = state.auto_scroll;
+    let scroll_offset = state.scroll_snapshot;
+    let auto_scroll = state.auto_snapshot;
     let mut content_height = 0usize;
     let mut block_bounds: Vec<usize> = Vec::new();
     let mut msg_bounds: Vec<usize> = Vec::new();
@@ -7946,6 +8140,7 @@ fn render(
                     state.active_agent_name.as_deref(),
                     state.pending_plan_reminder_at_turn,
                     drill_down_breadcrumb.as_deref(),
+                    tab_manager_for_bar.map_or(false, |tm| matches!(tm.active_tab().view_state.mode, crate::domain::models::AnchorMode::Pinned(_))),
                 );
                 input_box::render(
                     frame,
@@ -8014,12 +8209,12 @@ fn render(
             let anchor_line = state.block_boundaries[anchor_idx];
             let vp = state.viewport_height as usize;
             let max_offset = content_height.saturating_sub(vp);
-            state.scroll_offset = max_offset.saturating_sub(anchor_line);
-            state.auto_scroll = state.scroll_offset == 0;
+            state.scroll_snapshot = max_offset.saturating_sub(anchor_line);
+            state.auto_snapshot = state.scroll_snapshot == 0;
         } else {
             // Anchor no longer valid (conversation changed during resize) — fall back to bottom
-            state.scroll_offset = 0;
-            state.auto_scroll = true;
+            state.scroll_snapshot = 0;
+            state.auto_snapshot = true;
         }
     }
 
@@ -8812,9 +9007,9 @@ mod tests {
     }
 
     /// Index-parity regression: when an assistant message with tool-call
-    /// results sits between two user messages, `build_api_messages` emits
-    /// an extra synthetic user message (for tool results). Rehydration
-    /// must still land images on the correct turn-1 user message.
+    /// results sits between two user messages, `build_api_messages` merges
+    /// tool results into the next User message (anthropic API forbids consecutive
+    /// User roles). Rehydration must still land images on turn-1's User message.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_rehydrate_index_parity_with_tool_results() {
         use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
@@ -8843,7 +9038,7 @@ mod tests {
             .unwrap();
 
         // turn-1: user with image
-        // turn-1: assistant with a tool call + result (→ 2 API messages)
+        // turn-1: assistant with a tool call + result
         // turn-2: user with no image
         let mut assistant_with_tool = mk_chat_msg_assistant("calling tool");
         assistant_with_tool.tool_calls.push(ToolCallInfo {
@@ -8868,23 +9063,26 @@ mod tests {
         );
 
         let mut messages = message_builder::build_api_messages(&conv);
-        // Expected layout: [User(analyse), Assistant(calling), User(tool-result), User(more)]
-        assert_eq!(messages.len(), 4, "tool-result synthetic message present");
+        // Tool results are merged into turn-2's User message (anthropic forbids consecutive User roles).
+        // Layout: [User(analyse, image), Assistant(calling), User(more?, tool_results)]
+        assert_eq!(messages.len(), 3, "tool results merged into next User message");
 
         rehydrate_historical_images(&conv, &mut messages, &storage);
 
-        // Image lands on messages[0], NOT on the synthetic tool-result at [2].
+        // Image lands on messages[0] (turn-1 user).
         assert_eq!(
             messages[0].images.len(),
             1,
             "image must rehydrate onto turn-1 user message"
         );
-        assert!(
-            messages[2].images.is_empty(),
-            "synthetic tool-result user message must not receive images"
+        // Tool results land on messages[2] (turn-2 user, merged).
+        assert_eq!(
+            messages[2].tool_results.len(),
+            1,
+            "tool results must appear on turn-2 user message"
         );
         assert!(
-            messages[3].images.is_empty(),
+            messages[2].images.is_empty(),
             "turn-2 user message has no image ref"
         );
     }

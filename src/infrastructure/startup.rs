@@ -363,8 +363,20 @@ pub async fn run() -> Result<()> {
     let clipboard: Arc<dyn ClipboardPort> =
         Arc::new(crate::adapters::clipboard_adapter::NoOpClipboard::new());
 
-    // 7. Setup terminal
-    let mut tui = terminal::setup()?;
+    // 7. Setup terminal (mouse capture gated by config + RUSTAIN_NO_MOUSE env. Story 16.8, AC14)
+    let mouse_enabled = app_config.mouse.capture
+        && crate::infrastructure::utils::env_var_trimmed("RUSTAIN_NO_MOUSE")
+            .map_or(true, |v| v != "1");
+    let mut tui = terminal::setup(mouse_enabled)?;
+
+    // P13: AC14 first-launch hint — if mouse capture is active, inform the user.
+    if mouse_enabled {
+        let _ = domain_tx.send(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Info,
+            message: "Mouse scroll enabled. Hold Shift to select text for copy.".to_string(),
+        });
+    }
 
     let result = event_loop::run(
         &mut tui,
@@ -388,7 +400,7 @@ pub async fn run() -> Result<()> {
     .await;
 
     // 9. Teardown terminal (always, even on error)
-    if let Err(e) = terminal::teardown() {
+    if let Err(e) = terminal::teardown(mouse_enabled) {
         tracing::error!("Terminal teardown failed: {}", e);
     }
     tracing::info!("Rustain shutdown complete.");

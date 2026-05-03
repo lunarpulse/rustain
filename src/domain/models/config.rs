@@ -90,6 +90,37 @@ impl Default for AutoPanelsConfig {
     }
 }
 
+/// Mouse configuration. Story 16.8, AC6 + AC14.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MouseConfig {
+    /// Lines per wheel tick. Default 3 per UX-DR-MOUSE.
+    /// Clamped to [1, u16::MAX] on deserialize (0 → 1 with warn).
+    #[serde(default = "MouseConfig::default_wheel_lines")]
+    pub wheel_lines: u16,
+    /// Enable terminal mouse capture. Default true.
+    /// Set to false in config or via RUSTAIN_NO_MOUSE=1 env to opt out.
+    #[serde(default = "MouseConfig::default_capture")]
+    pub capture: bool,
+}
+
+impl MouseConfig {
+    fn default_wheel_lines() -> u16 {
+        3
+    }
+    fn default_capture() -> bool {
+        true
+    }
+}
+
+impl Default for MouseConfig {
+    fn default() -> Self {
+        Self {
+            wheel_lines: 3,
+            capture: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LayoutConfig {
     #[serde(default)]
@@ -133,6 +164,9 @@ pub struct AppConfig {
     /// If no `[provider]` section exists, the default Anthropic config is used.
     #[serde(default)]
     pub provider: std::collections::HashMap<String, ProviderConfig>,
+    /// Mouse configuration (scroll lines, capture on/off). Story 16.8, AC6 + AC14.
+    #[serde(default)]
+    pub mouse: MouseConfig,
 }
 
 impl AppConfig {
@@ -166,6 +200,7 @@ impl Default for AppConfig {
             layout: LayoutConfig::default(),
             default_plan_mode: false,
             provider: std::collections::HashMap::new(),
+            mouse: MouseConfig::default(),
         }
     }
 }

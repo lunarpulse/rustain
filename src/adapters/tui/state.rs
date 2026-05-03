@@ -961,8 +961,13 @@ pub struct TuiState {
     pub status_before_flash: Option<StatusState>,
     pub should_quit: bool,
     pub theme: Theme,
-    pub auto_scroll: bool,
-    pub scroll_offset: usize,
+    /// Scroll position snapshot synced from `view_state.scroll_offset` before
+    /// each render/input cycle. Read by app.rs boundary handlers and event_loop.
+    /// NEVER write directly — use `dispatch_view_scroll` or `reconcile_fold_toggle`.
+    pub(crate) scroll_snapshot: usize,
+    /// Auto-scroll snapshot synced from `view_state.mode == Following`.
+    /// Marked pub(crate) to prevent external crate access (tests migrate to view_state reads).
+    pub(crate) auto_snapshot: bool,
     pub total_content_height: usize,
     /// Line offsets for each content block boundary in rendered view.
     pub block_boundaries: Vec<usize>,
@@ -1006,6 +1011,16 @@ pub struct TuiState {
     /// `JumpToLatestProseAnchor` (relocated from S16.6's `G` binding per ADR-16-03).
     /// AC10
     pub pending_bracket: Option<char>,
+    /// Story 16.8: pending `g`-prefix chord for `gg` detection. AC2
+    /// Single-`g` immediately fires ScrollToTop (legacy alias preserved) AND
+    /// sets this flag; a follow-up `g` produces the idempotent `gg` chord.
+    /// Reset on any non-`g` key or non-key event via the chord-reset guard.
+    pub pending_g: bool,
+    /// S16.8 AC15: Two-stage anchor-confirmation gate.  When the user is Pinned
+    /// and emits a scroll-intent event, this field records the first tick's
+    /// instant.  A second scroll-intent within 2000ms drops the anchor via
+    /// `ViewEvent::DropAnchorAndScroll`.  Reset on `]]`/`[[` or mode change.
+    pub pending_anchor_drop: Option<std::time::Instant>,
     /// Active AskUserQuestion card state.
     pub ask_user_question: Option<AskUserQuestionState>,
     /// Oneshot sender for AskUserQuestion responses.
@@ -1185,8 +1200,8 @@ impl TuiState {
             status_before_flash: None,
             should_quit: false,
             theme: Theme::for_capability(capability),
-            auto_scroll: true,
-            scroll_offset: 0,
+            auto_snapshot: true,
+            scroll_snapshot: 0,
             total_content_height: 0,
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
@@ -1204,6 +1219,8 @@ impl TuiState {
             chord_leader_active: false,
             pending_z: false,
             pending_bracket: None,
+            pending_g: false,
+            pending_anchor_drop: None,
             ask_user_question: None,
             question_response_tx: None,
             pending_skill_trust: None,
@@ -1300,6 +1317,28 @@ impl TuiState {
     /// Get or create the render state for a specific tab.
     pub fn tab_render_state(&mut self, tab_id: TabId) -> &mut TabRenderState {
         self.tab_render_states.entry(tab_id).or_default()
+    }
+
+    /// Public getter for scroll_snapshot (pub(crate) field access for external crates like tests).
+    /// Read this value for the current scroll position. Write through dispatch_view_scroll.
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_snapshot
+    }
+
+    /// Public getter for auto_snapshot. True when view_state.mode == Following.
+    pub fn auto_scroll(&self) -> bool {
+        self.auto_snapshot
+    }
+
+    /// Public setter for scroll_snapshot. For test setup only. Production code
+    /// must use `dispatch_view_scroll` which syncs from view_state.
+    pub fn set_scroll_offset(&mut self, offset: usize) {
+        self.scroll_snapshot = offset;
+    }
+
+    /// Public setter for auto_snapshot. For test setup only.
+    pub fn set_auto_scroll(&mut self, auto: bool) {
+        self.auto_snapshot = auto;
     }
 }
 

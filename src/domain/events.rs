@@ -1,4 +1,5 @@
 use crate::domain::models::tab::ConversationId;
+use crate::domain::models::view_state::ScrollDelta;
 use crate::domain::models::{
     NoticeLevel, PermissionMode, SkillTrustResponse, StreamChunk, ToolResult,
 };
@@ -226,6 +227,8 @@ pub enum DomainInputEvent {
     ImagePaste(Vec<u8>),
     /// Plain text pasted from clipboard (bracketed paste mode).
     Paste(String),
+    /// Mouse scroll event carrying the ScrollDelta payload. Story 16.8, AC4.
+    MouseScroll(ScrollDelta),
 }
 
 /// Abstract key representation — no crossterm dependency.
@@ -253,7 +256,9 @@ pub enum DomainKey {
     End,
     Tab,
     ShiftTab,
+    CtrlB,
     CtrlC,
+    CtrlD,
     CtrlE,
     CtrlF,
     CtrlH,

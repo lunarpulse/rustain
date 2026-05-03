@@ -182,7 +182,7 @@ def test_help_overlay_shows_plan_mode_bindings(tui: RustainTUI):
     tui.chat_mode()
     tui.open_help()
     # Scroll down to find COMMANDS category (j scrolls down by 1 line)
-    for _ in range(25):
+    for _ in range(35):
         tui.send("j")
         tui.wait(0.05)
     screen = tui.get_screen_text()
@@ -190,7 +190,7 @@ def test_help_overlay_shows_plan_mode_bindings(tui: RustainTUI):
     # Scroll back to top and down a bit less to find Shift+Tab
     tui.send("g")
     tui.wait(0.1)
-    for _ in range(15):
+    for _ in range(30):
         tui.send("j")
         tui.wait(0.05)
     screen = tui.get_screen_text()

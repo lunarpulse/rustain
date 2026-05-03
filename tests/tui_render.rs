@@ -38,8 +38,8 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     app_layout.chat_pane,
                     &conversation,
                     &streaming,
-                    state.scroll_offset,
-                    state.auto_scroll,
+                    state.scroll_offset(),
+                    state.auto_scroll(),
                     &state.theme,
                     &mut TabRenderState::default(),
                     &HashMap::<String, ToolBlockState>::new(),
@@ -64,7 +64,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     0,
                     None,
                     None,
-                    None,
+                    None, false,
                 );
                 input_box::render(
                     frame,

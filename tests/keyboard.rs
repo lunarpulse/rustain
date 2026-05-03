@@ -134,11 +134,11 @@ fn test_block_jump_no_content_is_noop() {
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.scroll_offset(), 0);
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('K'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.scroll_offset(), 0);
 }
 
 // Covers: FR22 (vim keybindings), FR13 (scroll)
@@ -149,11 +149,11 @@ fn test_block_jump_down_at_bottom_noop() {
     state.focus = FocusState::Chat;
     state.total_content_height = 100;
     state.block_boundaries = vec![0, 25, 50, 75];
-    state.scroll_offset = 0; // at bottom
+    state.set_scroll_offset(0); // at bottom
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.scroll_offset(), 0);
 }
 
 // Covers: FR22 (vim keybindings), FR13 (scroll)
@@ -165,11 +165,11 @@ fn test_block_jump_up_at_top_noop() {
     state.viewport_height = 24; // tests use terminal_height as viewport
     state.total_content_height = 100;
     state.block_boundaries = vec![0, 25, 50, 75];
-    state.scroll_offset = 76; // at top (max_offset = 100-24 = 76)
+    state.set_scroll_offset(76); // at top (max_offset = 100-24 = 76)
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('K'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.scroll_offset, 76);
+    assert_eq!(state.scroll_offset(), 76);
 }
 
 // Covers: FR22 (vim keybindings), FR13 (scroll)
@@ -184,27 +184,25 @@ fn test_message_jump_no_user_messages_noop() {
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('{'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.scroll_offset(), 0);
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('}'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.scroll_offset(), 0);
 }
 
 // Covers: FR22 (vim keybindings), FR13 (scroll)
-/// J/K with single block: J from scrolled position should jump to bottom.
+/// J/K with single block: J should emit BlockJump to bottom. S16.8, AC7.
 #[test]
 fn test_block_jump_single_block() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
     state.total_content_height = 50;
     state.block_boundaries = vec![0];
-    state.scroll_offset = 10;
-
+    state.set_scroll_offset(10);
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
-    assert_eq!(action, InputAction::Consumed);
-    // Should jump to bottom (offset 0)
-    assert_eq!(state.scroll_offset, 0);
+    assert!(matches!(action, InputAction::BlockJump { offset: 0, auto_scroll: true }),
+        "J should emit BlockJump(offset=0, auto_scroll=true), got {:?}", action);
 }
 
 // === Multi-line input keyboard tests (Story 3.1) ===
@@ -1250,7 +1248,7 @@ fn test_crossterm_alt_enter_converts_to_domain_alt_enter() {
         state: KeyEventState::NONE,
     });
 
-    let domain_event = convert_crossterm_event(&event);
+    let domain_event = convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
     assert!(
         domain_event.is_some(),
         "Alt+Enter should produce a domain event"
@@ -1275,7 +1273,7 @@ fn test_crossterm_alt_m_converts_to_domain_alt_m() {
         state: KeyEventState::NONE,
     });
 
-    let domain_event = convert_crossterm_event(&event);
+    let domain_event = convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
     assert!(
         domain_event.is_some(),
         "Alt+M should produce a domain event"

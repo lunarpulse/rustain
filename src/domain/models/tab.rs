@@ -36,8 +36,10 @@ pub struct TabState {
     pub clock: Arc<dyn Clock>,
     pub session: SessionManager,
     pub session_meta: SessionMeta,
-    pub scroll_offset: usize,
-    pub auto_scroll: bool,
+    /// Scroll offset and auto-scroll are now read from `view_state.scroll_offset`
+    /// and `view_state.mode` (Story 16.8, AC10). All sync sites in event_loop.rs
+    /// write to view_state directly via `dispatch_view_scroll` and
+    /// `reconcile_fold_toggle`; these legacy fields are deleted.
     pub block_boundaries: Vec<usize>,
     pub message_boundaries: Vec<usize>,
     pub user_message_boundaries: Vec<usize>,
@@ -113,8 +115,6 @@ impl TabState {
             clock: clock.clone(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
             session_meta,
-            scroll_offset: 0,
-            auto_scroll: true,
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
             user_message_boundaries: Vec::new(),
@@ -183,8 +183,6 @@ impl TabState {
             clock: clock.clone(),
             session: SessionManager::new(SessionState::Active { id: session_id }),
             session_meta,
-            scroll_offset: 0,
-            auto_scroll: true,
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
             user_message_boundaries: Vec::new(),
@@ -200,8 +198,8 @@ impl TabState {
 
     /// Reset TUI display state (on tab creation or conversation reset).
     pub fn reset_display_state(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll = true;
+        self.view_state.scroll_offset = 0;
+        self.view_state.mode = crate::domain::models::AnchorMode::Following;
         self.block_boundaries.clear();
         self.message_boundaries.clear();
         self.user_message_boundaries.clear();

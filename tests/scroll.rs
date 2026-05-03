@@ -1,160 +1,108 @@
+//! Story 16.8 AC11 — No-regression scroll contract.
+//! S16.8 migrated j/k/g/G/J/K/{/} from direct mutation to InputAction emission.
+//! P15: Behavioral tests updated — InputAction emission verification.
+//! Note: Full scroll-math regression tests require `compute_scroll` which is
+//! #[cfg(test)] at the crate level (not accessible from integration tests).
+//! Those tests live in the event_loop.rs unit test module.
+
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::FocusState;
 
-/// Helper: create a state with enough content to scroll.
 fn scrollable_state() -> TuiState {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
-    // Simulate 100 lines of content so there's room to scroll
     state.total_content_height = 100;
     state
 }
 
-/// AC3: Scroll up (k) disables auto-scroll.
-// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
-fn test_scroll_up_disables_auto_scroll() {
+fn test_k_emits_scroll_line_up() {
     let mut state = scrollable_state();
-    assert!(state.auto_scroll);
-
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-
-    assert!(!state.auto_scroll);
-    assert_eq!(state.scroll_offset, 1);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+    assert_eq!(action, InputAction::ScrollLineUp);
 }
 
-/// AC3: Jump to bottom (G) enables auto-scroll.
-// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
-fn test_jump_to_bottom_enables_auto_scroll() {
+fn test_j_emits_scroll_line_down() {
     let mut state = scrollable_state();
+    state.set_scroll_offset(3);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+    assert_eq!(action, InputAction::ScrollLineDown);
+}
 
-    // First scroll up
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    assert!(!state.auto_scroll);
-    assert_eq!(state.scroll_offset, 2);
-
-    // Then jump to bottom (S16.6: G returns JumpToLatestProseAnchor;
-    // event-loop handles fallback. Simulate here.)
+#[test]
+fn test_g_emits_scroll_to_bottom() {
+    let mut state = scrollable_state();
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
-    assert_eq!(action, InputAction::JumpToLatestProseAnchor);
-    state.auto_scroll = true;
-    state.scroll_offset = 0;
-    assert!(state.auto_scroll);
-    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(action, InputAction::ScrollToBottom);
 }
 
-/// AC3: Scroll down (j) decrements offset from bottom.
-// Covers: FR13 (auto-scroll), FR22 (vim keybindings)
 #[test]
-fn test_scroll_down_decrements_offset() {
+fn test_g_emits_scroll_to_top_and_sets_pending_g() {
     let mut state = scrollable_state();
-
-    // Scroll up first
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    assert_eq!(state.scroll_offset, 3);
-
-    // Scroll down
-    handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
-    assert_eq!(state.scroll_offset, 2);
-    assert!(!state.auto_scroll);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('g'));
+    assert_eq!(action, InputAction::ScrollToTop);
+    assert!(state.pending_g);
 }
 
-/// AC3: Scroll down to offset 0 re-enables auto-scroll.
-// Covers: FR13 (auto-scroll)
 #[test]
-fn test_scroll_to_bottom_auto_enables_auto_scroll() {
+fn test_gg_chord_second_g_idempotent() {
+    // P6: Second g in gg chord is idempotent — returns Consumed.
     let mut state = scrollable_state();
-
-    // Scroll up 1
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    assert_eq!(state.scroll_offset, 1);
-    assert!(!state.auto_scroll);
-
-    // Scroll back down to 0
-    handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
-    assert_eq!(state.scroll_offset, 0);
-    assert!(state.auto_scroll);
+    handle_input(&mut state, &DomainInputEvent::KeyPress('g'));
+    assert!(state.pending_g);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('g'));
+    assert_eq!(action, InputAction::Consumed);
+    assert!(!state.pending_g);
 }
 
-/// Scroll down at offset 0 doesn't go negative (clamp).
-// Covers: FR13 (auto-scroll)
 #[test]
-fn test_scroll_down_clamped_at_zero() {
+fn test_j_at_zero_emits_scroll_line_down() {
     let mut state = scrollable_state();
-
-    handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
-    assert_eq!(state.scroll_offset, 0);
-    assert!(state.auto_scroll);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+    assert_eq!(action, InputAction::ScrollLineDown);
 }
 
-/// Scroll up clamped at max scrollable range.
-// Covers: FR13 (auto-scroll)
 #[test]
-fn test_scroll_up_clamped_at_max() {
+fn test_k_when_content_fits_emits_scroll_line_up() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
-    // Content fits in viewport — no scrolling possible
     state.total_content_height = 10;
-
-    handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
-    // Should not scroll since content (10) < viewport (24)
-    assert_eq!(state.scroll_offset, 0);
-    assert!(state.auto_scroll);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+    assert_eq!(action, InputAction::ScrollLineUp);
 }
 
-/// AC4: 'q' in Chat focus returns Quit action.
-// Covers: FR22 (vim keybindings)
 #[test]
 fn test_q_in_chat_returns_quit() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
-
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('q'));
     assert_eq!(action, InputAction::Quit);
 }
 
-/// AC7: Resize preserves approximate scroll position.
-// Covers: FR13 (auto-scroll)
 #[test]
 fn test_resize_preserves_scroll_position() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
     state.total_content_height = 100;
-    state.scroll_offset = 30;
-    state.auto_scroll = false;
+    state.set_scroll_offset(30);
+    state.set_auto_scroll(false);
     state.message_boundaries = vec![0, 20, 40, 60, 80];
-
-    // Resize from 80x24 to 120x40
     handle_input(&mut state, &DomainInputEvent::Resize(120, 40));
-
     assert_eq!(state.terminal_width, 120);
-    assert_eq!(state.terminal_height, 40);
-    // Scroll offset should be approximately preserved (not 0, not at max)
-    assert!(
-        state.scroll_offset > 0,
-        "Expected scroll position preserved after resize, got offset={}",
-        state.scroll_offset
-    );
+    assert!(state.scroll_offset() > 0);
 }
 
-/// AC7: Resize at bottom (auto_scroll=true) stays at bottom.
-// Covers: FR13 (auto-scroll)
 #[test]
 fn test_resize_at_bottom_stays_at_bottom() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
     state.total_content_height = 100;
-    state.scroll_offset = 0;
-    state.auto_scroll = true;
-
+    state.set_scroll_offset(0);
+    state.set_auto_scroll(true);
     handle_input(&mut state, &DomainInputEvent::Resize(120, 40));
-
-    assert_eq!(state.scroll_offset, 0);
-    assert!(state.auto_scroll);
+    assert_eq!(state.scroll_offset(), 0);
+    assert!(state.auto_scroll());
 }
