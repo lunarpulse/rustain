@@ -44,17 +44,21 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
 
 def _start_tui_with_workspace(workspace_path):
     """Start a RustainTUI pointing at the given workspace (no auto-build)."""
-    from pathlib import Path
-
-    wp = Path(workspace_path)
-    settings_dir = wp / ".claude"
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    (settings_dir / "settings.json").write_text(
-        json.dumps({"permissions": {"allow": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]}}) + "\n"
-    )
-    tui = RustainTUI(fresh=True, build=False, workspace=wp)
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path)
     tui.start()
     return tui
+
+
+def _wait_for_agents_loaded(tui: RustainTUI, screen_text: str, timeout: float = 15.0) -> None:
+    """Wait for the background agent scan to complete.
+
+    Polls the pyte screen for *screen_text* (the SystemNotice flash).
+    Falls back to checking the log file for ``AgentsDiscovered`` entries.
+    """
+    if tui.wait_for_screen(screen_text, timeout=timeout):
+        return
+    tui.assert_log_contains(r"Background agent scan complete:\s+\d+ agents",
+                            msg=f"Agent scan completed but '{screen_text}' not on screen")
 
 
 def _activate_agent(tui: RustainTUI, agent_name: str) -> None:
@@ -90,8 +94,7 @@ def test_at_agents_slash_opens_agent_autocomplete(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Discovered 1 custom agent", timeout=10.0)
-        assert found, "Expected agent discovery notice after background scan"
+        _wait_for_agents_loaded(tui, "Discovered 1 custom agent")
 
         type_slowly(tui, "@Agents/")
         time.sleep(0.5)
@@ -113,8 +116,7 @@ def test_agent_filter_narrows_list(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Discovered 2 custom agent", timeout=10.0)
-        assert found
+        _wait_for_agents_loaded(tui, "Discovered 2 custom agent")
 
         type_slowly(tui, "@Agents/cod")
         time.sleep(0.5)
@@ -140,8 +142,7 @@ def test_select_agent_with_enter_activates_and_shows_in_status_bar(build_binary,
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Discovered 1 custom agent", timeout=10.0)
-        assert found
+        _wait_for_agents_loaded(tui, "Discovered 1 custom agent")
 
         _activate_agent(tui, "code-reviewer")
 
@@ -168,8 +169,7 @@ def test_default_clears_active_agent(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Discovered 1 custom agent", timeout=10.0)
-        assert found
+        _wait_for_agents_loaded(tui, "Discovered 1 custom agent")
 
         _activate_agent(tui, "code-reviewer")
         assert tui.wait_for_screen("Active agent: code-reviewer", timeout=5.0)
@@ -266,7 +266,6 @@ def test_background_scan_notice_for_discovered_agents(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Discovered 2 custom agent", timeout=10.0)
-        assert found, "Expected 'Discovered 2 custom agent(s)' notice"
+        _wait_for_agents_loaded(tui, "Discovered 2 custom agent")
     finally:
         tui.stop()

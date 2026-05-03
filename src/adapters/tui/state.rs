@@ -1150,6 +1150,10 @@ pub struct TuiState {
     pub pending_plan_approval: Option<PendingPlanApproval>,
     /// Pending inline PlanCard awaiting user resolution (Story 6-1a).
     pub pending_plan_card: Option<PendingPlanCard>,
+    /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
+    /// when the event arrives while a stream is still active. Dispatched
+    /// after the stream completes (TurnComplete handler).
+    pub pending_agent_then_submit: Option<(String, bool)>,
     /// Which assistant-turn count the last plan reminder was injected at.
     /// `None` when no reminder is pending.
     pub pending_plan_reminder_at_turn: Option<u32>,
@@ -1247,6 +1251,7 @@ impl TuiState {
             pending_agent_activation: None,
             pending_plan_approval: None,
             pending_plan_card: None,
+            pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,
         }

@@ -389,6 +389,7 @@ pub async fn run(
     // a `spawn_blocking` thread to avoid stalling the async runtime (P7).
     // Story 16-0 AC1: writes directly into the shared Arc<RwLock<SkillRegistry>>
     // so TuiState and SkillActivator see the same catalog (DF-159).
+    tracing::debug!("Dispatching background skill scan");
     {
         let tx = domain_tx.clone();
         let shared_registry = state.skill_registry.clone();
@@ -411,6 +412,7 @@ pub async fn run(
                 Some(registry) => {
                     let count = registry.skills().len();
                     let warnings = registry.warnings_count();
+                    tracing::debug!("Background skill scan complete: {count} skills ({warnings} warnings)");
                     {
                         let mut g = shared_registry.write().await;
                         *g = registry;
@@ -418,6 +420,7 @@ pub async fn run(
                     let _ = tx.send(AppEvent::SkillsDiscovered { count, warnings });
                 }
                 None => {
+                    tracing::debug!("Background skill scan failed or timed out");
                     let _ = tx.send(AppEvent::SkillsDiscovered {
                         count: 0,
                         warnings: 0,
@@ -428,6 +431,7 @@ pub async fn run(
     }
 
     // Story 5.4 AC8: Spawn agent discovery as background task after first frame.
+    tracing::debug!("Dispatching background agent scan");
     {
         let tx = domain_tx.clone();
         let ws = workspace_path.clone();
@@ -445,6 +449,7 @@ pub async fn run(
                 Ok(Ok(reg)) => {
                     let count = reg.agents().len();
                     let warnings = reg.warnings_count();
+                    tracing::debug!("Background agent scan complete: {count} agents ({warnings} warnings)");
                     {
                         let mut slot = agent_slot.lock().await;
                         *slot = Some(reg.clone());
@@ -3994,6 +3999,37 @@ pub async fn run(
                                     state.needs_redraw = true;
                                     _active_turn = None;
 
+                                    // Dispatch any deferred AgentThenSubmit (Story 6-2a race fix)
+                                    if let Some((text, synthetic)) = state.pending_agent_then_submit.take() {
+                                        tracing::debug!("Dispatching deferred AgentThenSubmit after stream complete");
+                                        let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                        let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                        start_turn_inner(
+                                            &text,
+                                            Vec::new(),
+                                            synthetic,
+                                            &mut conversation,
+                                            &mut streaming,
+                                            &mut state,
+                                            &mut _active_turn,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                            &security,
+                                            &tools, &tool_scheduler,
+                                            &persona,
+                                            &workspace_path,
+                                            &mut session_manager,
+                                            &fs_storage,
+                                            &storage,
+                                            &app_state.plan_manager, &app_state.plan_injector,
+                                            None,
+                                            _skill_snap,
+                                            _agent_snap,
+                                            tab_manager.reset_and_clone_turn_cancel(),
+                                        ).await;
+                                    }
+
                                     // Update sidebar index on turn complete
                                     session_index.touch(
                                         &conversation.id,
@@ -5187,10 +5223,16 @@ pub async fn run(
                         }
                     }
                     AppEvent::AgentThenSubmit { conversation_id, text, synthetic } => {
-                        if conversation.id == *conversation_id && !streaming.is_streaming {
-                            let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
-                            let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                            start_turn_inner(
+                        if conversation.id == *conversation_id {
+                            if streaming.is_streaming {
+                                tracing::debug!(
+                                    "AgentThenSubmit deferred: still streaming, queuing for dispatch after turn completes"
+                                );
+                                state.pending_agent_then_submit = Some((text, synthetic));
+                            } else {
+                                let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
+                                let _agent_snap = agent_activator.snapshot(&conversation.id).await;
+                                start_turn_inner(
                                 &text,
                                 Vec::new(),
                                 synthetic,
@@ -5214,6 +5256,7 @@ pub async fn run(
                                 _agent_snap,
                                                                   tab_manager.reset_and_clone_turn_cancel(),
                             ).await;
+                            }
                         }
                     }
                     AppEvent::AskActivateSkill { conversation_id, name, arguments } => {
@@ -6977,6 +7020,7 @@ async fn start_turn_inner(
     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
     turn_cancel: CancellationToken,
 ) {
+    tracing::debug!("start_turn_inner: synthetic={synthetic} text_len={}", text.len());
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
     // (Story 4-3a.1 AC3 / DF-067).

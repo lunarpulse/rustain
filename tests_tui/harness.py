@@ -138,38 +138,43 @@ class RustainTUI:
         if self.build:
             _build_binary()
 
-        # Use a temp workspace so tests don't pollute the real project.
+        # Resolve workspace directory
         if self.workspace is None:
             self._tmpdir = tempfile.TemporaryDirectory(prefix="rustain_test_")
             self._workspace_path = Path(self._tmpdir.name)
-            # Copy .env so the API key is available
-            if ENV_FILE.exists():
-                shutil.copy2(ENV_FILE, self._workspace_path / ".env")
-            # Pre-create .rustain/config.toml (new 6-0c format) for
-            # session-level auto-allow rules.  This is what ApprovalRuntime
-            # loads at startup, so tests control permissions via this file.
-            allow_list = (
-                self.allowed_tools
-                if self.allowed_tools is not None
-                else ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-            )
-            rustain_dir = self._workspace_path / ".rustain"
-            rustain_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self._workspace_path = self.workspace
+
+        # Copy .env so the API key is available (skip if already present)
+        if ENV_FILE.exists() and not (self._workspace_path / ".env").exists():
+            shutil.copy2(ENV_FILE, self._workspace_path / ".env")
+
+        # Pre-create .rustain/config.toml (6-0c format) for
+        # session-level auto-allow rules. ApprovalRuntime loads this at
+        # startup, so tests control permissions via this file.
+        allow_list = (
+            self.allowed_tools
+            if self.allowed_tools is not None
+            else ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+        )
+        rustain_dir = self._workspace_path / ".rustain"
+        rustain_dir.mkdir(parents=True, exist_ok=True)
+        if not (rustain_dir / "config.toml").exists():
             (rustain_dir / "config.toml").write_text(
                 "[permissions]\n"
                 + f"always_tools = {json.dumps(allow_list)}\n"
             )
-            # Empty workspace rules file so load_rules() doesn't error.
+        if not (rustain_dir / "permissions.toml").exists():
             (rustain_dir / "permissions.toml").write_text("")
-            # Keep .claude/settings.json for backward compatibility with
-            # other code that may still read it (doctor, init, etc.).
-            settings_dir = self._workspace_path / ".claude"
-            settings_dir.mkdir(parents=True, exist_ok=True)
+
+        # Keep .claude/settings.json for backward compatibility with
+        # other code that may still read it (doctor, init, etc.).
+        settings_dir = self._workspace_path / ".claude"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        if not (settings_dir / "settings.json").exists():
             (settings_dir / "settings.json").write_text(
                 json.dumps({"permissions": {"allow": allow_list}}) + "\n"
             )
-        else:
-            self._workspace_path = self.workspace
 
         env = _load_env()
         # Redirect rustain's config_dir() to the test workspace so
@@ -376,10 +381,13 @@ class RustainTUI:
     def assert_responsive(self, timeout: float = 3.0) -> None:
         """Verify the TUI process is alive AND accepting input.
 
-        Sends a state-neutral probe (space + backspace) and polls for any
-        screen change within *timeout*. Raises ``RuntimeError`` if the
-        process is dead, ``TimeoutError`` if alive but unresponsive.
-        The probe is reversible — it does not alter committed application state.
+        Types a single character into the input box, then polls for the
+        character to appear on the pyte screen.  Uses ``x`` as the probe
+        character because it is unambiguous (won't trigger autocomplete
+        or overlays) and clears it afterwards via Backspace.
+
+        Raises ``RuntimeError`` if the process is dead, ``TimeoutError`` if
+        alive but unresponsive.
         """
         if self._child is None:
             raise RuntimeError("TUI not started — call .start() first")
@@ -388,8 +396,10 @@ class RustainTUI:
 
         screen_before = self.get_screen_text()
 
-        self._child.send(" ")
+        self._child.send("x")
+        time.sleep(0.1)
         self._child.send("\x7f")
+        time.sleep(0.1)
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

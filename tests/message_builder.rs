@@ -1,4 +1,4 @@
-use rustain::domain::models::{ChatMessage, Conversation, MessageRole};
+use rustain::domain::models::{ChatMessage, Conversation, MessageRole, ToolCallInfo, ToolResultInfo};
 use rustain::domain::services::message_builder::{
     ResolvedCommandContext, ResolvedFileContext, build_api_messages, build_command_context_prefix,
     build_file_context_prefix,
@@ -64,6 +64,84 @@ fn test_build_api_messages_empty_conversation() {
     let conv = make_conversation(vec![]);
     let messages = build_api_messages(&conv);
     assert!(messages.is_empty());
+}
+
+#[test]
+fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
+    // Simulate: plan proposal → tool result → synthetic task turn.
+    // Output must NOT have consecutive User messages (violates Anthropic API rule).
+    let propose_plan_tc = ToolCallInfo {
+        id: "tc-1".to_string(),
+        name: "propose_plan".to_string(),
+        input: serde_json::json!({"title": "Test", "tasks": [{"title": "Task 1"}]}),
+        result: Some(ToolResultInfo {
+            content: "Plan proposed for user approval".to_string(),
+            is_error: false,
+        }),
+        started_at_ms: Some(0),
+        completed_at_ms: Some(1000),
+        status: Some("✓ Success".to_string()),
+    };
+
+    let conv = make_conversation(vec![
+        ChatMessage {
+            synthetic: false,
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::User,
+            content: "Use propose_plan".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+            images: vec![],
+        },
+        ChatMessage {
+            synthetic: false,
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::Assistant,
+            content: "I'll create a plan".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![propose_plan_tc],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+            images: vec![],
+        },
+        ChatMessage {
+            synthetic: true,
+            id: rustain::domain::models::generate_conversation_id(),
+            role: MessageRole::User,
+            content: "Now executing task 1".to_string(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: 0,
+            token_count: None,
+            stop_reason: None,
+            images: vec![],
+        },
+    ]);
+
+    let messages = build_api_messages(&conv);
+
+    // Must have exactly 3 messages (not 4): U, A, U
+    assert_eq!(messages.len(), 3, "Expected 3 messages (U-A-U), got: {:?}", messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>());
+
+    assert_eq!(messages[0].role, MessageRole::User);
+    assert_eq!(messages[0].content, "Use propose_plan");
+    assert!(messages[0].tool_results.is_empty());
+
+    assert_eq!(messages[1].role, MessageRole::Assistant);
+    assert_eq!(messages[1].content, "I'll create a plan");
+    assert_eq!(messages[1].tool_uses.len(), 1);
+    assert_eq!(messages[1].tool_uses[0].name, "propose_plan");
+
+    assert_eq!(messages[2].role, MessageRole::User);
+    assert_eq!(messages[2].content, "Now executing task 1");
+    // The propose_plan tool result must be merged into this message
+    assert_eq!(messages[2].tool_results.len(), 1);
+    assert_eq!(messages[2].tool_results[0].tool_use_id, "tc-1");
+    assert_eq!(messages[2].tool_results[0].content, "Plan proposed for user approval");
 }
 
 // === File context attachment tests (Story 3.2, Task 4) ===

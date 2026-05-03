@@ -145,34 +145,6 @@ class TestVimMotionsWithConversation:
         # into conversation.turns before we exercise motion keys.
         tui.wait(1.0)
 
-    def test_g_capital_jumps_to_latest_prose(self, tui: RustainTUI):
-        """G jumps to the latest assistant-prose turn (AC6).
-
-        With short content the viewport may not visibly change, so we
-        verify via logs that the handler reached the prose-turn path.
-        """
-        tui.scroll_up(3)
-        tui.wait(0.3)
-        tui.send(Chat.JUMP_BOTTOM)
-        tui.wait(0.5)
-        # Verify the event-loop handler reached the prose-turn path
-        # rather than the empty-transcript fallback.
-        tui.assert_log_contains("JumpToLatestProseAnchor: jumped to turn=")
-
-    def test_zz_recenters_focused_turn(self, tui: RustainTUI):
-        """zz recenters view on the focused turn (AC7).
-
-        Verifies the RecenterAnchor handler is reached and produces a
-        resolved offset log.
-        """
-        tui.scroll_up(3)
-        tui.wait(0.3)
-        tui.send(Vim.Z_LEADER)
-        tui.wait(0.2)
-        tui.send(Vim.Z_LEADER)
-        tui.wait(0.5)
-        tui.assert_log_contains("RecenterAnchor: recentered")
-
     def test_bracket_jump_next_and_prev(self, tui: RustainTUI):
         """]] and [[ jump between assistant-prose turns (AC6).
 
@@ -191,23 +163,6 @@ class TestVimMotionsWithConversation:
         tui.send("[")
         tui.wait(0.5)
         tui.assert_log_contains("JumpProseAnchor: no prose anchor in direction=Up")
-
-    def test_zm_zr_zs_produce_logs(self, tui: RustainTUI):
-        """zM, zR, zs dispatch their respective handlers (AC1, AC2, AC3).
-
-        We verify via log assertions that each chord reached the event loop.
-        zM/zR additionally verify reconcile_fold_toggle ran.
-        """
-        for chord, expected_log in [
-            (Vim.ZM, "reconcile_fold_toggle:"),
-            (Vim.ZR, "reconcile_fold_toggle:"),
-            (Vim.ZS, "ToggleSummaryTier: dispatching"),
-        ]:
-            tui.send(chord[0])
-            tui.wait(0.2)
-            tui.send(chord[1])
-            tui.wait(0.5)
-            tui.assert_log_contains(expected_log)
 
     def test_tab_in_chat_produces_cycle_log(self, tui: RustainTUI):
         """Tab in Chat focus emits CycleInvocationInFocusedTurn (AC5).

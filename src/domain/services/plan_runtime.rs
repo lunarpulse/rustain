@@ -61,6 +61,7 @@ impl PlanRuntime {
         conversation: &mut crate::domain::models::Conversation,
         event_emitter: &dyn EventEmitter,
     ) {
+        tracing::debug!("PlanRuntime::start: plan={plan_id} conv={conversation_id}");
         // Story 6.4 reload normalization: flip Paused → Pending.
         // After restart, in-memory task_cancels is empty; a Paused
         // task has nothing to resume from. Pending lets find_next_eligible
@@ -151,6 +152,7 @@ impl PlanRuntime {
                 task_number,
                 status: PlanTaskStatus::Running,
             });
+            tracing::debug!("PlanRuntime::start emitting AgentThenSubmit task={task_number} plan={plan_id}");
             event_emitter.emit(AppEvent::AgentThenSubmit {
                 conversation_id: conversation_id.clone(),
                 text: prompt,

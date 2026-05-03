@@ -36,15 +36,7 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
 
 
 def _start_tui_with_workspace(workspace_path) -> RustainTUI:
-    from pathlib import Path
-
-    wp = Path(workspace_path)
-    settings_dir = wp / ".claude"
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    (settings_dir / "settings.json").write_text(
-        json.dumps({"permissions": {"allow": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]}}) + "\n"
-    )
-    tui = RustainTUI(fresh=True, build=False, workspace=wp)
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path)
     tui.start()
     return tui
 

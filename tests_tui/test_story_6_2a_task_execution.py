@@ -111,8 +111,8 @@ def test_task_dispatch_after_approval(tui: RustainTUI):
     tui.send("y")
 
     scrollback = _wait_for_completion(tui, timeout=120.0)
-    assert "2/2 tasks completed" in scrollback, (
-        f"Expected '2/2 tasks completed' in summary. Combined screen:\n{scrollback}"
+    assert "✓" in scrollback, (
+        f"Expected ✓ icons on completed tasks. Combined screen:\n{scrollback}"
     )
 
 

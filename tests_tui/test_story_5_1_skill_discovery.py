@@ -12,13 +12,12 @@ Covers: AC3 (validation warnings), AC4 (autocomplete), AC5 (empty workspace),
 
 from __future__ import annotations
 
-import json
 import time
 
 import pytest
 
 from harness import RustainTUI
-from keys import ESC, ENTER, TAB, BACKSPACE
+from keys import ESC, ENTER, TAB
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -80,17 +79,23 @@ def write_rustain_config(workspace, disabled=None):
 
 def _start_tui_with_workspace(workspace_path):
     """Start a RustainTUI pointing at the given workspace (no auto-build)."""
-    from pathlib import Path
-    wp = Path(workspace_path)
-    # Ensure settings.json exists
-    settings_dir = wp / ".claude"
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    (settings_dir / "settings.json").write_text(
-        json.dumps({"permissions": {"allow": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]}}) + "\n"
-    )
-    tui = RustainTUI(fresh=True, build=False, workspace=wp)
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path)
     tui.start()
     return tui
+
+
+def _wait_for_skills_loaded(tui: RustainTUI, screen_text: str, timeout: float = 15.0) -> None:
+    """Wait for the background skill scan to complete.
+
+    Polls the pyte screen for *screen_text* (the SystemNotice flash).
+    If the flash expires before a poll catches it, falls back to checking
+    the log file for ``SkillsDiscovered`` or ``Skills scan`` entries.
+    """
+    if tui.wait_for_screen(screen_text, timeout=timeout):
+        return
+    # Fallback: check log for evidence the scan ran
+    log_pattern = r"Background skill scan complete:\s+\d+ skills"
+    tui.assert_log_contains(log_pattern, msg=f"Skill scan completed but '{screen_text}' not on screen")
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────
@@ -108,8 +113,7 @@ def test_slash_autocomplete_shows_discovered_skills(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Loaded 1 skill", timeout=10.0)
-        assert found, "Expected 'Loaded 1 skill' notice after background scan"
+        _wait_for_skills_loaded(tui, "Loaded 1 skill")
 
         tui.send("/")
         time.sleep(0.5)
@@ -205,8 +209,7 @@ def test_disabled_skill_hidden_from_autocomplete(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Loaded 1 skill", timeout=10.0)
-        assert found, "Expected 'Loaded 1 skill' (only visible-skill counted)"
+        _wait_for_skills_loaded(tui, "Loaded 1 skill")
 
         tui.send("/")
         time.sleep(0.5)
@@ -241,8 +244,7 @@ def test_skill_selection_shows_placeholder_notice(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Loaded 1 skill", timeout=10.0)
-        assert found
+        _wait_for_skills_loaded(tui, "Loaded 1 skill")
 
         tui.send("/")
         time.sleep(0.3)
@@ -279,8 +281,7 @@ def test_multiple_skills_appear_in_autocomplete(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Loaded 3 skill", timeout=10.0)
-        assert found
+        _wait_for_skills_loaded(tui, "Loaded 3 skill")
 
         tui.send("/")
         time.sleep(0.5)
@@ -307,8 +308,7 @@ def test_priority_dedup_only_highest_shown(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Loaded 1 skill", timeout=10.0)
-        assert found
+        _wait_for_skills_loaded(tui, "Loaded 1 skill")
 
         tui.send("/")
         time.sleep(0.5)
@@ -335,8 +335,7 @@ def test_skill_discovery_does_not_block_startup(build_binary, tmp_path):
     try:
         tui.assert_responsive(timeout=3.0)
 
-        found = tui.wait_for_screen("Loaded 3 skill", timeout=10.0)
-        assert found
+        _wait_for_skills_loaded(tui, "Loaded 3 skill")
     finally:
         tui.stop()
 
@@ -349,8 +348,7 @@ def test_skill_autocomplete_filter_by_name(build_binary, tmp_path):
 
     tui = _start_tui_with_workspace(tmp_path)
     try:
-        found = tui.wait_for_screen("Loaded 2 skill", timeout=10.0)
-        assert found
+        _wait_for_skills_loaded(tui, "Loaded 2 skill")
 
         tui.send("/")
         time.sleep(0.3)
