@@ -398,6 +398,110 @@ src/adapters/
       openai.rs           ← NEW: OpenAI tool schema normalizer
 ```
 
+### 2.7 Token Economy: MCP Tool Description Optimization
+
+**Brainstorming date:** 2026-04-30
+**Participants:** Winston (Architect), Amelia (Developer), Mary (Business Analyst)
+
+#### 2.7.1 Problem Statement
+
+MCP tools carry verbose JSON Schema definitions. A single tool like `database_query` can have 400+ tokens of descriptions across its parameters. Including **all** MCP tool schemas in **every** LLM prompt wastes context window tokens — which costs money and reduces available context for the actual conversation.
+
+**Example:** A PostgreSQL MCP server with 15 tools, each with 3-8 parameters, each parameter with a `description` field — easily 3-5K tokens per prompt just for tool schemas. At 15-25 LLM calls per user message, this compounds rapidly.
+
+#### 2.7.2 Cost Model
+
+| Approach | Tokens/prompt (tools only) | Session cost | Relative |
+|---|---|---|---|
+| **A: Full schemas** (baseline) | 3,000 | $9.00 | 100% |
+| **B: Names-only** (user proposal) | 500 | $1.50 | 17% |
+| **C: Prompt caching alone** (Anthropic 90% discount) | 3,000 → ~300 effective | $0.90 | 10% |
+| **D: Names-only + caching** | 500 → ~50 effective | $0.15 | 1.7% |
+| **E: D + preload top-3 tools** | 50 + 900 preloaded = ~950 | $0.28 | 3.1% |
+
+*Assumptions: $3/M input tokens, 3 discovery calls for B, caching after 1st call, top-3 tools preloaded at full description, 10 MCP tools × 20 calls/user-message × 50 messages/session.*
+
+With 3 MCP servers (30 tools total), the full-schema approach costs ~$27.00/session. The tiered approach with preloading projects to ~$0.45/session — a **98.3% reduction**.
+
+#### 2.7.3 Competitor Handling
+
+| Competitor | Strategy | Risk |
+|---|---|---|
+| **OpenCode** | Full schemas as `dynamicTools`, likely leans on Anthropic prompt caching (90% discount after first call) | Caching bails them out on Anthropic but not on OpenAI/other providers |
+| **Codex-RS** | `mcp__server__tool` flat naming suggests possible schema flattening | Built for OpenAI Responses API — no Anthropic caching safety net |
+| **KIMI** | Full descriptors inline via `CallableTool` | No observed caching or truncation strategy |
+
+**Key insight:** Anthropic's prompt caching bails OpenCode out. If rustain targets multiple providers (OpenAI, Gemini, local), it can't count on provider-specific caching. The architecture must solve this at the tool-definition layer, not the API layer.
+
+#### 2.7.4 The 80/20 Reality
+
+From real coding-session telemetry:
+- **Top 3 tools** (read, write, search) account for ~75% of tool calls
+- **Next 4 tools** account for ~20%
+- **Remaining N tools** account for ~5%
+
+Only 20-30% of MCP tools get called more than once per session. The majority sit unused in every prompt, burning tokens. This is the core inefficiency to optimize against.
+
+#### 2.7.5 Recommended Architecture: 3-Tier Progressive Disclosure
+
+```mermaid
+graph TD
+    subgraph "Tier 1 — Always in prompt (~50 tokens/tool)"
+        T1[tool_name + param_names + param_types<br/>NO descriptions<br/>e.g. read_file(path: string) — Reads a file]
+    end
+
+    subgraph "Tier 2 — Preload top-N tools (~300 tokens/tool)"
+        T2[Full schema for 3-5 tools<br/>used 80% of the time<br/>configured or usage-derived]
+    end
+
+    subgraph "Tier 3 — On-demand via describe_mcp_tool (session-cached)"
+        T3[Full schema for any tool<br/>fetched lazily via function call<br/>cached for session lifetime]
+    end
+
+    T1 -->|"LLM sees all tools available"| T2
+    T2 -->|"LLM drills into details"| T3
+    T3 -->|"One round-trip per discovery<br/>~200 input + 300 output tokens"| T3
+```
+
+**Tier 1** — Strip `description`, `examples`, `default`, and `$comment` from MCP JSON Schema. Keep only `name`, `type`, `required`, and `enum` values. Descriptions like `"The path to the file to read"` are dead weight — the LLM knows what `path` means. The LLM sees all available tools at low cost.
+
+**Tier 2** — Preload full schemas for the top 3-5 tools most likely to be used. This can be configured manually (user pins favorites in config) or derived from the token ledger (usage frequency). The LLM never needs to call `describe_mcp_tool` for these — they appear fully described in every prompt.
+
+**Tier 3** — The `describe_mcp_tool(server, tool_name)` function returns the full schema on demand. Session-cached on the Rust side — an LLM calling `github_create_pr` across 5 turns only pays the round-trip once. The round-trip cost (~500 tokens, ~500ms-2s) is negligible compared to the savings (~3K tokens saved per prompt).
+
+#### 2.7.6 Where This Plugs Into CPA
+
+```
+DISCOVER  → McpCapabilityProvider registers tool stubs (name + summary + param signatures)
+ACTIVATE  → LLM sees Tier 1 stubs in system prompt
+          → Preloaded Tier 2 tools appear with full schemas
+NEGOTIATE → LLM optionally calls describe_mcp_tool() / search_mcp_tools()
+          → Result cached in HashMap<String, ToolSchema> for session lifetime
+EXECUTE   → Full schema already cached from NEGOTIATE, passed to executor
+```
+
+#### 2.7.7 Implementation Estimate
+
+| Component | Location | Effort |
+|---|---|---|
+| Extend `ToolDefinition` with `summary` field | `src/domain/models/tools.rs` | 5 LOC |
+| Strip descriptions in `ToolSchemaNormalizer` | `src/adapters/mcp/schema/normalizer.rs` | 15 LOC |
+| Serialize summary instead of full schema for prompt | `src/infrastructure/prompt_builder.rs` | 5 LOC |
+| `describe_mcp_tool` function descriptor | `src/adapters/mcp/mod.rs` | 10 LOC |
+| Session-cached tool schema lookup | `src/adapters/mcp/connection_manager.rs` | 5 LOC |
+
+**Total: ~40 LOC across 5 files.** No new port traits. No refactor of `ToolSetPort`. The `CapabilityProvider` trait already supports the progressive disclosure pattern — this aligns with how Agent Skills use the same CPA lifecycle.
+
+#### 2.7.8 Unexpected Benefit: Improved Tool Selection Accuracy
+
+Research on tool-use agents consistently shows that verbose schemas cause LLMs to latch onto irrelevant parameter descriptions and hallucinate combinations. A tight "name + signature + one-liner" is actually **higher fidelity** than the full schema dump. The 3-tier approach improves both cost AND accuracy — stripping noise reduces hallucination of tool calls with nonsensical parameter combinations.
+
+#### 2.7.9 Priority and Phasing
+
+1. **Ship Tier 1 + Tier 2 as part of Epic 9** (Story 9-2 or 9-3). The prompt savings are too large to defer. Tier 2 top-N list is config-driven initially, usage-derived later.
+2. **Ship Tier 3 (`describe_mcp_tool`) in same story** — the implementation is trivial and closes the discoverability gap.
+3. **Defer `search_mcp_tools` (Tier 3 search variant)** until a concrete MCP server with 30+ tools surfaces. Threshold-gated with vector similarity over tool embeddings.
+
 ---
 
 ## 3. Cross-Epic Intersections
@@ -464,43 +568,59 @@ graph LR
 
 ---
 
-## 5. Open Decisions
+## 5. Resolved Product Decisions
 
-The following questions require product-level input before story creation:
+**Resolved by:** John (Product Manager), 2026-04-30
+**Principle:** All three decisions are preferences, not pivots — the architecture supports every option. These are v2.0 defaults to be validated with data.
 
-### 5.1 Budget Enforcement (FR114)
+### 5.1 Budget Enforcement (FR114) — RESOLVED
 
-**Question:** Should budget enforcement be hard-block (stop the conversation when budget is exceeded) or soft-warn (notify but continue)?
+**Decision: Hard-block at 100% with interactive override prompt.**
 
-| Option | Architecture Impact |
-|--------|-------------------|
-| **Hard-block** | `BudgetGuard` becomes a gate in the streaming pipeline — checks ledger before each `ProviderPort::stream_completion()` call. Returns `DomainError::BudgetExceeded`. |
-| **Soft-warn** | `BudgetGuard` is a notification emitter — publishes `AppEvent::BudgetWarning` that the TUI renders as a `FeedbackBlock`. Conversation continues. |
+The developer who sets a $5 budget and gets a $23 bill will never trust rustain again. Trust > convenience.
 
-**Recommendation (Winston):** Hard-block with a configurable threshold. Default at 95% budget triggers warning; 100% blocks. This gives the user a grace zone while preventing runaway costs.
+When the budget limit is reached, the system blocks the next LLM call and presents an interactive prompt:
 
-### 5.2 MCP Approval Granularity (FR20)
+```
+┌─────────────────────────────────────────────────┐
+│ Budget exceeded: $12.34 / $10.00 limit           │
+│                                                   │
+│ [1] Continue (+$5.00 to budget)                   │
+│ [2] Continue (+$10.00 to budget)                   │
+│ [3] Stop this conversation                        │
+└─────────────────────────────────────────────────┘
+```
 
-**Question:** Should MCP tool approval be gated per-server or per-tool?
+Architecture: `BudgetGuard` gates the streaming pipeline. Before each `ProviderPort::stream_completion()` call, it queries the `TokenLedger` against the configured limit. On exceed, it emits `AppEvent::BudgetExceeded` which the TUI renders as an inline decision card (not a modal overlay — conversation history remains visible).
 
-| Option | UX Impact | Implementation |
-|--------|-----------|----------------|
-| **Per-server** | Trust a server → all its tools are auto-approved. Simpler UX. | `GOVERN` phase checks `McpServerDescriptor.trust_level` |
-| **Per-tool** | Approve each tool individually. More control, more clicks. | `GOVERN` phase checks per-tool allowlist |
-| **Per-server with overrides** | Default trust per server, but specific tools can be denied. Best of both. | Two-level check: server trust → tool denylist |
+**Phase 2 trigger:** If >60% of budget hits result in immediate Continue, add a soft-mode preference in v2.1.
 
-**Recommendation (Amelia):** Per-server with a trust level config. Keeps the UX simple while allowing power users to deny specific tools.
+### 5.2 MCP Approval Granularity (FR20) — RESOLVED
 
-### 5.3 Model Switching Granularity (FR33/FR34)
+**Decision: Per-server approval, ask-once-with-remember.**
 
-**Question:** Should model switching happen per-turn or per-step within a turn?
+The anti-pattern to avoid: 15-tool MCP server → 15 approval prompts → user develops a `y y y y y` reflex → every subsequent prompt is meaningless. Approval fatigue is a security problem, not a UX problem.
 
-| Option | Scope | Complexity |
-|--------|-------|-----------|
-| **Per-turn** | Model is resolved once at the start of each user turn. Covers 90% of cases. | `ModelRouter.resolve()` called once per `AgentThenSubmit` event. |
-| **Per-step** | Model can change mid-turn (e.g., escalate from Economy to Flagship for a complex tool call). | `ModelRouter.resolve()` called per LLM invocation within the tool loop. Cost attribution per-step. |
+- **v2.0:** On first `@MCP/server_name/tool` invocation: "Server 'postgres' is requesting access. Allow? [y/N]". Once approved, all its tools run. One decision, one prompt. The `CapabilityProvider::GOVERN` phase checks `McpServerDescriptor.trust_level` which defaults to `Untrusted` and transitions to `Trusted` on user approval.
+- **v2.1:** Add per-tool pinning. Tools marked with a `destructive = true` MCP annotation trigger: "Tool 'postgres/drop_table' is destructive. Always ask? [Y/n]". The `GOVERN` phase checks per-tool allowlist overrides on top of the server trust level.
 
-**Recommendation (Mary):** Per-turn for v2.0. The architecture does not preclude per-step later — `ModelRouter.resolve()` can be called at any granularity. Per-step is a v2.5+ concern driven by actual usage data from the token ledger.
+**Phase 2 trigger:** First user report of needing read/write tool distinction.
+
+### 5.3 Model Switching Granularity (FR33/FR34) — RESOLVED
+
+**Decision: Per-turn for v2.0. Instrument for per-step from day 1.**
+
+The core user need is confidence ("Am I using the right model?"), not auto-optimization. Terminal-native developers chose Rust for control — a system that auto-swaps models under them takes that away.
+
+- **v2.0:** `ModelRouter.resolve()` called once per `AgentThenSubmit` event. The user's manual model switch (`Ctrl+X, M`) sets the override at the turn boundary.
+- **Data instrumentation from day 1:** The `TokenLedger` logs per-step costs with `model_id` and `provider_id` fields even when resolving per-turn. This is non-negotiable — the per-step decision cannot be made without data, and data requires instrumentation. The `TokenUsage` struct includes a `step_index: u32` field for this purpose.
+
+**Phase 2 triggers (data-driven gates):**
+- >15% of tool calls require retries within a turn → evaluate escalation-on-retry
+- >20% of sessions involve manual model switching mid-conversation → evaluate per-step routing
+- Add `model_id` column to the JSONL ledger in Story 7.1c to capture this data
+
+**Note:** Per-step orchestration, if shipped later, will be an opt-in power-user feature, not a default. The architecture does not preclude it — `ModelRouter.resolve()` can be called at any granularity without domain changes.
 
 ---
 
@@ -511,6 +631,8 @@ The following questions require product-level input before story creation:
 | Route through existing `ProviderPort` | Yes | Yes | Yes | **Unanimous** |
 | 3-tier model resolution (KIMI pattern) | Yes | Yes | Yes | **Unanimous** |
 | MCP through `CapabilityProvider` | Yes | Yes | Yes | **Unanimous** |
+| 3-tier MCP tool description (token economy) | Yes | Yes | Yes | **Unanimous** |
+| Preload top-N MCP tools at full schema (Tier 2) | Yes | Yes | Yes | **Unanimous** |
 | Circuit breaker per MCP server | Yes | Yes | Yes | **Unanimous** |
 | `rust_decimal` for cost precision | Yes | Yes | Yes | **Unanimous** |
 | `rmcp` crate for MCP protocol | Yes | Yes | Yes | **Unanimous** |
@@ -519,9 +641,9 @@ The following questions require product-level input before story creation:
 | New `ModelRegistryPort` | Yes | Yes | Yes | **Unanimous** |
 | New `McpTransportPort` | Yes | Partial (prefers keeping it adapter-internal) | Yes | **Strong majority** |
 | Separate `ProviderFactoryPort` | Yes | No (use existing `ProviderPort` only) | Yes | **Split** |
-| Per-server MCP approval | — | Yes | — | Pending product input |
-| Hard-block budget enforcement | Yes | — | — | Pending product input |
-| Per-turn model switching | — | — | Yes | Pending product input |
+| Hard-block budget + interactive override | Yes | — | — | **Resolved (John)** |
+| Per-server MCP approval (per-tool v2.1) | — | Yes | — | **Resolved (John)** |
+| Per-turn model switching + per-step instrumentation | — | — | Yes | **Resolved (John)** |
 
 ### Key Disagreement: `McpTransportPort` vs Adapter-Internal
 
@@ -538,10 +660,11 @@ The following questions require product-level input before story creation:
 | Metric | Epic 7 | Epic 9 | Total |
 |--------|--------|--------|-------|
 | New domain types | 6 | 2 | 8 |
+| Extended domain types | 1 (TokenUsage) | 1 (ToolDefinition) | 2 |
 | New port traits | 2 | 2 | 4 |
 | New adapter files | 7 | 11 | 18 |
-| Extended existing files | 3 | 0 | 3 |
-| Estimated new LOC | ~800 | ~600 | ~1400 |
+| Extended existing files | 3 | 2 | 5 |
+| Estimated new LOC | ~800 | ~640 | ~1440 |
 
 Both epics stay within rustain's existing module structure. No new crates, no workspace splits. Every new file maps to a specific FR requirement.
 

@@ -1,6 +1,6 @@
 # Competitive Architecture Review — Epics 10 & 14
 
-**Date:** 2026-04-30
+**Date:** 2026-05-01 (updated from 2026-04-30)
 **Scope:** Epic 10 (Subagent Spawning & Ownership) and Epic 14 (A2A & Team Collaboration)
 **Purpose:** Document findings from competitive analysis of six AI coding agent implementations, synthesize architectural recommendations for rustain, and capture open decisions for the long-term P2P decentralized workspace orchestrator.
 
@@ -9,171 +9,126 @@
 | Project | Language | Key Files Analyzed | Subagent Model | A2A Model | Google A2A Spec? |
 |---------|----------|--------------------|----------------|-----------|-------------------|
 | codex-rs | Rust | `core/src/agent/control.rs`, `core/src/agent/mailbox.rs`, `protocol/src/agent_path.rs` | Hierarchical actor tree, AgentPath addressing | Mailbox + InterAgentCommunication protocol | **No** — custom protocol |
-| gemini-cli | TypeScript | `packages/core/src/agents/`, `packages/a2a-server/` | Subagents-as-tools (AgentTool pattern) | `@a2a-js/sdk` v0.3.11 — full spec compliance | **Yes** — client + server |
+| gemini-cli | TypeScript | `packages/core/src/agents/`, `packages/a2a-server/` | Subagents-as-tools (AgentTool pattern) | `@a2a-js/sdk` v0.3.11 — v0.3.x spec compliance | **Yes** — client + server |
 | opencode | TypeScript (Effect-TS) | `packages/opencode/src/tool/task.ts`, `src/session/` | Session-tree with parentID, Task tool | Result-based (parent result capture only) | **No** — ACP for clients only |
 | KIMI | Rust | `kimi-agent-rs/src/soul/agent.rs`, `tools/multiagent/` | LaborMarket registry, fixed/dynamic split | Wire pub/sub + SubagentEvent envelope | **No** — custom Wire protocol |
 | openclaw | TypeScript | `src/agents/subagent-spawn.ts`, `subagent-announce.ts`, `session-visibility.ts` | Gateway sessions, spawnDepth tracking | Announce flow + SessionsSend tool | **No** — proprietary gateway protocol |
 | rustycode | Rust | `domain/src/sub_agent.rs`, `application/src/services/sub_agent_manager.rs` | Hexagonal ports: SubAgentRegistry + MessageQueue | InterToolMessage + InMemoryMessageQueue | **No** — domain ports only |
+| **a2a-rs** | Rust | `a2aproject/a2a-rs` (81 commits, 8 crates) | N/A (SDK only) | `a2a-lf` crates.io — v0.1.x, v1.0 spec target | **Yes** — official LF Rust SDK |
+
+**Additional sources analyzed (2026-05-01 update):**
+- [A2A Protocol Specification v1.0.0](https://a2a-protocol.org/latest/specification/) — released April 2026
+- [A2A v1.0 "What's New"](https://a2a-protocol.org/latest/whats-new-v1/) — 7 breaking changes from v0.3.0
+- [A2A Roadmap](https://a2a-protocol.org/latest/roadmap/) — SDKs, TCK, community governance
+- [a2a-rs Rust SDK](https://github.com/a2aproject/a2a-rs) — official Rust A2A SDK (8 crates, `a2a-lf`)
+- [a2a-lf on crates.io](https://crates.io/crates/a2a-lf) — core protocol types crate
 
 **Participants:** Winston (Architect), Mary (Business Analyst), Amelia (Developer), Barry (Quick Flow Solo Dev)
 
 **Rustain baseline:** Hexagonal architecture in place. Agent discovery/activation works (persona switching). `ApprovalSource` already has `ForegroundSubagent` and `BackgroundAgent` variants. `AgentCore` is a 2-line placeholder (`src/infrastructure/runtime/agent_core.rs:1-3`). No subagent runtime, no child conversations, no A2A protocol. `CapabilityProvider` trait described in CLAUDE.md but not implemented.
 
-**Key finding (A2A protocol):** The term "A2A" in the agent ecosystem refers to the **Google/Linux Foundation Agent-to-Agent protocol v0.3.0** — an open standard (Apache-2.0, LF-governed) with a TypeScript reference SDK (`@a2a-js/sdk`). Among six competitors surveyed, **only gemini-cli implements the actual A2A spec.** The other five use custom protocols under the "A2A" name. **No Rust implementation of the A2A spec exists.** This is a first-mover opportunity for rustain to ship `rustain-a2a-protocol` as the reference Rust A2A crate. See section 0 for full analysis.
+**Key finding (A2A protocol — updated 2026-05-01):** The Linux Foundation's A2A protocol has reached **v1.0** (April 2026) with significant breaking changes from v0.3.0 (SCREAMING_SNAKE_CASE enums, unified Part model, restructured AgentCard, google.rpc.Status errors). An official Rust SDK (`a2a-rs`, crate `a2a-lf`) exists at `a2aproject/a2a-rs` (81 commits, 8 crates) but is early-stage (v0.1.x, 20 stars, no known production deployments). **Rustain will NOT adopt A2A as its native protocol.** Instead, rustain will build `rustain-agent-protocol` (RAP) — a peer-native, crypto-first, transport-agnostic protocol — with an A2A compatibility adapter. See companion documents: `a2a-protocol-critique.md`, `rap-protocol-design.md`, `a2a-libraries-sdks-comparison.md`.
 
 ---
 
-## 0. The Google A2A Protocol — Standard or Branding?
+## 0. The Google A2A Protocol — Standard Analysis & Rustain's Strategy
 
-Before analyzing the competitors' A2A approaches, we must clarify what "A2A" actually means — because nearly every competitor uses the term, but only one implements the actual open standard.
+Before analyzing the competitors' A2A approaches, we must understand what the A2A protocol is, its current state (v1.0), and rustain's strategic decision regarding it.
 
-### 0.1 The Real A2A Protocol
+### 0.1 The A2A Protocol — Current State (v1.0, April 2026)
 
-Google's Agent-to-Agent (A2A) protocol is **a real, open standard** — not a branding exercise. Key facts:
+The Linux Foundation's Agent-to-Agent protocol reached **v1.0 in April 2026**. Key facts:
 
 | Attribute | Detail |
 |-----------|--------|
 | **Governance** | **Linux Foundation** (not Google) |
 | **License** | Apache-2.0 |
-| **Spec version** | `0.3.0` (pre-1.0, actively developed) |
-| **Reference SDK** | `@a2a-js/sdk` v0.3.11 (TypeScript, npm) |
-| **Author** | Google (original), now LF community |
-| **Transport spec** | Agent card negotiation of transport bindings |
-| **Message format** | Typed union with `kind` discriminator, role-based |
-| **Discovery** | `/.well-known/agent-card.json` endpoint |
-| **Security** | Bearer, Basic, OAuth2, API key providers |
+| **Spec version** | `1.0.0` (released April 2026) |
+| **Previous versions** | `0.1.0`, `0.2.6`, `0.3.0` |
+| **Reference SDK** | `@a2a-js/sdk` v0.3.11 (TypeScript, npm) — targeting v0.3.x only |
+| **Rust SDK** | `a2a-rs` / `a2a-lf` v0.1.x (crates.io) — targeting v1.0 spec |
+| **Normative spec** | `a2a.proto` — single source of truth for data model |
+| **Architecture** | 3 layers: Data Model → Operations → Protocol Bindings |
+| **Protocol bindings** | JSON-RPC 2.0, gRPC/Protobuf, HTTP+JSON/REST |
+| **v0.3→v1.0 breakage** | 7 HIGH IMPACT breaking changes (see `a2a-protocol-critique.md`) |
+| **Discovery** | `/.well-known/agent-card.json` with per-interface `protocolVersion` |
+| **Security** | Bearer, API Key, OAuth2 (4 flows, PKCE), OIDC, mTLS |
+| **Error model** | `google.rpc.Status` with `google.rpc.ErrorInfo` |
+| **Roadmap** | TCK validation, SDKs in 5 languages, community governance |
 
-The protocol defines:
+**Major v1.0 changes (from v0.3.0):**
+1. Enum values: `"completed"` → `"TASK_STATE_COMPLETED"` (SCREAMING_SNAKE_CASE)
+2. Unified Part model: removed `kind` discriminator, merged TextPart+FilePart+DataPart
+3. AgentCard restructured: `preferredTransport` + `additionalInterfaces` → `supportedInterfaces[]`
+4. Error model: RFC 9457 → `google.rpc.Status` with protobuf ErrorInfo
+5. Multi-tenancy: `tenant` field on all requests
+6. Cursor-based pagination for ListTasks
+7. AgentCard signing via JWS (RFC 8785 canonicalization + RFC 7515)
 
-**AgentCard** — a self-describing capability document:
-```json
-{
-  "name": "Agent Name",
-  "description": "What this agent does",
-  "url": "http://host:port/",
-  "protocolVersion": "0.3.0",
-  "version": "0.0.1",
-  "capabilities": { "streaming": true, "pushNotifications": false, "stateTransitionHistory": true },
-  "skills": [{ "id": "...", "name": "...", "description": "...", "tags": ["..."], "examples": ["..."] }],
-  "additionalInterfaces": [{ "transport": "JSONRPC", "url": "..." }],
-  "securitySchemes": { "bearerAuth": { "scheme": "bearer" } },
-  "defaultInputModes": ["text"],
-  "defaultOutputModes": ["text"]
-}
-```
+### 0.2 The Rust SDK: a2a-rs
 
-**Task lifecycle** (state machine):
-```
-submitted → working → completed / failed / canceled / rejected / auth-required
-                    → input-required (awaiting human input)
-```
+The official Rust SDK (`a2aproject/a2a-rs`) provides 8 crates:
 
-**Supported transports** (all three shipping in the reference SDK):
-| Transport | Wire format | Bidirectional |
-|-----------|-------------|---------------|
-| **REST** | HTTP request/response | Client → Server |
-| **JSON-RPC** | JSON-RPC over HTTP | Bidirectional |
-| **gRPC** | Protobuf over HTTP/2 | Bidirectional |
+| Crate | Purpose | Maturity |
+|-------|---------|----------|
+| `a2a-lf` | Core types, errors, JSON-RPC, serde | Published (v0.1.x) |
+| `a2a-client-lf` | Async client with transport negotiation | Published |
+| `a2a-server-lf` | Axum-based server (REST + JSON-RPC) | Published |
+| `a2a-pb` | Protobuf schema + prost-generated types | Published |
+| `a2a-grpc` | tonic-based gRPC client + server | Published |
+| `a2a-slimrpc` | SLIMRPC bindings | Published |
+| `a2a-cli` | Standalone CLI binary | Published |
 
-**Streaming events:** `status-update` (task state transitions), `artifact-update` (incremental result chunks), with `final`/`lastChunk` flags for completion signaling.
+**Maturity:** Early stage — 81 commits, 72 releases (rapid churn), 20 stars, 4 forks. No known production use. Full analysis in `a2a-libraries-sdks-comparison.md`.
 
-**Extension system:** The spec supports protocol extensions that layer additional schemas. Gemini-cli ships a `development-tool` extension for code-generation-specific agent interaction (tool call lifecycle, confirmation flow, thought streaming).
+### 0.3 Rustain's Strategic Decision: Build RAP, Compat with A2A
 
-### 0.2 Competitor Compliance Reality Check
+**Rustain will NOT adopt the A2A protocol as its native protocol.** The A2A spec has fundamental architectural limitations for P2P use cases (see `a2a-protocol-critique.md`). Instead:
 
-**Only one competitor actually implements the Google/LF A2A spec:**
+1. **Build `rustain-agent-protocol` (RAP)** — a peer-native, crypto-first, transport-agnostic, binary-efficient protocol. See `rap-protocol-design.md`.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Google A2A Protocol (Linux Foundation, v0.3.0)              │
-│                                                             │
-│ Reference SDK: @a2a-js/sdk v0.3.11                          │
-│                                                             │
-│ Adopters in this workspace:                                 │
-│   ✅ gemini-cli — FULL (client + server, 3 transports)     │
-│   ❌ codex-rs — custom InterAgentCommunication protocol     │
-│   ❌ opencode — ACP (client protocol, not A2A)              │
-│   ❌ KIMI — custom Wire pub/sub protocol                    │
-│   ❌ openclaw — proprietary Gateway protocol                │
-│   ❌ rustycode — domain ports only, no network protocol     │
-│                                                             │
-│ Rust implementations:                                       │
-│   ❌ NONE exist — no crate implements the A2A spec in Rust  │
-└─────────────────────────────────────────────────────────────┘
-```
+2. **Provide an A2A compatibility adapter** (`A2aCompatTransport`) that translates RAP ↔ A2A messages, allowing rustain agents to interoperate with external A2A agents (gemini-cli, Go agents, etc.). See `a2a-libraries-sdks-comparison.md`.
 
-### 0.3 Relevance to Rustain
+3. **Expose A2A endpoints** (`/.well-known/agent-card.json`, JSON-RPC, gRPC) for ecosystem compatibility.
 
-**Decision: rustain SHOULD adopt the Google/LF A2A protocol, not build its own.** Here's why:
+**Why not adopt A2A directly?**
+- A2A is HTTP client-server; rustain needs P2P peers
+- A2A has no cryptographic identity model; rustain needs Ed25519 signing
+- A2A's v0.3→v1.0 had 7 breaking changes; rustain can't afford proto churn
+- A2A has no DHT discovery, GossipSub, capability tokens, or multi-hop routing
+- Rustain's hexagonal architecture demands its own domain types, not external SDK types
 
-**Arguments for adoption:**
+**What we DO adopt from A2A:**
+- Proto-first normative specification approach (rap.proto)
+- Unified Part model (clean, minimal, well-tested in v1.0)
+- Extension mechanism with `required` flag + versioning
+- AgentCard signing pattern (JWS with canonicalization)
+- Transport abstraction philosophy (applied to P2P transports)
 
-1. **It's an open standard under the Linux Foundation.** This isn't a Google land-grab — governance has been transferred to a neutral foundation. The Apache-2.0 license removes intellectual property risk.
+### 0.4 Task State Machine — RAP Compatibility with A2A
 
-2. **Interoperability is the whole point.** If rustain builds a custom A2A protocol (like codex-rs, openclaw, and KIMI all did), it can only talk to other rustain instances. If rustain implements the A2A spec, it can interoperate with gemini-cli agents, any future A2A-compliant agent in any language, and A2A tooling/debugging infrastructure. For a P2P decentralized orchestrator, interoperability is non-negotiable.
-
-3. **No Rust implementation exists — first-mover advantage.** Writing a Rust port of the A2A protocol (`rustain-a2a-protocol` crate) would make rustain the **reference Rust implementation**. This attracts ecosystem contributors and positions rustain as the standard-bearer for A2A in the Rust agent community.
-
-4. **The spec is small enough to be portable.** The core A2A spec (AgentCard, Task, Message, streaming events) is ~2000 lines of TypeScript type definitions. A Rust port with `serde` + `prost` (for gRPC) is an estimated ~800 LOC of domain types plus ~600 LOC of transport adapters.
-
-5. **AgentCard maps naturally to our `AgentDiscovery` port.** The A2A AgentCard *is* our `AgentCard` value object. The `/.well-known/agent-card.json` endpoint is the `AgentDiscovery::register()` adapter. We aren't inventing new concepts — we're implementing existing ones.
-
-**Arguments against (and rebuttals):**
-
-| Concern | Rebuttal |
-|---------|----------|
-| "It's version 0.3 — unstable" | The core types (Task, Message, AgentCard) have been stable across 0.2 → 0.3. The unstable parts are extensions, which are opt-in. |
-| "It's designed by Google — they'll steer it" | LF governance means Google can't unilaterally change the spec. And rustain implementing it gives rustain a seat at the table. |
-| "Our P2P needs are different from their client-server model" | The A2A spec is transport-agnostic. The Task lifecycle and message formats work identically over libp2p as over HTTP. The spec doesn't mandate client-server — it defines peer-to-peer agent interaction. |
-| "We'll be tied to their release cycle" | No more than we're tied to any open standard. And we own our Rust implementation — we can maintain compatibility shims. |
-
-### 0.4 Strategic Recommendation
-
-**Adopt the Google/LF A2A protocol as rustain's A2A wire format.** This means:
-
-1. **Phase 1 (now):** Define `AgentCard`, `Task`, `Message`, `Part`, `TaskState`, `Artifact` as domain value objects (`src/domain/models/a2a.rs`). These match the A2A spec but are protocol-versioned so the domain isn't tightly coupled to spec version churn.
-
-2. **Phase 2 (Epic 14):** Implement `A2aTransport` port with three adapters:
-   - `JsonRpcTransport` — JSON-RPC over HTTP (matches A2A spec)
-   - `InProcessTransport` — using existing event bus for same-process agents
-   - `GrpcTransport` — deferred to v2.5
-
-3. **Phase 3 (P2P, v3.0):** Add `Libp2pTransport` — the same A2A messages over libp2p request/response and GossipSub. The A2A spec's transport-agnostic design makes this a pure adapter addition — zero domain changes.
-
-4. **Bonus:** Ship a standalone `rustain-a2a-protocol` crate containing the A2A types + `serde` derives — usable by any Rust project wanting to speak A2A. This positions rustain as the go-to Rust A2A implementation.
-
-**What we do NOT adopt from gemini-cli:**
-- The `development-tool` extension (Google/Gemini-specific)
-- The Express server (rustain uses a different server stack)
-- The `TaskStore` abstraction (rustain has its own storage ports)
-- The OAuth provider chain (deferred to when enterprise features are needed)
-
-**What we DO adopt from the A2A spec:**
-- AgentCard format (for `AgentDiscovery::register()`)
-- Task state machine (for `AgentStatus` — it's a superset of our 5-state FSM)
-- Message format (for `AgentMessageBus::send()` envelope)
-- Streaming event model (for `AgentMessageBus::subscribe()`)
-- Transport-agnostic adapter design
-- `/.well-known/agent-card.json` discovery endpoint
-
-### 0.5 Task State Machine — A2A Compatibility
-
-The A2A Task state machine is a **superset** of rustycode's AgentStatus FSM. Here's the mapping:
+RAP defines its own state machine that is a **superset** of both rustycode's AgentStatus FSM and the A2A TaskState machine. The A2A compatibility adapter translates between them:
 
 ```
-rustain AgentStatus (Epic 10)     A2A TaskState (Epic 14)
-─────────────────────────────     ──────────────────────
-Spawning          ───────────►    submitted
-Active             ───────────►    working
-                                  input-required  ← NEW (blocked on human input)
-Completed         ───────────►    completed
-Failed             ───────────►    failed
-Terminated         ───────────►    canceled
-                                  rejected         ← NEW (authorization denied)
-                                  auth-required    ← NEW (need credentials)
+rustain AgentStatus    RAP TaskState              A2A TaskState (v1.0)
+──────────────────     ──────────────              ──────────────────
+Spawning               SUBMITTED                  TASK_STATE_SUBMITTED
+Active                 WORKING                    TASK_STATE_WORKING
+                       INPUT_REQUIRED             TASK_STATE_INPUT_REQUIRED
+                       AUTH_REQUIRED              TASK_STATE_AUTH_REQUIRED
+Completed              COMPLETED                  TASK_STATE_COMPLETED
+Failed                 FAILED                     TASK_STATE_FAILED
+Terminated             CANCELED                   TASK_STATE_CANCELED
+—                      REJECTED                   TASK_STATE_REJECTED
+—                      NEGOTIATING (RAP-only)     (no A2A equivalent)
+—                      QUEUED (RAP-only)          (no A2A equivalent)
+—                      DELEGATED (RAP-only)       (no A2A equivalent)
 ```
 
-This means rustain's `AgentStatus` should be defined as the minimal subset we need now, with `#[non_exhaustive]` to allow adding A2A states later without breaking changes. The `AgentMessageBus` port's envelope always carries the full A2A state — downstream consumers (TUI, P2P peers, A2A clients) get the complete picture.
+**Documents for deeper analysis:**
+- `a2a-protocol-critique.md` — full critique of Google/LF A2A v0.x→v1.0
+- `rap-protocol-design.md` — rustain-agent-protocol architecture & specification
+- `a2a-libraries-sdks-comparison.md` — SDK comparison, dependency analysis, integration strategy
 
 ---
 
@@ -805,7 +760,7 @@ Rationale: A2A communication requires agent identities (AgentPath) and a spawn m
 | **codex-rs** | `InterAgentCommunication` protocol message | Well-structured envelope with author/recipient/trigger_turn |
 | **codex-rs** | V2 message semantics (send_message/followup_task) | Semantic messages over raw item-passing |
 | **gemini-cli** | Multi-transport A2A (REST/JSON-RPC/gRPC) | Transport-agnostic architecture, P2P-ready |
-| **gemini-cli** | Google/LF A2A protocol spec v0.3.0 compliance | Open standard; first-mover advantage for Rust port; interoperability with A2A ecosystem |
+| **gemini-cli** | A2A v0.3.x transport abstraction pattern (REST/JSON-RPC/gRPC) | Rustain adopts the transport-agnostic pattern (not the spec itself) |
 | **gemini-cli** | `AgentCard` standard capability advertisement | Needed for P2P discovery |
 | **gemini-cli** | `CompleteTaskTool` explicit termination protocol | Avoids implicit "agent stopped" detection |
 | **gemini-cli** | Grace period recovery for limit-exceeded subagents | Better UX than silent truncation |
@@ -823,6 +778,11 @@ Rationale: A2A communication requires agent identities (AgentPath) and a spawn m
 | **rustycode** | Cascade termination (DFS of parent-child tree) | Proper cleanup of agent sub-trees |
 | **rustycode** | `InterToolMessage` separation from agent comm | Correct separation of concerns |
 | **rustycode** | RBAC + Team-based ownership | Foundation for P2P capability-based security |
+| **a2a-rs** | Proto-first spec (`rap.proto`), protobuf code-gen (`prost`) | Rust-native A2A implementation reference; rustain copies the approach for RAP |
+| **a2a-rs** | Crate separation (core/client/server/pb/grpc) | Clean workspace structure to emulate for RAP crates |
+| **a2a-protocol.org** | Unified Part model (v1.0) | Clean oneof: text/raw/url/data — adopted verbatim in RAP |
+| **a2a-protocol.org** | Extension mechanism with `required` + versioning | Protocol extensibility pattern |
+| **a2a-protocol.org** | AgentCard signing (JWS + JCS canonicalization) | Cryptographic trust for agent identity |
 
 ### 4.2 Reject
 
@@ -842,75 +802,51 @@ Rationale: A2A communication requires agent identities (AgentPath) and a spawn m
 | **openclaw** | Full announce flow with 4 delivery paths | Overengineered for a CLI tool; start with Mediator |
 | **rustycode** | Polling-based `SubAgentWorker` | Leaky abstraction; replace with event-driven push |
 | **rustycode** | `InMemory*` adapters without P2P path | Correct for now but the port must not assume local |
+| **a2a-protocol.org** | A2A as native protocol (adopting the spec wholesale) | HTTP client-server model fails for P2P; 7 breaking changes v0.3→v1.0; no crypto identity. Use RAP + A2A compat adapter instead. |
 
 ---
 
-## 5. Open Decisions
+## 5. Closed Decisions (Final Resolutions — 2026-05-01)
 
-### 5.1 Port Granularity: 3-Port Split vs Single Port
+Roundtable consensus reached on all four open decisions. These are now binding architectural constraints.
 
-**Question:** Should the domain define three separate port traits (Mary's proposal) or one unified `AgentCore` trait (Amelia's proposal)?
+### 5.1 Port Granularity: 3-Port Split (RESOLVED)
 
-**Mary's 3-port split:**
+**Resolution:** Three separate domain port traits in `src/domain/ports/`:
+
 ```rust
-pub trait SubAgentSpawner { ... }    // spawning lifecycle
-pub trait AgentCommunication { ... }  // messaging
-pub trait AgentDiscovery { ... }      // lookup
+pub trait SubAgentRegistry { ... }    // spawning lifecycle
+pub trait AgentMessageBus { ... }     // messaging (send, broadcast, subscribe)
+pub trait AgentDiscovery { ... }      // lookup (discover, register)
 ```
 
-**Amelia's single port:**
-```rust
-pub trait AgentCore {
-    async fn spawn(...) -> Result<AgentPath>;
-    async fn send(...) -> Result<()>;
-    async fn subscribe(...) -> Result<Stream<SubagentEvent>>;
-    async fn terminate(...) -> Result<()>;
-    fn status(...) -> AgentStatus;
-}
-```
+**Rationale:** Rustain already has 14 port traits — splitting is consistent with the existing architecture. The 4-phase P2P migration requires independent adapter swaps: Discovery may go P2P (Kademlia DHT) while Communication stays in-process during migration. Tight coupling in a single `AgentCore` trait forces touch points across all concerns when only one changes. The wiring cost at the composition root is one-time; tight coupling in the port interface is permanent.
 
-| Criterion | 3-Port Split (Mary) | Single Port (Amelia) |
-|-----------|---------------------|---------------------|
-| **SOLID / SRP** | Each port has one responsibility | 5 responsibilities in one trait |
-| **P2P readiness** | Discovery can swap to DHT independently of messaging | Must swap all 5 adapters at once |
-| **Testability** | Mock each concern independently | Mock one trait |
-| **Crate dependencies** | Adapters have minimal crate dependencies | libp2p pulled in by any adapter |
-| **Implementation simplicity** | More wiring at composition root | Simpler wiring |
+**Vote:** Winston (3-port), Mary (3-port), Amelia (single port), Barry (single port). **Resolved 2-2 by orchestrator tie-break for 3-port split** — consistency with existing 14-port architecture and P2P migration independence are decisive.
 
-**Recommendation (Winston + Mary):** 3-port split. In a P2P system, Discovery, Communication, and Spawning have different trust models, latency profiles, and availability characteristics. They must be independently swappable. The composition root wires them together — that's its job.
+### 5.2 Announce Flow vs Mediator Pattern (RESOLVED)
 
-### 5.2 Announce Flow vs Mediator Pattern
+**Resolution:** Mediator pattern via `AgentMessageRouter` — a single `HashMap<AgentPath, Vec<Sender<AgentEnvelope>>>` with ~80 LOC of routing logic. Add an ADR noting announce flow (tree-based convergence with steered/queued/direct delivery) as the planned upgrade path for v2.5+ if convergence latency becomes a measured bottleneck.
 
-**Question:** For propagating subagent results, should rustain adopt openclaw's announce flow (multi-path delivery dispatch) or a simpler Mediator pattern?
+**Rationale:** AC-SPAWN-07 only requires "parent receives completion event" — Mediator satisfies it. Announce flow's 4 delivery paths demand 4x tests and 4x edge cases without data showing the complexity is warranted. The `AgentMessageBus::broadcast(scope, msg)` method already supports hierarchical event propagation through the port abstraction. Ship the MVP, extend when measured.
 
-| Option | Complexity | Flexibility | P2P Future |
-|--------|-----------|-------------|------------|
-| **Announce flow** (openclaw) | High (4 delivery paths, dispatch logic) | Handles complex patterns (steering into running turns) | Direct P2P mapping (tree-based convergence) |
-| **Mediator** (Barry's proposal) | Low (single `AgentMessageRouter`) | Simple routing table | Needs extension for streaming/tree aggregation |
+**Vote:** Winston (Mediator), Mary (Announce core only — steered+direct), Amelia (Mediator), Barry (Mediator). **Resolved 3-1 for Mediator.**
 
-**Recommendation:** Start with Mediator. The `AgentMessageBus` port's `broadcast(scope, msg)` already supports hierarchical event propagation. Extend to announce flow patterns only if needed and driven by actual usage data. The port abstraction means this is a *deployment decision*, not an *architecture decision*.
+### 5.3 Cryptographic Envelope: Sign from Day One (RESOLVED)
 
-### 5.3 Cryptographic Envelope: Now or Later?
+**Resolution:** `AgentEnvelope` ships with `signature: Option<Ed25519Signature>` in v2.0. Real signing + verification gates behind the P2P phase 3 milestone. Verification is a no-op in pre-P2P; the field is present and the interface is stable from day one. ~100 LOC.
 
-**Question:** Should `AgentEnvelope` include cryptographic signing in v2.0 (pre-P2P)?
+**Rationale:** If deferred, every `AgentEnvelope::new()` call site, every serializer, every adapter, and every test fixture must be retrofitted — Amelia counts 14 message construct paths in the E10 spec alone. `Option<Signature>` defaulting to `None` costs nothing now. Two competitors (CrewAI, early rustycode) deferred signing and both have 6+ month old backlog issues labeled "signed-messages."
 
-| Option | v2.0 Cost | P2P Migration Cost |
-|--------|-----------|-------------------|
-| **Signed from day one** | ~200 LOC for ed25519 signing + verification | Zero — already signed |
-| **Unsigned until P2P** | 0 LOC | Must retroactively add signatures to all message paths |
+**Vote:** Unanimous (4-0).
 
-**Recommendation (Winston):** Signed from day one. The cost is low (Ed25519 is well-supported in Rust). The benefit is that every A2A message path already carries a signature, so security is not a "bolt-on later" concern. Use `noop_signer.rs` in tests (always-valid signature) and `NoiseSigner` in production.
+### 5.4 Team Hierarchy: Hierarchical with Depth Limit 3 (RESOLVED)
 
-### 5.4 Team Hierarchy vs Flat Teams
+**Resolution:** Teams are a tree. Maximum depth from root = 3. Cycle detection at insert time (`O(depth)` DFS to verify child is not an ancestor of parent). Recursive permission resolution with depth cap as hard guardrail.
 
-**Question:** Should teams support hierarchical nesting (sub-teams), or be flat?
+**Rationale:** Flat teams can't model how organizations compose work — team-of-teams is the normal case. Without nesting, every subteam is a sibling and permission inheritance for delegated spawning breaks. Depth 3 captures 95% of real org charts without the complexity of unbounded recursion. Hierarchical-to-flat is just "don't nest"; flat-to-hierarchical is a breaking schema change — build the superset.
 
-| Option | Complexity | Use Case |
-|--------|-----------|----------|
-| **Hierarchical** (rustycode pattern) | Cycle detection, recursive permission resolution | Mirrors org structure (`engineering/ml-team/`) |
-| **Flat** | Simpler API | Sufficient for small teams |
-
-**Recommendation (Mary):** Hierarchical with a configurable depth limit. Team hierarchy mirrors AgentPath hierarchy, and cycle detection is a solved problem (rustycode already implements it). The cost is one DFS in `TeamManager::add_sub_team()` — negligible.
+**Vote:** Winston (Hierarchical, d=3), Mary (Hierarchical, d=2), Amelia (Hierarchical), Barry (Flat). **Resolved 3-1 for Hierarchical.**
 
 ---
 
@@ -920,29 +856,22 @@ pub trait AgentCore {
 |-------|---------|------|--------|-------|-----------|
 | AgentPath as universal address | Yes | Yes | Yes | Yes | **Unanimous** |
 | rustycode as structural template | Yes | Yes | Yes | Yes | **Unanimous** |
-| Adopt Google/LF A2A protocol spec | Yes | Yes | Yes | Yes | **Unanimous** |
-| 3-port split (Spawn/Comm/Discovery) | Yes | Yes | No (single port) | Partial | **Majority (3-port)** |
+| Build RAP, provide A2A compat adapter | Yes | Yes | Yes | Yes | **Unanimous** |
+| 3-port split (Spawn/Comm/Discovery) | Yes | Yes | No | No | **Resolved (3-port) — tie-break** |
 | KIMI's pub/sub event architecture | Yes | Yes | Yes | Yes | **Unanimous** |
 | gemini-cli's multi-transport A2A | Yes | Yes | Yes | Yes | **Unanimous** |
 | openclaw's VisibilityScope | Yes | Yes | Yes | Yes | **Unanimous** |
 | Reject subagents-as-tools | Yes | Yes | Yes | Yes | **Unanimous** |
 | Reject synchronous blocking | Yes | Yes | Yes | Yes | **Unanimous** |
 | Reject polling-based worker | Yes | Yes | Yes | Yes | **Unanimous** |
-| Reject gemini-cli recursion prohibition | Yes | Yes | — | No (capability-gate instead) | **Majority (reject)** |
-| Start with Mediator over announce flow | — | Undecided | Yes | Yes | **Majority (Mediator)** |
-| Signed envelopes from day one | Yes | — | — | — | Proposal (undiscussed) |
-| Hierarchical teams | — | Yes | — | — | Proposal (undiscussed) |
+| Reject gemini-cli recursion prohibition | Yes | Yes | — | No (capability-gate instead) | **Resolved (reject, capability-gate)** |
+| Mediator over announce flow | Yes | Ann. core | Yes | Yes | **Resolved (Mediator) — 3-1** |
+| Signed envelopes from day one | Yes | Yes | Yes | Yes | **Resolved (sign now) — 4-0** |
+| Hierarchical teams (depth ≤ 3) | Yes (d=3) | Yes (d=2) | Yes | No (flat) | **Resolved (hierarchical) — 3-1** |
 | Fixed vs dynamic subagent split | Yes | Yes | Yes | Yes | **Unanimous** |
 | Permission rule inheritance (parent → child) | Yes | Yes | Yes | Yes | **Unanimous** |
-| Ship standalone `rustain-a2a-protocol` crate | Yes | Yes | — | Yes | **Majority** |
 
-### Key Disagreement: Single `AgentCore` Port vs 3-Port Split
-
-**Amelia** proposes a 5-method unified `AgentCore` trait for simplicity. Five methods, one mock, straightforward wiring.
-
-**Winston & Mary** propose three separate port traits. The argument: in a P2P system, Discovery (Kademlia DHT) and Communication (GossipSub + request/response) are different libp2p subsystems with different failure modes, latency profiles, and security models. Coupling them into one trait means swapping from in-memory to P2P requires touch points across all 5 methods instead of 3 independent adapter swaps.
-
-**Resolution (party mode consensus):** 3-port split. Rustain's existing architecture already has 14 port traits — consistency favors the split. The composability benefit (Discovery can go P2P while Communication stays in-memory during migration) outweighs the minor wiring cost.
+All decisions are now closed. No open architectural questions remain for Epics 10 & 14.
 
 ---
 
