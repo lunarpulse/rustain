@@ -193,7 +193,15 @@ fn fixture_10_cancelled_respects_collapse() -> (Conversation, ViewState, Turn) {
 fn live_streaming_two_running_tools_w80() {
     let (conv, turn) = fixture_1_live_streaming();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 80, 60, None);
+    let text = render_to_string(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        80,
+        60,
+        None,
+    );
     insta::assert_snapshot!(text);
 }
 
@@ -201,7 +209,15 @@ fn live_streaming_two_running_tools_w80() {
 fn live_streaming_two_running_tools_w120() {
     let (conv, turn) = fixture_1_live_streaming();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 120, 60, None);
+    let text = render_to_string(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        120,
+        60,
+        None,
+    );
     insta::assert_snapshot!(text);
 }
 
@@ -209,7 +225,15 @@ fn live_streaming_two_running_tools_w120() {
 fn live_streaming_two_running_tools_w200() {
     let (conv, turn) = fixture_1_live_streaming();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
-    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 200, 60, None);
+    let text = render_to_string(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        200,
+        60,
+        None,
+    );
     insta::assert_snapshot!(text);
 }
 
@@ -520,6 +544,115 @@ fn live_rail_no_progress_w80() {
     let (conv, turn) = fixture_13_live_rail_running_no_progress();
     let clock = MockClock::at_wall_ms(1_700_000_000_000);
     clock.set_frame(3);
-    let text = render_to_string(&conv, Some(&turn), &ViewState::default(), &clock, 80, 60, None);
+    let text = render_to_string(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        80,
+        60,
+        None,
+    );
     insta::assert_snapshot!(text);
+}
+
+// ==========================================================================
+// S16.9 — Live rail with progress + tail
+// ==========================================================================
+
+// Fixture 15: live_rail_running_with_progress. Same prose+Bash shape as
+// fixture 13, wrapped by a LivenessSnapshot constructed by the test.
+// AC13 carry-forward from S16.7: exactly 3 new snapshots, doc-commented
+// width rationale per S16.7 discipline.
+
+use rustain::domain::models::LivenessSnapshot;
+
+fn fixture_15_liveness(progress: Option<(u64, u64)>, tail: Option<&str>) -> LivenessSnapshot {
+    LivenessSnapshot {
+        active_tool_name: Some("Bash".to_string()),
+        progress,
+        tail: tail.map(String::from),
+    }
+}
+
+// live_rail_with_progress_w80 — AC2 divergence-lock.
+// Width 80: baseline where truncation matters; asserts the (k/n) counter is
+// visible and `assert_ne!` guards against regression with the S16.7-OFF baseline.
+#[test]
+fn live_rail_with_progress_w80() {
+    let (conv, turn) = fixture_13_live_rail_running_no_progress();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    clock.set_frame(3);
+    let liveness = fixture_15_liveness(Some((3, 10)), None);
+    let text_with = render_to_string_ext(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        80,
+        60,
+        None,
+        Some(&liveness),
+    );
+    let text_without = render_to_string(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        80,
+        60,
+        None,
+    );
+    assert_ne!(
+        text_with, text_without,
+        "S16.9 visible delta lock: (3/10) progress suffix must change rendered output"
+    );
+    insta::assert_snapshot!("live_rail_with_progress_w80", text_with);
+}
+
+// live_rail_with_tail_w80 — AC3 tail rendering.
+// Width 80: 4 indented tail lines under the rail; truncation applies for
+// lines wider than 78 chars minus 2-space indent.
+#[test]
+fn live_rail_with_tail_w80() {
+    let (conv, turn) = fixture_13_live_rail_running_no_progress();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    clock.set_frame(3);
+    let liveness = fixture_15_liveness(Some((4, 4)), Some("line1\nline2\nline3\nline4"));
+    let text = render_to_string_ext(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        80,
+        60,
+        None,
+        Some(&liveness),
+    );
+    insta::assert_snapshot!("live_rail_with_tail_w80", text);
+}
+
+// live_rail_with_tail_w120 — mid-width verification.
+// Width 120: wider terminal allows tail lines to render without truncation.
+// Uses longer lines than the w80 fixture so truncation behavior differs.
+#[test]
+fn live_rail_with_tail_w120() {
+    let (conv, turn) = fixture_13_live_rail_running_no_progress();
+    let clock = MockClock::at_wall_ms(1_700_000_000_000);
+    clock.set_frame(3);
+    let liveness = fixture_15_liveness(
+        Some((4, 4)),
+        Some("line1_is_longer_than_eighty_characters_so_it_will_be_truncated_in_w80_but_not_here\nline2\nline3\nline4"),
+    );
+    let text = render_to_string_ext(
+        &conv,
+        Some(&turn),
+        &ViewState::default(),
+        &clock,
+        120,
+        60,
+        None,
+        Some(&liveness),
+    );
+    insta::assert_snapshot!("live_rail_with_tail_w120", text);
 }

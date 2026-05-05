@@ -121,6 +121,69 @@ impl Default for MouseConfig {
     }
 }
 
+/// Tool progress configuration. Story 16.9, AC4.
+///
+/// `live_tail` is the kill-switch — default OFF so the bash-adapter refactor
+/// can prove stable before the visible surface is turned on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolProgressConfig {
+    /// Enable streaming stdout tail for long-running tools. Default false.
+    #[serde(default = "ToolProgressConfig::default_live_tail")]
+    pub live_tail: bool,
+    /// Consumer ring-buffer line cap (for the producer). Clamped to [1, 16].
+    #[serde(default = "ToolProgressConfig::default_tail_lines")]
+    pub tail_lines: u8,
+    /// Minimum elapsed ms before the producer emits its first event. Default 3000.
+    #[serde(default = "ToolProgressConfig::default_threshold_ms")]
+    pub threshold_ms: u64,
+}
+
+impl ToolProgressConfig {
+    fn default_live_tail() -> bool {
+        false
+    }
+    fn default_tail_lines() -> u8 {
+        4
+    }
+    fn default_threshold_ms() -> u64 {
+        3000
+    }
+
+    pub fn tail_lines_clamped(&self) -> usize {
+        self.tail_lines.clamp(1, 16) as usize
+    }
+
+    /// Validates the config, emitting `tracing::warn!` when clamping is applied.
+    /// Returns the clamped `tail_lines` value.
+    pub fn validate(&self) -> usize {
+        let clamped = self.tail_lines_clamped();
+        if self.tail_lines < 1 {
+            tracing::warn!(
+                tail_lines = self.tail_lines,
+                clamped,
+                "tool_progress.tail_lines below minimum (1); clamped up"
+            );
+        } else if self.tail_lines > 16 {
+            tracing::warn!(
+                tail_lines = self.tail_lines,
+                clamped,
+                "tool_progress.tail_lines above maximum (16); clamped down"
+            );
+        }
+        clamped
+    }
+}
+
+impl Default for ToolProgressConfig {
+    fn default() -> Self {
+        Self {
+            live_tail: false,
+            tail_lines: 4,
+            threshold_ms: 3000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LayoutConfig {
     #[serde(default)]
@@ -167,6 +230,9 @@ pub struct AppConfig {
     /// Mouse configuration (scroll lines, capture on/off). Story 16.8, AC6 + AC14.
     #[serde(default)]
     pub mouse: MouseConfig,
+    /// Tool progress configuration (stdout tail, counter). Story 16.9, AC4.
+    #[serde(default)]
+    pub tool_progress: ToolProgressConfig,
 }
 
 impl AppConfig {
@@ -201,6 +267,62 @@ impl Default for AppConfig {
             default_plan_mode: false,
             provider: std::collections::HashMap::new(),
             mouse: MouseConfig::default(),
+            tool_progress: ToolProgressConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_config_tool_progress_roundtrip() {
+        let toml = r#"
+model = "test-model"
+[tool_progress]
+live_tail = true
+tail_lines = 8
+threshold_ms = 5000
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert!(config.tool_progress.live_tail);
+        assert_eq!(config.tool_progress.tail_lines, 8);
+        assert_eq!(config.tool_progress.threshold_ms, 5000);
+
+        // True round-trip: serialize back to TOML and verify key values preserved
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(serialized.contains("live_tail = true"), "serialized TOML must contain live_tail");
+        assert!(serialized.contains("tail_lines = 8"), "serialized TOML must contain tail_lines");
+        assert!(serialized.contains("threshold_ms = 5000"), "serialized TOML must contain threshold_ms");
+    }
+
+    #[test]
+    fn tool_progress_tail_lines_clamps_out_of_range() {
+        // Helper to construct a config with a specific tail_lines value
+        // via serde deserialize (simulates user TOML input)
+        fn parse_tail_lines(val: u8) -> ToolProgressConfig {
+            let toml = format!(
+                "[tool_progress]\nlive_tail = false\ntail_lines = {}\n",
+                val
+            );
+            let config: AppConfig = toml::from_str(&toml).expect("deserialize");
+            config.tool_progress
+        }
+
+        let cfg = parse_tail_lines(4);
+        assert_eq!(cfg.tail_lines_clamped(), 4);
+
+        let cfg = parse_tail_lines(0);
+        assert_eq!(cfg.tail_lines_clamped(), 1); // clamped up
+
+        let cfg = parse_tail_lines(100);
+        assert_eq!(cfg.tail_lines_clamped(), 16); // clamped down
+
+        let cfg = parse_tail_lines(1);
+        assert_eq!(cfg.tail_lines_clamped(), 1);
+
+        let cfg = parse_tail_lines(16);
+        assert_eq!(cfg.tail_lines_clamped(), 16);
     }
 }

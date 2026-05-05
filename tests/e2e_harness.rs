@@ -286,7 +286,8 @@ impl TestHarness {
                         0,
                         None,
                         None,
-                        None, false,
+                        None,
+                        false,
                     );
 
                     input_box::render(
@@ -1014,7 +1015,8 @@ fn test_e2e_scroll_navigation() {
 
     // Should be at bottom (auto_scroll)
     assert_eq!(
-        h.state.scroll_offset(), 0,
+        h.state.scroll_offset(),
+        0,
         "Should be at bottom after messages"
     );
 
@@ -1027,7 +1029,11 @@ fn test_e2e_scroll_navigation() {
     // not handle_input). Simulate the scroll effect manually.
     h.focus_chat();
     let action = h.type_char('k');
-    assert_eq!(action, InputAction::ScrollLineUp, "k should emit ScrollLineUp");
+    assert_eq!(
+        action,
+        InputAction::ScrollLineUp,
+        "k should emit ScrollLineUp"
+    );
     // Simulate event_loop dispatch: scroll up by 1 line
     let current = h.state.scroll_offset();
     h.state.set_scroll_offset(current + 1);
@@ -1039,7 +1045,11 @@ fn test_e2e_scroll_navigation() {
 
     // Jump to bottom with G. S16.8: G returns ScrollToBottom (was JumpToLatestProseAnchor in S16.6).
     let action = h.type_char('G');
-    assert_eq!(action, InputAction::ScrollToBottom, "G should emit ScrollToBottom");
+    assert_eq!(
+        action,
+        InputAction::ScrollToBottom,
+        "G should emit ScrollToBottom"
+    );
     // Simulate event_loop dispatch
     h.state.set_scroll_offset(0);
     h.state.set_auto_scroll(true);

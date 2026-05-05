@@ -7,9 +7,7 @@ mod common;
 
 use common::*;
 use rustain::domain::clock::MockClock;
-use rustain::domain::models::{
-    InvocationStatus, MessageRole, StopReason, SummaryTier, ViewState,
-};
+use rustain::domain::models::{InvocationStatus, MessageRole, StopReason, SummaryTier, ViewState};
 
 #[test]
 fn tier1_and_tier2_render_different_collapsed_lines() {

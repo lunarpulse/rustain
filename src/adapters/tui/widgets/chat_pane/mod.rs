@@ -7,6 +7,11 @@ use ratatui::widgets::Paragraph;
 
 use std::collections::{BTreeMap, HashMap};
 
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+
 use crate::adapters::tui::state::PendingPlanCard;
 use crate::adapters::tui::state::{CachedTurnLayout, TabRenderState};
 use crate::adapters::tui::theme::Theme;
@@ -15,9 +20,9 @@ use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
 use crate::domain::clock::{Clock, current_braille_frame};
 use crate::domain::models::turn::tool_call_id_for;
 use crate::domain::models::{
-    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics, MessageRole,
-    PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId,
-    TurnPart, ViewState,
+    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics,
+    MessageRole, PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn,
+    TurnId, TurnPart, ViewState,
 };
 use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
@@ -1077,6 +1082,29 @@ fn render_expanded_turn<'a>(
                         ),
                     ];
                     lines.push(Line::from(rail_spans));
+                    // Story 16.9: render stdout tail lines below the live rail
+                    if let Some(tail) = liveness
+                        .and_then(|l| l.tail.as_deref())
+                        .filter(|_| {
+                            liveness
+                                .as_ref()
+                                .and_then(|l| l.active_tool_name.as_deref())
+                                == Some(tool.as_str())
+                        })
+                    {
+                        // Cap at 4 lines (render-side double-defense; the
+                        // producer ring is also capped at tail_lines).
+                        // TODO(S16.10-cleanup): plumb ToolProgressConfig::tail_lines through
+                        // the render path if user-tunable cap becomes a feature request.
+                        let tail_width = content_width.saturating_sub(4); // gutter + 2-space indent + 1-char safety
+                        for tail_line in tail.split('\n').take(4) {
+                            let truncated = truncate_with_ellipsis(tail_line, tail_width);
+                            lines.push(Line::from(vec![Span::styled(
+                                format!("  {}", truncated),
+                                Style::default().fg(theme.colors.fg_secondary),
+                            )]));
+                        }
+                    }
                 }
             }
             TurnPart::ToolResult { .. } => {
@@ -1257,6 +1285,7 @@ pub fn render(
         &[],
         &[],
         None,
+        None, // liveness
     )
 }
 
@@ -1299,6 +1328,7 @@ pub fn render_with_search(
     search_matches: &[SearchMatch],
     bookmarks: &[usize],
     pending_plan_card: Option<&PendingPlanCard>,
+    liveness: Option<&crate::domain::models::LivenessSnapshot>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -1631,7 +1661,7 @@ pub fn render_with_search(
                         let turn_lines = if collapsed {
                             render_collapsed_turn(turn, view_state, theme, width, clock)
                         } else {
-                            render_expanded_turn(turn, theme, width, clock, tool_block_states, None)
+                            render_expanded_turn(turn, theme, width, clock, tool_block_states, liveness)
                         };
                         let is_focused = view_state.focused_turn.as_ref().is_some_and(|ft| *ft == turn.id);
                         for (j, line) in turn_lines.into_iter().enumerate() {
@@ -1808,7 +1838,7 @@ pub fn render_with_search(
                 }
                 line_offset += spacing;
             }
-            let turn_lines = render_expanded_turn(ot, theme, width, clock, tool_block_states, None);
+            let turn_lines = render_expanded_turn(ot, theme, width, clock, tool_block_states, liveness);
             let tl_len = turn_lines.len();
             for (j, line) in turn_lines.into_iter().enumerate() {
                 let abs_line = line_offset + j;
@@ -2973,6 +3003,7 @@ mod parts_aware_tests {
                     &[],
                     &[],
                     None,
+                    None,  // liveness
                 );
             })
             .unwrap();
@@ -3006,6 +3037,7 @@ mod parts_aware_tests {
                     &[],
                     &[],
                     None,
+                    None,  // liveness
                 );
             })
             .unwrap();
@@ -3041,6 +3073,7 @@ mod parts_aware_tests {
                     &[],
                     &[],
                     None,
+                    None,  // liveness
                 );
             })
             .unwrap();

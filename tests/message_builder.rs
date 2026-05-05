@@ -1,4 +1,6 @@
-use rustain::domain::models::{ChatMessage, Conversation, MessageRole, ToolCallInfo, ToolResultInfo};
+use rustain::domain::models::{
+    ChatMessage, Conversation, MessageRole, ToolCallInfo, ToolResultInfo,
+};
 use rustain::domain::services::message_builder::{
     ResolvedCommandContext, ResolvedFileContext, build_api_messages, build_command_context_prefix,
     build_file_context_prefix,
@@ -125,7 +127,15 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
     let messages = build_api_messages(&conv);
 
     // Must have exactly 3 messages (not 4): U, A, U
-    assert_eq!(messages.len(), 3, "Expected 3 messages (U-A-U), got: {:?}", messages.iter().map(|m| format!("{:?}", m.role)).collect::<Vec<_>>());
+    assert_eq!(
+        messages.len(),
+        3,
+        "Expected 3 messages (U-A-U), got: {:?}",
+        messages
+            .iter()
+            .map(|m| format!("{:?}", m.role))
+            .collect::<Vec<_>>()
+    );
 
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[0].content, "Use propose_plan");
@@ -141,7 +151,10 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
     // The propose_plan tool result must be merged into this message
     assert_eq!(messages[2].tool_results.len(), 1);
     assert_eq!(messages[2].tool_results[0].tool_use_id, "tc-1");
-    assert_eq!(messages[2].tool_results[0].content, "Plan proposed for user approval");
+    assert_eq!(
+        messages[2].tool_results[0].content,
+        "Plan proposed for user approval"
+    );
 }
 
 // === File context attachment tests (Story 3.2, Task 4) ===

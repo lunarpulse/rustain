@@ -70,7 +70,7 @@
 //! - Story 16.1 — data primitives foundation
 //! - Story 16.3 — ViewState consumes `Conversation.turns` (added in this story)
 //! - Story 16.4 — render walks `Turn.parts` (inherits mirror deletion from this story)
-//! - Story 16.9 — wires the `set_progress` API (exposed here, uncalled until then)
+//! - Story 16.9 — wires the producer for both `set_progress` AND `set_tail` (exposed here, uncalled until then)
 //! - ADR-16-01 §2 — reducer specification
 //! - ADR-16-01 amendment 2026-04-28 §Q2 — prose-flush rule rationale
 
@@ -110,6 +110,7 @@ pub struct ReducerState {
     /// preserved here for mirror sync via `update_streaming_mirror`).
     completed_invocations: HashMap<String, PartId>,
     progress: HashMap<String, (u64, u64)>,
+    tail: HashMap<String, String>,
     last_running_tool: Option<String>,
     last_running_tool_use_id: Option<String>,
     pub pending_usage: Option<UsageInfo>,
@@ -122,6 +123,8 @@ pub struct ReducerState {
 pub struct LivenessSnapshot {
     pub active_tool_name: Option<String>,
     pub progress: Option<(u64, u64)>,
+    /// Last N lines of stdout tail (bash adapter only). Story 16.9.
+    pub tail: Option<String>,
 }
 
 impl ReducerState {
@@ -137,6 +140,7 @@ impl ReducerState {
             pending_invocations: HashMap::new(),
             completed_invocations: HashMap::new(),
             progress: HashMap::new(),
+            tail: HashMap::new(),
             last_running_tool: None,
             last_running_tool_use_id: None,
             pending_usage: None,
@@ -155,9 +159,14 @@ impl ReducerState {
             .last_running_tool_use_id
             .as_ref()
             .and_then(|id| self.progress.get(id).copied());
+        let tail = self
+            .last_running_tool_use_id
+            .as_ref()
+            .and_then(|id| self.tail.get(id).cloned());
         LivenessSnapshot {
             active_tool_name: self.last_running_tool.clone(),
             progress,
+            tail,
         }
     }
 
@@ -167,6 +176,16 @@ impl ReducerState {
     /// (intra-tool stdout tail). Until then, `liveness().progress` is always `None`.
     pub fn set_progress(&mut self, tool_use_id: &str, k: u64, n: u64) {
         self.progress.insert(tool_use_id.to_string(), (k, n));
+    }
+
+    /// Set stdout tail text for a running tool invocation.
+    ///
+    /// Story 16.9 — wires the producer for both `set_progress` AND `set_tail`
+    /// (exposed here, uncalled until then). Overwrites the previous tail value
+    /// for the same `tool_use_id` — the ring-buffer throttling in the bash
+    /// adapter ensures this is called at most 4 Hz, so no coalescing is needed.
+    pub fn set_tail(&mut self, tool_use_id: &str, text: String) {
+        self.tail.insert(tool_use_id.to_string(), text);
     }
 
     /// Current wall-clock time in unix milliseconds via the injected clock.
@@ -372,6 +391,11 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
                 });
             }
 
+            // Story 16.9: clear progress + tail for this tool_use_id on ToolResult.
+            // The rail must collapse the moment the result arrives.
+            state.progress.remove(&id);
+            state.tail.remove(&id);
+
             // Clear last_running_tool if no more pending invocations that haven't been resolved
             // (pending_invocations holds all seen invocations; we can't tell which are resolved
             // without a separate tracking set. For now, just clear on every ToolResult —
@@ -437,6 +461,8 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
                 state.open_reasoning = None;
                 state.pending_invocations.clear();
                 state.completed_invocations.clear();
+                state.progress.clear();
+                state.tail.clear();
                 state.last_running_tool = None;
                 state.last_running_tool_use_id = None;
 
@@ -1591,6 +1617,143 @@ mod tests {
 
         let snap = state.liveness();
         assert_eq!(snap.progress, Some((3, 10)));
+    }
+
+    #[test]
+    fn liveness_tail_set_via_api() {
+        let now = Instant::now();
+        let mut state = ReducerState::new(1000, now);
+        let clock = MockClock::new(now);
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolUse {
+                id: "tool_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            },
+            &clock,
+        );
+
+        state.set_tail("tool_1", "line1\nline2".into());
+
+        let snap = state.liveness();
+        assert_eq!(snap.tail.as_deref(), Some("line1\nline2"));
+    }
+
+    #[test]
+    fn liveness_tail_cleared_on_tool_result() {
+        let (mut state, clock) = make_state(1000);
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolUse {
+                id: "tool_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            },
+            &clock,
+        );
+        state.set_progress("tool_1", 5, 10);
+        state.set_tail("tool_1", "hello".into());
+
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolResult {
+                id: "tool_1".into(),
+                content: "done".into(),
+                is_error: false,
+            },
+            &clock,
+        );
+
+        let snap = state.liveness();
+        assert!(snap.progress.is_none(), "progress should be cleared on ToolResult");
+        assert!(snap.tail.is_none(), "tail should be cleared on ToolResult");
+    }
+
+    #[test]
+    fn liveness_tail_cleared_on_turn_complete() {
+        let (mut state, clock) = make_state(1000);
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolUse {
+                id: "tool_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            },
+            &clock,
+        );
+        state.set_progress("tool_1", 3, 5);
+        state.set_tail("tool_1", "data".into());
+
+        let _ = reduce(
+            &mut state,
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+            &clock,
+        );
+
+        assert!(state.progress.is_empty(), "progress map should be cleared on turn complete");
+        assert!(state.tail.is_empty(), "tail map should be cleared on turn complete");
+    }
+
+    #[test]
+    fn liveness_progress_cleared_on_tool_result() {
+        let (mut state, clock) = make_state(1000);
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolUse {
+                id: "tool_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            },
+            &clock,
+        );
+        state.set_progress("tool_1", 1, 1);
+
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolResult {
+                id: "tool_1".into(),
+                content: "ok".into(),
+                is_error: false,
+            },
+            &clock,
+        );
+
+        assert!(
+            state.progress.get("tool_1").is_none(),
+            "progress entry should be removed on ToolResult"
+        );
+    }
+
+    #[test]
+    fn progress_and_tail_cleared_on_tool_result_error() {
+        let (mut state, clock) = make_state(1000);
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolUse {
+                id: "tool_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            },
+            &clock,
+        );
+        state.set_progress("tool_1", 4, 4);
+        state.set_tail("tool_1", "tail-data".into());
+
+        let _ = reduce(
+            &mut state,
+            StreamChunk::ToolResult {
+                id: "tool_1".into(),
+                content: "error output".into(),
+                is_error: true,
+            },
+            &clock,
+        );
+
+        assert!(state.liveness().progress.is_none(), "progress must be cleared on ToolResult error");
+        assert!(state.liveness().tail.is_none(), "tail must be cleared on ToolResult error");
     }
 
     // ── ReducerState::new ────────────────────────────────────────────────

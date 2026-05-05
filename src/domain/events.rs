@@ -278,6 +278,21 @@ pub enum DomainEventPayload {
     Noop,
 }
 
+/// Tool progress event emitted by the bash adapter during long-running execution.
+/// Story 16.9 — surfaced via the live rail + stdout tail in the render path.
+#[derive(Debug, Clone)]
+pub enum ToolProgressEvent {
+    Counter {
+        tool_use_id: String,
+        k: u64,
+        n: u64,
+    },
+    Tail {
+        tool_use_id: String,
+        text: String,
+    },
+}
+
 /// Action returned by apply_chunk() to tell the event loop what to do.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]

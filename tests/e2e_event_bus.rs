@@ -31,7 +31,7 @@ fn test_app_state_honors_raw_capacity() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let provider_swap = Arc::new(ArcSwap::from_pointee(
-        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>,
+        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
     let (app_state, _domain_rx) = AppState::new(
         64,
@@ -53,7 +53,7 @@ fn test_app_state_session_cancel_is_root_token() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let provider_swap2 = Arc::new(ArcSwap::from_pointee(
-        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>,
+        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
     let (app_state, _domain_rx) = AppState::new(
         16,

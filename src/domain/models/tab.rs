@@ -373,6 +373,21 @@ impl TabManager {
         self.tabs.iter_mut().find(|t| t.conversation.id == id)
     }
 
+    /// Find a tab that has a pending tool invocation matching `tool_use_id`.
+    /// Story 16.9 — used to route progress events to the correct tab.
+    pub fn find_tab_with_pending_tool(&mut self, tool_use_id: &str) -> Option<&mut TabState> {
+        self.tabs
+            .iter_mut()
+            .find(|t| t.reducer.pending_invocations.contains_key(tool_use_id))
+    }
+
+    /// Check whether the given tab_id is the currently active tab.
+    pub fn is_active_tab(&self, tab_id: TabId) -> bool {
+        self.tabs
+            .get(self.active_tab_index)
+            .map_or(false, |t| t.id == tab_id)
+    }
+
     /// Total number of open tabs.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()

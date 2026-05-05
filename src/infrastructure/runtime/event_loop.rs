@@ -239,6 +239,8 @@ pub async fn run(
     skill_activator: Arc<SkillActivator>,
     agent_activator: Arc<crate::adapters::agent_activation::AgentActivator>,
     approval_runtime: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::domain::events::ToolProgressEvent>>,
+    progress_rx: Option<mpsc::UnboundedReceiver<crate::domain::events::ToolProgressEvent>>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
 
@@ -302,6 +304,12 @@ pub async fn run(
         approval_runtime.clone(),
         config.runtime.event_bus.raw_capacity,
     );
+
+    // Story 16.9: wire progress channel to ToolScheduler
+    let mut progress_rx = progress_rx;
+    if let Some(ref tx) = progress_tx {
+        tool_scheduler.set_progress_tx(Some(tx.clone())).await;
+    }
 
     // Story 6-0d: warm up plan slug + directory when starting in Plan mode (default_plan_mode)
     if security.current_mode() == PermissionMode::Plan {
@@ -5749,6 +5757,75 @@ pub async fn run(
                 }
             }
 
+            // Branch 5: Tool progress events for live stdout tail. Story 16.9.
+            // When progress_rx is None (live_tail OFF), this branch is a
+            // std::future::pending() — it never fires (no idle wakeups).
+            event = async {
+                match &mut progress_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let Some(event) = event else {
+                    // All senders dropped — disable this branch to prevent
+                    // spinning on the closed channel.
+                    progress_rx = None;
+                    continue;
+                };
+                use crate::domain::events::ToolProgressEvent;
+                match event {
+                    ToolProgressEvent::Counter {
+                        tool_use_id,
+                        k,
+                        n,
+                    } => {
+                        let found_id = tab_manager
+                            .find_tab_with_pending_tool(&tool_use_id)
+                            .map(|tab| {
+                                tab.reducer.set_progress(&tool_use_id, k, n);
+                                update_streaming_mirror(
+                                    &tab.reducer,
+                                    &mut tab.streaming,
+                                );
+                                tab.id
+                            });
+                        if found_id.is_none() {
+                            tracing::debug!(
+                                "stale Counter progress for {} — tool no longer pending",
+                                tool_use_id
+                            );
+                        }
+                        if found_id.is_some_and(|id| id == tab_manager.active_tab_id()) {
+                            state.needs_redraw = true;
+                        }
+                    }
+                    ToolProgressEvent::Tail {
+                        tool_use_id,
+                        text,
+                    } => {
+                        let found_id = tab_manager
+                            .find_tab_with_pending_tool(&tool_use_id)
+                            .map(|tab| {
+                                tab.reducer.set_tail(&tool_use_id, text);
+                                update_streaming_mirror(
+                                    &tab.reducer,
+                                    &mut tab.streaming,
+                                );
+                                tab.id
+                            });
+                        if found_id.is_none() {
+                            tracing::debug!(
+                                "stale Tail progress for {} — tool no longer pending",
+                                tool_use_id
+                            );
+                        }
+                        if found_id.is_some_and(|id| id == tab_manager.active_tab_id()) {
+                            state.needs_redraw = true;
+                        }
+                    }
+                }
+            }
+
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)
             _ = tick_interval.tick() => {
                 // Update elapsed_ms for Executing state each tick
@@ -7783,7 +7860,7 @@ fn render(
                         &crate::domain::models::view_state::ViewState,
                         Option<&crate::domain::models::turn::Turn>,
                         &dyn crate::domain::clock::Clock,
-                    ) = if let Some(tm) = tab_manager_for_bar {
+                    ) =                     if let Some(tm) = tab_manager_for_bar {
                         let tab = tm.active_tab();
                         (
                             &tab.view_state,
@@ -7793,6 +7870,11 @@ fn render(
                     } else {
                         (&default_vs, None, &default_clock)
                     };
+                    // Story 16.9: capture liveness snapshot for live rail rendering
+                    let liveness_snapshot: Option<crate::domain::models::LivenessSnapshot> =
+                        tab_manager_for_bar.map(|tm| tm.active_tab().reducer.liveness());
+                    let liveness_ref: Option<&crate::domain::models::LivenessSnapshot> =
+                        liveness_snapshot.as_ref();
                     let tab_id = state.active_tab_id;
                     let render_state = state.tab_render_states.entry(tab_id).or_default();
                     let result = chat_pane::render_with_search(
@@ -7814,6 +7896,7 @@ fn render(
                         search_state.matches.as_slice(),
                         bookmark_indices,
                         state.pending_plan_card.as_ref(),
+                        liveness_ref,
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;

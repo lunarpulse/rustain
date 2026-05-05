@@ -201,8 +201,17 @@ fn test_block_jump_single_block() {
     state.block_boundaries = vec![0];
     state.set_scroll_offset(10);
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('J'));
-    assert!(matches!(action, InputAction::BlockJump { offset: 0, auto_scroll: true }),
-        "J should emit BlockJump(offset=0, auto_scroll=true), got {:?}", action);
+    assert!(
+        matches!(
+            action,
+            InputAction::BlockJump {
+                offset: 0,
+                auto_scroll: true
+            }
+        ),
+        "J should emit BlockJump(offset=0, auto_scroll=true), got {:?}",
+        action
+    );
 }
 
 // === Multi-line input keyboard tests (Story 3.1) ===
@@ -1248,7 +1257,8 @@ fn test_crossterm_alt_enter_converts_to_domain_alt_enter() {
         state: KeyEventState::NONE,
     });
 
-    let domain_event = convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
+    let domain_event =
+        convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
     assert!(
         domain_event.is_some(),
         "Alt+Enter should produce a domain event"
@@ -1273,7 +1283,8 @@ fn test_crossterm_alt_m_converts_to_domain_alt_m() {
         state: KeyEventState::NONE,
     });
 
-    let domain_event = convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
+    let domain_event =
+        convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
     assert!(
         domain_event.is_some(),
         "Alt+M should produce a domain event"

@@ -319,7 +319,6 @@ def test_priority_dedup_only_highest_shown(build_binary, tmp_path):
     finally:
         tui.stop()
 
-
 @pytest.mark.story_5_1
 def test_skill_discovery_does_not_block_startup(build_binary, tmp_path):
     """AC6: Skill scan runs in background — TUI is responsive immediately.
@@ -338,7 +337,6 @@ def test_skill_discovery_does_not_block_startup(build_binary, tmp_path):
         _wait_for_skills_loaded(tui, "Loaded 3 skill")
     finally:
         tui.stop()
-
 
 @pytest.mark.story_5_1
 def test_skill_autocomplete_filter_by_name(build_binary, tmp_path):

@@ -237,7 +237,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let provider_swap = Arc::new(ArcSwap::from_pointee(
-        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>,
+        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
     let (app_state, _domain_rx) = AppState::new(
         16,

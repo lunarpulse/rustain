@@ -53,7 +53,8 @@ fn test_ctrl_c_crossterm_mapping() {
         state: KeyEventState::NONE,
     });
 
-    let domain_event = convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
+    let domain_event =
+        convert_crossterm_event(&event, &rustain::domain::models::MouseConfig::default());
     assert!(domain_event.is_some());
     match domain_event.unwrap() {
         DomainInputEvent::SpecialKey(DomainKey::CtrlC) => {} // expected

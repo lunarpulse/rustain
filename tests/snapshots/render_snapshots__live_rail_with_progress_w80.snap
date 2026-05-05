@@ -1,0 +1,9 @@
+---
+source: tests/render_snapshots.rs
+expression: text_with
+---
+│ Let me run the build.
+│
+│ ┄ ● Executing Bash "" → running... (0.0s) ┄
+│ ⠸ Bash (3/10)
+│

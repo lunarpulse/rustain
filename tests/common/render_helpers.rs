@@ -9,8 +9,8 @@ use rustain::adapters::tui::widgets::chat_pane;
 use rustain::domain::clock::Clock;
 use rustain::domain::models::turn::{PartId, TurnPart};
 use rustain::domain::models::{
-    ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason, StreamingState, Turn,
-    ViewState,
+    ChatMessage, Conversation, InvocationStatus, LivenessSnapshot, MessageRole, StopReason,
+    StreamingState, Turn, ViewState,
 };
 
 use ratatui::Terminal;
@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, HashMap};
 /// Returns a deterministic string of non-empty buffer rows joined by `\n`.
 ///
 /// `streaming` defaults to `StreamingState::default()` when `None`.
+/// `liveness` defaults to `None` (no live rail progress) when not provided.
 pub fn render_to_string(
     conversation: &Conversation,
     open_turn: Option<&Turn>,
@@ -37,6 +38,30 @@ pub fn render_to_string(
     width: u16,
     height: u16,
     streaming: Option<&StreamingState>,
+) -> String {
+    render_to_string_ext(
+        conversation,
+        open_turn,
+        view_state,
+        clock,
+        width,
+        height,
+        streaming,
+        None,
+    )
+}
+
+/// Extended render-to-string helper with optional liveness snapshot.
+/// Story 16.9 — allows tests to inject `LivenessSnapshot` for the live rail.
+pub fn render_to_string_ext(
+    conversation: &Conversation,
+    open_turn: Option<&Turn>,
+    view_state: &ViewState,
+    clock: &dyn Clock,
+    width: u16,
+    height: u16,
+    streaming: Option<&StreamingState>,
+    liveness: Option<&LivenessSnapshot>,
 ) -> String {
     let streaming = streaming.map_or_else(StreamingState::default, |s| s.clone());
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -62,6 +87,7 @@ pub fn render_to_string(
             &[],
             &[],
             None,
+            liveness,
         );
     });
     use ratatui::buffer::Buffer;

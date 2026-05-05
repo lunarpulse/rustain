@@ -13,8 +13,8 @@ use rustain::domain::models::{
     CompletionOptions, Message, MessageRole, PathAccessType, PermissionMode,
 };
 use rustain::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, StreamingProvider, SchedulerPort, SecurityPort,
-    SessionPort, StoragePort, ToolSetPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort, SecurityPort, SessionPort,
+    StoragePort, StreamingProvider, ToolSetPort,
 };
 
 // Covers: NFR1 (hexagonal architecture conformance)

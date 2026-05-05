@@ -392,7 +392,8 @@ fn test_status_bar_renders_hint() {
                 0,
                 None,
                 None,
-                None, false,
+                None,
+                false,
             );
         })
         .unwrap();
@@ -444,7 +445,8 @@ fn test_status_bar_no_hint_when_none() {
                 0,
                 None,
                 None,
-                None, false,
+                None,
+                false,
             );
         })
         .unwrap();

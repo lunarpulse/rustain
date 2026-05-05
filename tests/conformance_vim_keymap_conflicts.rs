@@ -4,9 +4,15 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
 
-fn make_state() -> TuiState { TuiState::new(80, 24) }
-fn key(c: char) -> DomainInputEvent { DomainInputEvent::KeyPress(c) }
-fn sp(key: DomainKey) -> DomainInputEvent { DomainInputEvent::SpecialKey(key) }
+fn make_state() -> TuiState {
+    TuiState::new(80, 24)
+}
+fn key(c: char) -> DomainInputEvent {
+    DomainInputEvent::KeyPress(c)
+}
+fn sp(key: DomainKey) -> DomainInputEvent {
+    DomainInputEvent::SpecialKey(key)
+}
 
 #[test]
 fn legacy_chat_keys_are_unchanged() {
@@ -42,44 +48,62 @@ fn legacy_chat_keys_are_unchanged() {
 
 #[test]
 fn vim_z_prefix_in_chat_only() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    handle_input(&mut s, &key('z')); assert!(s.pending_z);
-    let mut s2 = make_state(); s2.focus = FocusState::Input;
-    handle_input(&mut s2, &key('z')); assert!(!s2.pending_z);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    handle_input(&mut s, &key('z'));
+    assert!(s.pending_z);
+    let mut s2 = make_state();
+    s2.focus = FocusState::Input;
+    handle_input(&mut s2, &key('z'));
+    assert!(!s2.pending_z);
 }
 
 #[test]
 fn g_capital_emits_scroll_to_bottom() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
     assert_eq!(handle_input(&mut s, &key('G')), InputAction::ScrollToBottom);
 }
 
 #[test]
 fn tab_narrow_override() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    assert_eq!(handle_input(&mut s, &sp(DomainKey::Tab)), InputAction::CycleInvocationInFocusedTurn);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::Tab)),
+        InputAction::CycleInvocationInFocusedTurn
+    );
 }
 
 #[test]
 fn non_key_resets_chords() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    handle_input(&mut s, &key('z')); assert!(s.pending_z);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    handle_input(&mut s, &key('z'));
+    assert!(s.pending_z);
     handle_input(&mut s, &DomainInputEvent::Resize(100, 30));
-    assert!(!s.pending_z); assert!(s.pending_bracket.is_none()); assert!(!s.pending_g);
+    assert!(!s.pending_z);
+    assert!(s.pending_bracket.is_none());
+    assert!(!s.pending_g);
 }
 
 #[test]
 fn esc_resets_chords() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    handle_input(&mut s, &key('z')); assert!(s.pending_z);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    handle_input(&mut s, &key('z'));
+    assert!(s.pending_z);
     handle_input(&mut s, &sp(DomainKey::Esc));
-    assert!(!s.pending_z); assert!(!s.pending_g);
+    assert!(!s.pending_z);
+    assert!(!s.pending_g);
 }
 
 #[test]
 fn chord_cancellation_absorbs_legacy() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    handle_input(&mut s, &key('z')); assert!(s.pending_z);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    handle_input(&mut s, &key('z'));
+    assert!(s.pending_z);
     assert_eq!(handle_input(&mut s, &key('1')), InputAction::Consumed);
 }
 
@@ -92,38 +116,62 @@ fn vim_not_in_which_key() {
 #[test]
 fn chord_defaults_false() {
     let s = make_state();
-    assert!(!s.pending_z); assert!(s.pending_bracket.is_none()); assert!(!s.pending_g);
+    assert!(!s.pending_z);
+    assert!(s.pending_bracket.is_none());
+    assert!(!s.pending_g);
 }
 
 // ── S16.8 AC8 tests ──
 #[test]
 fn ctrl_d_emits_scroll_half_page_down() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    assert_eq!(handle_input(&mut s, &sp(DomainKey::CtrlD)), InputAction::ScrollHalfPageDown);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::CtrlD)),
+        InputAction::ScrollHalfPageDown
+    );
 }
 #[test]
 fn ctrl_u_emits_scroll_half_page_up() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    assert_eq!(handle_input(&mut s, &sp(DomainKey::CtrlU)), InputAction::ScrollHalfPageUp);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::CtrlU)),
+        InputAction::ScrollHalfPageUp
+    );
 }
 #[test]
 fn ctrl_b_emits_scroll_full_page_up() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    assert_eq!(handle_input(&mut s, &sp(DomainKey::CtrlB)), InputAction::ScrollFullPageUp);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::CtrlB)),
+        InputAction::ScrollFullPageUp
+    );
 }
 #[test]
 fn ctrl_f_chat_emits_full_page_down() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    assert_eq!(handle_input(&mut s, &sp(DomainKey::CtrlF)), InputAction::ScrollFullPageDown);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::CtrlF)),
+        InputAction::ScrollFullPageDown
+    );
 }
 #[test]
 fn ctrl_f_input_opens_search() {
-    let mut s = make_state(); s.focus = FocusState::Input; s.input_buffer.clear();
-    assert_eq!(handle_input(&mut s, &sp(DomainKey::CtrlF)), InputAction::OpenSearch);
+    let mut s = make_state();
+    s.focus = FocusState::Input;
+    s.input_buffer.clear();
+    assert_eq!(
+        handle_input(&mut s, &sp(DomainKey::CtrlF)),
+        InputAction::OpenSearch
+    );
 }
 #[test]
 fn gg_chord_emits_scroll_top() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
     assert_eq!(handle_input(&mut s, &key('g')), InputAction::ScrollToTop);
     assert!(s.pending_g);
     // P6: Second g is idempotent — no redundant dispatch (was ScrollToTop).
@@ -132,29 +180,39 @@ fn gg_chord_emits_scroll_top() {
 }
 #[test]
 fn single_g_emits_scroll_top() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
     assert_eq!(handle_input(&mut s, &key('g')), InputAction::ScrollToTop);
     assert!(s.pending_g);
 }
 #[test]
 fn g_chord_resets_on_non_g() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    handle_input(&mut s, &key('g')); assert!(s.pending_g);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    handle_input(&mut s, &key('g'));
+    assert!(s.pending_g);
     handle_input(&mut s, &key('j'));
     assert!(!s.pending_g);
 }
 #[test]
 fn g_chord_resets_on_resize() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    handle_input(&mut s, &key('g')); assert!(s.pending_g);
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    handle_input(&mut s, &key('g'));
+    assert!(s.pending_g);
     handle_input(&mut s, &DomainInputEvent::Resize(100, 30));
     assert!(!s.pending_g);
 }
 #[test]
 fn mouse_scroll_dispatches() {
-    let mut s = make_state(); s.focus = FocusState::Input;
-    let r = handle_input(&mut s, &DomainInputEvent::MouseScroll(
-        rustain::domain::models::view_state::ScrollDelta::WheelDown(3)));
+    let mut s = make_state();
+    s.focus = FocusState::Input;
+    let r = handle_input(
+        &mut s,
+        &DomainInputEvent::MouseScroll(
+            rustain::domain::models::view_state::ScrollDelta::WheelDown(3),
+        ),
+    );
     assert!(matches!(r, InputAction::MouseScroll(_)));
 }
 
@@ -166,17 +224,25 @@ fn g_in_pinned_noop_at_dispatch_layer() {
     // Mode-aware Pinned no-op happens in event_loop dispatcher.
     // This test verifies the InputAction contract — the dispatcher test
     // (compute_scroll) confirms mode-specific behavior.
-    let mut s = make_state(); s.focus = FocusState::Chat;
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
     assert_eq!(handle_input(&mut s, &key('G')), InputAction::ScrollToBottom);
 }
 
 #[test]
 fn mouse_wheel_up_emits_wheel_up_scroll_delta() {
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    let r = handle_input(&mut s, &DomainInputEvent::MouseScroll(
-        rustain::domain::models::view_state::ScrollDelta::WheelUp(3)));
-    assert!(matches!(r, InputAction::MouseScroll(
-        rustain::domain::models::view_state::ScrollDelta::WheelUp(3))));
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    let r = handle_input(
+        &mut s,
+        &DomainInputEvent::MouseScroll(rustain::domain::models::view_state::ScrollDelta::WheelUp(
+            3,
+        )),
+    );
+    assert!(matches!(
+        r,
+        InputAction::MouseScroll(rustain::domain::models::view_state::ScrollDelta::WheelUp(3))
+    ));
 }
 
 #[test]
@@ -184,20 +250,32 @@ fn shift_wheel_up_emits_half_page_up() {
     // Shift+wheel half-page is handled at convert_crossterm_event level;
     // the mouse_scroll_dispatches test covers the generic MouseScroll path.
     // This test verifies a half-page delta also dispatches correctly.
-    let mut s = make_state(); s.focus = FocusState::Chat;
-    let r = handle_input(&mut s, &DomainInputEvent::MouseScroll(
-        rustain::domain::models::view_state::ScrollDelta::HalfPageUp));
-    assert!(matches!(r, InputAction::MouseScroll(
-        rustain::domain::models::view_state::ScrollDelta::HalfPageUp)));
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
+    let r = handle_input(
+        &mut s,
+        &DomainInputEvent::MouseScroll(
+            rustain::domain::models::view_state::ScrollDelta::HalfPageUp,
+        ),
+    );
+    assert!(matches!(
+        r,
+        InputAction::MouseScroll(rustain::domain::models::view_state::ScrollDelta::HalfPageUp)
+    ));
 }
 
 #[test]
 fn mouse_wheel_in_input_focus_dispatches() {
     // AC4 note: MouseScroll always dispatches; focus guard expected in event loop,
     // not handle_input. The InputAction is emitted regardless of focus.
-    let mut s = make_state(); s.focus = FocusState::Input;
-    let r = handle_input(&mut s, &DomainInputEvent::MouseScroll(
-        rustain::domain::models::view_state::ScrollDelta::WheelUp(3)));
+    let mut s = make_state();
+    s.focus = FocusState::Input;
+    let r = handle_input(
+        &mut s,
+        &DomainInputEvent::MouseScroll(rustain::domain::models::view_state::ScrollDelta::WheelUp(
+            3,
+        )),
+    );
     assert!(matches!(r, InputAction::MouseScroll(_)));
 }
 
@@ -205,7 +283,8 @@ fn mouse_wheel_in_input_focus_dispatches() {
 fn z_g_chord_emits_scroll_to_top() {
     // P8: z-prefix chord cancelled with 'g' still produces ScrollToTop
     // instead of silently consuming the keystroke.
-    let mut s = make_state(); s.focus = FocusState::Chat;
+    let mut s = make_state();
+    s.focus = FocusState::Chat;
     handle_input(&mut s, &key('z'));
     assert!(s.pending_z);
     assert_eq!(handle_input(&mut s, &key('g')), InputAction::ScrollToTop);

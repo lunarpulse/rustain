@@ -182,9 +182,9 @@ def test_help_overlay_shows_plan_mode_bindings(tui: RustainTUI):
     tui.chat_mode()
     tui.open_help()
     # Scroll down to find COMMANDS category (j scrolls down by 1 line)
-    for _ in range(35):
+    for _ in range(60):
         tui.send("j")
-        tui.wait(0.05)
+        tui.wait(0.1)
     screen = tui.get_screen_text()
     assert "/plan on|off|toggle" in screen, f"Help should document /plan command. Screen:\n{screen}"
     # Scroll back to top and down a bit less to find Shift+Tab

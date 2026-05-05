@@ -112,8 +112,10 @@ fn jump_and_reconcile(
 ) -> (ViewState, usize) {
     view_state.focused_turn = Some(focus_id.clone());
 
-    let tool_block_states: HashMap<String, rustain::adapters::tui::widgets::tool_block::ToolBlockState> =
-        HashMap::new();
+    let tool_block_states: HashMap<
+        String,
+        rustain::adapters::tui::widgets::tool_block::ToolBlockState,
+    > = HashMap::new();
     let mut tab_render_state = TabRenderState::default();
 
     // Build layout to seed HeightCache and produce turn_top_offsets
@@ -162,8 +164,10 @@ fn build_verify_layout(
     width: u16,
     viewport_height: usize,
 ) -> LayoutMetrics {
-    let tool_block_states: HashMap<String, rustain::adapters::tui::widgets::tool_block::ToolBlockState> =
-        HashMap::new();
+    let tool_block_states: HashMap<
+        String,
+        rustain::adapters::tui::widgets::tool_block::ToolBlockState,
+    > = HashMap::new();
     let mut tab_render_state = TabRenderState::default();
     chat_pane::build_layout_metrics(
         conv,
@@ -205,13 +209,9 @@ fn next_prose_anchor_jump_advances_focus_and_pins_mode() {
 
     // Focus on turn "b" (index 1), jump to turn "c" (index 2)
     let (vs, offset) = jump_and_reconcile(
-        &conv,
-        view_state,
-        &ids[1], // "b"
+        &conv, view_state, &ids[1], // "b"
         &ids[2], // "c"
-        &clock,
-        80,
-        VPORT,
+        &clock, 80, VPORT,
     );
 
     assert_eq!(vs.focused_turn.as_ref(), Some(&ids[2]));
@@ -236,13 +236,9 @@ fn prev_prose_anchor_jump_reverses() {
 
     // Focus on turn "c" (index 2), jump backward to turn "b" (index 1)
     let (vs, offset) = jump_and_reconcile(
-        &conv,
-        view_state,
-        &ids[2], // "c"
+        &conv, view_state, &ids[2], // "c"
         &ids[1], // "b"
-        &clock,
-        80,
-        VPORT,
+        &clock, 80, VPORT,
     );
 
     assert_eq!(vs.focused_turn.as_ref(), Some(&ids[1]));
@@ -250,10 +246,7 @@ fn prev_prose_anchor_jump_reverses() {
         matches!(vs.mode, AnchorMode::Pinned { .. }),
         "Expected Pinned mode after backward jump"
     );
-    assert!(
-        offset > 0,
-        "Expected scroll_offset > 0 for backward jump"
-    );
+    assert!(offset > 0, "Expected scroll_offset > 0 for backward jump");
 
     let layout = build_verify_layout(&conv, &vs, &clock, 80, VPORT);
     verify_turn_at_viewport_top(&layout, &ids[1], offset, "prev_prose jump b");
@@ -293,9 +286,7 @@ fn fixture_4_turn_skip_no_prose() -> (Conversation, MockClock, Vec<TurnId>) {
     );
     let turn_4 = make_turn(
         "dd",
-        vec![
-            prose("Fourth turn for completeness."),
-        ],
+        vec![prose("Fourth turn for completeness.")],
         Some(StopReason::EndTurn),
     );
 
@@ -323,17 +314,16 @@ fn prose_anchor_jump_skips_turns_without_prose_part() {
     // Here we test the VIEWPORT OUTCOME: when the target is "cc", reconcile
     // correctly sets focus and pin.
     let (vs, offset) = jump_and_reconcile(
-        &conv,
-        view_state,
-        &ids[0], // "aa"
+        &conv, view_state, &ids[0], // "aa"
         &ids[2], // "cc" - skip "bb"
-        &clock,
-        80,
-        VPORT,
+        &clock, 80, VPORT,
     );
 
-    assert_eq!(vs.focused_turn.as_ref(), Some(&ids[2]),
-        "Jump from turn-aa should land on turn-cc (skipping tool-only turn-bb)");
+    assert_eq!(
+        vs.focused_turn.as_ref(),
+        Some(&ids[2]),
+        "Jump from turn-aa should land on turn-cc (skipping tool-only turn-bb)"
+    );
     assert!(
         matches!(vs.mode, AnchorMode::Pinned { .. }),
         "Expected Pinned mode after jump skipping tool-only turn"
@@ -364,8 +354,10 @@ fn prose_anchor_jump_at_boundary_is_noop_with_debug_log() {
     };
     view_state.reconcile(Some(event), &layout);
 
-    assert_eq!(view_state.focused_turn, focus_before,
-        "Boundary jump forward should not change focused_turn");
+    assert_eq!(
+        view_state.focused_turn, focus_before,
+        "Boundary jump forward should not change focused_turn"
+    );
     // scroll_offset may be 0 if content fits viewport, or equal to
     // what resolve_pinned produces. Either is fine for a boundary no-op
     // since the focused turn stays the same.
@@ -383,7 +375,9 @@ fn recenter_zz_pins_focused_turn_top_at_viewport_top() {
     let layout = build_verify_layout(&conv, &view_state, &clock, 80, VPORT);
 
     // Scroll mid-conversation so turn "c" is not at top
-    let max_offset = layout.total_content_height.saturating_sub(layout.viewport_height);
+    let max_offset = layout
+        .total_content_height
+        .saturating_sub(layout.viewport_height);
     let turn_c_top = get_turn_top_offset(&layout, &ids[2]);
     // Set scroll_offset to make turn_c appear somewhere mid-viewport
     view_state.scroll_offset = (max_offset.saturating_sub(turn_c_top)).saturating_add(5);
@@ -391,17 +385,16 @@ fn recenter_zz_pins_focused_turn_top_at_viewport_top() {
 
     // Simulate `zz` - jump to the focused turn
     let (vs, offset) = jump_and_reconcile(
-        &conv,
-        view_state,
-        &ids[2], // "c"
+        &conv, view_state, &ids[2], // "c"
         &ids[2], // "c" - zz jumps to the focused turn itself
-        &clock,
-        80,
-        VPORT,
+        &clock, 80, VPORT,
     );
 
-    assert_eq!(vs.focused_turn.as_ref(), Some(&ids[2]),
-        "zz should keep focused turn on turn-c");
+    assert_eq!(
+        vs.focused_turn.as_ref(),
+        Some(&ids[2]),
+        "zz should keep focused turn on turn-c"
+    );
     assert!(
         matches!(vs.mode, AnchorMode::Pinned { .. }),
         "zz should enter Pinned mode"
@@ -425,7 +418,9 @@ fn recenter_zz_with_no_focus_falls_back_to_topmost_assistant_turn() {
     let layout = build_verify_layout(&conv, &view_state, &clock, 80, VPORT);
 
     // Scroll to top (offset = max_offset)
-    let max_offset = layout.total_content_height.saturating_sub(layout.viewport_height);
+    let max_offset = layout
+        .total_content_height
+        .saturating_sub(layout.viewport_height);
     view_state.scroll_offset = max_offset;
     // No focused turn - simulating "no focus" state
     view_state.focused_turn = None;
@@ -436,8 +431,11 @@ fn recenter_zz_with_no_focus_falls_back_to_topmost_assistant_turn() {
     };
     let offset = view_state.reconcile(Some(event), &layout);
 
-    assert_eq!(view_state.focused_turn.as_ref(), Some(&ids[0]),
-        "zz with no focus should fall back to topmost assistant turn (a)");
+    assert_eq!(
+        view_state.focused_turn.as_ref(),
+        Some(&ids[0]),
+        "zz with no focus should fall back to topmost assistant turn (a)"
+    );
     assert!(
         matches!(view_state.mode, AnchorMode::Pinned { .. }),
         "zz fallback should enter Pinned mode"

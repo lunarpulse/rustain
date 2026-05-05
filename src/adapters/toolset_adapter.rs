@@ -8,19 +8,21 @@
 //! their conversation at `{sessions_dir}/{conversation_id}/snapshots/`.
 //! The old path leaked across conversations and was not cleaned up by `delete_conversation()`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::skill_activation::SkillActivator;
 use crate::domain::errors::ToolError;
-use crate::domain::events::AppEvent;
+use crate::domain::events::{AppEvent, ToolProgressEvent};
 use crate::domain::models::checkpoint::CheckpointId;
-use crate::domain::models::{ToolDefinition, ToolResult};
+use crate::domain::models::{ToolDefinition, ToolProgressConfig, ToolResult};
 use crate::domain::ports::{StoragePort, ToolSetPort};
 use crate::domain::services::plan_manager::PlanManager;
 
@@ -54,6 +56,117 @@ pub struct ToolSetAdapter {
     /// Optional event bus sender for emitting plan approval events.
     #[allow(dead_code)]
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
+    /// Progress event sender for long-running tool stdout tail. Story 16.9.
+    progress_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>>,
+    /// Tool progress configuration (tail_lines cap, threshold). Story 16.9.
+    tool_progress_config: Mutex<ToolProgressConfig>,
+}
+
+/// Context for the `stream_lines` helper, bundling the many parameters
+/// that were previously passed as individual closure captures.
+#[derive(Clone)]
+struct StreamLinesContext {
+    ring: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+    counter: Arc<AtomicU64>,
+    last_emit: Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+    accumulator: Arc<tokio::sync::Mutex<String>>,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>,
+    tid: String,
+    tail_cap: usize,
+    threshold_ms: u64,
+    spawn_instant: std::time::Instant,
+    emit_enabled: bool,
+}
+
+async fn stream_lines(
+    stream_opt: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>,
+    ctx: StreamLinesContext,
+) {
+    if let Some(stream) = stream_opt {
+        let mut reader = BufReader::new(stream);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    // Decode lossily so invalid UTF-8 does not truncate the stream.
+                    let line = String::from_utf8_lossy(&buf);
+                    let line = line.strip_suffix('\n').unwrap_or(&line);
+                    let line = line.strip_suffix('\r').unwrap_or(line);
+                    let line_owned = line.to_string();
+
+                    // Accumulate for the final result in a single lock acquisition.
+                    {
+                        let mut acc = ctx.accumulator.lock().await;
+                        acc.push_str(&line_owned);
+                        acc.push('\n');
+                    }
+                    let k = ctx.counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Ring buffer
+                    {
+                        let mut ring_guard = ctx.ring.lock().await;
+                        ring_guard.push_back(line_owned);
+                        while ring_guard.len() > ctx.tail_cap {
+                            ring_guard.pop_front();
+                        }
+                    }
+                    if ctx.emit_enabled {
+                        let elapsed = ctx
+                            .spawn_instant
+                            .elapsed()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
+                        if elapsed >= ctx.threshold_ms {
+                            // Counter events are NOT throttled — rail render is constant-cost.
+                            if let Some(ref tx) = ctx.progress_tx {
+                                let _ = tx.send(ToolProgressEvent::Counter {
+                                    tool_use_id: ctx.tid.clone(),
+                                    k,
+                                    n: k,
+                                });
+                            }
+                            // Throttle tail emit to ~250ms
+                            let now = tokio::time::Instant::now();
+                            let should_emit_tail = {
+                                let mut le = ctx.last_emit.lock().await;
+                                match *le {
+                                    None => {
+                                        *le = Some(now);
+                                        true
+                                    }
+                                    Some(prev) => {
+                                        if now.duration_since(prev).as_millis() >= 250 {
+                                            *le = Some(now);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                }
+                            };
+                            if should_emit_tail {
+                                if let Some(ref tx) = ctx.progress_tx {
+                                    let ring_guard = ctx.ring.lock().await;
+                                    let tail_text: String =
+                                        ring_guard.iter().cloned().collect::<Vec<_>>().join("\n");
+                                    let _ = tx.send(ToolProgressEvent::Tail {
+                                        tool_use_id: ctx.tid.clone(),
+                                        text: tail_text,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("stream read error: {}", e);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl ToolSetAdapter {
@@ -67,6 +180,8 @@ impl ToolSetAdapter {
             activator: None,
             plan_manager: None,
             event_tx: None,
+            progress_tx: Mutex::new(None),
+            tool_progress_config: Mutex::new(ToolProgressConfig::default()),
         }
     }
 
@@ -86,6 +201,16 @@ impl ToolSetAdapter {
     }
 
     #[allow(dead_code)]
+    pub async fn set_progress_tx(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>) {
+        *self.progress_tx.lock().await = tx;
+    }
+
+    #[allow(dead_code)]
+    pub async fn set_tool_progress_config(&self, cfg: ToolProgressConfig) {
+        *self.tool_progress_config.lock().await = cfg;
+    }
+
+    #[allow(dead_code)]
     pub async fn set_plan_file(&self, path: Option<std::path::PathBuf>) {
         *self.current_plan_file.lock().await = path;
     }
@@ -94,6 +219,18 @@ impl ToolSetAdapter {
         &self,
         input: &serde_json::Value,
         cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let progress_tx = self.progress_tx.lock().await.clone();
+        self.execute_bash_with_progress(input, cancel, "", progress_tx)
+            .await
+    }
+
+    async fn execute_bash_with_progress(
+        &self,
+        input: &serde_json::Value,
+        cancel: CancellationToken,
+        tool_use_id: &str,
+        progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>,
     ) -> Result<ToolResult, ToolError> {
         let command = input
             .get("command")
@@ -106,7 +243,14 @@ impl ToolSetAdapter {
             .unwrap_or(120_000)
             .min(600_000);
 
-        let child = tokio::process::Command::new("bash")
+        let cfg = self.tool_progress_config.lock().await.clone();
+        let tail_cap = cfg.tail_lines_clamped();
+        let threshold_ms = cfg.threshold_ms;
+        let emit_enabled = progress_tx.is_some();
+        // Drop the lock before spawning child
+        let _ = cfg;
+
+        let mut child = tokio::process::Command::new("bash")
             .arg("-c")
             .arg(command)
             .current_dir(&self.workspace_path)
@@ -117,36 +261,114 @@ impl ToolSetAdapter {
             .spawn()
             .map_err(|e| ToolError::ExecutionFailed(format!("spawn: {e}")))?;
 
-        let wait = child.wait_with_output();
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
+        let spawn_instant = std::time::Instant::now();
+
+        let ring: Arc<tokio::sync::Mutex<VecDeque<String>>> =
+            Arc::new(tokio::sync::Mutex::new(VecDeque::with_capacity(tail_cap)));
+        let line_counter: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let last_emit: Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+
+        let stdout_lines: Arc<tokio::sync::Mutex<String>> =
+            Arc::new(tokio::sync::Mutex::new(String::new()));
+        let stderr_lines: Arc<tokio::sync::Mutex<String>> =
+            Arc::new(tokio::sync::Mutex::new(String::new()));
+
+        let tid = tool_use_id.to_string();
+
+        let ctx = StreamLinesContext {
+            ring: ring.clone(),
+            counter: line_counter.clone(),
+            last_emit: last_emit.clone(),
+
+            accumulator: stdout_lines.clone(),
+            progress_tx: progress_tx.clone(),
+            tid: tid.clone(),
+            tail_cap,
+            threshold_ms,
+            spawn_instant,
+            emit_enabled,
+        };
+        let stdout_task = tokio::spawn(stream_lines(
+            child_stdout.map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            ctx.clone(),
+        ));
+        let stderr_task = tokio::spawn(stream_lines(
+            child_stderr.map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            StreamLinesContext {
+                accumulator: stderr_lines.clone(),
+                ..ctx
+            },
+        ));
+
+        let wait = child.wait();
         let timed = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), wait);
 
-        tokio::select! {
-            _ = cancel.cancelled() => Err(ToolError::Cancelled),
+        let mut wait_error = None;
+        let (exit_status, was_cancelled) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                child.kill().await.ok();
+                (None, true)
+            }
             res = timed => match res {
-                Ok(Ok(output)) => {
-                    let mut result = String::new();
-                    if !output.stdout.is_empty() {
-                        result.push_str(&String::from_utf8_lossy(&output.stdout));
-                    }
-                    if !output.stderr.is_empty() {
-                        if !result.is_empty() {
-                            result.push('\n');
-                        }
-                        result.push_str(&String::from_utf8_lossy(&output.stderr));
-                    }
-                    if result.is_empty() {
-                        result = format!("Command exited with status {}", output.status);
-                    }
-                    Ok(ToolResult {
-                        tool_use_id: String::new(),
-                        content: result,
-                        is_error: !output.status.success(),
-                    })
+                Ok(Ok(status)) => (Some(status), false),
+                Ok(Err(e)) => {
+                    wait_error = Some(ToolError::ExecutionFailed(format!("wait: {e}")));
+                    (None, false)
                 }
-                Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("wait: {e}"))),
-                Err(_) => Err(ToolError::Timeout),
+                Err(_) => {
+                    child.kill().await.ok();
+                    (None, false)
+                }
+            }
+        };
+
+        // Join reader tasks AFTER wait() returns to drain remaining buffered lines (AC8 step 6).
+        // Do NOT abort first — that drops in-flight buffered data.
+        let (stdout_res, stderr_res) = tokio::join!(stdout_task, stderr_task);
+        if let Err(ref e) = stdout_res {
+            tracing::warn!("stdout reader task failed: {}", e);
+        }
+        if let Err(ref e) = stderr_res {
+            tracing::warn!("stderr reader task failed: {}", e);
+        }
+
+        if was_cancelled {
+            return Err(ToolError::Cancelled);
+        }
+        if let Some(e) = wait_error {
+            return Err(e);
+        }
+        if exit_status.is_none() {
+            return Err(ToolError::Timeout);
+        }
+
+        let stdout_acc = stdout_lines.lock().await;
+        let stderr_acc = stderr_lines.lock().await;
+        let mut result = String::new();
+        if !stdout_acc.is_empty() {
+            result.push_str(&stdout_acc);
+        }
+        if !stderr_acc.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&stderr_acc);
+        }
+        if result.is_empty() {
+            if let Some(s) = exit_status {
+                result = format!("Command exited with status {}", s);
             }
         }
+        let is_error = exit_status.map_or(true, |s| !s.success());
+        Ok(ToolResult {
+            tool_use_id: tid,
+            content: result,
+            is_error,
+        })
     }
 
     async fn execute_read(
@@ -542,6 +764,26 @@ impl ToolSetPort for ToolSetAdapter {
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             "propose_plan" => self.execute_propose_plan(&input).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
+        }
+    }
+
+    async fn execute_with_id(
+        &self,
+        tool_name: &str,
+        tool_use_id: &str,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+        progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>,
+    ) -> Result<ToolResult, ToolError> {
+        match tool_name {
+            "Bash" | "bash" => {
+                self.execute_bash_with_progress(&input, cancel, tool_use_id, progress_tx)
+                    .await
+            }
+            _ => {
+                let _ = (tool_use_id, progress_tx);
+                self.execute(tool_name, input, cancel).await
+            }
         }
     }
 
@@ -963,4 +1205,101 @@ mod tests {
         assert!(matches!(result, Err(ToolError::Cancelled)));
         assert!(!file.exists(), "file must not be created when cancelled");
     }
+
+    // Story 16.9: threshold gate tests (AC11)
+
+    #[tokio::test]
+    async fn execute_bash_no_events_below_threshold() {
+        let dir = std::env::current_dir().unwrap();
+        let adapter = make_adapter(&dir);
+        adapter.set_tool_progress_config(ToolProgressConfig {
+            live_tail: true,
+            tail_lines: 4,
+            threshold_ms: 3000,
+        }).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Script totals ~1s — well below the 3s threshold
+        let _result = adapter
+            .execute_bash_with_progress(
+                &serde_json::json!({"command": "echo a; sleep 0.5; echo b; sleep 0.5; echo c"}),
+                CancellationToken::new(),
+                "test-below",
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "zero events should be emitted below threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_bash_streams_lines_after_threshold() {
+        let dir = std::env::current_dir().unwrap();
+        let adapter = make_adapter(&dir);
+        adapter.set_tool_progress_config(ToolProgressConfig {
+            live_tail: true,
+            tail_lines: 4,
+            threshold_ms: 3000,
+        }).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Script totals ~4s — exceeds the 3s threshold
+        let _result = adapter
+            .execute_bash_with_progress(
+                &serde_json::json!({"command": "for i in 1 2 3 4 5 6 7 8 9 10; do echo line $i; sleep 0.4; done"}),
+                CancellationToken::new(),
+                "test-above",
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        let mut got_counter = false;
+        let mut got_tail = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                ToolProgressEvent::Counter { .. } => got_counter = true,
+                ToolProgressEvent::Tail { .. } => got_tail = true,
+            }
+        }
+        assert!(got_counter, "should emit >=1 Counter after threshold");
+        assert!(got_tail, "should emit >=1 Tail after threshold");
+    }
+
+    #[tokio::test]
+    async fn bash_failure_mid_stream_preserves_full_stdout() {
+        let dir = std::env::current_dir().unwrap();
+        let adapter = make_adapter(&dir);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        adapter.set_progress_tx(Some(tx.clone())).await;
+        adapter.set_tool_progress_config(ToolProgressConfig {
+            live_tail: true,
+            tail_lines: 4,
+            threshold_ms: 500, // low threshold so events fire
+        }).await;
+
+        let result = adapter
+            .execute_bash_with_progress(
+                &serde_json::json!({"command": "echo a; sleep 0.5; echo b; sleep 0.5; echo c; sleep 1; echo d; echo e; echo f; exit 1"}),
+                CancellationToken::new(),
+                "test-failure",
+                Some(tx),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error, "exit 1 must mark ToolResult as error");
+        for line in &["a", "b", "c", "d", "e", "f"] {
+            assert!(
+                result.content.contains(line),
+                "full stdout must contain '{}' — not just ring-buffered last 4",
+                line
+            );
+        }
+    }
+
 }

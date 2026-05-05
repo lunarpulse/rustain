@@ -124,6 +124,7 @@ fn render_text(
             &[],
             &[],
             None,
+            None,
         );
     });
     use ratatui::buffer::Buffer;

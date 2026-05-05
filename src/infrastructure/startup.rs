@@ -198,6 +198,17 @@ pub async fn run() -> Result<()> {
     tools_adapter.set_activator(Arc::clone(&skill_activator));
     tools_adapter.set_plan_manager(plan_manager.clone());
     tools_adapter.set_event_tx(domain_tx.clone());
+
+    // Story 16.9: construct progress channel when live_tail is enabled
+    let (progress_tx, progress_rx) = if app_config.tool_progress.live_tail {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tools_adapter.set_progress_tx(Some(tx.clone())).await;
+        tools_adapter.set_tool_progress_config(app_config.tool_progress.clone()).await;
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let tools: Arc<dyn ToolSetPort> = Arc::new(tools_adapter);
 
     // 5c. Discover and load project context
@@ -396,6 +407,8 @@ pub async fn run() -> Result<()> {
         skill_activator,
         agent_activator,
         approval_runtime,
+        progress_tx,
+        progress_rx,
     )
     .await;
 

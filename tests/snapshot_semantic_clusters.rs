@@ -22,11 +22,9 @@ mod common;
 
 use common::*;
 use rustain::domain::clock::MockClock;
-use rustain::domain::models::{
-    InvocationStatus, MessageRole, StopReason, SummaryTier, TurnPart,
-};
 use rustain::domain::models::turn::PartId;
 use rustain::domain::models::{ChatMessage, Conversation, ViewState};
+use rustain::domain::models::{InvocationStatus, MessageRole, StopReason, SummaryTier, TurnPart};
 use serde_json::json;
 
 // ---------------------------------------------------------------------------
@@ -35,207 +33,273 @@ use serde_json::json;
 // ---------------------------------------------------------------------------
 
 fn cluster_read_heavy_with_common_prefix() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_read_heavy_with_common_prefix",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Read".to_string(),
-             args: json!({"file_path": "src/auth/login.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Read".to_string(),
-             args: json!({"file_path": "src/auth/jwt.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(2), tool: "Read".to_string(),
-             args: json!({"file_path": "src/auth/session.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(3), tool: "Read".to_string(),
-             args: json!({"file_path": "src/auth/csrf.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(4), tool: "Read".to_string(),
-             args: json!({"file_path": "src/auth/oauth.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_read_heavy_with_common_prefix",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/auth/login.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/auth/jwt.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(2),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/auth/session.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(3),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/auth/csrf.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(4),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/auth/oauth.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 fn cluster_mixed_kinds_with_separators() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_mixed_kinds_with_separators",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Read".to_string(),
-             args: json!({"file_path": "src/foo.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Read".to_string(),
-             args: json!({"file_path": "src/bar.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(2), tool: "Bash".to_string(),
-             args: json!({"command": "ls -la"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(3), tool: "Edit".to_string(),
-             args: json!({"file_path": "src/auth/foo.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_mixed_kinds_with_separators",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/foo.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/bar.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(2),
+                tool: "Bash".to_string(),
+                args: json!({"command": "ls -la"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(3),
+                tool: "Edit".to_string(),
+                args: json!({"file_path": "src/auth/foo.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 fn cluster_failure_containing_does_not_filter() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_failure_containing_does_not_filter",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Read".to_string(),
-             args: json!({"file_path": "src/a.rs"}),
-             status: InvocationStatus::Error,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Read".to_string(),
-             args: json!({"file_path": "src/b.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(2), tool: "Read".to_string(),
-             args: json!({"file_path": "src/c.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_failure_containing_does_not_filter",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/a.rs"}),
+                status: InvocationStatus::Error,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/b.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(2),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/c.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 fn cluster_single_tool() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_single_tool",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Read".to_string(),
-             args: json!({"file_path": "src/auth/login.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_single_tool",
+        vec![TurnPart::ToolInvocation {
+            id: PartId(0),
+            tool: "Read".to_string(),
+            args: json!({"file_path": "src/auth/login.rs"}),
+            status: InvocationStatus::Success,
+            started_at: 1_700_000_000_000,
+            ended_at: Some(1_700_000_005_000),
+        }],
+    )
 }
 
 fn cluster_all_bash_no_path_qualifier() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_all_bash_no_path_qualifier",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Bash".to_string(),
-             args: json!({"command": "ls -la"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Bash".to_string(),
-             args: json!({"command": "ls -la"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(2), tool: "Bash".to_string(),
-             args: json!({"command": "ls -la"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(3), tool: "Bash".to_string(),
-             args: json!({"command": "ls -la"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_all_bash_no_path_qualifier",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Bash".to_string(),
+                args: json!({"command": "ls -la"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Bash".to_string(),
+                args: json!({"command": "ls -la"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(2),
+                tool: "Bash".to_string(),
+                args: json!({"command": "ls -la"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(3),
+                tool: "Bash".to_string(),
+                args: json!({"command": "ls -la"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 fn cluster_grep_only_with_path() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_grep_only_with_path",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Grep".to_string(),
-             args: json!({"path": "src/auth/"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Grep".to_string(),
-             args: json!({"path": "src/auth/"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_grep_only_with_path",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Grep".to_string(),
+                args: json!({"path": "src/auth/"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Grep".to_string(),
+                args: json!({"path": "src/auth/"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 fn cluster_mixed_paths_no_common_prefix() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_mixed_paths_no_common_prefix",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Read".to_string(),
-             args: json!({"file_path": "src/foo.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Read".to_string(),
-             args: json!({"file_path": "tests/bar.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(2), tool: "Read".to_string(),
-             args: json!({"file_path": "docs/baz.md"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_mixed_paths_no_common_prefix",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/foo.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "tests/bar.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(2),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "docs/baz.md"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 fn cluster_parallel_calls_one_each() -> (&'static str, Vec<TurnPart>) {
-    ("cluster_parallel_calls_one_each",
-     vec![
-         TurnPart::ToolInvocation {
-             id: PartId(0), tool: "Read".to_string(),
-             args: json!({"file_path": "src/a.rs"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(1), tool: "Bash".to_string(),
-             args: json!({"command": "ls"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(2), tool: "Grep".to_string(),
-             args: json!({"path": "src/"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-         TurnPart::ToolInvocation {
-             id: PartId(3), tool: "Write".to_string(),
-             args: json!({"file_path": "out.txt"}),
-             status: InvocationStatus::Success,
-             started_at: 1_700_000_000_000, ended_at: Some(1_700_000_005_000),
-         },
-     ])
+    (
+        "cluster_parallel_calls_one_each",
+        vec![
+            TurnPart::ToolInvocation {
+                id: PartId(0),
+                tool: "Read".to_string(),
+                args: json!({"file_path": "src/a.rs"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(1),
+                tool: "Bash".to_string(),
+                args: json!({"command": "ls"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(2),
+                tool: "Grep".to_string(),
+                args: json!({"path": "src/"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+            TurnPart::ToolInvocation {
+                id: PartId(3),
+                tool: "Write".to_string(),
+                args: json!({"file_path": "out.txt"}),
+                status: InvocationStatus::Success,
+                started_at: 1_700_000_000_000,
+                ended_at: Some(1_700_000_005_000),
+            },
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -347,10 +411,7 @@ fn semantic_label_clusters_tier2_w80() {
     // (#3) auto-expands due to UX-DR-FAILURE-AUTOEXPAND, so its collapsed
     // Tier-2 label is never rendered — count is 3, not 4. Guarding against
     // regression where labeler silently drops qualifiers.
-    let path_qualifier_count = text
-        .lines()
-        .filter(|l| l.contains(" in "))
-        .count();
+    let path_qualifier_count = text.lines().filter(|l| l.contains(" in ")).count();
     assert!(
         path_qualifier_count >= 3,
         "Expected >=3 cluster lines with path qualifier ' in ', got {}. Text:\n{text}",

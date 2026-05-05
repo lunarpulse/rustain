@@ -34,9 +34,14 @@ fn test_full_navigation_flow() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('K'));
     assert!(
         matches!(action, InputAction::BlockJump { .. }),
-        "K should emit BlockJump up, got {:?}", action
+        "K should emit BlockJump up, got {:?}",
+        action
     );
-    if let InputAction::BlockJump { offset, auto_scroll } = action {
+    if let InputAction::BlockJump {
+        offset,
+        auto_scroll,
+    } = action
+    {
         assert!(offset > 10, "K should jump up (offset {} > 10)", offset);
         assert!(!auto_scroll);
     }
@@ -51,7 +56,8 @@ fn test_full_navigation_flow() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('{'));
     assert!(
         matches!(action, InputAction::BlockJump { .. }),
-        "{{ should emit BlockJump, got {:?}", action
+        "{{ should emit BlockJump, got {:?}",
+        action
     );
 }
 
@@ -88,10 +94,15 @@ fn test_block_jump_actions() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('}'));
     assert!(
         matches!(action, InputAction::BlockJump { .. }),
-        "}} should emit BlockJump, got {:?}", action
+        "}} should emit BlockJump, got {:?}",
+        action
     );
     // Verify the jump goes toward bottom (smaller offset)
     if let InputAction::BlockJump { offset, .. } = action {
-        assert!(offset < 176, "}} should jump toward bottom (offset {} < 176)", offset);
+        assert!(
+            offset < 176,
+            "}} should jump toward bottom (offset {} < 176)",
+            offset
+        );
     }
 }

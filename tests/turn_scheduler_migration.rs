@@ -13,7 +13,7 @@ use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
     ToolDefinition, ToolResult, generate_conversation_id,
 };
-use rustain::domain::ports::{StreamingProvider, SecurityPort, ToolSetPort};
+use rustain::domain::ports::{SecurityPort, StreamingProvider, ToolSetPort};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::runtime::turn::run_turn;

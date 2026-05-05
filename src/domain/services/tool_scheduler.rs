@@ -23,11 +23,12 @@ use crate::domain::models::ActiveSkill;
 use crate::domain::models::tool_call::{
     ApprovalSource, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
+use crate::domain::events::ToolProgressEvent;
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::permission_chain;
 use std::path::PathBuf;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 /// Schedules and executes tool calls with lifecycle event broadcast.
 pub struct ToolScheduler {
@@ -36,6 +37,7 @@ pub struct ToolScheduler {
     events: broadcast::Sender<ToolCallTransition>,
     approval_runtime: Arc<ApprovalRuntime>,
     plan_file: RwLock<Option<PathBuf>>,
+    progress_tx: RwLock<Option<mpsc::UnboundedSender<ToolProgressEvent>>>,
 }
 
 impl ToolScheduler {
@@ -61,6 +63,7 @@ impl ToolScheduler {
             events,
             approval_runtime,
             plan_file: RwLock::new(None),
+            progress_tx: RwLock::new(None),
         })
     }
 
@@ -74,6 +77,12 @@ impl ToolScheduler {
     /// Used by the turn orchestrator to thread the plan-file exception through the chain.
     pub async fn set_plan_file(&self, path: Option<PathBuf>) {
         *self.plan_file.write().await = path;
+    }
+
+    /// Set the progress channel sender for tool progress events.
+    /// Story 16.9 — called at startup when `tool_progress.live_tail` is enabled.
+    pub async fn set_progress_tx(&self, tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>) {
+        *self.progress_tx.write().await = tx;
     }
 
     /// Run a batch of tool calls through the scheduler.
@@ -288,8 +297,9 @@ impl ToolScheduler {
         };
         self.emit(&conversation_id, &call);
 
+        let progress_tx = self.progress_tx.read().await.clone();
         let exec = tokio::select! {
-            r = self.tools.execute(&req.tool_name, req.input.clone(), cancel.clone()) => r,
+            r = self.tools.execute_with_id(&req.tool_name, &req.id, req.input.clone(), cancel.clone(), progress_tx) => r,
             _ = cancel.cancelled() => {
                 return self.terminal(&conversation_id, ToolCall::Cancelled {
                     id, request: req, reason: "cancelled-during-execute".into()

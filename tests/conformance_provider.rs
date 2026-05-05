@@ -6,9 +6,7 @@
 use rustain::adapters::noop::NoOpProvider;
 use rustain::adapters::provider::ProviderRegistry;
 use rustain::domain::models::provider::ModelDescriptor;
-use rustain::domain::models::{
-    CompletionOptions, Message, MessageRole, UserMessage,
-};
+use rustain::domain::models::{CompletionOptions, Message, MessageRole, UserMessage};
 use rustain::domain::ports::StreamingProvider;
 use tokio::runtime::Runtime;
 
@@ -25,8 +23,14 @@ fn assert_streaming_provider_conformance(provider: &dyn StreamingProvider) {
     let models = provider.list_models();
     for model in &models {
         assert!(!model.model_id.is_empty(), "model_id must not be empty");
-        assert!(!model.display_name.is_empty(), "display_name must not be empty");
-        assert_eq!(model.provider_id, pid, "model's provider_id must match the owning provider");
+        assert!(
+            !model.display_name.is_empty(),
+            "display_name must not be empty"
+        );
+        assert_eq!(
+            model.provider_id, pid,
+            "model's provider_id must match the owning provider"
+        );
         assert!(model.context_window > 0, "context_window must be positive");
     }
 }
@@ -118,12 +122,21 @@ fn test_anthropic_adapter_provider_id_and_models() {
     assert_eq!(adapter.provider_id(), "anthropic");
 
     let models = adapter.list_models();
-    assert!(!models.is_empty(), "Anthropic adapter must list at least one model");
-    let sonnet = models.iter().find(|m| m.model_id == "claude-sonnet-4-20250514");
+    assert!(
+        !models.is_empty(),
+        "Anthropic adapter must list at least one model"
+    );
+    let sonnet = models
+        .iter()
+        .find(|m| m.model_id == "claude-sonnet-4-20250514");
     assert!(sonnet.is_some(), "Sonnet model must be present");
     let sonnet = sonnet.unwrap();
     assert_eq!(sonnet.context_window, 200_000);
-    assert!(sonnet.capabilities.contains(&rustain::domain::models::ModelCapability::ToolUse));
+    assert!(
+        sonnet
+            .capabilities
+            .contains(&rustain::domain::models::ModelCapability::ToolUse)
+    );
 }
 
 // ---------------------------------------------------------------------------

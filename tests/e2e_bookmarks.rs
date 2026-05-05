@@ -109,6 +109,7 @@ fn render_chat_pane_with_bookmarks(
                 &[],
                 bookmarks,
                 None,
+                None,
             );
         })
         .unwrap();

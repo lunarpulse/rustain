@@ -162,7 +162,10 @@ fn test_tab_state_reset_display_state() {
     ts.reset_display_state();
 
     assert_eq!(ts.view_state.scroll_offset, 0);
-    assert!(matches!(ts.view_state.mode, rustain::domain::models::AnchorMode::Following));
+    assert!(matches!(
+        ts.view_state.mode,
+        rustain::domain::models::AnchorMode::Following
+    ));
     assert!(ts.block_boundaries.is_empty());
     assert!(ts.message_boundaries.is_empty());
     assert_eq!(ts.total_content_height, 0);
@@ -176,7 +179,10 @@ fn test_tab_state_new_has_fresh_conversation() {
     assert!(ts.conversation.messages.is_empty());
     assert!(ts.conversation.title.is_empty());
     assert!(!ts.conversation.id.is_empty());
-    assert!(matches!(ts.view_state.mode, rustain::domain::models::AnchorMode::Following));
+    assert!(matches!(
+        ts.view_state.mode,
+        rustain::domain::models::AnchorMode::Following
+    ));
     assert_eq!(ts.view_state.scroll_offset, 0);
 }
 

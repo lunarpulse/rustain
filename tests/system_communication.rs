@@ -95,7 +95,10 @@ fn test_error_feedback_block_in_conversation() {
     }
 
     assert!(content.contains('✗'), "Error symbol should be present");
-    assert!(content.contains("[Ctrl+K r]"), "Retry action should be present");
+    assert!(
+        content.contains("[Ctrl+K r]"),
+        "Retry action should be present"
+    );
 }
 
 /// AC2: Warning FeedbackBlock max 3 lines.
