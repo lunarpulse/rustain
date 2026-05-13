@@ -243,6 +243,7 @@ pub async fn run(
     progress_rx: Option<mpsc::UnboundedReceiver<crate::domain::events::ToolProgressEvent>>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
+    let active_provider_id = provider.provider_id().to_string();
 
     let size = terminal.size()?;
     let capability = detect_color_capability();
@@ -467,6 +468,7 @@ pub async fn run(
         &conversation,
         &streaming,
         &config.model,
+        &active_provider_id,
         security.as_ref(),
         tab_manager.tab_count(),
         tab_manager.active_tab_index(),
@@ -769,7 +771,7 @@ pub async fn run(
                                                                                 tab_manager.reset_and_clone_turn_cancel(),
                                           ).await;
                                         // Force immediate render for typing indicator
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -1532,7 +1534,7 @@ pub async fn run(
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         ).await;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -4318,7 +4320,7 @@ pub async fn run(
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         ).await;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -5129,7 +5131,7 @@ pub async fn run(
                             _agent_snap,
                                                               tab_manager.reset_and_clone_turn_cancel(),
                         ).await;
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                         }
@@ -5875,7 +5877,7 @@ pub async fn run(
                 }
 
                 if state.needs_redraw {
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -7566,6 +7568,7 @@ fn render(
     conversation: &Conversation,
     streaming: &StreamingState,
     model: &str,
+    provider_id: &str,
     security: &dyn SecurityPort,
     tab_count: usize,
     active_tab_index: usize,
@@ -8203,10 +8206,15 @@ fn render(
                     .task_panel_state
                     .drill_down_task
                     .map(|n| format!("Tasks > Task {}", n));
+                let provider_label = format!(
+                    "{}/{}",
+                    provider_id,
+                    model
+                );
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
-                    model,
+                    &provider_label,
                     status,
                     theme,
                     scroll_offset,

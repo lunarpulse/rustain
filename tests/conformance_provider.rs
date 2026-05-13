@@ -33,6 +33,14 @@ fn assert_streaming_provider_conformance(provider: &dyn StreamingProvider) {
         );
         assert!(model.context_window > 0, "context_window must be positive");
     }
+
+    // health_check must succeed or return a typed error (not panic)
+    let rt = Runtime::new().unwrap();
+    let health_result = rt.block_on(provider.health_check());
+    assert!(
+        health_result.is_ok() || health_result.is_err(),
+        "health_check must return a result (Ok or typed Err)"
+    );
 }
 
 #[test]
@@ -86,16 +94,15 @@ fn test_registry_health_check_on_noop_succeeds() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore = "Requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN env var"]
 fn test_anthropic_adapter_provider_id_and_models() {
-    // Verify the adapter can be constructed and provides correct metadata
-    // (requires ANTHROPIC_API_KEY env var — skip if not present)
     let auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
-    if auth_token.is_none() && api_key.is_none() {
-        eprintln!("Skipping anthropic adapter test — no API key set");
-        return;
-    }
+    assert!(
+        auth_token.is_some() || api_key.is_some(),
+        "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN must be set"
+    );
 
     let auth_mode = if let Some(token) = auth_token {
         rustain::adapters::anthropic::AuthMode::BearerToken(token)
@@ -109,15 +116,8 @@ fn test_anthropic_adapter_provider_id_and_models() {
         auth_mode,
         "claude-sonnet-4-20250514".to_string(),
         None,
-    );
-
-    let adapter = match adapter {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Skipping anthropic adapter test — construction failed: {e}");
-            return;
-        }
-    };
+    )
+    .expect("AnthropicAdapter construction failed");
 
     assert_eq!(adapter.provider_id(), "anthropic");
 

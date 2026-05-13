@@ -290,24 +290,32 @@ impl StreamingProvider for AnthropicAdapter {
 
     async fn health_check(&self) -> Result<(), ProviderError> {
         let url = format!("{}/v1/messages", self.base_url);
-        let response = match &self.auth_mode {
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let request = match &self.auth_mode {
             AuthMode::ApiKey(key) => {
                 self.client
-                    .head(&url)
+                    .post(&url)
                     .header("x-api-key", key.to_string())
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
                     .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await
+                    .body(serde_json::to_string(&body).unwrap_or_default())
             }
             AuthMode::BearerToken(token) => {
                 self.client
-                    .head(&url)
+                    .post(&url)
                     .header("authorization", format!("Bearer {}", token))
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
                     .timeout(std::time::Duration::from_secs(5))
-                    .send()
-                    .await
+                    .body(serde_json::to_string(&body).unwrap_or_default())
             }
         };
+        let response = request.send().await;
         match response {
             Ok(resp) if resp.status().is_success() => Ok(()),
             Ok(resp) if resp.status().as_u16() == 401 => {

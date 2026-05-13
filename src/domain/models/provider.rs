@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Adapters populate this from provider metadata (API docs or config).
 /// The registry filters by capability for tool-use vs vision vs thinking routing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ModelCapability {
     /// Model can accept images in the prompt (e.g., Claude, GPT-4o).
     Vision,
@@ -22,6 +23,8 @@ pub enum ModelCapability {
     Thinking,
     /// Model supports multiple parallel tool calls in a single turn.
     ParallelToolCalls,
+    /// Forward-compatible catch-all for capabilities not yet known at compile time.
+    Unknown(String),
 }
 
 /// Metadata for a single model exposed by a provider.

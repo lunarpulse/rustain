@@ -118,19 +118,10 @@ pub async fn run() -> Result<()> {
     let provider_arc_for_swap = Arc::clone(&provider);
     let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(provider_arc_for_swap));
 
-    // 5a.2 — ProviderRegistry: catalog of registered providers
+    // 5a.2 — ProviderRegistry: catalog of registered providers (D1: register real adapter)
     let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
-    // TODO(S7.1b): register providers from config instead of hard-coding Anthropic
-    provider_registry.register(Box::new(crate::adapters::noop::NoOpProvider));
-    // Run health check; failures emit a warning notice but do not block startup (AC4)
-    match provider.health_check().await {
-        Ok(()) => {
-            tracing::info!("Provider '{}' health check passed", provider.provider_id());
-        }
-        Err(e) => {
-            tracing::warn!("Provider '{}' health check failed: {e}", provider.provider_id());
-        }
-    }
+    provider_registry.register_arc(Arc::clone(&provider));
+    // Health check runs after AppState creation so we can emit TUI notice (D2)
 
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
@@ -170,8 +161,27 @@ pub async fn run() -> Result<()> {
         plan_manager.clone(),
         plan_injector.clone(),
         provider_swap,
+        provider_registry.clone(),
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
+
+    // D2: Health check — emit TUI warning notice on failure and update registry (AC4)
+    let provider_id_str = provider.provider_id().to_string();
+    match provider.health_check().await {
+        Ok(()) => {
+            tracing::info!("Provider '{}' health check passed", provider_id_str);
+            provider_registry.update_health(&provider_id_str, true);
+        }
+        Err(e) => {
+            tracing::warn!("Provider '{}' health check failed: {e}", provider_id_str);
+            provider_registry.update_health(&provider_id_str, false);
+            let _ = domain_tx.send(AppEvent::SystemNotice {
+                conversation_id: None,
+                level: NoticeLevel::Warning,
+                message: format!("Provider '{}' health check failed: {e}", provider_id_str),
+            });
+        }
+    }
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
     security_adapter.set_mode(initial_mode);
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);

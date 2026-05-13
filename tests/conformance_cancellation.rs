@@ -239,6 +239,7 @@ async fn ac4_signal_cancel_before_shutdown() {
     let provider_swap = Arc::new(ArcSwap::from_pointee(
         Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
+    let provider_registry = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
     let (app_state, _domain_rx) = AppState::new(
         16,
         approval_runtime,
@@ -246,6 +247,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
         provider_swap.clone(),
+        provider_registry,
     );
 
     app_state.session_cancel.cancel();

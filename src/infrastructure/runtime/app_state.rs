@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::adapters::provider::ProviderRegistry;
 use crate::domain::models::SandboxPolicy;
 use crate::domain::ports::StreamingProvider;
 use crate::domain::services::approval_runtime::ApprovalRuntime;
@@ -24,6 +25,8 @@ pub struct AppState {
     /// Load with `.load()` → `Arc<dyn StreamingProvider>`.
     // ProviderRouter added in Story 7.1b.
     pub provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
+    /// Provider catalog — model metadata queries without crossing port boundary (AC6).
+    pub provider_registry: Arc<ProviderRegistry>,
 }
 
 impl AppState {
@@ -34,6 +37,7 @@ impl AppState {
         plan_manager: Arc<PlanManager>,
         plan_injector: Arc<DefaultPlanInjector>,
         provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
+        provider_registry: Arc<ProviderRegistry>,
     ) -> (
         Self,
         tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
@@ -48,6 +52,7 @@ impl AppState {
                 plan_manager,
                 plan_injector,
                 provider,
+                provider_registry,
             },
             domain_rx,
         )
