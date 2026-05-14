@@ -17,8 +17,9 @@ use crate::domain::models::{
 };
 use crate::domain::ports::{
     ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort,
-    SecurityPort, SessionPort, StoragePort, StreamingProvider, ToolSetPort,
+    SecurityPort, SessionPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
 };
+use crate::domain::models::usage::UsageLedgerEntry;
 use crate::domain::services::approval_runtime::SessionApprovalSet;
 use tokio_util::sync::CancellationToken;
 
@@ -179,6 +180,18 @@ impl SchedulerPort for NoOpScheduler {}
 pub struct NoOpContext;
 
 impl ContextPort for NoOpContext {}
+
+// ── UsageLedgerPort ─────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct NoOpUsageLedger;
+
+#[async_trait]
+impl UsageLedgerPort for NoOpUsageLedger {
+    async fn append(&self, _entry: UsageLedgerEntry) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
 
 // ── ApprovalPersistencePort ─────────────────────────────────────
 

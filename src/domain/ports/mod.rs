@@ -25,6 +25,8 @@ mod session_port;
 mod storage;
 #[allow(unused_imports)]
 mod toolset;
+#[allow(unused_imports)]
+mod usage_ledger;
 
 pub use approval_persistence::ApprovalPersistencePort;
 pub use channel::ChannelPort;
@@ -39,3 +41,4 @@ pub use security::SecurityPort;
 pub use session_port::SessionPort;
 pub use storage::StoragePort;
 pub use toolset::ToolSetPort;
+pub use usage_ledger::UsageLedgerPort;

@@ -7,6 +7,7 @@ mod config;
 mod content;
 pub mod conversation;
 mod focus;
+pub mod launch_spec;
 mod message;
 mod notice;
 pub mod palette;
@@ -14,6 +15,7 @@ mod permission;
 pub mod plan;
 pub mod project_context;
 pub mod provider;
+pub mod router;
 pub mod sandbox;
 mod session;
 pub mod session_meta;
@@ -24,7 +26,7 @@ pub mod tool_call;
 mod tools;
 pub mod transaction;
 pub mod turn;
-mod usage;
+pub mod usage;
 pub mod view_state;
 #[allow(dead_code)]
 pub mod visual;
@@ -107,8 +109,11 @@ pub use turn::{
     InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
     migrate_chat_message_to_turn, tool_call_id_for,
 };
+pub use launch_spec::AgentLaunchSpec;
 #[allow(unused_imports)]
-pub use usage::{ModelInfo, UsageInfo};
+pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
+#[allow(unused_imports)]
+pub use usage::{ModelInfo, UsageInfo, TokenUsage, UsageLedgerEntry};
 #[allow(unused_imports)]
 pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,

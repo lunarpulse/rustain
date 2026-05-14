@@ -233,6 +233,9 @@ pub struct AppConfig {
     /// Tool progress configuration (stdout tail, counter). Story 16.9, AC4.
     #[serde(default)]
     pub tool_progress: ToolProgressConfig,
+    /// Tiered model router configuration. Story 7.1c, AC2.
+    #[serde(default)]
+    pub router: crate::domain::models::router::RouterConfig,
 }
 
 impl AppConfig {
@@ -268,6 +271,7 @@ impl Default for AppConfig {
             provider: std::collections::HashMap::new(),
             mouse: MouseConfig::default(),
             tool_progress: ToolProgressConfig::default(),
+            router: crate::domain::models::router::RouterConfig::default(),
         }
     }
 }
@@ -330,5 +334,72 @@ threshold_ms = 5000
 
         let cfg = parse_tail_lines(16);
         assert_eq!(cfg.tail_lines_clamped(), 16);
+    }
+
+    #[test]
+    fn app_config_router_roundtrip() {
+        let toml = r#"
+model = "test-model"
+[router]
+default_tier = "flagship"
+threshold_tokens = 50000
+max_retries = 3
+
+[router.tier_models]
+cheap_agentic = "cheap-model"
+flagship = "flagship-model"
+
+[router.step_tiers]
+codegen = "flagship"
+edit = "cheap_agentic"
+test = "cheap_agentic"
+plan = "flagship"
+review = "flagship"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.router.default_tier, crate::domain::models::router::ModelTier::Flagship);
+        assert_eq!(config.router.threshold_tokens, 50000);
+        assert_eq!(config.router.max_retries, 3);
+        assert_eq!(
+            config.router.tier_models.get(&crate::domain::models::router::ModelTier::CheapAgentic),
+            Some(&"cheap-model".to_string())
+        );
+        assert_eq!(
+            config.router.tier_models.get(&crate::domain::models::router::ModelTier::Flagship),
+            Some(&"flagship-model".to_string())
+        );
+        assert_eq!(
+            config.router.step_tiers.get(&crate::domain::models::router::StepKind::Codegen),
+            Some(&crate::domain::models::router::ModelTier::Flagship)
+        );
+        assert_eq!(
+            config.router.step_tiers.get(&crate::domain::models::router::StepKind::Edit),
+            Some(&crate::domain::models::router::ModelTier::CheapAgentic)
+        );
+
+        // Serialize back and assert key strings survive
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(serialized.contains("default_tier = \"flagship\""), "serialized must contain default_tier");
+        assert!(serialized.contains("threshold_tokens = 50000"), "serialized must contain threshold_tokens");
+        assert!(serialized.contains("max_retries = 3"), "serialized must contain max_retries");
+        assert!(serialized.contains("cheap_agentic = \"cheap-model\""), "serialized must contain cheap_agentic tier model");
+        assert!(serialized.contains("codegen = \"flagship\""), "serialized must contain codegen step tier");
+    }
+
+    #[test]
+    fn app_config_router_defaults_when_missing() {
+        let toml = r#"model = "test-model""#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.router.default_tier, crate::domain::models::router::ModelTier::CheapAgentic);
+        assert_eq!(config.router.threshold_tokens, 100_000);
+        assert_eq!(config.router.max_retries, 2);
+        assert_eq!(
+            config.router.tier_models.get(&crate::domain::models::router::ModelTier::CheapAgentic),
+            Some(&"claude-haiku-4-5-20251001".to_string())
+        );
+        assert_eq!(
+            config.router.step_tiers.get(&crate::domain::models::router::StepKind::Plan),
+            Some(&crate::domain::models::router::ModelTier::Flagship)
+        );
     }
 }

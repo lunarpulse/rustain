@@ -13,7 +13,9 @@ use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
     ToolDefinition, ToolResult, generate_conversation_id,
 };
-use rustain::domain::ports::{SecurityPort, StreamingProvider, ToolSetPort};
+use rustain::domain::ports::{SecurityPort, StreamingProvider, ToolSetPort, UsageLedgerPort};
+use rustain::domain::services::model_router::ResolvedModel;
+use rustain::domain::models::router::{EscalationReason, ModelTier, StepKind};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::runtime::turn::run_turn;
@@ -232,6 +234,15 @@ async fn turn_scheduler_migration() {
         make_conversation(),
         None,
         CancellationToken::new(),
+        Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn UsageLedgerPort>,
+        ResolvedModel {
+            model: "test".into(),
+            tier: ModelTier::CheapAgentic,
+            escalation_reason: EscalationReason::None,
+        },
+        None,
+        0,
+        "sess-test".into(),
     )
     .await;
 

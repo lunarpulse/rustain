@@ -60,6 +60,7 @@ use crate::domain::models::{
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
+    UsageLedgerPort,
 };
 use crate::domain::services::message_builder;
 use crate::domain::services::plan_mode_injector::PlanModeInjector;
@@ -798,7 +799,7 @@ pub async fn run(
                                               _skill_snap,
                                               _agent_snap,
                                                                                 tab_manager.reset_and_clone_turn_cancel(),
-                                          ).await;
+                                          app_state.usage_ledger.clone()).await;
                                         // Force immediate render for typing indicator
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
@@ -1562,7 +1563,7 @@ pub async fn run(
                                             _skill_snap,
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
-                                        ).await;
+                                        app_state.usage_ledger.clone()).await;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
@@ -2663,7 +2664,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -2687,7 +2688,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -2703,7 +2704,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -2727,7 +2728,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -2830,7 +2831,7 @@ pub async fn run(
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
                                                         { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -2975,7 +2976,7 @@ pub async fn run(
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
                                                             { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -4101,7 +4102,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -4254,7 +4255,7 @@ pub async fn run(
                                             _skill_snap,
                                             _agent_snap,
                                             tab_manager.reset_and_clone_turn_cancel(),
-                                        ).await;
+                                        app_state.usage_ledger.clone()).await;
                                     }
 
                                     // Update sidebar index on turn complete
@@ -4347,7 +4348,7 @@ pub async fn run(
                                             _skill_snap,
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
-                                        ).await;
+                                        app_state.usage_ledger.clone()).await;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
@@ -4522,7 +4523,7 @@ pub async fn run(
                                                 _skill_snap,
                                                 Some(fallback_agent),
                                                                                   tab_manager.reset_and_clone_turn_cancel(),
-                                            ).await;
+                                            app_state.usage_ledger.clone()).await;
                                         }
                                     }
                                 }
@@ -4679,7 +4680,7 @@ pub async fn run(
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
                                 start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
                                 app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::AutoEdit));
@@ -4703,7 +4704,7 @@ pub async fn run(
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
                                 start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::Reject => {
                                 let _ = domain_tx.send(AppEvent::SystemNotice {
@@ -5158,7 +5159,7 @@ pub async fn run(
                             _skill_snap,
                             _agent_snap,
                                                               tab_manager.reset_and_clone_turn_cancel(),
-                        ).await;
+                        app_state.usage_ledger.clone()).await;
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
@@ -5482,7 +5483,7 @@ pub async fn run(
                                 _skill_snap,
                                 _agent_snap,
                                                                   tab_manager.reset_and_clone_turn_cancel(),
-                            ).await;
+                            app_state.usage_ledger.clone()).await;
                             }
                         }
                     }
@@ -5629,7 +5630,7 @@ pub async fn run(
                                         snap,
                                         agent_snap,
                                                                           tab_manager.reset_and_clone_turn_cancel(),
-                                    ).await;
+                                    app_state.usage_ledger.clone()).await;
                                     app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
@@ -5764,7 +5765,7 @@ pub async fn run(
                                     snap,
                                     agent_snap,
                                                                       tab_manager.reset_and_clone_turn_cancel(),
-                                ).await;
+                                app_state.usage_ledger.clone()).await;
                                 app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
@@ -7264,6 +7265,7 @@ async fn start_turn(
     activation_set: Option<crate::domain::models::SkillActivationSet>,
     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
     turn_cancel: CancellationToken,
+    usage_ledger: Arc<dyn UsageLedgerPort>,
 ) {
     start_turn_inner(
         text,
@@ -7290,6 +7292,7 @@ async fn start_turn(
         activation_set,
         agent_snapshot,
         turn_cancel,
+        usage_ledger,
     )
     .await;
 }
@@ -7319,6 +7322,7 @@ async fn start_turn_inner(
     activation_set: Option<crate::domain::models::SkillActivationSet>,
     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
     turn_cancel: CancellationToken,
+    usage_ledger: Arc<dyn UsageLedgerPort>,
 ) {
     tracing::debug!(
         "start_turn_inner: synthetic={synthetic} text_len={}",
@@ -7481,20 +7485,50 @@ async fn start_turn_inner(
         }
         None => all_tool_defs,
     };
-    let model = agent_snapshot
+    // --- Model resolution (Story 7.1c) ---
+    let retry_count = state.retry_state.as_ref().map_or(0, |r| r.attempt as u32);
+    let input_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
+    let explicit_override = agent_snapshot
         .as_ref()
         .and_then(|a| {
             let m = a.model.as_ref()?;
             if m.is_empty() { None } else { Some(m.clone()) }
-        })
-        .unwrap_or_else(|| config.model.clone());
+        });
+    let req = crate::domain::services::model_router::ModelResolutionRequest {
+        explicit_override,
+        tier_hint: None,
+        step_kind: None,
+        retry_count,
+        input_tokens,
+    };
+    let resolved = crate::domain::services::model_router::resolve_effective_model(
+        &req, &config.router);
+    if resolved.escalation_reason != crate::domain::models::EscalationReason::None {
+        tracing::info!(
+            target: "router",
+            "tier escalated: reason={:?} model={}",
+            resolved.escalation_reason,
+            resolved.model
+        );
+    }
     let options = CompletionOptions {
-        model,
+        model: resolved.model.clone(),
         max_tokens: 8192,
-        system_prompt,
+        system_prompt: system_prompt.clone(),
         temperature: None,
         tools: tool_defs,
     };
+
+    // Forward-compat: construct AgentLaunchSpec even though foreground path
+    // only consumes effective_model today (Story 10.7 will use the full struct).
+    let _launch_spec = crate::domain::models::AgentLaunchSpec {
+        prompt: system_prompt.clone(),
+        effective_model: resolved.model.clone(),
+        tools_allow: all_tool_names,
+        parent_ctx_tokens: 0,
+    };
+
+    let session_id = conversation.session_id.clone().unwrap_or_else(|| conversation.id.clone());
 
     // Clear any stale buffers from a previous turn (e.g. after TurnContinuing or SystemNotice)
     streaming.current_text_buffer.clear();
@@ -7516,6 +7550,11 @@ async fn start_turn_inner(
         conversation.clone(),
         activation_set,
         turn_cancel,
+        usage_ledger.clone(),
+        resolved,
+        None,
+        0,
+        session_id,
     ));
     *active_turn = Some(handle);
 

@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::cli::commands::{Cli, Command};
 use crate::adapters::filesystem::FileSystemStorage;
+use crate::adapters::ledger::FileUsageLedger;
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::project_context_loader::ProjectContextLoader;
 use crate::adapters::security_adapter::SecurityAdapter;
@@ -152,6 +153,9 @@ pub async fn run() -> Result<()> {
     };
     let sandbox_policy = SandboxPolicy::from_mode(initial_mode, &workspace_path);
 
+    let usage_ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
+        Arc::new(FileUsageLedger::new());
+
     let (app_state, domain_rx) = AppState::new(
         raw_capacity,
         approval_runtime.clone(),
@@ -160,6 +164,7 @@ pub async fn run() -> Result<()> {
         plan_injector.clone(),
         provider_swap,
         provider_registry.clone(),
+        usage_ledger,
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
 

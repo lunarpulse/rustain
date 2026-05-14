@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::provider::ProviderRegistry;
 use crate::domain::models::SandboxPolicy;
-use crate::domain::ports::StreamingProvider;
+use crate::domain::ports::{StreamingProvider, UsageLedgerPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
 use crate::domain::services::plan_mode_injector::DefaultPlanInjector;
@@ -27,6 +27,8 @@ pub struct AppState {
     pub provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
     /// Provider catalog — model metadata queries without crossing port boundary (AC6).
     pub provider_registry: Arc<ProviderRegistry>,
+    /// Usage ledger for per-call token tracking (Story 7.1c).
+    pub usage_ledger: Arc<dyn UsageLedgerPort>,
 }
 
 impl AppState {
@@ -38,6 +40,7 @@ impl AppState {
         plan_injector: Arc<DefaultPlanInjector>,
         provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
         provider_registry: Arc<ProviderRegistry>,
+        usage_ledger: Arc<dyn UsageLedgerPort>,
     ) -> (
         Self,
         tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
@@ -53,6 +56,7 @@ impl AppState {
                 plan_injector,
                 provider,
                 provider_registry,
+                usage_ledger,
             },
             domain_rx,
         )

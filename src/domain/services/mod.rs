@@ -8,6 +8,7 @@ pub mod frontmatter;
 pub mod history_rebuild;
 pub mod import;
 pub mod message_builder;
+pub mod model_router;
 pub mod permission_chain;
 pub mod plan_effort;
 pub mod plan_manager;

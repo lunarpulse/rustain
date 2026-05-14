@@ -10,10 +10,12 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
-    CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCall,
-    ToolCallInfo, ToolResultMessage, ToolUseMessage,
+    CompletionOptions, EscalationReason, Message, MessageRole, NoticeLevel, StepKind, StopReason,
+    StreamChunk, TokenUsage, ToolCall, ToolCallInfo, ToolResultMessage, ToolUseMessage,
+    UsageLedgerEntry,
 };
-use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort};
+use crate::domain::services::model_router::ResolvedModel;
+use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort};
 use crate::domain::services::tool_scheduler::ToolScheduler;
 
 /// Execute a turn: stream completion, execute tools, loop until EndTurn.
@@ -39,6 +41,11 @@ pub async fn run_turn(
     conversation_snapshot: crate::domain::models::Conversation,
     activation_set: Option<crate::domain::models::SkillActivationSet>,
     turn_cancel: CancellationToken,
+    ledger: Arc<dyn UsageLedgerPort>,
+    resolved: ResolvedModel,
+    step_kind: Option<StepKind>,
+    parent_ctx_tokens: u32,
+    session_id: String,
 ) {
     // Persist the conversation before the first API call so that
     // `create_checkpoint` (called when the API returns tool_use) can load it
@@ -87,6 +94,8 @@ pub async fn run_turn(
                 let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
                 let mut accumulated_text = String::new();
 
+                let mut iteration_usage: Option<crate::domain::models::UsageInfo> = None;
+
                 while let Some(chunk) = stream.next().await {
                     match &chunk {
                         StreamChunk::TurnComplete { stop_reason: sr } => {
@@ -107,12 +116,42 @@ pub async fn run_turn(
                         StreamChunk::Text { content, .. } => {
                             accumulated_text.push_str(content);
                         }
+                        StreamChunk::Usage { usage, .. } => {
+                            iteration_usage = Some(usage.clone());
+                        }
                         _ => {}
                     }
                     let _ = event_tx.send(AppEvent::ProviderChunk {
                         conversation_id: conversation_id.clone(),
                         chunk,
                     });
+                }
+
+                // Write ledger entry for this provider call (success path)
+                let ledger_entry = UsageLedgerEntry {
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    session_id: session_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                    provider_id: provider.provider_id(),
+                    model: options.model.clone(),
+                    tier: resolved.tier,
+                    step_kind,
+                    escalation_reason: resolved.escalation_reason,
+                    usage: match iteration_usage {
+                        Some(ref u) => TokenUsage {
+                            tokens_in: u.input_tokens,
+                            tokens_out: u.output_tokens,
+                            parent_ctx: parent_ctx_tokens,
+                        },
+                        None => TokenUsage {
+                            tokens_in: 0,
+                            tokens_out: 0,
+                            parent_ctx: parent_ctx_tokens,
+                        },
+                    },
+                };
+                if let Err(e) = ledger.append(ledger_entry).await {
+                    tracing::warn!("Usage ledger append failed: {}", e);
                 }
 
                 // Safety: synthesize TurnComplete if stream ended without one
@@ -379,6 +418,26 @@ pub async fn run_turn(
                 }
             }
             Err(e) => {
+                // Write failure ledger entry before emitting notice
+                let failure_entry = UsageLedgerEntry {
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                    session_id: session_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                    provider_id: provider.provider_id(),
+                    model: options.model.clone(),
+                    tier: resolved.tier,
+                    step_kind,
+                    escalation_reason: resolved.escalation_reason,
+                    usage: TokenUsage {
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        parent_ctx: parent_ctx_tokens,
+                    },
+                };
+                if let Err(le) = ledger.append(failure_entry).await {
+                    tracing::warn!("Usage ledger append failed on error path: {}", le);
+                }
+
                 let _ = event_tx.send(AppEvent::SystemNotice {
                     conversation_id: Some(conversation_id.clone()),
                     level: NoticeLevel::Error,

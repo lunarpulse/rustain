@@ -55,6 +55,18 @@ pub fn sessions_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".claude").join("sessions")
 }
 
+/// Resolve the `~/.rustain/usage/` directory for token-usage ledger files.
+pub async fn usage_dir() -> Result<PathBuf> {
+    let dir = data_dir()?.join("usage");
+    tokio::fs::create_dir_all(&dir).await?;
+    Ok(dir)
+}
+
+/// Path to a per-session usage ledger JSONL file.
+pub async fn usage_ledger_path(session_id: &str) -> Result<PathBuf> {
+    Ok(usage_dir().await?.join(format!("{}.jsonl", session_id)))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()
