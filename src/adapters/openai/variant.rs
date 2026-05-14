@@ -24,6 +24,8 @@ pub enum OpenAiCompatibleVariant {
     Custom {
         provider_id: String,
         display_name: String,
+        context_window: Option<u32>,
+        supports_tools: Option<bool>,
     },
 }
 
@@ -99,7 +101,7 @@ impl OpenAiCompatibleVariant {
                     pricing_tier: Some("cheap".to_string()),
                 },
             ],
-            Self::OpenRouter | Self::Custom { .. } => {
+            Self::OpenRouter => {
                 vec![ModelDescriptor {
                     model_id: configured_model.to_string(),
                     display_name: configured_model.to_string(),
@@ -107,6 +109,25 @@ impl OpenAiCompatibleVariant {
                     context_window: 128_000, // sensible default for OpenRouter
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: None,
+                }]
+            }
+            Self::Custom {
+                provider_id: _,
+                context_window,
+                supports_tools,
+                ..
+            } => {
+                let mut caps = std::collections::HashSet::new();
+                if supports_tools.unwrap_or(true) {
+                    caps.insert(ModelCapability::ToolUse);
+                }
+                vec![ModelDescriptor {
+                    model_id: configured_model.to_string(),
+                    display_name: configured_model.to_string(),
+                    provider_id,
+                    context_window: context_window.unwrap_or(8_192),
+                    capabilities: caps,
+                    pricing_tier: Some("local".to_string()),
                 }]
             }
             Self::Google => vec![
@@ -191,6 +212,8 @@ mod tests {
             OpenAiCompatibleVariant::Custom {
                 provider_id: "my-proxy".to_string(),
                 display_name: "My Proxy".to_string(),
+                context_window: None,
+                supports_tools: None,
             }
             .provider_id(),
             "my-proxy"
@@ -275,10 +298,27 @@ mod tests {
         let models = OpenAiCompatibleVariant::Custom {
             provider_id: "my-proxy".to_string(),
             display_name: "My Proxy".to_string(),
+            context_window: None,
+            supports_tools: None,
         }
         .known_models("custom-model");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].model_id, "custom-model");
         assert_eq!(models[0].provider_id, "my-proxy");
+    }
+
+    #[test]
+    fn test_custom_metadata_overrides() {
+        let models = OpenAiCompatibleVariant::Custom {
+            provider_id: "local".to_string(),
+            display_name: "Local".to_string(),
+            context_window: Some(32_768),
+            supports_tools: Some(false),
+        }
+        .known_models("custom-model");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].context_window, 32_768);
+        assert!(models[0].capabilities.is_empty());
+        assert_eq!(models[0].pricing_tier, Some("local".to_string()));
     }
 }

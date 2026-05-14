@@ -57,7 +57,7 @@ impl OpenAiAdapter {
         model: String,
         base_url: Option<String>,
     ) -> Result<Self, ProviderError> {
-        if api_key.trim().is_empty() {
+        if !matches!(variant, OpenAiCompatibleVariant::Custom { .. }) && api_key.trim().is_empty() {
             return Err(ProviderError::AuthenticationFailed);
         }
         if api_key.bytes().any(|b| b < 0x20 || b == 0x7f) {
@@ -123,12 +123,15 @@ impl StreamingProvider for OpenAiAdapter {
             "Full request body"
         );
 
-        let response = self
+        let mut req = self
             .client
             .post(&url)
-            .header("authorization", format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
-            .json(&request_body)
+            .json(&request_body);
+        if !self.api_key.is_empty() {
+            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = req
             .send()
             .await
             .map_err(|e| ProviderError::ConnectionFailed(e.to_string()))?;
@@ -239,13 +242,14 @@ impl StreamingProvider for OpenAiAdapter {
 
     async fn health_check(&self) -> Result<(), ProviderError> {
         let url = format!("{}/models", self.base_url);
-        let response = self
+        let mut req = self
             .client
             .get(&url)
-            .header("authorization", format!("Bearer {}", self.api_key))
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await;
+            .timeout(std::time::Duration::from_secs(5));
+        if !self.api_key.is_empty() {
+            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = req.send().await;
         match response {
             Ok(resp) if resp.status().is_success() => Ok(()),
             Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
@@ -291,6 +295,22 @@ mod tests {
             ProviderError::AuthenticationFailed => {}
             other => panic!("Expected AuthenticationFailed, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_openai_adapter_custom_variant_allows_empty_key() {
+        let result = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::Custom {
+                provider_id: "local".to_string(),
+                display_name: "Local".to_string(),
+                context_window: None,
+                supports_tools: None,
+            },
+            String::new(),
+            "m".to_string(),
+            Some("http://localhost:8080/v1".to_string()),
+        );
+        assert!(result.is_ok());
     }
 
     #[test]

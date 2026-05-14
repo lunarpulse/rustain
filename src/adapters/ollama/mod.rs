@@ -15,7 +15,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -55,6 +55,60 @@ impl OllamaAdapter {
             abort_handle: Arc::new(Mutex::new(None)),
             discovered_models: ArcSwap::from_pointee(Vec::new()),
         })
+    }
+}
+
+impl OllamaAdapter {
+    async fn fetch_model_capabilities(
+        &self,
+        model_name: &str,
+    ) -> Option<(std::collections::HashSet<ModelCapability>, Option<u32>)> {
+        let url = format!("{}/api/show", self.base_url);
+        let request_body = OllamaShowRequest {
+            model: model_name.to_string(),
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_secs(5))
+            .json(&request_body)
+            .send()
+            .await
+            .ok()?;
+
+        if !response.status().is_success() {
+            return None;
+        }
+
+        let show_resp: OllamaShowResponse = response.json().await.ok()?;
+        let capabilities = show_resp.capabilities?;
+
+        let mut caps = std::collections::HashSet::new();
+        for cap in &capabilities {
+            match cap.as_str() {
+                "tools" => {
+                    caps.insert(ModelCapability::ToolUse);
+                }
+                "vision" => {
+                    caps.insert(ModelCapability::Vision);
+                }
+                "thinking" => {
+                    caps.insert(ModelCapability::Thinking);
+                }
+                _ => {}
+            }
+        }
+
+        let context_window = show_resp
+            .model_info
+            .iter()
+            .find(|(k, _)| k.ends_with(".context_length"))
+            .and_then(|(_, v)| v.as_u64())
+            .map(|v| v as u32);
+
+        Some((caps, context_window))
     }
 }
 
@@ -99,7 +153,16 @@ impl StreamingProvider for OllamaAdapter {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ProviderError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    ProviderError::ConnectionFailed(format!(
+                        "Local LLM not reachable at {}. Is Ollama running?",
+                        self.base_url
+                    ))
+                } else {
+                    ProviderError::ConnectionFailed(e.to_string())
+                }
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -207,20 +270,53 @@ impl StreamingProvider for OllamaAdapter {
                     ProviderError::Other(format!("Failed to parse Ollama tags response: {}", e))
                 })?;
 
+                let futures: Vec<_> = tags
+                    .models
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, m)| async move {
+                        let result = self.fetch_model_capabilities(&m.name).await;
+                        (idx, result)
+                    })
+                    .collect();
+                let mut indexed_results: Vec<_> = futures::stream::iter(futures)
+                    .buffer_unordered(8)
+                    .collect()
+                    .await;
+                indexed_results.sort_by_key(|(idx, _)| *idx);
+                let capabilities_results: Vec<_> =
+                    indexed_results.into_iter().map(|(_, r)| r).collect();
+
                 let models: Vec<ModelDescriptor> = tags
                     .models
                     .into_iter()
-                    .map(|m| {
-                        let context_window =
-                            guess_context_from_parameter_size(&m.details.parameter_size);
+                    .zip(capabilities_results)
+                    .map(|(m, caps_result)| {
+                        let (capabilities, context_window) = match caps_result {
+                            Some((caps, ctx)) => {
+                                let ctx = ctx.unwrap_or_else(|| {
+                                    guess_context_from_parameter_size(&m.details.parameter_size)
+                                });
+                                (caps, ctx)
+                            }
+                            None => {
+                                tracing::debug!(
+                                    "/api/show unavailable for '{}' — assuming ToolUse",
+                                    m.name
+                                );
+                                let ctx =
+                                    guess_context_from_parameter_size(&m.details.parameter_size);
+                                let caps =
+                                    std::collections::HashSet::from([ModelCapability::ToolUse]);
+                                (caps, ctx)
+                            }
+                        };
                         ModelDescriptor {
                             model_id: m.name.clone(),
                             display_name: m.name,
                             provider_id: "ollama".to_string(),
                             context_window,
-                            capabilities: std::collections::HashSet::from([
-                                ModelCapability::ToolUse,
-                            ]),
+                            capabilities,
                             pricing_tier: Some("local".to_string()),
                         }
                     })
@@ -233,7 +329,16 @@ impl StreamingProvider for OllamaAdapter {
                 "Health check failed: HTTP {}",
                 resp.status()
             ))),
-            Err(e) => Err(ProviderError::ConnectionFailed(e.to_string())),
+            Err(e) => {
+                if e.is_connect() || e.is_timeout() {
+                    Err(ProviderError::ConnectionFailed(format!(
+                        "Local LLM not reachable at {}. Is Ollama running?",
+                        self.base_url
+                    )))
+                } else {
+                    Err(ProviderError::ConnectionFailed(e.to_string()))
+                }
+            }
         }
     }
 }
@@ -462,6 +567,19 @@ struct OllamaModelDetails {
     parameter_size: String,
 }
 
+#[derive(Debug, Serialize)]
+struct OllamaShowRequest {
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaShowResponse {
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    model_info: std::collections::HashMap<String, serde_json::Value>,
+}
+
 impl From<(&[Message], &CompletionOptions, &str)> for OllamaChatRequest {
     fn from((messages, options, model): (&[Message], &CompletionOptions, &str)) -> Self {
         let ollama_messages: Vec<OllamaMessage> = messages
@@ -542,8 +660,7 @@ fn guess_context_from_parameter_size(param_size: &str) -> u32 {
     }
 }
 
-// Need Serialize for OllamaChatRequest
-use serde::Serialize;
+// serde::Serialize is imported at the top of the module
 
 #[cfg(test)]
 mod tests {

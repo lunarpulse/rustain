@@ -661,6 +661,9 @@ pub async fn run(
         });
     }
 
+    // Story 7.3 AC9: one-shot startup provider fallback
+    apply_startup_provider_fallback(&mut state, &router, &app_state, &domain_tx).await;
+
     loop {
         tokio::select! {
             // Branch 1: Terminal input (crossterm event stream)
@@ -8940,7 +8943,8 @@ async fn complete_model_switch(
         .map(|p| p.display_name)
         .unwrap_or_else(|| resolved_pid.to_string());
     let model_display_name = model_desc
-        .map(|m| m.display_name)
+        .as_ref()
+        .map(|m| m.display_name.clone())
         .unwrap_or_else(|| model_id.to_string());
 
     let fb = crate::domain::models::FeedbackBlock {
@@ -8956,6 +8960,25 @@ async fn complete_model_switch(
     };
     state.feedback_blocks.insert(fb.id.clone(), fb);
 
+    // Story 7.3 AC7: warn when switching to a non-tool model
+    if let Some(ref md) = model_desc {
+        use crate::domain::models::provider::ModelCapability;
+        if !md.capabilities.contains(&ModelCapability::ToolUse) {
+            let warning_fb = crate::domain::models::FeedbackBlock {
+                id: generate_conversation_id(),
+                level: crate::domain::models::FeedbackLevel::Warning,
+                message: format!(
+                    "{} does not support tool use. Tool execution will be unavailable.",
+                    md.display_name
+                ),
+                actions: vec![],
+            };
+            state
+                .feedback_blocks
+                .insert(warning_fb.id.clone(), warning_fb);
+        }
+    }
+
     if state.model_selector.active {
         state.focus = state
             .model_selector
@@ -8963,6 +8986,62 @@ async fn complete_model_switch(
             .unwrap_or(crate::domain::models::FocusState::Input);
     }
     state.needs_redraw = true;
+}
+
+/// One-shot startup convenience: if the active provider is unhealthy,
+/// fall back to the first healthy registered provider (deterministic — sorted).
+/// Runtime provider failures are surfaced via the existing apply_model_switch path.
+async fn apply_startup_provider_fallback(
+    state: &mut TuiState,
+    router: &crate::adapters::provider::ProviderRouter,
+    app_state: &crate::infrastructure::runtime::app_state::AppState,
+    _domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+) {
+    let active = router.active_delegate_id();
+    let providers = app_state.provider_registry.list_providers();
+    let active_healthy = providers
+        .iter()
+        .find(|p| p.provider_id == active)
+        .is_some_and(|p| p.healthy);
+
+    if active_healthy {
+        return;
+    }
+
+    let mut healthy_ids: Vec<String> = providers
+        .iter()
+        .filter(|p| p.healthy)
+        .map(|p| p.provider_id.clone())
+        .collect();
+    healthy_ids.sort();
+
+    if let Some(healthy_id) = healthy_ids.into_iter().next() {
+        if let Err(e) = router.set_active(&healthy_id) {
+            tracing::warn!("Failed to set active provider to '{}': {}", healthy_id, e);
+            return;
+        }
+        if let Some(first_model) = app_state
+            .provider_registry
+            .list_models_by_provider(&healthy_id)
+            .first()
+        {
+            state.selected_model = Some(first_model.model_id.clone());
+        }
+        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Info,
+            message: format!(
+                "Active provider '{}' unavailable — using '{}'.",
+                active, healthy_id
+            ),
+        });
+    } else {
+        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M.".to_string(),
+        });
+    }
 }
 
 /// Populate command palette filtered entries from the registry.

@@ -16,12 +16,13 @@ pub fn build_provider_for_config(
     provider_id: &str,
     cfg: &ProviderConfig,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
-    match provider_id {
+    let kind = cfg.kind.as_deref().unwrap_or(provider_id);
+    match kind {
         "anthropic" => build_anthropic_from_config(cfg),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
-                build_openai_from_config(provider_id, cfg)
+                build_openai_from_config(kind, cfg)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -42,9 +43,21 @@ pub fn build_provider_for_config(
                 ))
             }
         }
+        "openai-compatible" => {
+            #[cfg(feature = "openai")]
+            {
+                build_openai_compatible_from_config(cfg)
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                Err(ProviderError::Other(
+                    "openai feature not enabled — rebuild with --features openai".to_string(),
+                ))
+            }
+        }
         _ => Err(ProviderError::Other(format!(
-            "unknown provider '{}' in [provider] config",
-            provider_id
+            "unknown provider kind '{}' for '{}'",
+            kind, provider_id
         ))),
     }
 }
@@ -106,10 +119,43 @@ fn build_openai_from_config(
         _ => OpenAiCompatibleVariant::Custom {
             provider_id: provider_id.to_string(),
             display_name: provider_id.to_string(),
+            context_window: None,
+            supports_tools: None,
         },
     };
 
     let adapter = OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), None)
+        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?;
+    Ok(Arc::new(adapter))
+}
+
+#[cfg(feature = "openai")]
+fn build_openai_compatible_from_config(
+    cfg: &ProviderConfig,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+
+    let base_url = cfg.base_url.clone().ok_or_else(|| {
+        ProviderError::Other(format!(
+            "openai-compatible provider '{}' requires a base_url",
+            cfg.provider_id
+        ))
+    })?;
+
+    let api_key = if cfg.api_key_env.is_empty() {
+        String::new()
+    } else {
+        crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
+    };
+
+    let variant = OpenAiCompatibleVariant::Custom {
+        provider_id: cfg.provider_id.clone(),
+        display_name: cfg.provider_id.clone(),
+        context_window: cfg.context_window,
+        supports_tools: cfg.supports_tools,
+    };
+
+    let adapter = OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), Some(base_url))
         .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?;
     Ok(Arc::new(adapter))
 }
@@ -127,7 +173,7 @@ fn build_ollama_from_config(
         );
     }
 
-    let adapter = OllamaAdapter::new(cfg.model_id.clone(), None)
+    let adapter = OllamaAdapter::new(cfg.model_id.clone(), cfg.base_url.clone())
         .map_err(|e| ProviderError::Other(format!("Failed to create Ollama adapter: {}", e)))?;
     Ok(Arc::new(adapter))
 }

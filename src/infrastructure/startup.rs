@@ -181,10 +181,19 @@ pub async fn run() -> Result<()> {
                 Err(e) => {
                     tracing::warn!("Provider '{}' health check failed: {}", id, e);
                     provider_registry.update_health(id, false);
+                    let (level, message) = match e {
+                        ProviderError::ConnectionFailed(ref msg) => {
+                            (NoticeLevel::Error, msg.clone())
+                        }
+                        _ => (
+                            NoticeLevel::Warning,
+                            format!("Provider '{}' unavailable: {}", id, e),
+                        ),
+                    };
                     let _ = domain_tx.send(AppEvent::SystemNotice {
                         conversation_id: None,
-                        level: NoticeLevel::Warning,
-                        message: format!("Provider '{}' unavailable: {}", id, e),
+                        level,
+                        message,
                     });
                 }
             }

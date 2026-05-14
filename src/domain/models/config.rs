@@ -15,6 +15,20 @@ pub struct ProviderConfig {
     /// Whether this provider is enabled.
     #[serde(default = "ProviderConfig::default_enabled")]
     pub enabled: bool,
+    /// Adapter selector — `"anthropic"`, `"openai"`, `"openrouter"`, `"google"`,
+    /// `"deepseek"`, `"moonshot"`, `"ollama"`, or `"openai-compatible"`.
+    /// When absent, `provider_id` is used as the kind (back-compat).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Overrides the adapter's default endpoint URL.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Context window for single-model servers that cannot self-describe.
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    /// Whether the model supports tool use (for single-model servers).
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
 }
 
 impl ProviderConfig {
@@ -436,6 +450,65 @@ review = "flagship"
                 .step_tiers
                 .get(&crate::domain::models::router::StepKind::Plan),
             Some(&crate::domain::models::router::ModelTier::Flagship)
+        );
+    }
+
+    #[test]
+    fn app_config_provider_local_fields_roundtrip() {
+        let toml = r#"
+model = "test-model"
+
+[provider.ollama]
+provider_id = "ollama"
+model_id = "llama3.3:70b"
+api_key_env = ""
+enabled = true
+base_url = "http://192.168.1.50:11434"
+
+[provider.local]
+provider_id = "local"
+model_id = "qwen2.5-coder"
+api_key_env = ""
+enabled = true
+kind = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+context_window = 32768
+supports_tools = true
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+
+        let ollama = config.provider.get("ollama").expect("ollama provider");
+        assert_eq!(
+            ollama.base_url.as_deref(),
+            Some("http://192.168.1.50:11434")
+        );
+        assert_eq!(ollama.kind, None);
+        assert_eq!(ollama.context_window, None);
+        assert_eq!(ollama.supports_tools, None);
+
+        let local = config.provider.get("local").expect("local provider");
+        assert_eq!(local.kind.as_deref(), Some("openai-compatible"));
+        assert_eq!(local.base_url.as_deref(), Some("http://localhost:8080/v1"));
+        assert_eq!(local.context_window, Some(32_768));
+        assert_eq!(local.supports_tools, Some(true));
+
+        // Serialize back and assert key strings survive
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(
+            serialized.contains("base_url = \"http://192.168.1.50:11434\""),
+            "serialized must contain ollama base_url"
+        );
+        assert!(
+            serialized.contains("kind = \"openai-compatible\""),
+            "serialized must contain local kind"
+        );
+        assert!(
+            serialized.contains("context_window = 32768"),
+            "serialized must contain local context_window"
+        );
+        assert!(
+            serialized.contains("supports_tools = true"),
+            "serialized must contain local supports_tools"
         );
     }
 }

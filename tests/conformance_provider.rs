@@ -532,3 +532,157 @@ fn test_domain_models_no_adapter_imports() {
     assert_eq!(desc.provider_id, "test");
     assert_eq!(desc.context_window, 1000);
 }
+
+// ---------------------------------------------------------------------------
+// Test 10: Ollama /api/show capability detection (Story 7.3 AC6)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(feature = "ollama")]
+fn test_ollama_adapter_show_populates_capabilities() {
+    use rustain::adapters::ollama::OllamaAdapter;
+    use rustain::domain::models::ModelCapability;
+
+    let mut server = mockito::Server::new();
+    let url = server.url();
+
+    let _m_tags = server
+        .mock("GET", "/api/tags")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"models":[{"name":"llama3.3:70b","details":{"parameter_size":"70B"}},{"name":"phi4:14b","details":{"parameter_size":"14B"}}]}"#)
+        .create();
+
+    let _m_show1 = server
+        .mock("POST", "/api/show")
+        .match_body(mockito::Matcher::JsonString(r#"{"model":"llama3.3:70b"}"#.to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"capabilities":["completion","tools"],"model_info":{"llama.context_length":131072}}"#)
+        .create();
+
+    let _m_show2 = server
+        .mock("POST", "/api/show")
+        .match_body(mockito::Matcher::JsonString(
+            r#"{"model":"phi4:14b"}"#.to_string(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"capabilities":["completion","vision"],"model_info":{}}"#)
+        .create();
+
+    let adapter = OllamaAdapter::new("llama3.3:70b".to_string(), Some(url)).unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        adapter
+            .health_check()
+            .await
+            .expect("health_check should succeed");
+    });
+
+    let models = adapter.list_models();
+    assert_eq!(models.len(), 2);
+
+    let m1 = models
+        .iter()
+        .find(|m| m.model_id == "llama3.3:70b")
+        .unwrap();
+    assert!(m1.capabilities.contains(&ModelCapability::ToolUse));
+    assert!(!m1.capabilities.contains(&ModelCapability::Vision));
+    assert_eq!(m1.context_window, 131_072);
+
+    let m2 = models.iter().find(|m| m.model_id == "phi4:14b").unwrap();
+    assert!(m2.capabilities.contains(&ModelCapability::Vision));
+    assert!(!m2.capabilities.contains(&ModelCapability::ToolUse));
+}
+
+#[test]
+#[cfg(feature = "ollama")]
+fn test_ollama_adapter_show_absent_falls_back_to_tooluse() {
+    use rustain::adapters::ollama::OllamaAdapter;
+    use rustain::domain::models::ModelCapability;
+
+    let mut server = mockito::Server::new();
+    let url = server.url();
+
+    let _m_tags = server
+        .mock("GET", "/api/tags")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"models":[{"name":"old-model","details":{"parameter_size":"7B"}}]}"#)
+        .create();
+
+    let _m_show = server.mock("POST", "/api/show").with_status(404).create();
+
+    let adapter = OllamaAdapter::new("old-model".to_string(), Some(url)).unwrap();
+
+    let rt = Runtime::new().unwrap();
+    rt.block_on(async {
+        adapter
+            .health_check()
+            .await
+            .expect("health_check should succeed even when /api/show fails");
+    });
+
+    let models = adapter.list_models();
+    assert_eq!(models.len(), 1);
+    assert!(models[0].capabilities.contains(&ModelCapability::ToolUse));
+}
+
+// ---------------------------------------------------------------------------
+// Test 11: OpenAI-compatible Custom variant conformance (Story 7.3 AC4, AC5, AC10)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(feature = "openai")]
+fn test_openai_compatible_custom_unauthenticated() {
+    use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+
+    let adapter = OpenAiAdapter::new(
+        OpenAiCompatibleVariant::Custom {
+            provider_id: "my-local".to_string(),
+            display_name: "My Local".to_string(),
+            context_window: None,
+            supports_tools: None,
+        },
+        String::new(),
+        "qwen2.5-coder".to_string(),
+        Some("http://localhost:8080/v1".to_string()),
+    )
+    .unwrap();
+
+    assert_streaming_provider_conformance(&adapter);
+    assert_eq!(adapter.provider_id(), "my-local");
+
+    let models = adapter.list_models();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model_id, "qwen2.5-coder");
+    assert_eq!(models[0].provider_id, "my-local");
+}
+
+#[test]
+#[cfg(feature = "openai")]
+fn test_openai_compatible_custom_metadata() {
+    use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+    use rustain::domain::models::ModelCapability;
+
+    let adapter = OpenAiAdapter::new(
+        OpenAiCompatibleVariant::Custom {
+            provider_id: "my-local".to_string(),
+            display_name: "My Local".to_string(),
+            context_window: Some(16_384),
+            supports_tools: Some(false),
+        },
+        String::new(),
+        "qwen2.5-coder".to_string(),
+        Some("http://localhost:8080/v1".to_string()),
+    )
+    .unwrap();
+
+    let models = adapter.list_models();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].context_window, 16_384);
+    assert!(!models[0].capabilities.contains(&ModelCapability::ToolUse));
+    assert_eq!(models[0].pricing_tier, Some("local".to_string()));
+}

@@ -3,7 +3,6 @@
 //! Tests the `init_provider_layer` extraction from `startup.rs`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -26,6 +25,10 @@ fn test_startup_registers_configured_providers() {
                 model_id: "claude-sonnet-4-20250514".to_string(),
                 api_key_env: "ANTHROPIC_API_KEY".to_string(),
                 enabled: true,
+                kind: None,
+                base_url: None,
+                context_window: None,
+                supports_tools: None,
             },
         ),
         (
@@ -35,6 +38,10 @@ fn test_startup_registers_configured_providers() {
                 model_id: "llama3.3:70b".to_string(),
                 api_key_env: "".to_string(),
                 enabled: true,
+                kind: None,
+                base_url: None,
+                context_window: None,
+                supports_tools: None,
             },
         ),
         (
@@ -44,6 +51,10 @@ fn test_startup_registers_configured_providers() {
                 model_id: "deepseek-chat".to_string(),
                 api_key_env: "DEEPSEEK_API_KEY".to_string(),
                 enabled: false,
+                kind: None,
+                base_url: None,
+                context_window: None,
+                supports_tools: None,
             },
         ),
     ]);
@@ -158,4 +169,83 @@ impl StreamingProvider for FailingHealthCheckProvider {
     async fn abort(&self) -> Result<(), ProviderError> {
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Story 7.3: kind routing + openai-compatible builder tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(feature = "openai")]
+fn test_factory_routes_kind_openai_compatible() {
+    use rustain::infrastructure::provider_factory::build_provider_for_config;
+
+    let cfg = ProviderConfig {
+        provider_id: "my-llamacpp".to_string(),
+        model_id: "qwen2.5-coder".to_string(),
+        api_key_env: "".to_string(),
+        enabled: true,
+        kind: Some("openai-compatible".to_string()),
+        base_url: Some("http://localhost:8080/v1".to_string()),
+        context_window: Some(32_768),
+        supports_tools: Some(true),
+    };
+
+    let provider = build_provider_for_config("my-llamacpp", &cfg).unwrap();
+    assert_eq!(provider.provider_id(), "my-llamacpp");
+
+    let models = provider.list_models();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].context_window, 32_768);
+}
+
+#[test]
+#[cfg(feature = "openai")]
+fn test_factory_openai_compatible_requires_base_url() {
+    use rustain::domain::errors::ProviderError;
+    use rustain::infrastructure::provider_factory::build_provider_for_config;
+
+    let cfg = ProviderConfig {
+        provider_id: "my-llamacpp".to_string(),
+        model_id: "qwen2.5-coder".to_string(),
+        api_key_env: "".to_string(),
+        enabled: true,
+        kind: Some("openai-compatible".to_string()),
+        base_url: None,
+        context_window: Some(32_768),
+        supports_tools: Some(true),
+    };
+
+    let result = build_provider_for_config("my-llamacpp", &cfg);
+    assert!(result.is_err());
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("Expected error"),
+    };
+    match err {
+        ProviderError::Other(msg) => {
+            assert!(msg.contains("requires a base_url"));
+        }
+        other => panic!("Expected ProviderError::Other, got {:?}", other),
+    }
+}
+
+#[test]
+#[cfg(feature = "ollama")]
+fn test_factory_kind_absent_uses_provider_id() {
+    use rustain::infrastructure::provider_factory::build_provider_for_config;
+
+    let cfg = ProviderConfig {
+        provider_id: "ollama".to_string(),
+        model_id: "llama3.3:70b".to_string(),
+        api_key_env: "".to_string(),
+        enabled: true,
+        kind: None,
+        base_url: Some("http://localhost:11434".to_string()),
+        context_window: None,
+        supports_tools: None,
+    };
+
+    let provider = build_provider_for_config("ollama", &cfg).unwrap();
+    assert_eq!(provider.provider_id(), "ollama");
 }
