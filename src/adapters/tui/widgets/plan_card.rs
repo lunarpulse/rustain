@@ -345,9 +345,7 @@ fn wrap_description(text: &str, max_width: usize) -> Vec<String> {
             // Flush current line first
             if !current.is_empty() {
                 result.push(current);
-                current = String::new();
             }
-            // Split the long word across multiple lines
             let mut remaining = word;
             while remaining.len() > max_width {
                 result.push(remaining[..max_width].to_string());

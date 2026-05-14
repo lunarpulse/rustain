@@ -394,6 +394,7 @@ fn test_tui_renders_with_theme_colors() {
                     frame,
                     app_layout.status_bar,
                     "test-model",
+                    None,
                     &state.status,
                     &state.theme,
                     0,

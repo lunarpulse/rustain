@@ -1666,7 +1666,10 @@ mod tests {
         );
 
         let snap = state.liveness();
-        assert!(snap.progress.is_none(), "progress should be cleared on ToolResult");
+        assert!(
+            snap.progress.is_none(),
+            "progress should be cleared on ToolResult"
+        );
         assert!(snap.tail.is_none(), "tail should be cleared on ToolResult");
     }
 
@@ -1693,8 +1696,14 @@ mod tests {
             &clock,
         );
 
-        assert!(state.progress.is_empty(), "progress map should be cleared on turn complete");
-        assert!(state.tail.is_empty(), "tail map should be cleared on turn complete");
+        assert!(
+            state.progress.is_empty(),
+            "progress map should be cleared on turn complete"
+        );
+        assert!(
+            state.tail.is_empty(),
+            "tail map should be cleared on turn complete"
+        );
     }
 
     #[test]
@@ -1752,8 +1761,14 @@ mod tests {
             &clock,
         );
 
-        assert!(state.liveness().progress.is_none(), "progress must be cleared on ToolResult error");
-        assert!(state.liveness().tail.is_none(), "tail must be cleared on ToolResult error");
+        assert!(
+            state.liveness().progress.is_none(),
+            "progress must be cleared on ToolResult error"
+        );
+        assert!(
+            state.liveness().tail.is_none(),
+            "tail must be cleared on ToolResult error"
+        );
     }
 
     // ── ReducerState::new ────────────────────────────────────────────────

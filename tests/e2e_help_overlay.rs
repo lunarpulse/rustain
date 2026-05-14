@@ -342,6 +342,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 frame,
                 frame.area(),
                 "test-model",
+                None,
                 &StatusState::Idle,
                 &theme,
                 0,

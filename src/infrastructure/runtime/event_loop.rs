@@ -49,17 +49,17 @@ use crate::domain::services::session_index::SessionIndex;
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 use crate::domain::events::{AppEvent, ChunkAction};
 use crate::domain::models::tab::TabManager;
+use crate::domain::models::turn::TurnId;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
 use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
     NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager,
-    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, ViewState, generate_conversation_id,
-    next_delay,
+    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, ViewState,
+    generate_conversation_id, next_delay,
 };
-use crate::domain::models::turn::TurnId;
 use crate::domain::ports::{
-    ClipboardPort, PersonaPort, StreamingProvider, SecurityPort, StoragePort, ToolSetPort,
+    ClipboardPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
 };
 use crate::domain::services::message_builder;
 use crate::domain::services::plan_mode_injector::PlanModeInjector;
@@ -104,10 +104,21 @@ fn reconcile_fold_toggle<F>(
     let tool_block_states = state.tool_block_states.clone();
     let pre_layout = {
         let rs = state.tab_render_state(state.active_tab_id);
-        chat_pane::build_layout_metrics(&conversation, &vs_before, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+        chat_pane::build_layout_metrics(
+            conversation,
+            &vs_before,
+            rs,
+            &theme,
+            width,
+            vp_height,
+            &*clock,
+            &tool_block_states,
+        )
     };
     let prev_focused_turn_top = pre_layout.focused_turn_top;
-    let prev_max_offset = pre_layout.total_content_height.saturating_sub(pre_layout.viewport_height);
+    let prev_max_offset = pre_layout
+        .total_content_height
+        .saturating_sub(pre_layout.viewport_height);
     {
         let tab = tab_manager.active_tab_mut();
         let rs = state.tab_render_state(state.active_tab_id);
@@ -116,15 +127,31 @@ fn reconcile_fold_toggle<F>(
     let tool_block_states = state.tool_block_states.clone();
     let post_layout = {
         let rs = state.tab_render_state(state.active_tab_id);
-        chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states)
+        chat_pane::build_layout_metrics(
+            conversation,
+            &tab_manager.active_tab().view_state,
+            rs,
+            &theme,
+            width,
+            vp_height,
+            &*clock,
+            &tool_block_states,
+        )
     };
     let resolved = tab_manager.active_tab_mut().view_state.reconcile(
-        Some(crate::domain::models::ViewEvent::FoldToggle { turn_id: event_turn_id, prev_focused_turn_top, prev_max_offset }),
+        Some(crate::domain::models::ViewEvent::FoldToggle {
+            turn_id: event_turn_id,
+            prev_focused_turn_top,
+            prev_max_offset,
+        }),
         &post_layout,
     );
     tab_manager.active_tab_mut().view_state.scroll_offset = resolved;
     state.scroll_snapshot = resolved;
-    state.auto_snapshot = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
+    state.auto_snapshot = matches!(
+        tab_manager.active_tab().view_state.mode,
+        crate::domain::models::AnchorMode::Following
+    );
     state.needs_redraw = true;
 }
 
@@ -143,7 +170,6 @@ fn apply_scroll_intent(
     delta: crate::domain::models::view_state::ScrollDelta,
 ) {
     use crate::domain::models::AnchorMode;
-    use crate::domain::models::ViewEvent;
 
     let is_pinned = matches!(
         tab_manager.active_tab().view_state.mode,
@@ -206,10 +232,10 @@ fn dispatch_view_scroll(
         focused_turn_top: None,
     };
 
-    let resolved = tab_manager.active_tab_mut().view_state.reconcile(
-        Some(ViewEvent::Scroll(delta)),
-        &layout,
-    );
+    let resolved = tab_manager
+        .active_tab_mut()
+        .view_state
+        .reconcile(Some(ViewEvent::Scroll(delta)), &layout);
 
     state.scroll_snapshot = resolved;
     state.auto_snapshot = matches!(
@@ -227,6 +253,7 @@ pub async fn run(
     app_state: AppState,
     config: &AppConfig,
     provider: Arc<dyn StreamingProvider>,
+    router: Arc<crate::adapters::provider::ProviderRouter>,
     security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
     persona: Arc<dyn PersonaPort>,
@@ -243,8 +270,6 @@ pub async fn run(
     progress_rx: Option<mpsc::UnboundedReceiver<crate::domain::events::ToolProgressEvent>>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
-    let active_provider_id = provider.provider_id().to_string();
-
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
@@ -468,7 +493,7 @@ pub async fn run(
         &conversation,
         &streaming,
         &config.model,
-        &active_provider_id,
+        &router.active_delegate_id(),
         security.as_ref(),
         tab_manager.tab_count(),
         tab_manager.active_tab_index(),
@@ -512,7 +537,9 @@ pub async fn run(
                 Some(registry) => {
                     let count = registry.skills().len();
                     let warnings = registry.warnings_count();
-                    tracing::debug!("Background skill scan complete: {count} skills ({warnings} warnings)");
+                    tracing::debug!(
+                        "Background skill scan complete: {count} skills ({warnings} warnings)"
+                    );
                     {
                         let mut g = shared_registry.write().await;
                         *g = registry;
@@ -549,7 +576,9 @@ pub async fn run(
                 Ok(Ok(reg)) => {
                     let count = reg.agents().len();
                     let warnings = reg.warnings_count();
-                    tracing::debug!("Background agent scan complete: {count} agents ({warnings} warnings)");
+                    tracing::debug!(
+                        "Background agent scan complete: {count} agents ({warnings} warnings)"
+                    );
                     {
                         let mut slot = agent_slot.lock().await;
                         *slot = Some(reg.clone());
@@ -771,7 +800,7 @@ pub async fn run(
                                                                                 tab_manager.reset_and_clone_turn_cancel(),
                                           ).await;
                                         // Force immediate render for typing indicator
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -1534,7 +1563,7 @@ pub async fn run(
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         ).await;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -1936,15 +1965,14 @@ pub async fn run(
                                 InputAction::TaskCancelPlan => {
                                     let executing_plan = conversation.plans.values()
                                         .find(|p| p.status == PlanStatus::Executing);
-                                    if executing_plan.is_none() {
+                                    if let Some(plan) = executing_plan {
+                                        state.task_panel_state.cancel_plan_confirm = Some(plan.id.clone());
+                                    } else {
                                         app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Info,
                                             message: "No active plan to cancel.".to_string(),
                                         });
-                                    } else {
-                                        let plan = executing_plan.unwrap();
-                                        state.task_panel_state.cancel_plan_confirm = Some(plan.id.clone());
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -2325,7 +2353,7 @@ pub async fn run(
                                                 }
                                             }
                                             plan.status = PlanStatus::Cancelled;
-                                            drop(plan);
+                                            let _ = plan;
                                             app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
                                                 conversation_id: conv_id.clone(),
                                                 plan_id: plan_id.clone(),
@@ -3839,7 +3867,7 @@ pub async fn run(
                                         fallback_start.and_then(|start_idx| {
                                             match direction {
                                                 crate::adapters::tui::state::Direction::Down => {
-                                                    // We're at the first turn, but `]]` means "next" — 
+                                                    // We're at the first turn, but `]]` means "next" —
                                                     // start_idx - 1 + 1 = start_idx. So just return the first.
                                                     turns.get(start_idx)
                                                 }
@@ -3998,7 +4026,7 @@ pub async fn run(
                                             state.auto_snapshot = state.scroll_snapshot == 0;
                                             tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_snapshot;
                                         }
-                                        state.status = StatusState::Flash { message: format!("Recenter: turn snapshot to top"), remaining_ms: 2000 };
+                                        state.status = StatusState::Flash { message: "Recenter: turn snapshot to top".to_string(), remaining_ms: 2000 };
                                     } else {
                                         tracing::debug!("RecenterAnchor: no target turn");
                                         state.status = StatusState::Flash { message: "No assistant turn to recenter".into(), remaining_ms: 2000 };
@@ -4320,7 +4348,7 @@ pub async fn run(
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         ).await;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -5131,7 +5159,7 @@ pub async fn run(
                             _agent_snap,
                                                               tab_manager.reset_and_clone_turn_cancel(),
                         ).await;
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                         }
@@ -5877,7 +5905,7 @@ pub async fn run(
                 }
 
                 if state.needs_redraw {
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &active_provider_id, security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -7001,11 +7029,10 @@ fn load_active_tab(
     // P2: Restore saved mode. Non-streaming tabs keep their view_state.mode
     // (Reading, Following, or Pinned) rather than unconditionally forcing Following.
     // Streaming tabs also restore the saved mode so Pinned anchors survive tab switch.
-    state.auto_snapshot = if tab.streaming.is_streaming {
-        matches!(tab.view_state.mode, crate::domain::models::AnchorMode::Following)
-    } else {
-        matches!(tab.view_state.mode, crate::domain::models::AnchorMode::Following)
-    };
+    state.auto_snapshot = matches!(
+        tab.view_state.mode,
+        crate::domain::models::AnchorMode::Following
+    );
     state.block_boundaries = tab.block_boundaries.clone();
     state.message_boundaries = tab.message_boundaries.clone();
     state.user_message_boundaries = tab.user_message_boundaries.clone();
@@ -7293,7 +7320,10 @@ async fn start_turn_inner(
     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
     turn_cancel: CancellationToken,
 ) {
-    tracing::debug!("start_turn_inner: synthetic={synthetic} text_len={}", text.len());
+    tracing::debug!(
+        "start_turn_inner: synthetic={synthetic} text_len={}",
+        text.len()
+    );
     // Persist any image attachments and collect their references. These are
     // attached to the user ChatMessage so they survive a session reload
     // (Story 4-3a.1 AC3 / DF-067).
@@ -7524,7 +7554,8 @@ fn handle_render_error(
 
     // Attempt terminal recovery
     crate::adapters::tui::terminal::restore_terminal_raw();
-    match crate::adapters::tui::terminal::setup(crate::adapters::tui::terminal::is_mouse_enabled()) {
+    match crate::adapters::tui::terminal::setup(crate::adapters::tui::terminal::is_mouse_enabled())
+    {
         Ok(new_terminal) => {
             *terminal = new_terminal;
             tracing::info!("Terminal recovered after render failure");
@@ -7863,7 +7894,7 @@ fn render(
                         &crate::domain::models::view_state::ViewState,
                         Option<&crate::domain::models::turn::Turn>,
                         &dyn crate::domain::clock::Clock,
-                    ) =                     if let Some(tm) = tab_manager_for_bar {
+                    ) = if let Some(tm) = tab_manager_for_bar {
                         let tab = tm.active_tab();
                         (
                             &tab.view_state,
@@ -8206,15 +8237,11 @@ fn render(
                     .task_panel_state
                     .drill_down_task
                     .map(|n| format!("Tasks > Task {}", n));
-                let provider_label = format!(
-                    "{}/{}",
-                    provider_id,
-                    model
-                );
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
-                    &provider_label,
+                    model,
+                    Some(provider_id),
                     status,
                     theme,
                     scroll_offset,
@@ -8231,7 +8258,12 @@ fn render(
                     state.active_agent_name.as_deref(),
                     state.pending_plan_reminder_at_turn,
                     drill_down_breadcrumb.as_deref(),
-                    tab_manager_for_bar.map_or(false, |tm| matches!(tm.active_tab().view_state.mode, crate::domain::models::AnchorMode::Pinned(_))),
+                    tab_manager_for_bar.is_some_and(|tm| {
+                        matches!(
+                            tm.active_tab().view_state.mode,
+                            crate::domain::models::AnchorMode::Pinned(_)
+                        )
+                    }),
                 );
                 input_box::render(
                     frame,
@@ -8768,9 +8800,20 @@ mod tests {
         let mut state = TuiState::new(80, 24);
         state.focus = FocusState::Input;
         let fb_id = apply_warning_notice(&mut state, "Auto-skipped task 3".to_string());
-        assert_eq!(state.focus, FocusState::Input, "Warning notice must not transfer focus from Input");
-        assert_eq!(state.active_feedback_id, Some(fb_id.clone()), "Warning notice must set active_feedback_id");
-        assert!(state.feedback_blocks.contains_key(&fb_id), "Warning notice must insert feedback block");
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "Warning notice must not transfer focus from Input"
+        );
+        assert_eq!(
+            state.active_feedback_id,
+            Some(fb_id.clone()),
+            "Warning notice must set active_feedback_id"
+        );
+        assert!(
+            state.feedback_blocks.contains_key(&fb_id),
+            "Warning notice must insert feedback block"
+        );
     }
 
     #[test]
@@ -9156,7 +9199,11 @@ mod tests {
         let mut messages = message_builder::build_api_messages(&conv);
         // Tool results are merged into turn-2's User message (anthropic forbids consecutive User roles).
         // Layout: [User(analyse, image), Assistant(calling), User(more?, tool_results)]
-        assert_eq!(messages.len(), 3, "tool results merged into next User message");
+        assert_eq!(
+            messages.len(),
+            3,
+            "tool results merged into next User message"
+        );
 
         rehydrate_historical_images(&conv, &mut messages, &storage);
 

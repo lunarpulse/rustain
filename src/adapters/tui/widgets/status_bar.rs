@@ -11,6 +11,7 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
     model: &str,
+    provider_status: Option<&str>,
     status: &StatusState,
     theme: &Theme,
     scroll_offset: usize,
@@ -35,10 +36,22 @@ pub fn render(
 
     // Build left side: model [ctx] │ mode │ tokens │ status
     // Spec layout: "sonnet-4-6 [ctx] │ normal │ ↑1.2k ↓3.4k │ Ready"
-    let model_label = if has_project_context {
-        format!(" {} [ctx]", model)
-    } else {
-        format!(" {}", model)
+    let model_label = match provider_status {
+        Some(provider_id) => {
+            let combined = format!(" {}/{}", provider_id, model);
+            if has_project_context {
+                format!("{} [ctx]", combined)
+            } else {
+                combined
+            }
+        }
+        None => {
+            if has_project_context {
+                format!(" {} [ctx]", model)
+            } else {
+                format!(" {}", model)
+            }
+        }
     };
     let mut left_spans: Vec<Span> = Vec::new();
 

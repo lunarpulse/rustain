@@ -45,8 +45,8 @@ impl StreamingProvider for MockTitleProvider {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "mock-title"
+    fn provider_id(&self) -> String {
+        "mock-title".to_string()
     }
 
     fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
@@ -75,8 +75,8 @@ impl StreamingProvider for FailingProvider {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "failing"
+    fn provider_id(&self) -> String {
+        "failing".to_string()
     }
 
     fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {

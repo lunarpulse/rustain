@@ -20,9 +20,9 @@ use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
 use crate::domain::clock::{Clock, current_braille_frame};
 use crate::domain::models::turn::tool_call_id_for;
 use crate::domain::models::{
-    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics,
-    MessageRole, PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn,
-    TurnId, TurnPart, ViewState,
+    ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics, MessageRole,
+    PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId,
+    TurnPart, ViewState,
 };
 use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
@@ -814,7 +814,10 @@ pub fn build_layout_metrics(
     width: u16,
     viewport_height: usize,
     clock: &dyn Clock,
-    tool_block_states: &std::collections::HashMap<String, crate::adapters::tui::widgets::tool_block::ToolBlockState>,
+    tool_block_states: &std::collections::HashMap<
+        String,
+        crate::adapters::tui::widgets::tool_block::ToolBlockState,
+    >,
 ) -> LayoutMetrics {
     let _ = clock; // reserved for spinner-frame stability in running-turn heights (S16.5 W4)
     let width_usize = width as usize;
@@ -859,7 +862,7 @@ pub fn build_layout_metrics(
             if let Some(cached) = tab_render_state.height_cache.get(&key) {
                 cached.clone()
             } else {
-                let fresh = expanded_turn_height(turn, theme, width_usize, &tool_block_states);
+                let fresh = expanded_turn_height(turn, theme, width_usize, tool_block_states);
                 tab_render_state.height_cache.set(key, fresh.clone());
                 fresh
             }
@@ -868,10 +871,12 @@ pub fn build_layout_metrics(
         cumulative_offset += layout.height;
     }
 
-    let focused_turn_top = view_state
-        .focused_turn
-        .as_ref()
-        .and_then(|ft| turn_top_offsets.iter().find(|(tid, _)| *tid == *ft).map(|(_, off)| *off));
+    let focused_turn_top = view_state.focused_turn.as_ref().and_then(|ft| {
+        turn_top_offsets
+            .iter()
+            .find(|(tid, _)| *tid == *ft)
+            .map(|(_, off)| *off)
+    });
 
     LayoutMetrics {
         viewport_height,
@@ -1006,7 +1011,7 @@ fn render_expanded_turn<'a>(
 
     for part in &turn.parts {
         // Inter-part spacing
-        let blanks = inter_part_blank_lines(prev, &part);
+        let blanks = inter_part_blank_lines(prev, part);
         for _ in 0..blanks {
             lines.push(Line::from(""));
         }
@@ -1083,15 +1088,12 @@ fn render_expanded_turn<'a>(
                     ];
                     lines.push(Line::from(rail_spans));
                     // Story 16.9: render stdout tail lines below the live rail
-                    if let Some(tail) = liveness
-                        .and_then(|l| l.tail.as_deref())
-                        .filter(|_| {
-                            liveness
-                                .as_ref()
-                                .and_then(|l| l.active_tool_name.as_deref())
-                                == Some(tool.as_str())
-                        })
-                    {
+                    if let Some(tail) = liveness.and_then(|l| l.tail.as_deref()).filter(|_| {
+                        liveness
+                            .as_ref()
+                            .and_then(|l| l.active_tool_name.as_deref())
+                            == Some(tool.as_str())
+                    }) {
                         // Cap at 4 lines (render-side double-defense; the
                         // producer ring is also capped at tail_lines).
                         // TODO(S16.10-cleanup): plumb ToolProgressConfig::tail_lines through
@@ -1175,7 +1177,7 @@ fn render_collapsed_turn<'a>(
     let success_glyph = "✓";
     let gutter_width = 2; // "│ "
     let separator_width = separator.width(); // " · "
-    let success_glyph_width = success_glyph.width(); // "✓"
+    let _success_glyph_width = success_glyph.width(); // "✓"
     let collapse_glyph_width = collapse_glyph.width(); // "▸ "
 
     let (glyph, glyph_style) = if has_error {
@@ -1661,16 +1663,29 @@ pub fn render_with_search(
                         let turn_lines = if collapsed {
                             render_collapsed_turn(turn, view_state, theme, width, clock)
                         } else {
-                            render_expanded_turn(turn, theme, width, clock, tool_block_states, liveness)
+                            render_expanded_turn(
+                                turn,
+                                theme,
+                                width,
+                                clock,
+                                tool_block_states,
+                                liveness,
+                            )
                         };
-                        let is_focused = view_state.focused_turn.as_ref().is_some_and(|ft| *ft == turn.id);
+                        let is_focused = view_state
+                            .focused_turn
+                            .as_ref()
+                            .is_some_and(|ft| *ft == turn.id);
                         for (j, line) in turn_lines.into_iter().enumerate() {
                             let abs_line = line_offset + j;
                             if abs_line >= visible_start && abs_line < visible_end {
                                 if is_focused && j == 0 {
-                                    let arrow = Span::styled("▶ ", Style::default()
-                                        .fg(theme.colors.accent)
-                                        .add_modifier(Modifier::BOLD));
+                                    let arrow = Span::styled(
+                                        "▶ ",
+                                        Style::default()
+                                            .fg(theme.colors.accent)
+                                            .add_modifier(Modifier::BOLD),
+                                    );
                                     let mut spans = vec![arrow];
                                     spans.extend(line.spans);
                                     lines.push(Line::from(spans));
@@ -1838,7 +1853,8 @@ pub fn render_with_search(
                 }
                 line_offset += spacing;
             }
-            let turn_lines = render_expanded_turn(ot, theme, width, clock, tool_block_states, liveness);
+            let turn_lines =
+                render_expanded_turn(ot, theme, width, clock, tool_block_states, liveness);
             let tl_len = turn_lines.len();
             for (j, line) in turn_lines.into_iter().enumerate() {
                 let abs_line = line_offset + j;
@@ -3003,7 +3019,7 @@ mod parts_aware_tests {
                     &[],
                     &[],
                     None,
-                    None,  // liveness
+                    None, // liveness
                 );
             })
             .unwrap();
@@ -3037,7 +3053,7 @@ mod parts_aware_tests {
                     &[],
                     &[],
                     None,
-                    None,  // liveness
+                    None, // liveness
                 );
             })
             .unwrap();
@@ -3073,7 +3089,7 @@ mod parts_aware_tests {
                     &[],
                     &[],
                     None,
-                    None,  // liveness
+                    None, // liveness
                 );
             })
             .unwrap();
@@ -3167,7 +3183,16 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let clock = MockClock::at_wall_ms(0);
 
-        let layout = build_layout_metrics(&conversation, &view_state, &mut trs, &theme, 80, 24, &clock, &std::collections::HashMap::new());
+        let layout = build_layout_metrics(
+            &conversation,
+            &view_state,
+            &mut trs,
+            &theme,
+            80,
+            24,
+            &clock,
+            &std::collections::HashMap::new(),
+        );
 
         assert_eq!(layout.total_content_height, 0);
         assert!(layout.turn_top_offsets.is_empty());
@@ -3179,7 +3204,10 @@ mod parts_aware_tests {
     fn build_layout_metrics_returns_correct_turn_top_offsets() {
         let mut turn1 = Turn::new("claude-3".to_string(), 1000);
         turn1.stop_reason = Some(StopReason::EndTurn);
-        turn1.push_part(|id| TurnPart::Prose { id, text: "Hello world".to_string() });
+        turn1.push_part(|id| TurnPart::Prose {
+            id,
+            text: "Hello world".to_string(),
+        });
         let turn2 = Turn::user("User message".to_string(), 2000);
 
         let conversation = Conversation {
@@ -3187,8 +3215,11 @@ mod parts_aware_tests {
             title: String::new(),
             messages: vec![],
             turns: vec![turn1.clone(), turn2],
-            created_at: 0, updated_at: 0, last_response_at: None,
-            session_id: None, usage: None,
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
         };
@@ -3196,13 +3227,25 @@ mod parts_aware_tests {
         let mut trs = TabRenderState::default();
         let theme = Theme::dark();
         let clock = MockClock::at_wall_ms(0);
-        let layout = build_layout_metrics(&conversation, &view_state, &mut trs, &theme, 80, 24, &clock, &std::collections::HashMap::new());
+        let layout = build_layout_metrics(
+            &conversation,
+            &view_state,
+            &mut trs,
+            &theme,
+            80,
+            24,
+            &clock,
+            &std::collections::HashMap::new(),
+        );
 
         assert!(!layout.turn_top_offsets.is_empty(), "should have entries");
         // First turn at offset 0
         assert_eq!(layout.turn_top_offsets[0], (turn1.id.clone(), 0));
         // Second turn at some positive offset (after first turn's height)
-        assert!(layout.turn_top_offsets[1].1 > 0, "second turn should be after first");
+        assert!(
+            layout.turn_top_offsets[1].1 > 0,
+            "second turn should be after first"
+        );
         assert!(layout.total_content_height > 0);
     }
 
@@ -3210,17 +3253,27 @@ mod parts_aware_tests {
     fn build_layout_metrics_focused_turn_top_matches_focused_turn() {
         let mut turn1 = Turn::new("claude-3".to_string(), 1000);
         turn1.stop_reason = Some(StopReason::EndTurn);
-        turn1.push_part(|id| TurnPart::Prose { id, text: "First assistant".to_string() });
+        turn1.push_part(|id| TurnPart::Prose {
+            id,
+            text: "First assistant".to_string(),
+        });
         let mut turn2 = Turn::new("claude-3".to_string(), 2000);
         turn2.stop_reason = Some(StopReason::EndTurn);
-        turn2.push_part(|id| TurnPart::Prose { id, text: "Second assistant".to_string() });
+        turn2.push_part(|id| TurnPart::Prose {
+            id,
+            text: "Second assistant".to_string(),
+        });
 
         let conversation = Conversation {
             id: "test".to_string(),
-            title: String::new(), messages: vec![],
+            title: String::new(),
+            messages: vec![],
             turns: vec![turn1.clone(), turn2.clone()],
-            created_at: 0, updated_at: 0, last_response_at: None,
-            session_id: None, usage: None,
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
         };
@@ -3230,7 +3283,16 @@ mod parts_aware_tests {
         let mut trs = TabRenderState::default();
         let theme = Theme::dark();
         let clock = MockClock::at_wall_ms(0);
-        let layout = build_layout_metrics(&conversation, &view_state, &mut trs, &theme, 80, 24, &clock, &std::collections::HashMap::new());
+        let layout = build_layout_metrics(
+            &conversation,
+            &view_state,
+            &mut trs,
+            &theme,
+            80,
+            24,
+            &clock,
+            &std::collections::HashMap::new(),
+        );
 
         assert_eq!(layout.focused_turn_top, Some(layout.turn_top_offsets[1].1));
     }

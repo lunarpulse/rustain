@@ -10,16 +10,16 @@ use futures::stream::BoxStream;
 
 use crate::domain::errors::{PermissionError, ProviderError, StorageError, ToolError};
 use crate::domain::models::ApprovalScope;
+use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use crate::domain::models::{
     CompletionOptions, Conversation, ConversationSummary, FileOperation, Message, PathAccessType,
     PermissionMode, StreamChunk, ToolDefinition, ToolResult,
 };
 use crate::domain::ports::{
-    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, StreamingProvider,
-    SchedulerPort, SecurityPort, SessionPort, StoragePort, ToolSetPort,
+    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort,
+    SecurityPort, SessionPort, StoragePort, StreamingProvider, ToolSetPort,
 };
 use crate::domain::services::approval_runtime::SessionApprovalSet;
-use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use tokio_util::sync::CancellationToken;
 
 // ── StreamingProvider ────────────────────────────────────────────────
@@ -43,8 +43,8 @@ impl StreamingProvider for NoOpProvider {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "noop"
+    fn provider_id(&self) -> String {
+        "noop".to_string()
     }
 
     fn list_models(&self) -> Vec<ModelDescriptor> {

@@ -89,7 +89,10 @@ procfs = "0.17"
 default = ["anthropic", "clipboard"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
-openai = []
+# openai feature transitively enables anthropic because OpenAiAdapter reuses
+# SseLineBuffer from crate::adapters::anthropic::sse (Story 7.1b).
+openai = ["anthropic", "dep:reqwest"]
+ollama = ["dep:reqwest"]
 skills-validation = []
 
 [profile.release]

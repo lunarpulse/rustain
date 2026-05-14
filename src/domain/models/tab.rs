@@ -385,7 +385,7 @@ impl TabManager {
     pub fn is_active_tab(&self, tab_id: TabId) -> bool {
         self.tabs
             .get(self.active_tab_index)
-            .map_or(false, |t| t.id == tab_id)
+            .is_some_and(|t| t.id == tab_id)
     }
 
     /// Total number of open tabs.

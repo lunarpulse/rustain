@@ -247,7 +247,12 @@ fn test_no_raw_env_var_outside_utils() {
             if trimmed.contains("env::var(") {
                 // Lines tagged with // CONFORMANCE_EXCEPTION are explicitly allowed.
                 // This is a content-based exception — robust to line renumbering (DF-053).
-                if line.contains("// CONFORMANCE_EXCEPTION") {
+                // Checks both the current line and the next line (rustfmt may split the
+                // comment onto a separate line).
+                let next_line = content.lines().nth(line_num).map(|l| l.trim());
+                if line.contains("// CONFORMANCE_EXCEPTION")
+                    || next_line.is_some_and(|l| l.starts_with("// CONFORMANCE_EXCEPTION"))
+                {
                     continue;
                 }
                 violations.push(format!(
@@ -305,19 +310,20 @@ fn test_no_new_eventbus_bypass() {
     //                                                       PlanExecutionStarted x2 +
     //                                                       SystemNotice handlers in
     //                                                       plan-mode slash commands)
-    //   src/infrastructure/startup.rs               5 sites (bootstrap diagnostics —
+    //   src/infrastructure/startup.rs               6 sites (bootstrap diagnostics —
     //                                                       pre-event-loop, EventBus
     //                                                       not yet observable; +1 for
     //                                                       S16.8 AC14 mouse capture hint;
-    //                                                       +1 for S7.1a health-check notice)
+    //                                                       +1 for S7.1a health-check notice;
+    //                                                       +1 for S7.1b deferred provider notice)
     //   src/adapters/toolset_adapter.rs             2 sites (tool execution streaming)
     //   src/infrastructure/signals.rs               1 site  (shutdown signal)
     //   src/adapters/skill_activation.rs            1 site  (activation event)
-    // Total: 39
+    // Total: 40
     //
     // To reduce: convert the call site to `event_bus.emit_domain(event)`.
     // Tracked in deferred-work as part of Epic 6 retro AI-6.2 follow-on.
-    const MAX_KNOWN_BYPASSES: usize = 39;
+    const MAX_KNOWN_BYPASSES: usize = 40;
 
     let src_dir = Path::new("src");
     let files = collect_rs_files(src_dir);

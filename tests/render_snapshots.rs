@@ -642,7 +642,9 @@ fn live_rail_with_tail_w120() {
     clock.set_frame(3);
     let liveness = fixture_15_liveness(
         Some((4, 4)),
-        Some("line1_is_longer_than_eighty_characters_so_it_will_be_truncated_in_w80_but_not_here\nline2\nline3\nline4"),
+        Some(
+            "line1_is_longer_than_eighty_characters_so_it_will_be_truncated_in_w80_but_not_here\nline2\nline3\nline4",
+        ),
     );
     let text = render_to_string_ext(
         &conv,

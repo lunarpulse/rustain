@@ -10,12 +10,7 @@ pub fn render(area: Rect, buf: &mut Buffer, plan_title: &str, n_pending: u32, n_
         return;
     }
     let style = Style::default();
-    buf.set_string(
-        area.x,
-        area.y,
-        format!("┌─ Cancel plan? ──────────────"),
-        style,
-    );
+    buf.set_string(area.x, area.y, "┌─ Cancel plan? ──────────────", style);
     if area.height > 1 {
         buf.set_string(area.x, area.y + 1, format!("│ {}", plan_title), style);
     }

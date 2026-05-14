@@ -241,8 +241,8 @@ impl StreamingProvider for AnthropicAdapter {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "anthropic"
+    fn provider_id(&self) -> String {
+        "anthropic".to_string()
     }
 
     fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
@@ -296,31 +296,27 @@ impl StreamingProvider for AnthropicAdapter {
             "messages": [{"role": "user", "content": "hi"}]
         });
         let request = match &self.auth_mode {
-            AuthMode::ApiKey(key) => {
-                self.client
-                    .post(&url)
-                    .header("x-api-key", key.to_string())
-                    .header("anthropic-version", "2023-06-01")
-                    .header("content-type", "application/json")
-                    .timeout(std::time::Duration::from_secs(5))
-                    .body(serde_json::to_string(&body).unwrap_or_default())
-            }
-            AuthMode::BearerToken(token) => {
-                self.client
-                    .post(&url)
-                    .header("authorization", format!("Bearer {}", token))
-                    .header("anthropic-version", "2023-06-01")
-                    .header("content-type", "application/json")
-                    .timeout(std::time::Duration::from_secs(5))
-                    .body(serde_json::to_string(&body).unwrap_or_default())
-            }
+            AuthMode::ApiKey(key) => self
+                .client
+                .post(&url)
+                .header("x-api-key", key.to_string())
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(5))
+                .body(serde_json::to_string(&body).unwrap_or_default()),
+            AuthMode::BearerToken(token) => self
+                .client
+                .post(&url)
+                .header("authorization", format!("Bearer {}", token))
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .timeout(std::time::Duration::from_secs(5))
+                .body(serde_json::to_string(&body).unwrap_or_default()),
         };
         let response = request.send().await;
         match response {
             Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) if resp.status().as_u16() == 401 => {
-                Err(ProviderError::AuthenticationFailed)
-            }
+            Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
             Ok(resp) => Err(ProviderError::Other(format!(
                 "Health check failed: HTTP {}",
                 resp.status()

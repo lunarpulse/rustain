@@ -292,9 +292,18 @@ threshold_ms = 5000
 
         // True round-trip: serialize back to TOML and verify key values preserved
         let serialized = toml::to_string(&config).expect("serialize");
-        assert!(serialized.contains("live_tail = true"), "serialized TOML must contain live_tail");
-        assert!(serialized.contains("tail_lines = 8"), "serialized TOML must contain tail_lines");
-        assert!(serialized.contains("threshold_ms = 5000"), "serialized TOML must contain threshold_ms");
+        assert!(
+            serialized.contains("live_tail = true"),
+            "serialized TOML must contain live_tail"
+        );
+        assert!(
+            serialized.contains("tail_lines = 8"),
+            "serialized TOML must contain tail_lines"
+        );
+        assert!(
+            serialized.contains("threshold_ms = 5000"),
+            "serialized TOML must contain threshold_ms"
+        );
     }
 
     #[test]
@@ -302,10 +311,7 @@ threshold_ms = 5000
         // Helper to construct a config with a specific tail_lines value
         // via serde deserialize (simulates user TOML input)
         fn parse_tail_lines(val: u8) -> ToolProgressConfig {
-            let toml = format!(
-                "[tool_progress]\nlive_tail = false\ntail_lines = {}\n",
-                val
-            );
+            let toml = format!("[tool_progress]\nlive_tail = false\ntail_lines = {}\n", val);
             let config: AppConfig = toml::from_str(&toml).expect("deserialize");
             config.tool_progress
         }

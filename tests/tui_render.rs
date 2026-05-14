@@ -49,6 +49,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     frame,
                     app_layout.status_bar,
                     "claude-sonnet-4-6",
+                None,
                     &state.status,
                     &state.theme,
                     0,

@@ -1,5 +1,7 @@
 // Pre-existing clippy suppressions — these predate Story 3-0.
 // Sync with lib.rs — both files must carry identical suppressions.
+#![allow(dead_code)] // TODO(epic-4): public API surface used by integration tests; audit per-module
+#![allow(unused_imports)] // TODO(epic-4): re-exports consumed by integration tests; prune unused
 #![allow(clippy::too_many_arguments)] // TODO(epic-4): large render fns — refactor into smaller units
 #![allow(clippy::implicit_saturating_sub)] // TODO(epic-4): audit saturating_sub usage
 #![allow(clippy::redundant_closure)] // TODO(epic-4): clean up trivial closures

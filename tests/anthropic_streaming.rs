@@ -684,8 +684,8 @@ data: {\"type\":\"message_stop\"}\n\
                 Ok(())
             }
 
-            fn provider_id(&self) -> &str {
-                "mock-disconnect"
+            fn provider_id(&self) -> String {
+                "mock-disconnect".to_string()
             }
 
             fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {

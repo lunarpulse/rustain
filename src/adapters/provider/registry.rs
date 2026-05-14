@@ -19,8 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock; // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: ProviderRegistry methods are sync, short critical sections, never across .await
 
-use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
 use crate::domain::models::ProviderDescriptor;
+use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
 use crate::domain::ports::StreamingProvider;
 
 pub struct ProviderRegistry {
@@ -39,7 +39,7 @@ impl ProviderRegistry {
     /// Register a boxed provider. If a provider with the same ID already exists,
     /// it is replaced. The provider starts with healthy=true until health-check runs.
     pub fn register(&self, provider: Box<dyn StreamingProvider>) {
-        let id = provider.provider_id().to_string();
+        let id = provider.provider_id();
         self.providers
             .write()
             .expect("ProviderRegistry lock poisoned")
@@ -53,7 +53,7 @@ impl ProviderRegistry {
     /// Register an Arc-wrapped provider (avoids double-allocation when caller
     /// already holds an Arc, e.g. the active provider on AppState).
     pub fn register_arc(&self, provider: Arc<dyn StreamingProvider>) {
-        let id = provider.provider_id().to_string();
+        let id = provider.provider_id();
         self.providers
             .write()
             .expect("ProviderRegistry lock poisoned")
@@ -74,7 +74,10 @@ impl ProviderRegistry {
 
     /// Lookup a single model by (provider_id, model_id).
     pub fn get_model(&self, provider_id: &str, model_id: &str) -> Option<ModelDescriptor> {
-        let providers = self.providers.read().expect("ProviderRegistry lock poisoned");
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
         let provider = providers.get(provider_id)?;
         provider
             .list_models()
@@ -84,7 +87,10 @@ impl ProviderRegistry {
 
     /// List all models for a specific provider.
     pub fn list_models_by_provider(&self, provider_id: &str) -> Vec<ModelDescriptor> {
-        let providers = self.providers.read().expect("ProviderRegistry lock poisoned");
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
         match providers.get(provider_id) {
             Some(p) => p.list_models(),
             None => vec![],
@@ -93,7 +99,10 @@ impl ProviderRegistry {
 
     /// List all models that support a given capability (AC2: queryable by capability).
     pub fn list_models_by_capability(&self, capability: &ModelCapability) -> Vec<ModelDescriptor> {
-        let providers = self.providers.read().expect("ProviderRegistry lock poisoned");
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
         let mut result = Vec::new();
         for (_id, provider) in providers.iter() {
             for model in provider.list_models() {
@@ -107,7 +116,10 @@ impl ProviderRegistry {
 
     /// List all models from all registered providers.
     pub fn list_all_models(&self) -> Vec<ModelDescriptor> {
-        let providers = self.providers.read().expect("ProviderRegistry lock poisoned");
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
         let mut models = Vec::new();
         for (_id, provider) in providers.iter() {
             models.extend(provider.list_models());
@@ -118,12 +130,18 @@ impl ProviderRegistry {
     /// Return provider-level descriptors for UI display.
     /// Uses stored health status from `update_health()`.
     pub fn list_providers(&self) -> Vec<ProviderDescriptor> {
-        let providers = self.providers.read().expect("ProviderRegistry lock poisoned");
-        let health = self.health_status.read().expect("ProviderRegistry health lock poisoned");
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
+        let health = self
+            .health_status
+            .read()
+            .expect("ProviderRegistry health lock poisoned");
         providers
             .values()
             .map(|p| {
-                let pid = p.provider_id().to_string();
+                let pid = p.provider_id();
                 let models = p.list_models();
                 ProviderDescriptor {
                     provider_id: pid.clone(),
@@ -137,7 +155,10 @@ impl ProviderRegistry {
 
     /// Return the set of provider IDs currently registered.
     pub fn provider_ids(&self) -> HashSet<String> {
-        let providers = self.providers.read().expect("ProviderRegistry lock poisoned");
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
         providers.keys().cloned().collect()
     }
 }

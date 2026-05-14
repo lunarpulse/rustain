@@ -11,15 +11,13 @@
 //! This test serves as the kill-switch verification gate — if S16.9 ships
 //! and someone accidentally flips the default to `true`, this test catches it.
 
+use async_trait::async_trait;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
 use rustain::domain::errors::PermissionError;
-use rustain::domain::models::{
-    FileOperation, PathAccessType, PermissionMode, ToolCallRequest,
-};
-use rustain::domain::ports::{SecurityPort, ToolSetPort, StoragePort};
+use rustain::domain::models::{FileOperation, PathAccessType, PermissionMode, ToolCallRequest};
+use rustain::domain::ports::{SecurityPort, StoragePort, ToolSetPort};
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
-use async_trait::async_trait;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 

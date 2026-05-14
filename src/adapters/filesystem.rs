@@ -1176,7 +1176,7 @@ impl StoragePort for FileSystemStorage {
         conv.plans.retain(|_, plan| {
             plan.host_message_id
                 .as_ref()
-                .map_or(false, |id| surviving_ids.contains(id))
+                .is_some_and(|id| surviving_ids.contains(id))
         });
 
         // Load the existing SessionMeta BEFORE save_conversation_inner overwrites it,

@@ -201,7 +201,10 @@ impl ToolSetAdapter {
     }
 
     #[allow(dead_code)]
-    pub async fn set_progress_tx(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>) {
+    pub async fn set_progress_tx(
+        &self,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>,
+    ) {
         *self.progress_tx.lock().await = tx;
     }
 
@@ -363,7 +366,7 @@ impl ToolSetAdapter {
                 result = format!("Command exited with status {}", s);
             }
         }
-        let is_error = exit_status.map_or(true, |s| !s.success());
+        let is_error = exit_status.is_none_or(|s| !s.success());
         Ok(ToolResult {
             tool_use_id: tid,
             content: result,
@@ -1212,11 +1215,13 @@ mod tests {
     async fn execute_bash_no_events_below_threshold() {
         let dir = std::env::current_dir().unwrap();
         let adapter = make_adapter(&dir);
-        adapter.set_tool_progress_config(ToolProgressConfig {
-            live_tail: true,
-            tail_lines: 4,
-            threshold_ms: 3000,
-        }).await;
+        adapter
+            .set_tool_progress_config(ToolProgressConfig {
+                live_tail: true,
+                tail_lines: 4,
+                threshold_ms: 3000,
+            })
+            .await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Script totals ~1s — well below the 3s threshold
@@ -1240,11 +1245,13 @@ mod tests {
     async fn execute_bash_streams_lines_after_threshold() {
         let dir = std::env::current_dir().unwrap();
         let adapter = make_adapter(&dir);
-        adapter.set_tool_progress_config(ToolProgressConfig {
-            live_tail: true,
-            tail_lines: 4,
-            threshold_ms: 3000,
-        }).await;
+        adapter
+            .set_tool_progress_config(ToolProgressConfig {
+                live_tail: true,
+                tail_lines: 4,
+                threshold_ms: 3000,
+            })
+            .await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Script totals ~4s — exceeds the 3s threshold
@@ -1276,11 +1283,13 @@ mod tests {
         let adapter = make_adapter(&dir);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         adapter.set_progress_tx(Some(tx.clone())).await;
-        adapter.set_tool_progress_config(ToolProgressConfig {
-            live_tail: true,
-            tail_lines: 4,
-            threshold_ms: 500, // low threshold so events fire
-        }).await;
+        adapter
+            .set_tool_progress_config(ToolProgressConfig {
+                live_tail: true,
+                tail_lines: 4,
+                threshold_ms: 500, // low threshold so events fire
+            })
+            .await;
 
         let result = adapter
             .execute_bash_with_progress(
@@ -1301,5 +1310,4 @@ mod tests {
             );
         }
     }
-
 }

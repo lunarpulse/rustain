@@ -12,11 +12,12 @@ use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
+use crate::domain::errors::ProviderError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
-use crate::domain::models::{PermissionMode, SandboxPolicy};
+use crate::domain::models::{PermissionMode, ProviderConfig, SandboxPolicy};
 use crate::domain::ports::{
-    ClipboardPort, PersonaPort, StreamingProvider, SecurityPort, StoragePort, ToolSetPort,
+    ClipboardPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
@@ -111,17 +112,14 @@ pub async fn run() -> Result<()> {
         app_config.model = model_override;
     }
 
-    // 5a. Construct provider adapter
-    let provider: Arc<dyn StreamingProvider> = build_provider(&app_config)?;
-    // ArcSwap hot-swap holder: wraps the same Arc so ProviderRouter (Story 7.1b)
-    // can swap it atomically. Stored on AppState for future routing.
-    let provider_arc_for_swap = Arc::clone(&provider);
-    let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(provider_arc_for_swap));
+    // 5a. Construct provider layer
+    let (router, provider_registry, deferred_notices, _active_id) =
+        init_provider_layer(&app_config);
 
-    // 5a.2 — ProviderRegistry: catalog of registered providers (D1: register real adapter)
-    let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
-    provider_registry.register_arc(Arc::clone(&provider));
-    // Health check runs after AppState creation so we can emit TUI notice (D2)
+    // ArcSwap hot-swap holder wraps the router (not a bare adapter)
+    let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(
+        router.clone() as Arc<dyn StreamingProvider>
+    ));
 
     // 5b. Construct security and toolset adapters
     let workspace_path = std::env::current_dir()
@@ -166,21 +164,35 @@ pub async fn run() -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
 
     // D2: Health check — emit TUI warning notice on failure and update registry (AC4)
-    let provider_id_str = provider.provider_id().to_string();
-    match provider.health_check().await {
-        Ok(()) => {
-            tracing::info!("Provider '{}' health check passed", provider_id_str);
-            provider_registry.update_health(&provider_id_str, true);
+    // Health-check ALL registered providers and emit notices for failures.
+    let all_provider_ids: Vec<String> = provider_registry.provider_ids().into_iter().collect();
+    for id in &all_provider_ids {
+        if let Some(adapter) = router.get_provider(id) {
+            match adapter.health_check().await {
+                Ok(()) => {
+                    tracing::info!("Provider '{}' health check passed", id);
+                    provider_registry.update_health(id, true);
+                }
+                Err(e) => {
+                    tracing::warn!("Provider '{}' health check failed: {}", id, e);
+                    provider_registry.update_health(id, false);
+                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: NoticeLevel::Warning,
+                        message: format!("Provider '{}' unavailable: {}", id, e),
+                    });
+                }
+            }
         }
-        Err(e) => {
-            tracing::warn!("Provider '{}' health check failed: {e}", provider_id_str);
-            provider_registry.update_health(&provider_id_str, false);
-            let _ = domain_tx.send(AppEvent::SystemNotice {
-                conversation_id: None,
-                level: NoticeLevel::Warning,
-                message: format!("Provider '{}' health check failed: {e}", provider_id_str),
-            });
-        }
+    }
+
+    // Flush deferred construction-failure notices
+    for (id, e) in &deferred_notices {
+        let _ = domain_tx.send(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: format!("Failed to construct provider '{}': {}", id, e),
+        });
     }
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
     security_adapter.set_mode(initial_mode);
@@ -213,7 +225,9 @@ pub async fn run() -> Result<()> {
     let (progress_tx, progress_rx) = if app_config.tool_progress.live_tail {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tools_adapter.set_progress_tx(Some(tx.clone())).await;
-        tools_adapter.set_tool_progress_config(app_config.tool_progress.clone()).await;
+        tools_adapter
+            .set_tool_progress_config(app_config.tool_progress.clone())
+            .await;
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -387,7 +401,7 @@ pub async fn run() -> Result<()> {
     // 7. Setup terminal (mouse capture gated by config + RUSTAIN_NO_MOUSE env. Story 16.8, AC14)
     let mouse_enabled = app_config.mouse.capture
         && crate::infrastructure::utils::env_var_trimmed("RUSTAIN_NO_MOUSE")
-            .map_or(true, |v| v != "1");
+            != Some("1".to_string());
     let mut tui = terminal::setup(mouse_enabled)?;
 
     // P13: AC14 first-launch hint — if mouse capture is active, inform the user.
@@ -404,7 +418,8 @@ pub async fn run() -> Result<()> {
         domain_rx,
         app_state,
         &app_config,
-        provider,
+        router.clone(),
+        router.clone(),
         security,
         tools,
         persona,
@@ -431,12 +446,100 @@ pub async fn run() -> Result<()> {
     result
 }
 
-/// Build the provider adapter based on configuration and environment.
+/// Extract the provider construction logic for testability.
+type ProviderLayer = (
+    Arc<crate::adapters::provider::ProviderRouter>,
+    Arc<crate::adapters::provider::ProviderRegistry>,
+    Vec<(String, ProviderError)>,
+    String,
+);
+
+pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> ProviderLayer {
+    let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
+    let router = Arc::new(crate::adapters::provider::ProviderRouter::new(
+        "anthropic".to_string(),
+    ));
+    let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
+
+    let enabled_configs: Vec<(&String, &ProviderConfig)> = app_config
+        .provider
+        .iter()
+        .filter(|(_id, cfg)| cfg.enabled)
+        .collect();
+
+    let use_config_path = !app_config.provider.is_empty() && !enabled_configs.is_empty();
+
+    let active_id = if use_config_path {
+        let mut first_enabled_id: Option<String> = None;
+        for (id, cfg) in enabled_configs {
+            if id != &cfg.provider_id {
+                tracing::warn!(
+                    "Provider config key '{}' does not match provider_id '{}'; using key",
+                    id,
+                    cfg.provider_id
+                );
+            }
+            match crate::infrastructure::provider_factory::build_provider_for_config(id, cfg) {
+                Ok(adapter) => {
+                    let adapter_arc = Arc::clone(&adapter);
+                    router.register(adapter);
+                    provider_registry.register_arc(adapter_arc);
+                    if first_enabled_id.is_none() {
+                        first_enabled_id = Some(id.clone());
+                    }
+                    tracing::info!("Provider '{}' registered from config", id);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to construct provider '{}': {}", id, e);
+                    deferred_notices.push((id.clone(), e));
+                }
+            }
+        }
+        first_enabled_id.unwrap_or_else(|| "anthropic".to_string())
+    } else {
+        if !app_config.provider.is_empty() {
+            tracing::info!(
+                "No enabled providers in [provider] config; using legacy ANTHROPIC env-var path"
+            );
+        }
+        match build_anthropic_provider_from_env(app_config) {
+            Ok(adapter) => {
+                let adapter_arc = Arc::clone(&adapter);
+                router.register(adapter);
+                provider_registry.register_arc(adapter_arc);
+                "anthropic".to_string()
+            }
+            Err(e) => {
+                tracing::warn!("Legacy Anthropic fallback failed: {}", e);
+                deferred_notices
+                    .push(("anthropic".to_string(), ProviderError::Other(e.to_string())));
+                "anthropic".to_string()
+            }
+        }
+    };
+
+    if let Err(e) = router.set_active(&active_id) {
+        tracing::warn!("Failed to set active provider '{}': {}", active_id, e);
+    }
+
+    if provider_registry.provider_ids().is_empty() {
+        tracing::warn!(
+            "No providers registered — rustain will launch but all completion requests will fail. \
+             Configure providers via `rustain init` or add [provider.*] sections to config."
+        );
+    }
+
+    (router, provider_registry, deferred_notices, active_id)
+}
+
+/// Build the Anthropic provider from environment variables (legacy fallback).
 ///
 /// Auth precedence (CC-compatible): `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`.
 /// - `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer {token}` (gateways/proxies)
 /// - `ANTHROPIC_API_KEY` → `X-Api-Key: {key}` (direct Anthropic)
-fn build_provider(config: &crate::domain::models::AppConfig) -> Result<Arc<dyn StreamingProvider>> {
+fn build_anthropic_provider_from_env(
+    config: &crate::domain::models::AppConfig,
+) -> Result<Arc<dyn StreamingProvider>> {
     #[cfg(feature = "anthropic")]
     {
         use crate::adapters::anthropic::AuthMode;

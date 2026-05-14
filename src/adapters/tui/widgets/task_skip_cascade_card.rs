@@ -13,7 +13,7 @@ pub fn render(area: Rect, buf: &mut Buffer, pending: &SkipCascadePending) {
     }
     let style = Style::default();
     let count = pending.downstream.len();
-    buf.set_string(area.x, area.y, format!("┌─ Skip cascade"), style);
+    buf.set_string(area.x, area.y, "┌─ Skip cascade", style);
     if area.height > 1 {
         buf.set_string(
             area.x,

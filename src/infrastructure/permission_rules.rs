@@ -136,12 +136,12 @@ pub fn load_rules(
                         let action = match rule_table.get("action").and_then(|v| v.as_str()) {
                             Some("allow") => RuleAction::Allow,
                             Some("deny") => RuleAction::Deny,
-                            Some("ask") | _ => RuleAction::Ask,
+                            _ => RuleAction::Ask,
                         };
                         let scope = match rule_table.get("scope").and_then(|v| v.as_str()) {
                             Some("server") => RuleScope::Server,
                             Some("path") => RuleScope::Path,
-                            Some("tool") | _ => RuleScope::Tool,
+                            _ => RuleScope::Tool,
                         };
                         rules.push(Rule {
                             priority,

@@ -181,11 +181,7 @@ pub async fn check(
 /// Derive server_id from tool_name (MCP pattern `<server>.<tool>`).
 /// Today returns None for all built-ins — full implementation lands in 9-2.
 fn derive_server_id(tool_name: &str) -> Option<String> {
-    if let Some(dot) = tool_name.find('.') {
-        Some(tool_name[..dot].to_string())
-    } else {
-        None
-    }
+    tool_name.find('.').map(|dot| tool_name[..dot].to_string())
 }
 
 /// Derive path_hint from tool_name and input (for Read/Write/Edit).

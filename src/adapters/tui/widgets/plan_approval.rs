@@ -102,8 +102,8 @@ pub fn render_plan_approval_card(
 
 /// Compute the centered rectangle for the plan approval card.
 pub fn plan_approval_area(area: Rect) -> Rect {
-    let width = (area.width as f32 * 0.8).min(120.0).max(40.0) as u16;
-    let height = (area.height as f32 * 0.7).min(40.0).max(12.0) as u16;
+    let width = (area.width as f32 * 0.8).clamp(40.0, 120.0) as u16;
+    let height = (area.height as f32 * 0.7).clamp(12.0, 40.0) as u16;
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)

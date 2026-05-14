@@ -110,6 +110,7 @@ struct PendingRecord {
 }
 
 /// Internal request struct.
+#[allow(dead_code)]
 struct ApprovalRequest {
     id: RequestId,
     source: ApprovalSource,

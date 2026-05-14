@@ -142,8 +142,8 @@ impl StreamingProvider for MockProvider {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "mock"
+    fn provider_id(&self) -> String {
+        "mock".to_string()
     }
 
     fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
@@ -271,6 +271,7 @@ impl TestHarness {
                         frame,
                         app_layout.status_bar,
                         "mock-model",
+                        None,
                         status,
                         theme,
                         scroll_offset,

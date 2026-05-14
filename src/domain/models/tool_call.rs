@@ -24,6 +24,12 @@ pub struct ToolCallResult {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
 
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestId {
     /// Generate a fresh 12-character URL-safe ID.
     pub fn new() -> Self {

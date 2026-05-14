@@ -145,7 +145,7 @@ impl Conversation {
             .collect();
 
         // Build a map of existing assistant message indices by id for in-place replacement
-        let mut msg_indices: std::collections::HashMap<String, usize> = self
+        let msg_indices: std::collections::HashMap<String, usize> = self
             .messages
             .iter()
             .enumerate()

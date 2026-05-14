@@ -11,6 +11,9 @@
 
 pub mod stream;
 pub mod types;
+pub mod variant;
+
+pub use variant::OpenAiCompatibleVariant;
 
 use std::fmt;
 use std::sync::Arc;
@@ -36,6 +39,7 @@ pub struct OpenAiAdapter {
     api_key: String,
     model: String,
     base_url: String,
+    variant: OpenAiCompatibleVariant,
     #[allow(dead_code)] // Used by abort() method
     abort_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -48,6 +52,7 @@ impl OpenAiAdapter {
     /// * `model` — Model identifier (e.g., `moonshot-v1-auto`, `gpt-4o`)
     /// * `base_url` — API base URL including `/v1` path (e.g., `https://api.moonshot.cn/v1`)
     pub fn new(
+        variant: OpenAiCompatibleVariant,
         api_key: String,
         model: String,
         base_url: Option<String>,
@@ -66,7 +71,7 @@ impl OpenAiAdapter {
             .map_err(|e| ProviderError::ConnectionFailed(e.to_string()))?;
 
         let resolved_base_url = crate::infrastructure::utils::normalize_base_url(
-            &base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+            &base_url.unwrap_or_else(|| variant.default_base_url().to_string()),
         );
 
         Ok(Self {
@@ -74,6 +79,7 @@ impl OpenAiAdapter {
             api_key,
             model,
             base_url: resolved_base_url,
+            variant,
             abort_handle: Arc::new(Mutex::new(None)),
         })
     }
@@ -82,6 +88,7 @@ impl OpenAiAdapter {
 impl fmt::Debug for OpenAiAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenAiAdapter")
+            .field("variant", &self.variant)
             .field("api_key", &"(***)")
             .field("model", &self.model)
             .field("base_url", &self.base_url)
@@ -222,22 +229,12 @@ impl StreamingProvider for OpenAiAdapter {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "openai"
+    fn provider_id(&self) -> String {
+        self.variant.provider_id().to_string()
     }
 
     fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
-        use crate::domain::models::ModelCapability;
-        vec![crate::domain::models::ModelDescriptor {
-            model_id: self.model.clone(),
-            display_name: self.model.clone(),
-            provider_id: "openai".to_string(),
-            context_window: 128_000,
-            capabilities: std::collections::HashSet::from([
-                ModelCapability::ToolUse,
-            ]),
-            pricing_tier: None,
-        }]
+        self.variant.known_models(&self.model)
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
@@ -251,9 +248,7 @@ impl StreamingProvider for OpenAiAdapter {
             .await;
         match response {
             Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) if resp.status().as_u16() == 401 => {
-                Err(ProviderError::AuthenticationFailed)
-            }
+            Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
             Ok(resp) => Err(ProviderError::Other(format!(
                 "Health check failed: HTTP {}",
                 resp.status()
@@ -270,6 +265,7 @@ mod tests {
     #[test]
     fn test_openai_adapter_debug_masks_api_key() {
         let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::Moonshot,
             "sk-test-secret-key".to_string(),
             "moonshot-v1-auto".to_string(),
             None,
@@ -285,6 +281,7 @@ mod tests {
     #[test]
     fn test_openai_adapter_missing_api_key() {
         let result = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::Moonshot,
             String::new(),
             "moonshot-v1-auto".to_string(),
             None,
@@ -299,17 +296,19 @@ mod tests {
     #[test]
     fn test_openai_adapter_provider_id() {
         let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::Moonshot,
             "test-key".to_string(),
             "moonshot-v1-auto".to_string(),
             None,
         )
         .unwrap();
-        assert_eq!(adapter.provider_id(), "openai");
+        assert_eq!(adapter.provider_id(), "moonshot");
     }
 
     #[test]
     fn test_openai_adapter_custom_base_url() {
         let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::Moonshot,
             "test-key".to_string(),
             "moonshot-v1-auto".to_string(),
             Some("https://api.moonshot.cn/v1".to_string()),
@@ -323,6 +322,7 @@ mod tests {
     fn test_api_key_never_in_serialized_output() {
         let key = "sk-super-secret-kimi-key-12345";
         let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::Moonshot,
             key.to_string(),
             "moonshot-v1-auto".to_string(),
             None,

@@ -100,7 +100,7 @@ pub fn render(
         buf.set_string(
             inner.x,
             y,
-            &format!("Depends on: {}", deps.join(", ")),
+            format!("Depends on: {}", deps.join(", ")),
             Style::default().fg(theme.colors.fg_muted),
         );
         y += 1;
@@ -185,7 +185,7 @@ pub fn render(
             buf.set_string(
                 inner.x,
                 y,
-                &format!("{}{}", pos, keys),
+                format!("{}{}", pos, keys),
                 Style::default().fg(theme.colors.fg_muted),
             );
             y += 1;

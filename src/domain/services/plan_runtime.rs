@@ -13,6 +13,15 @@ use crate::domain::models::plan::{
 use crate::domain::models::tab::ConversationId;
 use crate::domain::ports::EventEmitter;
 
+type TaskSummary = (
+    u32,
+    String,
+    PlanTaskStatus,
+    Option<i64>,
+    Option<String>,
+    Option<TaskResult>,
+);
+
 pub struct PlanRuntime {
     plans: RwLock<HashMap<String, PlanRuntimeState>>,
 }
@@ -152,7 +161,9 @@ impl PlanRuntime {
                 task_number,
                 status: PlanTaskStatus::Running,
             });
-            tracing::debug!("PlanRuntime::start emitting AgentThenSubmit task={task_number} plan={plan_id}");
+            tracing::debug!(
+                "PlanRuntime::start emitting AgentThenSubmit task={task_number} plan={plan_id}"
+            );
             event_emitter.emit(AppEvent::AgentThenSubmit {
                 conversation_id: conversation_id.clone(),
                 text: prompt,
@@ -360,7 +371,7 @@ impl PlanRuntime {
                             t.status == PlanTaskStatus::Skipped
                                 && t.error
                                     .as_ref()
-                                    .map_or(false, |e| e.contains("depends on failed task"))
+                                    .is_some_and(|e| e.contains("depends on failed task"))
                         })
                         .map(|t| t.number)
                         .collect();
@@ -432,9 +443,9 @@ impl PlanRuntime {
                         status: PlanTaskStatus::Paused,
                     });
                     // Remove from pause_pending set — it's been consumed
-                    self.plans.write().unwrap().get_mut(plan_id).map(|s| {
+                    if let Some(s) = self.plans.write().unwrap().get_mut(plan_id) {
                         s.pause_pending_tasks.remove(&task_number);
-                    });
+                    }
                     // Do NOT call skip_blocked_tasks or advance_after_task — runtime idles
                     return;
                 }
@@ -650,7 +661,7 @@ impl PlanRuntime {
         let plans = self.plans.read().unwrap();
         plans
             .get(plan_id)
-            .map_or(false, |s| s.pending_deviation.is_some())
+            .is_some_and(|s| s.pending_deviation.is_some())
     }
 
     /// Public wrapper for the private `advance_after_task`. Called by 6-4
@@ -676,9 +687,9 @@ impl PlanRuntime {
     /// message since it started — i.e. the turn is ready to be classified.
     pub fn can_complete_turn(&self, plan_id: &str, current_assistant_count: usize) -> bool {
         let plans = self.plans.read().unwrap();
-        plans.get(plan_id).map_or(false, |s| {
-            current_assistant_count > s.task_start_assistant_count
-        })
+        plans
+            .get(plan_id)
+            .is_some_and(|s| current_assistant_count > s.task_start_assistant_count)
     }
 
     pub fn classify_outcome(
@@ -939,14 +950,7 @@ fn build_summary_markdown(
     skipped: u32,
     total_elapsed_ms: i64,
     total_tokens: u32,
-    tasks: &[(
-        u32,
-        String,
-        PlanTaskStatus,
-        Option<i64>,
-        Option<String>,
-        Option<TaskResult>,
-    )],
+    tasks: &[TaskSummary],
 ) -> String {
     let mut md = format!("## Plan complete: {}\n\n", plan_title);
 

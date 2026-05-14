@@ -20,7 +20,7 @@ pub fn render(
     buf.set_string(
         area.x,
         area.y,
-        format!("╔══ Plan deviation — reapproval required"),
+        "╔══ Plan deviation — reapproval required",
         style,
     );
     if area.height > 1 {

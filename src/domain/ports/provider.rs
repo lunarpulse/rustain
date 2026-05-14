@@ -38,7 +38,7 @@ pub trait StreamingProvider: Send + Sync {
     async fn abort(&self) -> Result<(), ProviderError>;
 
     /// Provider identifier (e.g., "anthropic", "openai", "ollama").
-    fn provider_id(&self) -> &str;
+    fn provider_id(&self) -> String;
 
     /// Return the metadata of all models available through this provider.
     fn list_models(&self) -> Vec<ModelDescriptor>;
@@ -51,11 +51,12 @@ pub trait StreamingProvider: Send + Sync {
     /// Return a provider-level descriptor for UI display.
     fn provider_descriptor(&self) -> ProviderDescriptor {
         let models = self.list_models();
+        let pid = self.provider_id();
         ProviderDescriptor {
-            provider_id: self.provider_id().to_string(),
+            provider_id: pid.clone(),
             healthy: true, // caller updates after health_check
             model_count: models.len(),
-            display_name: self.provider_id().to_string(),
+            display_name: pid,
         }
     }
 }

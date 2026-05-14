@@ -358,7 +358,10 @@ fn feedback_action_to_input_action(action: crate::domain::models::FeedbackAction
 /// Returns an InputAction telling the event loop what to do.
 pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
     // Cancel pending chord leader on any event that isn't a character key or Ctrl+K.
-    if !matches!(event, DomainInputEvent::KeyPress(_) | DomainInputEvent::SpecialKey(DomainKey::CtrlK)) {
+    if !matches!(
+        event,
+        DomainInputEvent::KeyPress(_) | DomainInputEvent::SpecialKey(DomainKey::CtrlK)
+    ) {
         state.chord_leader_active = false;
         state.pending_z = false;
         state.pending_bracket = None;
@@ -893,228 +896,244 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 state.pending_g = false;
             }
             match c {
-            // --- Story 16.6: vim z-prefix chord state machine (AC10) ---
-            _z if state.pending_z => {
-                state.pending_z = false;
-                // P8: Let 'g' through — user intended jump-to-top, not a cancelled z-chord.
-                // 'g' is also reserved for future z-g chord expansion; consume it
-                // as ScrollToTop rather than as a discarded cancelled-chord keystroke.
-                state.needs_redraw = true;
-                tracing::debug!("vim z-prefix chord: z + '{}'", c);
-                return match c {
-                    'a' => InputAction::FoldToggleAtFocus,
-                    'c' => InputAction::CollapseFocus,
-                    'o' => InputAction::ExpandFocus,
-                    'M' => InputAction::CollapseAllTurns,
-                    'R' => InputAction::ExpandAllTurns,
-                    's' => InputAction::ToggleSummaryTier,
-                    'z' => InputAction::RecenterAnchor,
-                    'g' => InputAction::ScrollToTop,
-                    _ => {
-                        tracing::debug!("z-prefix chord cancelled with '{}'", c);
+                // --- Story 16.6: vim z-prefix chord state machine (AC10) ---
+                _z if state.pending_z => {
+                    state.pending_z = false;
+                    // P8: Let 'g' through — user intended jump-to-top, not a cancelled z-chord.
+                    // 'g' is also reserved for future z-g chord expansion; consume it
+                    // as ScrollToTop rather than as a discarded cancelled-chord keystroke.
+                    state.needs_redraw = true;
+                    tracing::debug!("vim z-prefix chord: z + '{}'", c);
+                    return match c {
+                        'a' => InputAction::FoldToggleAtFocus,
+                        'c' => InputAction::CollapseFocus,
+                        'o' => InputAction::ExpandFocus,
+                        'M' => InputAction::CollapseAllTurns,
+                        'R' => InputAction::ExpandAllTurns,
+                        's' => InputAction::ToggleSummaryTier,
+                        'z' => InputAction::RecenterAnchor,
+                        'g' => InputAction::ScrollToTop,
+                        _ => {
+                            tracing::debug!("z-prefix chord cancelled with '{}'", c);
+                            InputAction::Consumed
+                        }
+                    };
+                }
+                // --- Story 16.6: vim bracket-prefix chord state machine (AC10) ---
+                // S16.8 preflight rebinding (2026-05-03): added `]P` arm — the new home
+                // for `JumpToLatestProseAnchor` (relocated from S16.6's `G` binding so
+                // S16.8 can return `G` to vim-bottom semantic per ADR-16-03). Bracket
+                // leader has no first-key side effect, so `]P` produces no flicker
+                // unlike a hypothetical `gp` chord (single-`g` would jump to top first).
+                // Mnemonic: `]` family for "forward to last X"; capital `P` = "Prose".
+                _b if state.pending_bracket.is_some() => {
+                    let leader = state.pending_bracket.take().unwrap();
+                    state.needs_redraw = true;
+                    tracing::debug!("vim bracket chord: {} + '{}'", leader, c);
+                    return match (leader, c) {
+                        (']', ']') => InputAction::JumpProseAnchor(Direction::Down),
+                        ('[', '[') => InputAction::JumpProseAnchor(Direction::Up),
+                        (']', 'P') => InputAction::JumpToLatestProseAnchor,
+                        _ => {
+                            tracing::debug!(
+                                "bracket-prefix chord cancelled with '{}{}'",
+                                leader,
+                                c
+                            );
+                            InputAction::Consumed
+                        }
+                    };
+                }
+                // --- Story 16.6: z / [ / ] chord leaders (AC10) ---
+                'z' => {
+                    state.pending_z = true;
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                ']' => {
+                    state.pending_bracket = Some(']');
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                '[' => {
+                    state.pending_bracket = Some('[');
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                // AC4: Large image confirmation
+                'y' if state.pending_large_image.is_some() => {
+                    return InputAction::ImageConfirmAttach;
+                }
+                'n' if state.pending_large_image.is_some() => {
+                    return InputAction::ImageConfirmCancel;
+                }
+                'i' => {
+                    state.focus = FocusState::Input;
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                'q' => InputAction::Quit,
+                // j = scroll down (toward newer content). Story 16.8, AC7:
+                // migrated from direct mutation to InputAction emission;
+                // event-loop dispatcher calls dispatch_view_scroll(LineDown).
+                'j' => {
+                    state.needs_redraw = true;
+                    InputAction::ScrollLineDown
+                }
+                // k = scroll up (toward older content). Story 16.8, AC7:
+                // migrated from direct mutation to InputAction emission;
+                // event-loop dispatcher calls dispatch_view_scroll(LineUp).
+                'k' => {
+                    state.needs_redraw = true;
+                    InputAction::ScrollLineUp
+                }
+                // G = jump to bottom (vim-native semantic restored).
+                // Story 16.6 had bound G to JumpToLatestProseAnchor (AC6 override);
+                // S16.8 preflight rebinding (2026-05-03) returned G to vim-bottom per
+                // ADR-16-03 (Anchor as Explicit User Investment). The displaced
+                // S16.8 binding moved to the `]P` bracket chord.
+                // Mode-aware dispatcher: Pinned → no-op + teaching toast; else ScrollToBottom.
+                // See event_loop.rs dispatcher for the mode check (AC3 + AC15).
+                'G' => {
+                    state.needs_redraw = true;
+                    InputAction::ScrollToBottom
+                }
+                // g = jump to top (mirror of G). Single-`g` immediately fires
+                // ScrollToTop (legacy alias preserved from Story 1.4) AND sets
+                // pending_g so a follow-up `g` is detected as `gg` chord.
+                // Idempotent: if already at top, ScrollToTop is a no-op.
+                // S16.8 Task 6, AC2.
+                'g' => {
+                    let was_gg = state.pending_g;
+                    // P6: On gg chord, the first g already jumped to top — second g
+                    // is idempotent, so skip the redundant dispatch.
+                    state.pending_g = !was_gg;
+                    state.needs_redraw = true;
+                    if was_gg {
+                        tracing::debug!("gg chord: second g, idempotent skip");
                         InputAction::Consumed
+                    } else {
+                        InputAction::ScrollToTop
                     }
-                };
-            }
-            // --- Story 16.6: vim bracket-prefix chord state machine (AC10) ---
-            // S16.8 preflight rebinding (2026-05-03): added `]P` arm — the new home
-            // for `JumpToLatestProseAnchor` (relocated from S16.6's `G` binding so
-            // S16.8 can return `G` to vim-bottom semantic per ADR-16-03). Bracket
-            // leader has no first-key side effect, so `]P` produces no flicker
-            // unlike a hypothetical `gp` chord (single-`g` would jump to top first).
-            // Mnemonic: `]` family for "forward to last X"; capital `P` = "Prose".
-            _b if state.pending_bracket.is_some() => {
-                let leader = state.pending_bracket.take().unwrap();
-                state.needs_redraw = true;
-                tracing::debug!("vim bracket chord: {} + '{}'", leader, c);
-                return match (leader, c) {
-                    (']', ']') => InputAction::JumpProseAnchor(Direction::Down),
-                    ('[', '[') => InputAction::JumpProseAnchor(Direction::Up),
-                    (']', 'P') => InputAction::JumpToLatestProseAnchor,
-                    _ => {
-                        tracing::debug!("bracket-prefix chord cancelled with '{}{}'", leader, c);
-                        InputAction::Consumed
-                    }
-                };
-            }
-            // --- Story 16.6: z / [ / ] chord leaders (AC10) ---
-            'z' => {
-                state.pending_z = true;
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            ']' => {
-                state.pending_bracket = Some(']');
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            '[' => {
-                state.pending_bracket = Some('[');
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            // AC4: Large image confirmation
-            'y' if state.pending_large_image.is_some() => {
-                return InputAction::ImageConfirmAttach;
-            }
-            'n' if state.pending_large_image.is_some() => {
-                return InputAction::ImageConfirmCancel;
-            }
-            'i' => {
-                state.focus = FocusState::Input;
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            'q' => InputAction::Quit,
-            // j = scroll down (toward newer content). Story 16.8, AC7:
-            // migrated from direct mutation to InputAction emission;
-            // event-loop dispatcher calls dispatch_view_scroll(LineDown).
-            'j' => {
-                state.needs_redraw = true;
-                InputAction::ScrollLineDown
-            }
-            // k = scroll up (toward older content). Story 16.8, AC7:
-            // migrated from direct mutation to InputAction emission;
-            // event-loop dispatcher calls dispatch_view_scroll(LineUp).
-            'k' => {
-                state.needs_redraw = true;
-                InputAction::ScrollLineUp
-            }
-            // G = jump to bottom (vim-native semantic restored).
-            // Story 16.6 had bound G to JumpToLatestProseAnchor (AC6 override);
-            // S16.8 preflight rebinding (2026-05-03) returned G to vim-bottom per
-            // ADR-16-03 (Anchor as Explicit User Investment). The displaced
-            // S16.8 binding moved to the `]P` bracket chord.
-            // Mode-aware dispatcher: Pinned → no-op + teaching toast; else ScrollToBottom.
-            // See event_loop.rs dispatcher for the mode check (AC3 + AC15).
-            'G' => {
-                state.needs_redraw = true;
-                InputAction::ScrollToBottom
-            }
-            // g = jump to top (mirror of G). Single-`g` immediately fires
-            // ScrollToTop (legacy alias preserved from Story 1.4) AND sets
-            // pending_g so a follow-up `g` is detected as `gg` chord.
-            // Idempotent: if already at top, ScrollToTop is a no-op.
-            // S16.8 Task 6, AC2.
-            'g' => {
-                let was_gg = state.pending_g;
-                // P6: On gg chord, the first g already jumped to top — second g
-                // is idempotent, so skip the redundant dispatch.
-                state.pending_g = !was_gg;
-                state.needs_redraw = true;
-                if was_gg {
-                    tracing::debug!("gg chord: second g, idempotent skip");
-                    InputAction::Consumed
-                } else {
-                    InputAction::ScrollToTop
                 }
-            }
-            // J = jump to next content block boundary. S16.8, AC7: migrated to BlockJump.
-            'J' => {
-                if let Some(new_offset) = find_next_boundary(
-                    state.scroll_snapshot,
-                    &state.block_boundaries,
-                    Direction::Down,
-                    state.total_content_height,
-                    state.viewport_height as usize,
-                ) {
-                    state.needs_redraw = true;
-                    InputAction::BlockJump { offset: new_offset, auto_scroll: new_offset == 0 }
-                } else {
-                    InputAction::Consumed
-                }
-            }
-            // K = jump to previous content block boundary
-            'K' => {
-                if let Some(new_offset) = find_next_boundary(
-                    state.scroll_snapshot,
-                    &state.block_boundaries,
-                    Direction::Up,
-                    state.total_content_height,
-                    state.viewport_height as usize,
-                ) {
-                    state.needs_redraw = true;
-                    InputAction::BlockJump { offset: new_offset, auto_scroll: false }
-                } else {
-                    InputAction::Consumed
-                }
-            }
-            // { = jump to previous user message
-            '{' => {
-                if let Some(new_offset) = find_next_boundary(
-                    state.scroll_snapshot,
-                    &state.user_message_boundaries,
-                    Direction::Up,
-                    state.total_content_height,
-                    state.viewport_height as usize,
-                ) {
-                    state.needs_redraw = true;
-                    InputAction::BlockJump { offset: new_offset, auto_scroll: false }
-                } else {
-                    InputAction::Consumed
-                }
-            }
-            // } = jump to next user message
-            '}' => {
-                if let Some(new_offset) = find_next_boundary(
-                    state.scroll_snapshot,
-                    &state.user_message_boundaries,
-                    Direction::Down,
-                    state.total_content_height,
-                    state.viewport_height as usize,
-                ) {
-                    state.needs_redraw = true;
-                    InputAction::BlockJump { offset: new_offset, auto_scroll: new_offset == 0 }
-                } else {
-                    InputAction::Consumed
-                }
-            }
-            // ? = toggle help overlay
-            // Covers: FR108, UX-DR94 (AC1: ? opens help from any non-Input focus)
-            '?' => {
-                let prior = state.focus.clone();
-                state.help_overlay.open(prior);
-                state.focus = FocusState::Overlay(OverlayType::Help);
-                state.needs_redraw = true;
-                return InputAction::Consumed;
-            }
-            // c = copy focused content to clipboard
-            // Covers: FR116, UX-DR68 (AC6, AC7, AC8, AC9)
-            'c' => {
-                return InputAction::CopyToClipboard(String::new());
-            }
-            // p = peek preview on focused collapsed tool block
-            'p' => {
-                if let Some(ref tool_id) = state.focused_tool_id {
-                    let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
-                    if entry.collapsed {
-                        entry.peek_active = !entry.peek_active;
-                        let tab_id = state.active_tab_id;
-                        state.tab_render_state(tab_id).tool_block_states_version = state
-                            .tab_render_state(tab_id)
-                            .tool_block_states_version
-                            .wrapping_add(1);
+                // J = jump to next content block boundary. S16.8, AC7: migrated to BlockJump.
+                'J' => {
+                    if let Some(new_offset) = find_next_boundary(
+                        state.scroll_snapshot,
+                        &state.block_boundaries,
+                        Direction::Down,
+                        state.total_content_height,
+                        state.viewport_height as usize,
+                    ) {
                         state.needs_redraw = true;
+                        InputAction::BlockJump {
+                            offset: new_offset,
+                            auto_scroll: new_offset == 0,
+                        }
+                    } else {
+                        InputAction::Consumed
                     }
                 }
-                InputAction::Consumed
+                // K = jump to previous content block boundary
+                'K' => {
+                    if let Some(new_offset) = find_next_boundary(
+                        state.scroll_snapshot,
+                        &state.block_boundaries,
+                        Direction::Up,
+                        state.total_content_height,
+                        state.viewport_height as usize,
+                    ) {
+                        state.needs_redraw = true;
+                        InputAction::BlockJump {
+                            offset: new_offset,
+                            auto_scroll: false,
+                        }
+                    } else {
+                        InputAction::Consumed
+                    }
+                }
+                // { = jump to previous user message
+                '{' => {
+                    if let Some(new_offset) = find_next_boundary(
+                        state.scroll_snapshot,
+                        &state.user_message_boundaries,
+                        Direction::Up,
+                        state.total_content_height,
+                        state.viewport_height as usize,
+                    ) {
+                        state.needs_redraw = true;
+                        InputAction::BlockJump {
+                            offset: new_offset,
+                            auto_scroll: false,
+                        }
+                    } else {
+                        InputAction::Consumed
+                    }
+                }
+                // } = jump to next user message
+                '}' => {
+                    if let Some(new_offset) = find_next_boundary(
+                        state.scroll_snapshot,
+                        &state.user_message_boundaries,
+                        Direction::Down,
+                        state.total_content_height,
+                        state.viewport_height as usize,
+                    ) {
+                        state.needs_redraw = true;
+                        InputAction::BlockJump {
+                            offset: new_offset,
+                            auto_scroll: new_offset == 0,
+                        }
+                    } else {
+                        InputAction::Consumed
+                    }
+                }
+                // ? = toggle help overlay
+                // Covers: FR108, UX-DR94 (AC1: ? opens help from any non-Input focus)
+                '?' => {
+                    let prior = state.focus.clone();
+                    state.help_overlay.open(prior);
+                    state.focus = FocusState::Overlay(OverlayType::Help);
+                    state.needs_redraw = true;
+                    return InputAction::Consumed;
+                }
+                // c = copy focused content to clipboard
+                // Covers: FR116, UX-DR68 (AC6, AC7, AC8, AC9)
+                'c' => {
+                    return InputAction::CopyToClipboard(String::new());
+                }
+                // p = peek preview on focused collapsed tool block
+                'p' => {
+                    if let Some(ref tool_id) = state.focused_tool_id {
+                        let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
+                        if entry.collapsed {
+                            entry.peek_active = !entry.peek_active;
+                            let tab_id = state.active_tab_id;
+                            state.tab_render_state(tab_id).tool_block_states_version = state
+                                .tab_render_state(tab_id)
+                                .tool_block_states_version
+                                .wrapping_add(1);
+                            state.needs_redraw = true;
+                        }
+                    }
+                    InputAction::Consumed
+                }
+                // 1-9 = direct tab switch (AC2: number key direct switch)
+                '1'..='9' => {
+                    let n = (c as u8 - b'0') as usize;
+                    InputAction::SwitchToTab(n)
+                }
+                // f = fork conversation at the currently focused message (Story 4-3a, AC1)
+                'f' => InputAction::ForkAtMessage,
+                // R = rewind conversation to the currently focused message (Story 4-3b, AC1; UX-DR90)
+                'R' => InputAction::RewindAtMessage,
+                // m = toggle bookmark on the focused message (Story 4-4, AC8; UX-DR91)
+                'm' => InputAction::ToggleBookmark,
+                // ' = open the bookmark list panel (Story 4-4, AC10; UX-DR91)
+                '\'' => InputAction::OpenBookmarkList,
+                _ => InputAction::Ignored,
             }
-            // 1-9 = direct tab switch (AC2: number key direct switch)
-            '1'..='9' => {
-                let n = (c as u8 - b'0') as usize;
-                InputAction::SwitchToTab(n)
-            }
-            // f = fork conversation at the currently focused message (Story 4-3a, AC1)
-            'f' => InputAction::ForkAtMessage,
-            // R = rewind conversation to the currently focused message (Story 4-3b, AC1; UX-DR90)
-            'R' => InputAction::RewindAtMessage,
-            // m = toggle bookmark on the focused message (Story 4-4, AC8; UX-DR91)
-            'm' => InputAction::ToggleBookmark,
-            // ' = open the bookmark list panel (Story 4-4, AC10; UX-DR91)
-            '\'' => InputAction::OpenBookmarkList,
-            _ => InputAction::Ignored,
         }
-        },
         FocusState::Sidebar {
             panel: _panel,
             selected: _selected,
@@ -1965,12 +1984,8 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         DomainKey::CtrlC => InputAction::CancelOrQuit,
         // Ctrl+F — narrow-override per S16.8: page-down in Chat focus, search elsewhere
         // (Story 4-4 AC1, UX-DR86 preserved for non-Chat focus).
-        DomainKey::CtrlF if state.focus == FocusState::Chat => {
-            InputAction::ScrollFullPageDown
-        }
-        DomainKey::CtrlF
-            if state.focus == FocusState::Input && state.input_buffer.is_empty() =>
-        {
+        DomainKey::CtrlF if state.focus == FocusState::Chat => InputAction::ScrollFullPageDown,
+        DomainKey::CtrlF if state.focus == FocusState::Input && state.input_buffer.is_empty() => {
             let prior = state.focus.clone();
             state.search_state = crate::adapters::tui::state::SearchState::new();
             state.search_state.active = true;
@@ -1981,9 +1996,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
         // P11: Ctrl+F in Input with non-empty buffer — give user feedback
         // instead of silently consuming.
-        DomainKey::CtrlF
-            if state.focus == FocusState::Input && !state.input_buffer.is_empty() =>
-        {
+        DomainKey::CtrlF if state.focus == FocusState::Input && !state.input_buffer.is_empty() => {
             state.status = StatusState::Flash {
                 message: "Clear input or press Esc to search".into(),
                 remaining_ms: 1500,
@@ -1992,18 +2005,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
         // Ctrl+D — scroll half page down (Chat focus only). Story 16.8, AC1.
-        DomainKey::CtrlD if state.focus == FocusState::Chat => {
-            InputAction::ScrollHalfPageDown
-        }
+        DomainKey::CtrlD if state.focus == FocusState::Chat => InputAction::ScrollHalfPageDown,
         // Ctrl+U — scroll half page up (Chat focus); clear-buffer in Input focus.
         // Story 16.8, AC1.
-        DomainKey::CtrlU if state.focus == FocusState::Chat => {
-            InputAction::ScrollHalfPageUp
-        }
+        DomainKey::CtrlU if state.focus == FocusState::Chat => InputAction::ScrollHalfPageUp,
         // Ctrl+B — scroll full page up (Chat focus only). Story 16.8, AC1.
-        DomainKey::CtrlB if state.focus == FocusState::Chat => {
-            InputAction::ScrollFullPageUp
-        }
+        DomainKey::CtrlB if state.focus == FocusState::Chat => InputAction::ScrollFullPageUp,
         DomainKey::CtrlH => InputAction::ToggleSidebar,
         DomainKey::CtrlT => InputAction::NewTab,
         // Tab/focus cycling (AC11):
@@ -2745,7 +2752,10 @@ fn handle_search_overlay_key(state: &mut TuiState, key: DomainKey) -> InputActio
 /// Convert a crossterm key event into a domain input event.
 /// This is the ONLY place where crossterm types are mapped to domain types.
 // Covers: FR16, UX-DR76, UX-DR74
-pub fn convert_crossterm_event(event: &crossterm::event::Event, mouse_cfg: &crate::domain::models::MouseConfig) -> Option<DomainInputEvent> {
+pub fn convert_crossterm_event(
+    event: &crossterm::event::Event,
+    mouse_cfg: &crate::domain::models::MouseConfig,
+) -> Option<DomainInputEvent> {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
     match event {
@@ -2755,18 +2765,18 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event, mouse_cfg: &crat
         }) => {
             let wheel_lines = mouse_cfg.wheel_lines.max(1);
             match (kind, modifiers.contains(KeyModifiers::SHIFT)) {
-                (MouseEventKind::ScrollUp, true) => {
-                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::HalfPageUp))
-                }
-                (MouseEventKind::ScrollDown, true) => {
-                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::HalfPageDown))
-                }
-                (MouseEventKind::ScrollUp, false) => {
-                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::WheelUp(wheel_lines)))
-                }
-                (MouseEventKind::ScrollDown, false) => {
-                    Some(DomainInputEvent::MouseScroll(crate::domain::models::view_state::ScrollDelta::WheelDown(wheel_lines)))
-                }
+                (MouseEventKind::ScrollUp, true) => Some(DomainInputEvent::MouseScroll(
+                    crate::domain::models::view_state::ScrollDelta::HalfPageUp,
+                )),
+                (MouseEventKind::ScrollDown, true) => Some(DomainInputEvent::MouseScroll(
+                    crate::domain::models::view_state::ScrollDelta::HalfPageDown,
+                )),
+                (MouseEventKind::ScrollUp, false) => Some(DomainInputEvent::MouseScroll(
+                    crate::domain::models::view_state::ScrollDelta::WheelUp(wheel_lines),
+                )),
+                (MouseEventKind::ScrollDown, false) => Some(DomainInputEvent::MouseScroll(
+                    crate::domain::models::view_state::ScrollDelta::WheelDown(wheel_lines),
+                )),
                 _ => None, // ScrollLeft/ScrollRight ignored
             }
         }
@@ -2839,7 +2849,10 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event, mouse_cfg: &crat
 
             match code {
                 KeyCode::Char(c) => {
-                    let c = if modifiers.contains(KeyModifiers::SHIFT) && !modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contains(KeyModifiers::ALT) {
+                    let c = if modifiers.contains(KeyModifiers::SHIFT)
+                        && !modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.contains(KeyModifiers::ALT)
+                    {
                         c.to_ascii_uppercase()
                     } else {
                         *c
@@ -2892,7 +2905,6 @@ pub fn convert_crossterm_event(event: &crossterm::event::Event, mouse_cfg: &crat
         Event::Resize(w, h) => Some(DomainInputEvent::Resize(*w, *h)),
         Event::FocusGained => Some(DomainInputEvent::FocusGained),
         Event::FocusLost => Some(DomainInputEvent::FocusLost),
-        _ => None,
     }
 }
 
@@ -2948,7 +2960,8 @@ mod tests {
     fn ctrl_v_does_not_map_to_alt_v() {
         // Ctrl+V must not accidentally trigger clipboard paste (terminals intercept it)
         let event = ctrl_key('v');
-        let result = convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default());
+        let result =
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default());
         assert!(!matches!(
             result,
             Some(DomainInputEvent::SpecialKey(DomainKey::AltV))
@@ -2998,7 +3011,9 @@ mod tests {
         state.focus = FocusState::Input;
         state.input_buffer.clear();
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+        if let Some(DomainInputEvent::SpecialKey(key)) =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+        {
             handle_input(state, &DomainInputEvent::SpecialKey(key));
         }
     }
@@ -3010,7 +3025,9 @@ mod tests {
         let mut state = make_state();
         state.focus = FocusState::Chat;
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+        if let Some(DomainInputEvent::SpecialKey(key)) =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+        {
             let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
             assert_eq!(action, InputAction::ScrollFullPageDown);
         } else {
@@ -3036,7 +3053,9 @@ mod tests {
         state.focus = FocusState::Input;
         state.input_buffer.clear();
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+        if let Some(DomainInputEvent::SpecialKey(key)) =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+        {
             let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
             assert_eq!(action, InputAction::OpenSearch);
         } else {
@@ -3052,7 +3071,9 @@ mod tests {
         state.focus = FocusState::Input;
         state.input_buffer.clear();
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+        if let Some(DomainInputEvent::SpecialKey(key)) =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+        {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
         }
         assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
@@ -3068,7 +3089,9 @@ mod tests {
         state.focus = FocusState::Input;
         state.input_buffer = "hello".to_string();
         let evt = ctrl_key('f');
-        if let Some(DomainInputEvent::SpecialKey(key)) = convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default()) {
+        if let Some(DomainInputEvent::SpecialKey(key)) =
+            convert_crossterm_event(&evt, &crate::domain::models::MouseConfig::default())
+        {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
         }
         assert_ne!(state.focus, FocusState::Overlay(OverlayType::Search));
@@ -3487,7 +3510,10 @@ mod tests {
         let action2 = handle_char(&mut state, 'c');
         assert_eq!(action2, InputAction::FeedbackCompact);
         assert!(!state.chord_leader_active);
-        assert!(!state.input_buffer.contains('c'), "chord 'c' must not leak into input buffer");
+        assert!(
+            !state.input_buffer.contains('c'),
+            "chord 'c' must not leak into input buffer"
+        );
     }
 
     #[test]
@@ -3495,7 +3521,10 @@ mod tests {
         for focus in [
             FocusState::Input,
             FocusState::Chat,
-            FocusState::Sidebar { panel: crate::domain::models::PanelType::History, selected: 0 },
+            FocusState::Sidebar {
+                panel: crate::domain::models::PanelType::History,
+                selected: 0,
+            },
         ] {
             let mut state = make_state();
             state.focus = focus.clone();
@@ -3503,8 +3532,12 @@ mod tests {
             let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);
             handle_input(&mut state, &ctrl_k);
             let action = handle_char(&mut state, 'c');
-            assert_eq!(action, InputAction::FeedbackCompact,
-                "chord dispatch should fire in {:?} focus", focus);
+            assert_eq!(
+                action,
+                InputAction::FeedbackCompact,
+                "chord dispatch should fire in {:?} focus",
+                focus
+            );
         }
     }
 
@@ -3625,13 +3658,19 @@ mod tests {
         // ]]
         assert_eq!(handle_char(&mut state, ']'), InputAction::Consumed);
         assert_eq!(state.pending_bracket, Some(']'));
-        assert_eq!(handle_char(&mut state, ']'), InputAction::JumpProseAnchor(Direction::Down));
+        assert_eq!(
+            handle_char(&mut state, ']'),
+            InputAction::JumpProseAnchor(Direction::Down)
+        );
         assert!(state.pending_bracket.is_none());
 
         // [[
         assert_eq!(handle_char(&mut state, '['), InputAction::Consumed);
         assert_eq!(state.pending_bracket, Some('['));
-        assert_eq!(handle_char(&mut state, '['), InputAction::JumpProseAnchor(Direction::Up));
+        assert_eq!(
+            handle_char(&mut state, '['),
+            InputAction::JumpProseAnchor(Direction::Up)
+        );
         assert!(state.pending_bracket.is_none());
     }
 
@@ -3683,7 +3722,10 @@ mod tests {
         // Second press: P (capital) — dispatches JumpToLatestProseAnchor + clears pending_bracket
         let second = handle_char(&mut state, 'P');
         assert_eq!(second, InputAction::JumpToLatestProseAnchor);
-        assert!(state.pending_bracket.is_none(), "]P chord must clear pending_bracket");
+        assert!(
+            state.pending_bracket.is_none(),
+            "]P chord must clear pending_bracket"
+        );
     }
 
     #[test]
@@ -3697,7 +3739,10 @@ mod tests {
         assert_eq!(state.pending_bracket, Some(']'));
         let action = handle_char(&mut state, 'p');
         assert_eq!(action, InputAction::Consumed);
-        assert!(state.pending_bracket.is_none(), "invalid bracket chord must clear pending_bracket");
+        assert!(
+            state.pending_bracket.is_none(),
+            "invalid bracket chord must clear pending_bracket"
+        );
     }
 
     #[test]

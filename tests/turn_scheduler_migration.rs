@@ -65,8 +65,8 @@ impl StreamingProvider for MockProvider {
         Ok(())
     }
 
-    fn provider_id(&self) -> &str {
-        "mock"
+    fn provider_id(&self) -> String {
+        "mock".to_string()
     }
 
     fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {

@@ -282,15 +282,8 @@ pub enum DomainEventPayload {
 /// Story 16.9 — surfaced via the live rail + stdout tail in the render path.
 #[derive(Debug, Clone)]
 pub enum ToolProgressEvent {
-    Counter {
-        tool_use_id: String,
-        k: u64,
-        n: u64,
-    },
-    Tail {
-        tool_use_id: String,
-        text: String,
-    },
+    Counter { tool_use_id: String, k: u64, n: u64 },
+    Tail { tool_use_id: String, text: String },
 }
 
 /// Action returned by apply_chunk() to tell the event loop what to do.

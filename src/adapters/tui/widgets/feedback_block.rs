@@ -236,7 +236,11 @@ mod tests {
             id: "fb-1".to_string(),
             level: FeedbackLevel::Warning,
             message: "Auto-skipped task 3".to_string(),
-            actions: vec![FeedbackAction::Retry, FeedbackAction::Compact, FeedbackAction::Dismiss],
+            actions: vec![
+                FeedbackAction::Retry,
+                FeedbackAction::Compact,
+                FeedbackAction::Dismiss,
+            ],
         };
         let lines = render_feedback_lines(&block, 80, &test_theme());
         assert!(!lines.is_empty());
@@ -249,7 +253,9 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(
-            last_line_text.contains("[Ctrl+K r]") && last_line_text.contains("[Ctrl+K c]") && last_line_text.contains("[Ctrl+K x]"),
+            last_line_text.contains("[Ctrl+K r]")
+                && last_line_text.contains("[Ctrl+K c]")
+                && last_line_text.contains("[Ctrl+K x]"),
             "all action chips should use chord-prefix: {}",
             last_line_text
         );

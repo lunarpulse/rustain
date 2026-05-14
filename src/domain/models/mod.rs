@@ -93,6 +93,8 @@ pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
 #[allow(unused_imports)]
+pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
+#[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
 pub use tool_call::{
@@ -107,8 +109,6 @@ pub use turn::{
 };
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, UsageInfo};
-#[allow(unused_imports)]
-pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 #[allow(unused_imports)]
 pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,

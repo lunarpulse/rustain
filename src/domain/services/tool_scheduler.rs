@@ -19,16 +19,16 @@ use futures::stream::{FuturesOrdered, StreamExt as _};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::events::ToolProgressEvent;
 use crate::domain::models::ActiveSkill;
 use crate::domain::models::tool_call::{
     ApprovalSource, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
 };
-use crate::domain::events::ToolProgressEvent;
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::permission_chain;
 use std::path::PathBuf;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 /// Schedules and executes tool calls with lifecycle event broadcast.
 pub struct ToolScheduler {

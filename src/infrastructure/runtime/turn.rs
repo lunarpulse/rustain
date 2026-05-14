@@ -13,7 +13,7 @@ use crate::domain::models::{
     CompletionOptions, Message, MessageRole, NoticeLevel, StopReason, StreamChunk, ToolCall,
     ToolCallInfo, ToolResultMessage, ToolUseMessage,
 };
-use crate::domain::ports::{StreamingProvider, SecurityPort, StoragePort, ToolSetPort};
+use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort};
 use crate::domain::services::tool_scheduler::ToolScheduler;
 
 /// Execute a turn: stream completion, execute tools, loop until EndTurn.
