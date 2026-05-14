@@ -69,16 +69,11 @@ impl RouterConfig {
         2
     }
     fn default_tier_models() -> HashMap<ModelTier, String> {
-        let mut m = HashMap::new();
-        m.insert(
-            ModelTier::CheapAgentic,
-            "claude-haiku-4-5-20251001".to_string(),
-        );
-        m.insert(
-            ModelTier::Flagship,
-            "claude-sonnet-4-20250514".to_string(),
-        );
-        m
+        // Intentionally empty: when the user hasn't configured [router],
+        // the caller's fallback_model (typically config.model) is used.
+        // This avoids hardcoding provider-specific model names that would
+        // silently override the user's configured model.
+        HashMap::new()
     }
     fn default_step_tiers() -> HashMap<StepKind, ModelTier> {
         let mut m = HashMap::new();

@@ -48,6 +48,9 @@ impl UsageLedgerPort for FileUsageLedger {
         file.write_all(&buf)
             .await
             .map_err(|e| StorageError::IoError(e.to_string()))?;
+        file.flush()
+            .await
+            .map_err(|e| StorageError::IoError(e.to_string()))?;
 
         Ok(())
     }
@@ -64,7 +67,9 @@ mod tests {
     async fn ledger_append_roundtrip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-        unsafe { std::env::set_var("RUSTAIN_DATA_DIR", tmp.path().as_os_str()); }
+        unsafe {
+            std::env::set_var("RUSTAIN_DATA_DIR", tmp.path().as_os_str());
+        }
 
         let ledger = FileUsageLedger::new();
 

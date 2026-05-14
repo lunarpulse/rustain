@@ -94,8 +94,11 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
+pub use launch_spec::AgentLaunchSpec;
 #[allow(unused_imports)]
 pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
+#[allow(unused_imports)]
+pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]
@@ -109,11 +112,8 @@ pub use turn::{
     InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
     migrate_chat_message_to_turn, tool_call_id_for,
 };
-pub use launch_spec::AgentLaunchSpec;
 #[allow(unused_imports)]
-pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
-#[allow(unused_imports)]
-pub use usage::{ModelInfo, UsageInfo, TokenUsage, UsageLedgerEntry};
+pub use usage::{ModelInfo, TokenUsage, UsageInfo, UsageLedgerEntry};
 #[allow(unused_imports)]
 pub use view_state::{
     AnchorMode, AnchorRef, LayoutMetrics, ScrollDelta, SummaryTier, ViewEvent, ViewState,

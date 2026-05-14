@@ -117,6 +117,8 @@ impl PermissionQueue {
 pub enum Direction {
     Up,
     Down,
+    Left,
+    Right,
 }
 
 /// A single file entry in the rewind confirmation preview.
@@ -596,6 +598,7 @@ impl AutocompleteState {
             Direction::Down => {
                 self.selected_index = (self.selected_index + 1) % self.suggestions.len();
             }
+            Direction::Left | Direction::Right => {}
         }
         // Adjust scroll offset to keep selected item visible
         let max_visible = 8;
@@ -713,8 +716,155 @@ pub enum ChordAction {
     /// Show help overlay.
     #[allow(dead_code)]
     ShowHelp,
+    /// Open the model/provider selector overlay (Story 7.2 AC1).
+    OpenModelSelector,
     /// Not yet implemented — show feedback.
     Noop(String),
+}
+
+/// A provider column in the model selector dialog (Story 7.2 AC2).
+/// TUI render state — lives in adapters/tui/, NOT domain/.
+#[derive(Debug, Clone)]
+pub struct ProviderColumn {
+    pub provider_id: String,
+    pub display_name: String,
+    pub healthy: bool,
+    pub models: Vec<crate::domain::models::provider::ModelDescriptor>,
+}
+
+/// Pending context-window warning state (Story 7.2 AC5).
+#[derive(Debug, Clone)]
+pub struct ContextWarning {
+    pub provider_id: String,
+    pub model_id: String,
+    pub model_display_name: String,
+    pub context_window: u32,
+    pub current_tokens: u32,
+}
+
+/// State for the model/provider selector overlay (Ctrl+X, M) (Story 7.2 AC1).
+/// Modelled on `CommandPaletteState` (uses previous_focus + open/dismiss).
+pub struct ModelSelectorState {
+    pub active: bool,
+    pub columns: Vec<ProviderColumn>,
+    pub selected_provider: usize,
+    pub selected_model: usize,
+    pub previous_focus: Option<FocusState>,
+    pub connecting: Option<String>,
+    pub pending_context_warning: Option<ContextWarning>,
+}
+
+impl ModelSelectorState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            columns: Vec::new(),
+            selected_provider: 0,
+            selected_model: 0,
+            previous_focus: None,
+            connecting: None,
+            pending_context_warning: None,
+        }
+    }
+
+    /// Open the model selector, seeding selection to the currently-active provider+model.
+    pub fn open(
+        &mut self,
+        current_focus: FocusState,
+        columns: Vec<ProviderColumn>,
+        active_provider_id: &str,
+        active_model_id: &str,
+    ) {
+        self.active = true;
+        self.previous_focus = Some(current_focus);
+        self.connecting = None;
+        self.pending_context_warning = None;
+        self.columns = columns;
+
+        self.selected_provider = self
+            .columns
+            .iter()
+            .position(|c| c.provider_id == active_provider_id)
+            .unwrap_or(0);
+
+        self.selected_model = self
+            .columns
+            .get(self.selected_provider)
+            .and_then(|col| {
+                col.models
+                    .iter()
+                    .position(|m| m.model_id == active_model_id)
+            })
+            .unwrap_or(0);
+    }
+
+    /// Dismiss the selector, returning the previous focus to restore.
+    pub fn dismiss(&mut self) -> Option<FocusState> {
+        self.active = false;
+        self.columns.clear();
+        self.connecting = None;
+        self.pending_context_warning = None;
+        self.previous_focus.take()
+    }
+
+    /// Navigate between providers (Left/Right). Wraps around; no-op when ≤1 column (AC7).
+    pub fn navigate_provider(&mut self, direction: Direction) {
+        if self.columns.len() <= 1 {
+            return;
+        }
+        match direction {
+            Direction::Left => {
+                if self.selected_provider == 0 {
+                    self.selected_provider = self.columns.len() - 1;
+                } else {
+                    self.selected_provider -= 1;
+                }
+            }
+            Direction::Right => {
+                self.selected_provider = (self.selected_provider + 1) % self.columns.len();
+            }
+            _ => {}
+        }
+        self.selected_model = 0;
+    }
+
+    /// Navigate between models (Up/Down). Wraps within current column.
+    pub fn navigate_model(&mut self, direction: Direction) {
+        let count = self
+            .columns
+            .get(self.selected_provider)
+            .map(|c| c.models.len())
+            .unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        match direction {
+            Direction::Up => {
+                if self.selected_model == 0 {
+                    self.selected_model = count - 1;
+                } else {
+                    self.selected_model -= 1;
+                }
+            }
+            Direction::Down => {
+                self.selected_model = (self.selected_model + 1) % count;
+            }
+            _ => {}
+        }
+    }
+
+    /// Get the currently selected (provider_id, model).
+    pub fn selected(&self) -> Option<(&str, &crate::domain::models::provider::ModelDescriptor)> {
+        let col = self.columns.get(self.selected_provider)?;
+        let model = col.models.get(self.selected_model)?;
+        Some((&col.provider_id, model))
+    }
+}
+
+impl Default for ModelSelectorState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// State for the command palette overlay (Ctrl+P).
@@ -781,6 +931,7 @@ impl CommandPaletteState {
             Direction::Down => {
                 self.selected_index = (self.selected_index + 1) % self.filtered_entries.len();
             }
+            Direction::Left | Direction::Right => {}
         }
         // Keep selected item visible
         let max_visible = 12;
@@ -875,10 +1026,7 @@ impl WhichKeyState {
     pub fn new() -> Self {
         let mut chord_map = HashMap::new();
         chord_map.insert('p', ChordAction::Noop("Profile panel — Epic 8".to_string()));
-        chord_map.insert(
-            'm',
-            ChordAction::Noop("Model selector — Epic 7".to_string()),
-        );
+        chord_map.insert('m', ChordAction::OpenModelSelector);
         chord_map.insert('a', ChordAction::Noop("Adapter panel — Epic 8".to_string()));
         chord_map.insert(
             's',
@@ -1082,6 +1230,11 @@ pub struct TuiState {
     /// Help overlay state (? key or Ctrl+X, ?).
     // Covers: FR108, UX-DR94
     pub help_overlay: HelpOverlayState,
+    /// Model/provider selector state (Ctrl+X, M) (Story 7.2).
+    pub model_selector: ModelSelectorState,
+    /// Session-scoped active-model override (Story 7.2 AC3).
+    /// `None` = use `config.model`. Runtime hot-swap — NOT a config mutation.
+    pub selected_model: Option<String>,
     /// Cached multiplexer detection (tmux/screen) — set once at startup.
     // Covers: UX-DR62
     pub multiplexer_detected: bool,
@@ -1243,6 +1396,8 @@ impl TuiState {
             command_palette: CommandPaletteState::new(),
             which_key: WhichKeyState::new(),
             help_overlay: HelpOverlayState::new(),
+            model_selector: ModelSelectorState::new(),
+            selected_model: None,
             multiplexer_detected: false,
             is_vscode: false,
             session_count: 0,
@@ -1708,5 +1863,163 @@ mod tests {
         cache.set_message(key.clone(), 17);
         cache.invalidate_all();
         assert_eq!(cache.get_message(&key), None);
+    }
+
+    #[test]
+    fn test_model_selector_provider_nav_wraps() {
+        use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
+        let mut ms = ModelSelectorState::new();
+        ms.columns = vec![
+            ProviderColumn {
+                provider_id: "a".to_string(),
+                display_name: "A".to_string(),
+                healthy: true,
+                models: vec![ModelDescriptor {
+                    model_id: "m1".to_string(),
+                    display_name: "M1".to_string(),
+                    provider_id: "a".to_string(),
+                    context_window: 200_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                }],
+            },
+            ProviderColumn {
+                provider_id: "b".to_string(),
+                display_name: "B".to_string(),
+                healthy: true,
+                models: vec![ModelDescriptor {
+                    model_id: "m2".to_string(),
+                    display_name: "M2".to_string(),
+                    provider_id: "b".to_string(),
+                    context_window: 128_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                }],
+            },
+        ];
+        ms.selected_provider = 0;
+        ms.navigate_provider(Direction::Left);
+        assert_eq!(ms.selected_provider, 1);
+        ms.navigate_provider(Direction::Right);
+        assert_eq!(ms.selected_provider, 0);
+    }
+
+    #[test]
+    fn test_model_selector_model_nav_wraps() {
+        use crate::domain::models::provider::ModelDescriptor;
+        let mut ms = ModelSelectorState::new();
+        ms.columns = vec![ProviderColumn {
+            provider_id: "a".to_string(),
+            display_name: "A".to_string(),
+            healthy: true,
+            models: vec![
+                ModelDescriptor {
+                    model_id: "m1".to_string(),
+                    display_name: "M1".to_string(),
+                    provider_id: "a".to_string(),
+                    context_window: 200_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                },
+                ModelDescriptor {
+                    model_id: "m2".to_string(),
+                    display_name: "M2".to_string(),
+                    provider_id: "a".to_string(),
+                    context_window: 128_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                },
+            ],
+        }];
+        ms.selected_provider = 0;
+        ms.selected_model = 0;
+        ms.navigate_model(Direction::Up);
+        assert_eq!(ms.selected_model, 1);
+        ms.navigate_model(Direction::Down);
+        assert_eq!(ms.selected_model, 0);
+    }
+
+    #[test]
+    fn test_model_selector_single_provider_noop() {
+        let mut ms = ModelSelectorState::new();
+        ms.columns = vec![ProviderColumn {
+            provider_id: "a".to_string(),
+            display_name: "A".to_string(),
+            healthy: true,
+            models: vec![],
+        }];
+        ms.selected_provider = 0;
+        ms.navigate_provider(Direction::Left);
+        assert_eq!(ms.selected_provider, 0);
+        ms.navigate_provider(Direction::Right);
+        assert_eq!(ms.selected_provider, 0);
+    }
+
+    #[test]
+    fn test_model_selector_selected_returns_pair() {
+        use crate::domain::models::provider::ModelDescriptor;
+        let mut ms = ModelSelectorState::new();
+        ms.columns = vec![ProviderColumn {
+            provider_id: "a".to_string(),
+            display_name: "A".to_string(),
+            healthy: true,
+            models: vec![ModelDescriptor {
+                model_id: "m1".to_string(),
+                display_name: "M1".to_string(),
+                provider_id: "a".to_string(),
+                context_window: 200_000,
+                capabilities: Default::default(),
+                pricing_tier: None,
+            }],
+        }];
+        ms.selected_provider = 0;
+        ms.selected_model = 0;
+        let (pid, model) = ms.selected().unwrap();
+        assert_eq!(pid, "a");
+        assert_eq!(model.model_id, "m1");
+    }
+
+    #[test]
+    fn test_model_selector_open_seeds_selection() {
+        use crate::domain::models::provider::ModelDescriptor;
+        let mut ms = ModelSelectorState::new();
+        ms.columns = vec![ProviderColumn {
+            provider_id: "anthropic".to_string(),
+            display_name: "Anthropic".to_string(),
+            healthy: true,
+            models: vec![
+                ModelDescriptor {
+                    model_id: "claude-opus".to_string(),
+                    display_name: "Opus".to_string(),
+                    provider_id: "anthropic".to_string(),
+                    context_window: 200_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                },
+                ModelDescriptor {
+                    model_id: "claude-sonnet".to_string(),
+                    display_name: "Sonnet".to_string(),
+                    provider_id: "anthropic".to_string(),
+                    context_window: 200_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                },
+            ],
+        }];
+        ms.open(
+            FocusState::Input,
+            ms.columns.clone(),
+            "anthropic",
+            "claude-sonnet",
+        );
+        assert!(ms.active);
+        assert_eq!(ms.selected_provider, 0);
+        assert_eq!(ms.selected_model, 1);
+    }
+
+    #[test]
+    fn test_selected_model_initializes_none() {
+        let state = TuiState::new(80, 24);
+        assert!(state.selected_model.is_none());
     }
 }

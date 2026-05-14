@@ -27,6 +27,9 @@ pub struct ModelResolutionRequest {
     pub retry_count: u32,
     /// Input token count for budget escalation.
     pub input_tokens: u32,
+    /// Model name to use when `tier_models` has no entry for the resolved tier.
+    /// Typically `config.model` — the user's configured base model.
+    pub fallback_model: String,
 }
 
 /// Result of model resolution — ready to flow into `CompletionOptions.model`.
@@ -68,19 +71,22 @@ pub fn resolve_effective_model(
     // 2. Base tier precedence
     let base_tier = req
         .tier_hint
-        .or_else(|| req.step_kind.and_then(|sk| config.step_tiers.get(&sk).copied()))
+        .or_else(|| {
+            req.step_kind
+                .and_then(|sk| config.step_tiers.get(&sk).copied())
+        })
         .unwrap_or(config.default_tier);
 
     let default_model = config
         .tier_models
         .get(&config.default_tier)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| req.fallback_model.clone());
     let model = config
         .tier_models
         .get(&base_tier)
         .cloned()
-        .unwrap_or(default_model);
+        .unwrap_or_else(|| default_model.clone());
 
     // 3. Escalation
     let mut tier = base_tier;
@@ -101,14 +107,12 @@ pub fn resolve_effective_model(
     // If that model is unavailable, revert to base tier — don't report
     // a tier/model mismatch in the ledger.
     let model = if tier != base_tier {
-        match config.tier_models.get(&tier).cloned() {
-            Some(m) => m,
-            None => {
-                tier = base_tier;
-                escalation_reason = EscalationReason::None;
-                model
-            }
-        }
+        config.tier_models.get(&tier).cloned().unwrap_or_else(|| {
+            // No configured model for the escalated tier — stay at the
+            // escalated tier (ledger still records the attempt) but fall
+            // back to the caller's base model since we have nothing else.
+            req.fallback_model.clone()
+        })
     } else {
         model
     };
@@ -163,6 +167,7 @@ mod tests {
     fn step_kind_codegen_to_flagship() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Codegen),
@@ -179,6 +184,7 @@ mod tests {
     fn step_kind_edit_to_cheap_agentic() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -195,6 +201,7 @@ mod tests {
     fn step_kind_test_to_cheap_agentic() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Test),
@@ -210,6 +217,7 @@ mod tests {
     fn step_kind_plan_to_flagship() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Plan),
@@ -225,6 +233,7 @@ mod tests {
     fn step_kind_review_to_flagship() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Review),
@@ -241,6 +250,7 @@ mod tests {
     fn budget_at_threshold_no_escalation() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -256,6 +266,7 @@ mod tests {
     fn budget_above_threshold_escalates_to_flagship() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -273,6 +284,7 @@ mod tests {
     fn retry_at_max_escalates() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -288,6 +300,7 @@ mod tests {
     fn retry_below_max_no_escalation() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -304,10 +317,11 @@ mod tests {
     fn retry_beats_budget_tie() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
-            retry_count: 2,      // >= max_retries
+            retry_count: 2,        // >= max_retries
             input_tokens: 200_000, // > threshold
         };
         let res = resolve_effective_model(&req, &cfg);
@@ -320,6 +334,7 @@ mod tests {
     fn explicit_override_beats_all() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: Some("my-custom-model".to_string()),
             tier_hint: Some(ModelTier::Flagship),
             step_kind: Some(StepKind::Plan),
@@ -335,6 +350,7 @@ mod tests {
     fn explicit_override_reverse_lookup_finds_tier() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: Some("flagship-model".to_string()),
             tier_hint: None,
             step_kind: None,
@@ -351,6 +367,7 @@ mod tests {
     fn explicit_override_unknown_model_falls_back_to_default_tier() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: Some("unknown-model".to_string()),
             tier_hint: None,
             step_kind: None,
@@ -368,6 +385,7 @@ mod tests {
     fn tier_hint_beats_step_kind() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: Some(ModelTier::Flagship),
             step_kind: Some(StepKind::Edit), // would be CheapAgentic
@@ -383,6 +401,7 @@ mod tests {
     fn step_kind_beats_default_tier() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Plan), // Flagship
@@ -398,6 +417,7 @@ mod tests {
     fn default_tier_when_nothing_else() {
         let cfg = test_config();
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: None,
@@ -416,6 +436,7 @@ mod tests {
             ..test_config()
         };
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -428,10 +449,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_default_tier_in_tier_models_no_panic() {
+    fn missing_default_tier_in_tier_models_uses_fallback() {
         let mut cfg = test_config();
         cfg.tier_models.remove(&ModelTier::CheapAgentic);
         let req = ModelResolutionRequest {
+            fallback_model: "fallback-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: None,
@@ -440,14 +462,15 @@ mod tests {
         };
         let res = resolve_effective_model(&req, &cfg);
         assert_eq!(res.tier, ModelTier::CheapAgentic);
-        assert_eq!(res.model, "");
+        assert_eq!(res.model, "fallback-model");
     }
 
     #[test]
-    fn escalation_reverts_when_flagship_model_missing() {
+    fn escalation_uses_fallback_when_flagship_model_missing() {
         let mut cfg = test_config();
         cfg.tier_models.remove(&ModelTier::Flagship);
         let req = ModelResolutionRequest {
+            fallback_model: "cheap-model".to_string(),
             explicit_override: None,
             tier_hint: None,
             step_kind: Some(StepKind::Edit),
@@ -455,8 +478,10 @@ mod tests {
             input_tokens: 200_000,
         };
         let res = resolve_effective_model(&req, &cfg);
-        assert_eq!(res.tier, ModelTier::CheapAgentic);
+        // Tier still escalates (recorded in ledger) but model falls back
+        // since no flagship model is configured.
+        assert_eq!(res.tier, ModelTier::Flagship);
         assert_eq!(res.model, "cheap-model");
-        assert_eq!(res.escalation_reason, EscalationReason::None);
+        assert_eq!(res.escalation_reason, EscalationReason::Budget);
     }
 }

@@ -161,6 +161,25 @@ impl ProviderRegistry {
             .expect("ProviderRegistry lock poisoned");
         providers.keys().cloned().collect()
     }
+
+    /// Resolve the provider_id that owns a given model_id (Story 7.2 AC6).
+    /// Scans all providers' model lists; returns the first match.
+    pub fn get_model_provider(&self, model_id: &str) -> Option<String> {
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
+        for (_id, provider) in providers.iter() {
+            if provider
+                .list_models()
+                .iter()
+                .any(|m| m.model_id == model_id)
+            {
+                return Some(provider.provider_id());
+            }
+        }
+        None
+    }
 }
 
 impl Default for ProviderRegistry {

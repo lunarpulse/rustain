@@ -738,7 +738,8 @@ data: {\"type\":\"message_stop\"}\n\
             make_conversation(),
             None,
             tokio_util::sync::CancellationToken::new(),
-            Arc::new(rustain::adapters::noop::NoOpUsageLedger) as Arc<dyn rustain::domain::ports::UsageLedgerPort>,
+            Arc::new(rustain::adapters::noop::NoOpUsageLedger)
+                as Arc<dyn rustain::domain::ports::UsageLedgerPort>,
             rustain::domain::services::model_router::ResolvedModel {
                 model: "test".into(),
                 tier: rustain::domain::models::router::ModelTier::CheapAgentic,

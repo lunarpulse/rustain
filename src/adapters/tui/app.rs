@@ -335,6 +335,14 @@ pub enum InputAction {
         offset: usize,
         auto_scroll: bool,
     },
+    /// Open the model/provider selector overlay (Story 7.2 AC1).
+    OpenModelSelector,
+    /// Apply a model/provider switch (Story 7.2 AC3).
+    /// `provider_id: None` means resolve from the registry by `model_id` (`:` palette path).
+    SwitchModelProvider {
+        provider_id: Option<String>,
+        model_id: String,
+    },
 }
 
 /// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
@@ -525,6 +533,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return handle_help_overlay_char(state, c);
     }
 
+    // Model selector overlay: handle vim-style navigation (h/l/j/k) and y/n confirmation
+    // Story 7.2 AC1, AC5
+    if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
+        return handle_model_selector_char(state, c);
+    }
+
     // Which-key: single char lookup in chord map
     // Covers: UX-DR19
     if state.which_key.active {
@@ -551,6 +565,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 ChordAction::OpenPanel(panel_type) => {
                     state.which_key.dismiss();
                     return InputAction::OpenPanel(panel_type);
+                }
+                ChordAction::OpenModelSelector => {
+                    state.which_key.dismiss();
+                    return InputAction::OpenModelSelector;
                 }
             }
             state.needs_redraw = true;
@@ -1506,6 +1524,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Covers: FR108, UX-DR94
     if state.focus == FocusState::Overlay(OverlayType::Help) {
         return handle_help_overlay_key(state, key);
+    }
+
+    // Model selector overlay: route arrow keys, Enter, Esc
+    // Story 7.2 AC1, AC3
+    if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
+        return handle_model_selector_key(state, key);
     }
 
     // Command palette overlay handling — intercept keys when palette is active
@@ -2557,6 +2581,104 @@ fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction 
     }
 }
 
+/// Handle special keys while the model selector overlay is active.
+/// Story 7.2 AC1, AC3, AC5.
+fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    match key {
+        DomainKey::Left => {
+            state.model_selector.navigate_provider(Direction::Left);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Right => {
+            state.model_selector.navigate_provider(Direction::Right);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Up => {
+            state.model_selector.navigate_model(Direction::Up);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Down => {
+            state.model_selector.navigate_model(Direction::Down);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Enter => {
+            if state.model_selector.pending_context_warning.is_some() {
+                return InputAction::Consumed;
+            }
+            if let Some((provider_id, model)) = state.model_selector.selected() {
+                return InputAction::SwitchModelProvider {
+                    provider_id: Some(provider_id.to_string()),
+                    model_id: model.model_id.clone(),
+                };
+            }
+            InputAction::Consumed
+        }
+        DomainKey::Esc => {
+            state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::CtrlC => {
+            state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+/// Handle char keys while the model selector overlay is active.
+/// Story 7.2 AC1 (vim-style h/l/j/k), AC5 (y/n context-warning confirmation).
+fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
+    if state.model_selector.pending_context_warning.is_some() {
+        return match c.to_ascii_lowercase() {
+            'y' => {
+                let warning = state.model_selector.pending_context_warning.take();
+                if let Some(w) = warning {
+                    return InputAction::SwitchModelProvider {
+                        provider_id: Some(w.provider_id),
+                        model_id: w.model_id,
+                    };
+                }
+                InputAction::Consumed
+            }
+            'n' => {
+                state.model_selector.pending_context_warning = None;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        };
+    }
+    match c.to_ascii_lowercase() {
+        'h' => {
+            state.model_selector.navigate_provider(Direction::Left);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        'l' => {
+            state.model_selector.navigate_provider(Direction::Right);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        'j' => {
+            state.model_selector.navigate_model(Direction::Down);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        'k' => {
+            state.model_selector.navigate_model(Direction::Up);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
 /// Dispatch a palette action to the appropriate handler.
 fn dispatch_palette_action(
     state: &mut TuiState,
@@ -2588,12 +2710,11 @@ fn dispatch_palette_action(
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        PaletteAction::SwitchModel(_)
-        | PaletteAction::SwitchProfile(_)
-        | PaletteAction::OpenPanel(_) => {
-            // Stubs for future epics
-            InputAction::Consumed
-        }
+        PaletteAction::SwitchModel(model_id) => InputAction::SwitchModelProvider {
+            provider_id: None,
+            model_id,
+        },
+        PaletteAction::SwitchProfile(_) | PaletteAction::OpenPanel(_) => InputAction::Consumed,
         PaletteAction::ShowVersion => {
             // Display version info as a FeedbackBlock in the chat pane
             // Covers: FR109

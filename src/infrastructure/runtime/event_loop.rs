@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use crossterm::event::EventStream;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +40,7 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, reverse_search, sidebar, status_bar, which_key_bar,
+    input_box, model_selector, reverse_search, sidebar, status_bar, which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
 
@@ -301,6 +301,15 @@ pub async fn run(
         state.theme.timing.tick_interval_ms,
     ));
 
+    // Story 7.2: pending async health check for model/provider switcher (AC4).
+    // Stored here so the tick branch can poll completion without blocking the event loop.
+    type PendingHealthCheck = (
+        String,
+        String,
+        tokio::task::JoinHandle<Result<(), crate::domain::errors::ProviderError>>,
+    );
+    let mut pending_health_check: Option<PendingHealthCheck> = None;
+
     // Tab manager — owns all per-tab state; standalone proxies stay in sync with the active tab
     let mut tab_manager = if let Some(conv) = restored_conversation {
         TabManager::with_conversation(conv, app_state.session_cancel.clone())
@@ -417,6 +426,45 @@ pub async fn run(
 
     // Lazy-initialized palette registry (populated on first Ctrl+P)
     let mut palette_registry = PaletteRegistry::new();
+
+    // Story 7.2 AC6: Register model entries in the `:` palette scope
+    {
+        use crate::adapters::tui::widgets::model_selector::humanize_ctx;
+        use crate::domain::models::provider::ModelCapability;
+        let models = app_state.provider_registry.list_all_models();
+        for model in models {
+            let mut cap_tags: Vec<&'static str> = Vec::new();
+            if model.capabilities.contains(&ModelCapability::Vision) {
+                cap_tags.push("vis");
+            }
+            if model.capabilities.contains(&ModelCapability::ToolUse) {
+                cap_tags.push("tool");
+            }
+            if model.capabilities.contains(&ModelCapability::Thinking) {
+                cap_tags.push("think");
+            }
+            if model
+                .capabilities
+                .contains(&ModelCapability::ParallelToolCalls)
+            {
+                cap_tags.push("par");
+            }
+            let cap_summary = if cap_tags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", cap_tags.join(","))
+            };
+            palette_registry.register(crate::domain::models::palette::PaletteEntry {
+                name: format!("{} ({})", model.display_name, model.provider_id),
+                description: format!("{} ctx{}", humanize_ctx(model.context_window), cap_summary),
+                shortcut: Some("Ctrl+X, M".to_string()),
+                scope: crate::domain::models::palette::PaletteScope::Model,
+                action: crate::domain::models::palette::PaletteAction::SwitchModel(
+                    model.model_id.clone(),
+                ),
+            });
+        }
+    }
 
     // P2/AC9: Build SessionIndex at startup from persisted session metadata
     let mut session_index = match storage.list_conversations().await {
@@ -2092,6 +2140,7 @@ pub async fn run(
                                                 crate::adapters::tui::state::Direction::Down => {
                                                     if i + 1 < plan.tasks.len() { i + 1 } else { i }
                                                 }
+                                                crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => i,
                                             };
                                             if i == new_i {
                                                 continue;
@@ -3845,6 +3894,7 @@ pub async fn run(
                                                         && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
                                                 })
                                             }
+                                            crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => None,
                                         }
                                     } else {
                                         // No starting reference: pick the first (Down) or last (Up) prose turn
@@ -3862,6 +3912,7 @@ pub async fn run(
                                                         && t.parts.iter().any(|p| matches!(p, crate::domain::models::TurnPart::Prose { .. }))
                                                 })
                                             }
+                                            crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => None,
                                         };
                                         // For Down with no focus: go to first prose turn (idx 0, treat like "start before first")
                                         // For Up with no focus: go to last prose turn
@@ -3876,6 +3927,7 @@ pub async fn run(
                                                     // We're at the last turn, but `[[` means "previous" — same.
                                                     turns.get(start_idx)
                                                 }
+                                                crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => None,
                                             }
                                         })
                                     };
@@ -3917,6 +3969,7 @@ pub async fn run(
                                         let msg = match direction {
                                             crate::adapters::tui::state::Direction::Down => "No next prose turn",
                                             crate::adapters::tui::state::Direction::Up => "No previous prose turn",
+                                            crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => "",
                                         };
                                         state.status = StatusState::Flash { message: msg.to_string(), remaining_ms: 2000 };
                                     }
@@ -4166,6 +4219,60 @@ pub async fn run(
                                 }
 
                                 InputAction::Consumed | InputAction::Ignored => {}
+                                InputAction::OpenModelSelector => {
+                                    let active_pid = router.active_delegate_id();
+                                    let effective_mid = effective_model(&state, config).to_string();
+                                    let providers = app_state.provider_registry.list_providers();
+                                    let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
+                                        .into_iter()
+                                        .map(|pd| {
+                                            let models = app_state
+                                                .provider_registry
+                                                .list_models_by_provider(&pd.provider_id);
+                                            crate::adapters::tui::state::ProviderColumn {
+                                                provider_id: pd.provider_id,
+                                                display_name: pd.display_name,
+                                                healthy: pd.healthy,
+                                                models,
+                                            }
+                                        })
+                                        .filter(|c| !c.models.is_empty())
+                                        .collect();
+                                    if columns.is_empty() {
+                                        let fb = crate::domain::models::FeedbackBlock {
+                                            id: "model-selector-empty".to_string(),
+                                            level: crate::domain::models::FeedbackLevel::Info,
+                                            message: "No models available".to_string(),
+                                            actions: Vec::new(),
+                                        };
+                                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                                        state.needs_redraw = true;
+                                    } else {
+                                        state.model_selector.open(
+                                            state.focus.clone(),
+                                            columns,
+                                            &active_pid,
+                                            &effective_mid,
+                                        );
+                                        state.focus = crate::domain::models::FocusState::Overlay(
+                                            crate::domain::models::visual::OverlayType::ModelSelector,
+                                        );
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                InputAction::SwitchModelProvider { provider_id, model_id } => {
+                                    apply_model_switch(
+                                        &mut state,
+                                        &router,
+                                        &app_state,
+                                        &streaming,
+                                        &domain_tx,
+                                        &conversation,
+                                        provider_id,
+                                        model_id,
+                                        &mut pending_health_check,
+                                    ).await;
+                                }
                             }
                         }
                     }
@@ -5859,6 +5966,54 @@ pub async fn run(
 
             // Branch 3: Render tick (250ms interval with needs_redraw optimization)
             _ = tick_interval.tick() => {
+                // Story 7.2 AC4: poll pending health check completion
+                if let Some((ref pid, ref mid, ref mut handle)) = pending_health_check {
+                    match handle.now_or_never() {
+                        Some(Ok(Ok(()))) => {
+                            app_state.provider_registry.update_health(pid, true);
+                            state.model_selector.connecting = None;
+                            let saved_pid = pid.clone();
+                            let saved_mid = mid.clone();
+                            pending_health_check = None;
+                            complete_model_switch(
+                                &mut state,
+                                &router,
+                                &app_state,
+                                &conversation,
+                                &saved_pid,
+                                &saved_mid,
+                            ).await;
+                        }
+                        Some(Ok(Err(e))) => {
+                            state.model_selector.connecting = None;
+                            pending_health_check = None;
+                            let fb = crate::domain::models::FeedbackBlock {
+                                id: generate_conversation_id(),
+                                level: crate::domain::models::FeedbackLevel::Warning,
+                                message: format!("Connection failed: {}", e),
+                                actions: vec![],
+                            };
+                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                            state.needs_redraw = true;
+                        }
+                        Some(Err(e)) => {
+                            state.model_selector.connecting = None;
+                            pending_health_check = None;
+                            let fb = crate::domain::models::FeedbackBlock {
+                                id: generate_conversation_id(),
+                                level: crate::domain::models::FeedbackLevel::Warning,
+                                message: format!("Health check panicked: {}", e),
+                                actions: vec![],
+                            };
+                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                            state.needs_redraw = true;
+                        }
+                        None => {
+                            state.needs_redraw = true;
+                        }
+                    }
+                }
+
                 // Update elapsed_ms for Executing state each tick
                 let tick_ms = state.theme.timing.tick_interval_ms;
                 if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
@@ -7493,16 +7648,18 @@ async fn start_turn_inner(
         .and_then(|a| {
             let m = a.model.as_ref()?;
             if m.is_empty() { None } else { Some(m.clone()) }
-        });
+        })
+        .or_else(|| state.selected_model.clone());
     let req = crate::domain::services::model_router::ModelResolutionRequest {
         explicit_override,
         tier_hint: None,
         step_kind: None,
         retry_count,
         input_tokens,
+        fallback_model: config.model.clone(),
     };
-    let resolved = crate::domain::services::model_router::resolve_effective_model(
-        &req, &config.router);
+    let resolved =
+        crate::domain::services::model_router::resolve_effective_model(&req, &config.router);
     if resolved.escalation_reason != crate::domain::models::EscalationReason::None {
         tracing::info!(
             target: "router",
@@ -7528,7 +7685,10 @@ async fn start_turn_inner(
         parent_ctx_tokens: 0,
     };
 
-    let session_id = conversation.session_id.clone().unwrap_or_else(|| conversation.id.clone());
+    let session_id = conversation
+        .session_id
+        .clone()
+        .unwrap_or_else(|| conversation.id.clone());
 
     // Clear any stale buffers from a previous turn (e.g. after TurnContinuing or SystemNotice)
     streaming.current_text_buffer.clear();
@@ -7637,7 +7797,7 @@ fn render(
     state: &mut TuiState,
     conversation: &Conversation,
     streaming: &StreamingState,
-    model: &str,
+    config_model: &str,
     provider_id: &str,
     security: &dyn SecurityPort,
     tab_count: usize,
@@ -7684,6 +7844,8 @@ fn render(
         ref command_palette,
         ref which_key,
         ref help_overlay,
+        ref model_selector,
+        ref selected_model,
         ref image_indicator,
         ref current_hint,
         sidebar_visible,
@@ -7692,6 +7854,8 @@ fn render(
         ref rewind_preview,
         ..
     } = *state;
+
+    let display_model = selected_model.as_deref().unwrap_or(config_model);
 
     terminal.draw(|frame| {
         let area = frame.area();
@@ -8279,7 +8443,7 @@ fn render(
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
-                    model,
+                    display_model,
                     Some(provider_id),
                     status,
                     theme,
@@ -8346,6 +8510,12 @@ fn render(
                         theme,
                         state.multiplexer_detected,
                     );
+                }
+
+                // Render model selector overlay (centered modal, Tier-1)
+                // Story 7.2 AC1
+                if model_selector.active {
+                    model_selector::render(frame, area, model_selector, theme);
                 }
             }
             None => {
@@ -8581,6 +8751,218 @@ pub fn build_slash_suggestions_ordered(
     }
 
     suggestions
+}
+
+fn effective_model<'a>(state: &'a TuiState, config: &'a AppConfig) -> &'a str {
+    state.selected_model.as_deref().unwrap_or(&config.model)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+async fn apply_model_switch(
+    state: &mut TuiState,
+    router: &crate::adapters::provider::ProviderRouter,
+    app_state: &crate::infrastructure::runtime::app_state::AppState,
+    streaming: &StreamingState,
+    domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    conversation: &Conversation,
+    provider_id: Option<String>,
+    model_id: String,
+    pending_health_check: &mut Option<(
+        String,
+        String,
+        tokio::task::JoinHandle<Result<(), crate::domain::errors::ProviderError>>,
+    )>,
+) {
+    use crate::domain::events::AppEvent;
+    use crate::domain::models::NoticeLevel;
+
+    let resolved_pid = match provider_id {
+        Some(pid) => pid,
+        None => match app_state.provider_registry.get_model_provider(&model_id) {
+            Some(pid) => pid,
+            None => {
+                let _ = domain_tx.send(AppEvent::SystemNotice {
+                    conversation_id: None,
+                    level: NoticeLevel::Warning,
+                    message: format!("Unknown model: {}", model_id),
+                });
+                return;
+            }
+        },
+    };
+
+    if streaming.is_streaming {
+        let _ = domain_tx.send(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Info,
+            message: "Cannot switch model while streaming".to_string(),
+        });
+        return;
+    }
+
+    let provider_desc = app_state
+        .provider_registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.provider_id == resolved_pid);
+    let is_healthy = provider_desc.as_ref().is_some_and(|p| p.healthy);
+    let provider_display_name = provider_desc
+        .as_ref()
+        .map(|p| p.display_name.clone())
+        .unwrap_or_else(|| resolved_pid.clone());
+
+    if !is_healthy {
+        if let Some(provider) = router.get_provider(&resolved_pid) {
+            state.model_selector.connecting = Some(provider_display_name.clone());
+            state.needs_redraw = true;
+            let pid_clone = resolved_pid.clone();
+            let mid_clone = model_id.clone();
+            let handle = tokio::spawn(async move { provider.health_check().await });
+            *pending_health_check = Some((pid_clone, mid_clone, handle));
+            return;
+        } else {
+            let fb = crate::domain::models::FeedbackBlock {
+                id: generate_conversation_id(),
+                level: crate::domain::models::FeedbackLevel::Warning,
+                message: format!("Provider '{}' not found", resolved_pid),
+                actions: vec![],
+            };
+            state.feedback_blocks.insert(fb.id.clone(), fb);
+            state.needs_redraw = true;
+            return;
+        }
+    }
+
+    // If triggered from palette (model selector not open), open it for context-warning display
+    let model_desc = app_state
+        .provider_registry
+        .get_model(&resolved_pid, &model_id);
+    let context_window = model_desc.as_ref().map_or(0, |m| m.context_window);
+    let model_display_name = model_desc
+        .as_ref()
+        .map(|m| m.display_name.clone())
+        .unwrap_or_else(|| model_id.clone());
+
+    if !state.model_selector.active && model_desc.is_some() {
+        let providers = app_state.provider_registry.list_providers();
+        let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
+            .into_iter()
+            .map(|pd| {
+                let models = app_state
+                    .provider_registry
+                    .list_models_by_provider(&pd.provider_id);
+                crate::adapters::tui::state::ProviderColumn {
+                    provider_id: pd.provider_id,
+                    display_name: pd.display_name,
+                    healthy: pd.healthy,
+                    models,
+                }
+            })
+            .filter(|c| !c.models.is_empty())
+            .collect();
+        if !columns.is_empty() {
+            state
+                .model_selector
+                .open(state.focus.clone(), columns, &resolved_pid, &model_id);
+            state.focus = crate::domain::models::FocusState::Overlay(
+                crate::domain::models::visual::OverlayType::ModelSelector,
+            );
+        }
+    }
+
+    if let Some(ref warning) = state.model_selector.pending_context_warning {
+        if warning.model_id == model_id && warning.provider_id == resolved_pid {
+            state.model_selector.pending_context_warning = None;
+        }
+    } else {
+        let current_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
+        if context_window > 0 && current_tokens > context_window {
+            state.model_selector.pending_context_warning =
+                Some(crate::adapters::tui::state::ContextWarning {
+                    provider_id: resolved_pid.clone(),
+                    model_id: model_id.clone(),
+                    model_display_name: model_display_name.clone(),
+                    context_window,
+                    current_tokens,
+                });
+            state.needs_redraw = true;
+            return;
+        }
+    }
+
+    complete_model_switch(
+        state,
+        router,
+        app_state,
+        conversation,
+        &resolved_pid,
+        &model_id,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn complete_model_switch(
+    state: &mut TuiState,
+    router: &crate::adapters::provider::ProviderRouter,
+    app_state: &crate::infrastructure::runtime::app_state::AppState,
+    _conversation: &Conversation,
+    resolved_pid: &str,
+    model_id: &str,
+) {
+    use crate::adapters::tui::widgets::model_selector::humanize_ctx;
+
+    if resolved_pid != router.active_delegate_id() {
+        if let Err(e) = router.set_active(resolved_pid) {
+            let fb = crate::domain::models::FeedbackBlock {
+                id: generate_conversation_id(),
+                level: crate::domain::models::FeedbackLevel::Warning,
+                message: format!("Switch failed: {}", e),
+                actions: vec![],
+            };
+            state.feedback_blocks.insert(fb.id.clone(), fb);
+            state.needs_redraw = true;
+            return;
+        }
+    }
+
+    state.selected_model = Some(model_id.to_string());
+
+    let model_desc = app_state
+        .provider_registry
+        .get_model(resolved_pid, model_id);
+    let context_window = model_desc.as_ref().map_or(0, |m| m.context_window);
+    let provider_display_name = app_state
+        .provider_registry
+        .list_providers()
+        .into_iter()
+        .find(|p| p.provider_id == resolved_pid)
+        .map(|p| p.display_name)
+        .unwrap_or_else(|| resolved_pid.to_string());
+    let model_display_name = model_desc
+        .map(|m| m.display_name)
+        .unwrap_or_else(|| model_id.to_string());
+
+    let fb = crate::domain::models::FeedbackBlock {
+        id: generate_conversation_id(),
+        level: crate::domain::models::FeedbackLevel::Info,
+        message: format!(
+            "Switched to {}/{} (context: {})",
+            provider_display_name,
+            model_display_name,
+            humanize_ctx(context_window)
+        ),
+        actions: vec![],
+    };
+    state.feedback_blocks.insert(fb.id.clone(), fb);
+
+    if state.model_selector.active {
+        state.focus = state
+            .model_selector
+            .dismiss()
+            .unwrap_or(crate::domain::models::FocusState::Input);
+    }
+    state.needs_redraw = true;
 }
 
 /// Populate command palette filtered entries from the registry.

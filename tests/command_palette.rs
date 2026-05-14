@@ -391,14 +391,11 @@ fn test_ctrl_x_second_key_dispatches_chord() {
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert!(state.which_key.active);
 
-    // Press a valid chord key
+    // Press 'm' — wired to OpenModelSelector (Story 7.2)
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('m'));
-    assert_eq!(action, InputAction::Consumed);
-    assert!(!state.which_key.active); // Dismissed
-    // Focus restored to Input
+    assert_eq!(action, InputAction::OpenModelSelector);
+    assert!(!state.which_key.active);
     assert_eq!(state.focus, FocusState::Input);
-    // Feedback block created for Noop chord
-    assert!(state.feedback_blocks.contains_key("chord-m"));
 }
 
 #[test]

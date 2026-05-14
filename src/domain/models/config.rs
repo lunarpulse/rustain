@@ -357,48 +357,84 @@ plan = "flagship"
 review = "flagship"
 "#;
         let config: AppConfig = toml::from_str(toml).expect("deserialize");
-        assert_eq!(config.router.default_tier, crate::domain::models::router::ModelTier::Flagship);
+        assert_eq!(
+            config.router.default_tier,
+            crate::domain::models::router::ModelTier::Flagship
+        );
         assert_eq!(config.router.threshold_tokens, 50000);
         assert_eq!(config.router.max_retries, 3);
         assert_eq!(
-            config.router.tier_models.get(&crate::domain::models::router::ModelTier::CheapAgentic),
+            config
+                .router
+                .tier_models
+                .get(&crate::domain::models::router::ModelTier::CheapAgentic),
             Some(&"cheap-model".to_string())
         );
         assert_eq!(
-            config.router.tier_models.get(&crate::domain::models::router::ModelTier::Flagship),
+            config
+                .router
+                .tier_models
+                .get(&crate::domain::models::router::ModelTier::Flagship),
             Some(&"flagship-model".to_string())
         );
         assert_eq!(
-            config.router.step_tiers.get(&crate::domain::models::router::StepKind::Codegen),
+            config
+                .router
+                .step_tiers
+                .get(&crate::domain::models::router::StepKind::Codegen),
             Some(&crate::domain::models::router::ModelTier::Flagship)
         );
         assert_eq!(
-            config.router.step_tiers.get(&crate::domain::models::router::StepKind::Edit),
+            config
+                .router
+                .step_tiers
+                .get(&crate::domain::models::router::StepKind::Edit),
             Some(&crate::domain::models::router::ModelTier::CheapAgentic)
         );
 
         // Serialize back and assert key strings survive
         let serialized = toml::to_string(&config).expect("serialize");
-        assert!(serialized.contains("default_tier = \"flagship\""), "serialized must contain default_tier");
-        assert!(serialized.contains("threshold_tokens = 50000"), "serialized must contain threshold_tokens");
-        assert!(serialized.contains("max_retries = 3"), "serialized must contain max_retries");
-        assert!(serialized.contains("cheap_agentic = \"cheap-model\""), "serialized must contain cheap_agentic tier model");
-        assert!(serialized.contains("codegen = \"flagship\""), "serialized must contain codegen step tier");
+        assert!(
+            serialized.contains("default_tier = \"flagship\""),
+            "serialized must contain default_tier"
+        );
+        assert!(
+            serialized.contains("threshold_tokens = 50000"),
+            "serialized must contain threshold_tokens"
+        );
+        assert!(
+            serialized.contains("max_retries = 3"),
+            "serialized must contain max_retries"
+        );
+        assert!(
+            serialized.contains("cheap_agentic = \"cheap-model\""),
+            "serialized must contain cheap_agentic tier model"
+        );
+        assert!(
+            serialized.contains("codegen = \"flagship\""),
+            "serialized must contain codegen step tier"
+        );
     }
 
     #[test]
     fn app_config_router_defaults_when_missing() {
         let toml = r#"model = "test-model""#;
         let config: AppConfig = toml::from_str(toml).expect("deserialize");
-        assert_eq!(config.router.default_tier, crate::domain::models::router::ModelTier::CheapAgentic);
+        assert_eq!(
+            config.router.default_tier,
+            crate::domain::models::router::ModelTier::CheapAgentic
+        );
         assert_eq!(config.router.threshold_tokens, 100_000);
         assert_eq!(config.router.max_retries, 2);
-        assert_eq!(
-            config.router.tier_models.get(&crate::domain::models::router::ModelTier::CheapAgentic),
-            Some(&"claude-haiku-4-5-20251001".to_string())
+        assert!(
+            config.router.tier_models.is_empty(),
+            "tier_models should be empty by default (no hardcoded models)"
         );
         assert_eq!(
-            config.router.step_tiers.get(&crate::domain::models::router::StepKind::Plan),
+            config
+                .router
+                .step_tiers
+                .get(&crate::domain::models::router::StepKind::Plan),
             Some(&crate::domain::models::router::ModelTier::Flagship)
         );
     }

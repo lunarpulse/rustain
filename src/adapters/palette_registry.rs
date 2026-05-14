@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::adapters::command_registry::CommandRegistry;
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
-/// Prefix characters that map to palette scopes (AC2).
 const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
     ('/', PaletteScope::SlashCommand),
     ('@', PaletteScope::FileMention),
@@ -15,8 +14,14 @@ const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
 /// Registry of command palette entries.
 /// Populated lazily from `CommandRegistry` on first Ctrl+P.
 /// Cached for the session; re-populated only if `CommandRegistry.discovered` changes.
+///
+/// DF-041 fix: entries split into two buckets so `populate_from_command_registry`
+/// never clears entries added via `register()`.
 pub struct PaletteRegistry {
-    entries: Vec<PaletteEntry>,
+    /// Entries managed by `populate_from_command_registry` (slash commands + built-ins).
+    slash_entries: Vec<PaletteEntry>,
+    /// Entries managed by `register()` (model/profile/adapter entries from epics).
+    registered_entries: Vec<PaletteEntry>,
     /// Track whether we populated from a discovered CommandRegistry.
     populated_from_discovered: bool,
 }
@@ -24,28 +29,27 @@ pub struct PaletteRegistry {
 impl PaletteRegistry {
     pub fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            slash_entries: Vec::new(),
+            registered_entries: Vec::new(),
             populated_from_discovered: false,
         }
     }
 
     /// Populate from the CommandRegistry. Lazy-loads on first call.
     /// Re-populates if the CommandRegistry discovery state changed.
+    /// Only clears `slash_entries`; `registered_entries` survive (DF-041).
     pub fn populate_from_command_registry(&mut self, command_registry: &CommandRegistry) {
         let cr_discovered = command_registry.is_discovered();
 
-        // Skip if already populated with same discovery state
-        if !self.entries.is_empty() && self.populated_from_discovered == cr_discovered {
+        if !self.slash_entries.is_empty() && self.populated_from_discovered == cr_discovered {
             return;
         }
 
-        // Clear and rebuild
-        self.entries.clear();
+        self.slash_entries.clear();
 
-        // Map all slash commands to palette entries
         let all_commands = command_registry.filter("");
         for cmd in all_commands {
-            self.entries.push(PaletteEntry {
+            self.slash_entries.push(PaletteEntry {
                 name: format!("/{}", cmd.name),
                 description: cmd.description.clone(),
                 shortcut: None,
@@ -54,9 +58,7 @@ impl PaletteRegistry {
             });
         }
 
-        // Built-in: version info
-        // Covers: FR109
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "version".to_string(),
             description: "Show rustain version and build info".to_string(),
             shortcut: None,
@@ -64,29 +66,28 @@ impl PaletteRegistry {
             action: PaletteAction::ShowVersion,
         });
 
-        // Built-in: tab management
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "new tab".to_string(),
             description: "Open a new conversation tab".to_string(),
             shortcut: Some("Ctrl+T".to_string()),
             scope: PaletteScope::All,
             action: PaletteAction::NewTab,
         });
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "close tab".to_string(),
             description: "Close the current conversation tab".to_string(),
             shortcut: None,
             scope: PaletteScope::All,
             action: PaletteAction::CloseTab,
         });
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "toggle sidebar".to_string(),
             description: "Toggle conversation history sidebar".to_string(),
             shortcut: Some("Ctrl+H".to_string()),
             scope: PaletteScope::All,
             action: PaletteAction::ToggleSidebar,
         });
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "delete all conversations".to_string(),
             description: "Delete all saved conversations (requires confirmation)".to_string(),
             shortcut: None,
@@ -94,8 +95,7 @@ impl PaletteRegistry {
             action: PaletteAction::DeleteAllConversations,
         });
 
-        // Clipboard paste
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "paste image from clipboard".to_string(),
             description: "Paste an image from the OS clipboard into the current message"
                 .to_string(),
@@ -104,7 +104,6 @@ impl PaletteRegistry {
             action: PaletteAction::PasteImageFromClipboard,
         });
 
-        // Permission mode entries (Story 5-0b AC9)
         for (mode_name, mode_arg, mode_desc) in [
             ("mode: plan", "plan", "Plan mode — read-only tools only"),
             (
@@ -119,7 +118,7 @@ impl PaletteRegistry {
             ),
             ("mode: yolo", "yolo", "YOLO mode — all tools auto-approved"),
         ] {
-            self.entries.push(PaletteEntry {
+            self.slash_entries.push(PaletteEntry {
                 name: mode_name.to_string(),
                 description: mode_desc.to_string(),
                 shortcut: None,
@@ -131,22 +130,21 @@ impl PaletteRegistry {
             });
         }
 
-        // Story 6.4: task control palette entries
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "!cancel-plan".into(),
             description: "Cancel the current executing plan".into(),
             shortcut: Some("Ctrl+X, T then x".into()),
             scope: PaletteScope::All,
             action: PaletteAction::ExecuteCommand("cancel-plan".into(), None),
         });
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "!reorder-task".into(),
             description: "Move the selected pending task up or down".into(),
             shortcut: None,
             scope: PaletteScope::All,
             action: PaletteAction::ExecuteCommand("reorder-task".into(), None),
         });
-        self.entries.push(PaletteEntry {
+        self.slash_entries.push(PaletteEntry {
             name: "!resume-all-tasks".into(),
             description: "Resume every paused task".into(),
             shortcut: None,
@@ -157,35 +155,39 @@ impl PaletteRegistry {
         self.populated_from_discovered = cr_discovered;
     }
 
-    /// Register a single entry (for future epics to add their entries).
+    /// Register a single entry. Survives `populate_from_command_registry` calls (DF-041).
     #[allow(dead_code)]
     pub fn register(&mut self, entry: PaletteEntry) {
-        self.entries.push(entry);
+        self.registered_entries.push(entry);
     }
 
-    /// All entries, unfiltered.
+    fn all_entries_iter(&self) -> impl Iterator<Item = &PaletteEntry> {
+        self.slash_entries
+            .iter()
+            .chain(self.registered_entries.iter())
+    }
+
     #[allow(dead_code)]
-    pub fn all_entries(&self) -> &[PaletteEntry] {
-        &self.entries
+    pub fn all_entries(&self) -> Vec<&PaletteEntry> {
+        self.all_entries_iter().collect()
     }
 
-    /// Entries for a specific scope.
     #[allow(dead_code)]
     pub fn entries_for_scope(&self, scope: PaletteScope) -> Vec<&PaletteEntry> {
-        self.entries.iter().filter(|e| e.scope == scope).collect()
+        self.all_entries_iter()
+            .filter(|e| e.scope == scope)
+            .collect()
     }
 
-    /// Scopes that have at least one entry (AC8: dynamic scope visibility).
     #[allow(dead_code)]
     pub fn populated_scopes(&self) -> Vec<PaletteScope> {
         let mut seen = HashMap::new();
-        for entry in &self.entries {
+        for entry in self.all_entries_iter() {
             seen.entry(entry.scope).or_insert(true);
         }
         seen.into_keys().collect()
     }
 
-    /// Map a prefix character to a scope.
     pub fn scope_for_prefix(prefix: char) -> Option<PaletteScope> {
         PREFIX_SCOPE_MAP
             .iter()
@@ -193,17 +195,11 @@ impl PaletteRegistry {
             .map(|(_, scope)| *scope)
     }
 
-    /// Fuzzy filter entries. Returns entries sorted by relevance score.
-    ///
-    /// Scoring: exact prefix > word-boundary match > substring match.
-    /// When `scope` is Some, only entries matching that scope are returned.
-    /// When `scope` is None, all entries from populated scopes are searched.
     pub fn fuzzy_filter(&self, query: &str, scope: Option<PaletteScope>) -> Vec<&PaletteEntry> {
         let lower_query = query.to_lowercase();
 
         let mut scored: Vec<(&PaletteEntry, u32)> = self
-            .entries
-            .iter()
+            .all_entries_iter()
             .filter(|e| match scope {
                 Some(s) => e.scope == s,
                 None => true,
@@ -221,7 +217,6 @@ impl PaletteRegistry {
             })
             .collect();
 
-        // Sort by score descending, then name ascending for stability
         scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
         scored.into_iter().map(|(entry, _)| entry).collect()
     }
@@ -233,24 +228,14 @@ impl Default for PaletteRegistry {
     }
 }
 
-/// Compute a fuzzy match score for an entry against a query.
-/// Returns 0 if no match.
-///
-/// Scoring tiers:
-///   300 — exact prefix match on name
-///   200 — word-boundary match on name
-///   100 — substring match on name
-///    50 — substring match on description
 fn fuzzy_score(name: &str, description: &str, lower_query: &str) -> u32 {
     let lower_name = name.to_lowercase();
     let lower_desc = description.to_lowercase();
 
-    // Exact prefix match on name (highest priority)
     if lower_name.starts_with(lower_query) {
         return 300;
     }
 
-    // Word-boundary match on name: query matches start of any word
     let words_match = lower_name
         .split(|c: char| !c.is_alphanumeric())
         .any(|word| word.starts_with(lower_query));
@@ -258,12 +243,10 @@ fn fuzzy_score(name: &str, description: &str, lower_query: &str) -> u32 {
         return 200;
     }
 
-    // Substring match on name
     if lower_name.contains(lower_query) {
         return 100;
     }
 
-    // Substring match on description
     if lower_desc.contains(lower_query) {
         return 50;
     }
@@ -440,21 +423,16 @@ mod tests {
 
     #[test]
     fn test_fuzzy_score_ranking() {
-        // Exact prefix should rank higher than substring
         assert!(fuzzy_score("/new", "desc", "/ne") > fuzzy_score("/renew", "desc", "/ne"));
-        // Name match should rank higher than description match
         assert!(fuzzy_score("deploy", "desc", "dep") > fuzzy_score("other", "deploy here", "dep"));
     }
 
     #[test]
     fn test_populate_from_command_registry() {
-        let cr = CommandRegistry::new(); // has built-in /new and /export
+        let cr = CommandRegistry::new();
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        // 5 slash commands (/new, /export, /deactivate, /mode, /plan) + 4 mode palette entries +
-        // 6 built-ins (version, new tab, close tab, toggle sidebar, delete all, paste image from clipboard)
-        // + 3 story 6.4 (!cancel-plan, !reorder-task, !resume-all-tasks) = 18
         assert_eq!(reg.all_entries().len(), 18);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
@@ -470,8 +448,36 @@ mod tests {
                 .any(|e| e.name == "delete all conversations")
         );
 
-        // Second call should be a no-op (cached)
         reg.populate_from_command_registry(&cr);
         assert_eq!(reg.all_entries().len(), 18);
+    }
+
+    #[test]
+    fn test_populate_does_not_clear_registered_entries() {
+        let cr = CommandRegistry::new();
+        let mut reg = PaletteRegistry::new();
+
+        reg.register(make_entry(
+            "claude-sonnet",
+            "Anthropic model",
+            PaletteScope::Model,
+        ));
+        assert_eq!(reg.all_entries().len(), 1);
+
+        reg.populate_from_command_registry(&cr);
+        assert_eq!(reg.slash_entries.len(), 18);
+        assert_eq!(reg.registered_entries.len(), 1);
+        assert_eq!(reg.all_entries().len(), 19);
+        assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
+
+        reg.populate_from_command_registry(&cr);
+        assert_eq!(reg.all_entries().len(), 19);
+        assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
+
+        reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
+        assert_eq!(reg.all_entries().len(), 20);
+
+        reg.populate_from_command_registry(&cr);
+        assert_eq!(reg.all_entries().len(), 20);
     }
 }

@@ -58,6 +58,7 @@ pub fn find_next_boundary(
             // Already at or above the first boundary — no-op
             None
         }
+        Direction::Left | Direction::Right => None,
     }
 }
 

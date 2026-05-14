@@ -249,7 +249,7 @@ impl StreamingProvider for AnthropicAdapter {
         use crate::domain::models::ModelCapability;
         vec![
             crate::domain::models::ModelDescriptor {
-                model_id: "claude-sonnet-4-20250514".to_string(),
+                model_id: "claude-sonnet-4-6".to_string(),
                 display_name: "Claude Sonnet 4".to_string(),
                 provider_id: "anthropic".to_string(),
                 context_window: 200_000,
@@ -262,7 +262,7 @@ impl StreamingProvider for AnthropicAdapter {
                 pricing_tier: Some("flagship".to_string()),
             },
             crate::domain::models::ModelDescriptor {
-                model_id: "claude-opus-4-20250514".to_string(),
+                model_id: "claude-opus-4-6".to_string(),
                 display_name: "Claude Opus 4".to_string(),
                 provider_id: "anthropic".to_string(),
                 context_window: 200_000,
@@ -275,7 +275,7 @@ impl StreamingProvider for AnthropicAdapter {
                 pricing_tier: Some("flagship".to_string()),
             },
             crate::domain::models::ModelDescriptor {
-                model_id: "claude-haiku-4-5-20251001".to_string(),
+                model_id: "claude-haiku-4-5".to_string(),
                 display_name: "Claude Haiku 4.5".to_string(),
                 provider_id: "anthropic".to_string(),
                 context_window: 200_000,

@@ -6,6 +6,7 @@ pub mod chat_pane;
 pub mod command_palette;
 pub mod cross_search;
 pub mod fork_confirm;
+pub mod model_selector;
 pub mod rewind_confirm;
 pub mod sidebar;
 pub use sidebar::truncate_to_width as truncate_sidebar_text;

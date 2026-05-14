@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustain::domain::events::AppEvent;
+use rustain::domain::models::router::{EscalationReason, ModelTier, StepKind};
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
     ToolDefinition, ToolResult, generate_conversation_id,
 };
 use rustain::domain::ports::{SecurityPort, StreamingProvider, ToolSetPort, UsageLedgerPort};
 use rustain::domain::services::model_router::ResolvedModel;
-use rustain::domain::models::router::{EscalationReason, ModelTier, StepKind};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::runtime::turn::run_turn;
