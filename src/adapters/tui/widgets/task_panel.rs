@@ -464,6 +464,7 @@ mod tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let p1 = make_plan(
             PlanStatus::Completed,
@@ -494,6 +495,7 @@ mod tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let p2 = make_plan(
             PlanStatus::Executing,

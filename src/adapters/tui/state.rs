@@ -708,6 +708,14 @@ pub enum SkipCascadeChoice {
     CancelSkip,
 }
 
+/// Story 7.4: context warning escalation level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextWarnLevel {
+    None,
+    Warn,
+    Crit,
+}
+
 /// Action dispatched by a which-key chord.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChordAction {
@@ -1330,6 +1338,12 @@ pub struct TuiState {
     pub pending_plan_reminder_at_turn: Option<u32>,
     /// Active plan file path when in Plan mode. `None` otherwise.
     pub plan_file_path: Option<std::path::PathBuf>,
+    /// Story 7.4: whether a compaction operation is in progress.
+    pub compacting: bool,
+    /// Story 7.4: current context warning level.
+    pub context_warn_level: ContextWarnLevel,
+    /// Story 7.4: pending context carryover for fresh tab + summary injection.
+    pub pending_context_carryover: Option<String>,
 }
 
 impl TuiState {
@@ -1429,6 +1443,9 @@ impl TuiState {
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,
+            compacting: false,
+            context_warn_level: ContextWarnLevel::None,
+            pending_context_carryover: None,
         }
     }
 

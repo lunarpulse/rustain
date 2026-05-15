@@ -26,6 +26,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
     let streaming = StreamingState::default();
 
@@ -58,6 +59,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     app_layout.chat_pane.height,
                     rustain::domain::models::PermissionMode::Normal,
                     state.token_usage.as_ref(),
+                    0, // context_window
                     state.has_project_context,
                     None,
                     state.multiline_mode,

@@ -33,6 +33,7 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

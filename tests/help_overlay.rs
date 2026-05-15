@@ -386,6 +386,7 @@ fn test_status_bar_renders_hint() {
                 24,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false,
@@ -440,6 +441,7 @@ fn test_status_bar_no_hint_when_none() {
                 24,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false,

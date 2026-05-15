@@ -47,7 +47,7 @@ use crate::domain::services::session_index::SessionIndex;
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-use crate::domain::events::{AppEvent, ChunkAction};
+use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::turn::TurnId;
 use crate::domain::models::visual::{ConfirmationType, DeleteConfirmTarget, OverlayType};
@@ -55,7 +55,7 @@ use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
     NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager,
-    SessionState, StatusState, StreamChunk, StreamingState, UserMessage, ViewState,
+    SessionState, StatusState, StreamChunk, StreamingState, UsageInfo, UserMessage, ViewState,
     generate_conversation_id, next_delay,
 };
 use crate::domain::ports::{
@@ -84,6 +84,62 @@ fn apply_warning_notice(state: &mut TuiState, msg: String) -> String {
     state.feedback_blocks.insert(fb_id.clone(), fb);
     state.active_feedback_id = Some(fb_id.clone());
     fb_id
+}
+
+/// Story 7.4: upsert a context-warning feedback block.
+fn upsert_context_warning(state: &mut TuiState, pct: u32) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CTXWARN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    // Remove any existing ctxwarn-* block
+    state
+        .feedback_blocks
+        .retain(|id, _| !id.starts_with("ctxwarn-"));
+    if state
+        .active_feedback_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("ctxwarn-"))
+    {
+        state.active_feedback_id = None;
+    }
+
+    let fb_id = format!(
+        "ctxwarn-{}",
+        CTXWARN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let (level, actions) = if pct >= 95 {
+        (
+            FeedbackLevel::Error,
+            vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
+        )
+    } else {
+        (
+            FeedbackLevel::Warning,
+            vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
+        )
+    };
+    let fb = FeedbackBlock {
+        id: fb_id.clone(),
+        level,
+        message: format!("Running low on context ({}%).", pct),
+        actions,
+    };
+    state.feedback_blocks.insert(fb_id.clone(), fb);
+    state.active_feedback_id = Some(fb_id);
+}
+
+/// Story 7.4: clear all context-warning feedback blocks.
+fn clear_context_warning(state: &mut TuiState) {
+    state
+        .feedback_blocks
+        .retain(|id, _| !id.starts_with("ctxwarn-"));
+    if state
+        .active_feedback_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("ctxwarn-"))
+    {
+        state.active_feedback_id = None;
+    }
 }
 
 /// Story 16.6 helper: pre/post layout + reconcile + mirror for fold mutations.
@@ -536,6 +592,7 @@ pub async fn run(
     }
 
     // Render first frame immediately
+    let _ctx_window = active_context_window(&app_state, &router, &state, config);
     match render(
         terminal,
         &mut state,
@@ -548,6 +605,7 @@ pub async fn run(
         tab_manager.active_tab_index(),
         Some(&tab_manager),
         &session_index,
+        _ctx_window,
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
@@ -732,6 +790,57 @@ pub async fn run(
                                 }
                             }
 
+                            // Story 7.4 AC10: carryover prompt bespoke interceptor
+                            if state.active_feedback_id.as_deref() == Some("carryover") {
+                                use crate::domain::events::DomainInputEvent;
+                                match &domain_event {
+                                    DomainInputEvent::KeyPress('y') | DomainInputEvent::KeyPress('Y') => {
+                                        state.feedback_blocks.remove("carryover");
+                                        state.active_feedback_id = None;
+                                        state.compacting = true;
+                                        state.needs_redraw = true;
+                                        trigger_compaction(
+                                            &conversation,
+                                            &streaming,
+                                            &mut state,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                            CompactionPurpose::Carryover,
+                                            &app_state,
+                                            &router,
+                                        );
+                                        continue;
+                                    }
+                                    DomainInputEvent::KeyPress('n') | DomainInputEvent::KeyPress('N')
+                                    | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
+                                        state.feedback_blocks.remove("carryover");
+                                        state.active_feedback_id = None;
+                                        // Story 7.4 AC10: open fresh tab immediately (no carryover)
+                                        if let Some(handle) = _active_turn.take() {
+                                            handle.abort();
+                                            streaming = StreamingState::default();
+                                        }
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                        tab_manager.create_tab();
+                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        state.input_buffer.clear();
+                                        state.cursor_position = 0;
+                                        state.focus = FocusState::Input;
+                                        state.status = StatusState::Idle;
+                                        state.active_agent_name = None;
+                                        session_index.set_open(&conversation.id, true);
+                                        session_index.set_active(Some(&conversation.id));
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    _ => {
+                                        // Block all other input while carryover prompt is active
+                                        continue;
+                                    }
+                                }
+                            }
+
                             let action = handle_input(&mut state, &domain_event);
 
                             // Update contextual hint whenever focus may have changed (UX-DR93)
@@ -852,7 +961,8 @@ pub async fn run(
                                                                                 tab_manager.reset_and_clone_turn_cancel(),
                                           app_state.usage_ledger.clone()).await;
                                         // Force immediate render for typing indicator
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -1208,6 +1318,24 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::FeedbackRetry => {
+                                    // Story 7.4 AC9: cfail- block retry → re-trigger compaction
+                                    if state.active_feedback_id.as_deref().is_some_and(|id| id.starts_with("cfail-")) {
+                                        if let Some(fb_id) = state.active_feedback_id.take() {
+                                            state.feedback_blocks.remove(&fb_id);
+                                        }
+                                        trigger_compaction(
+                                            &conversation,
+                                            &streaming,
+                                            &mut state,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                            CompactionPurpose::Inline,
+                                            &app_state,
+                                            &router,
+                                        );
+                                        continue;
+                                    }
                                     // Clear the feedback block and retry the last user message
                                     if let Some(fb_id) = state.active_feedback_id.take() {
                                         state.feedback_blocks.remove(&fb_id);
@@ -1270,6 +1398,17 @@ pub async fn run(
                                         state.feedback_blocks.remove(&fb_id);
                                     }
                                     state.needs_redraw = true;
+                                    trigger_compaction(
+                                        &conversation,
+                                        &streaming,
+                                        &mut state,
+                                        &provider,
+                                        config,
+                                        &domain_tx,
+                                        CompactionPurpose::Inline,
+                                        &app_state,
+                                        &router,
+                                    );
                                 }
                                 InputAction::FeedbackDismiss => {
                                     if let Some(fb_id) = state.active_feedback_id.take() {
@@ -1281,31 +1420,17 @@ pub async fn run(
                                     if let Some(fb_id) = state.active_feedback_id.take() {
                                         state.feedback_blocks.remove(&fb_id);
                                     }
-                                    conversation.messages.clear();
-                                    conversation.title = String::new();
-                                    conversation.id = generate_conversation_id();
-                                    conversation.session_id = Some(generate_conversation_id());
-                                    conversation.created_at = crate::domain::models::session_meta::now_unix();
-                                    conversation.updated_at = crate::domain::models::session_meta::now_unix();
-                                    conversation.last_response_at = None;
-                                    conversation.usage = None;
-                                    state.focus = FocusState::Input;
+                                    // Story 7.4 AC10: show carryover prompt instead of immediate reset
+                                    let carryover_fb = FeedbackBlock {
+                                        id: "carryover".to_string(),
+                                        level: FeedbackLevel::Info,
+                                        message: "Carry over context summary? [y/n]".to_string(),
+                                        actions: vec![],
+                                    };
+                                    state.feedback_blocks.insert(carryover_fb.id.clone(), carryover_fb);
+                                    state.active_feedback_id = Some("carryover".to_string());
+                                    state.focus = FocusState::Chat;
                                     state.needs_redraw = true;
-                                    let fs_ref = fs_storage.clone();
-                                    let conv_clone = conversation.clone();
-                                    if let Some(prev) = _pending_save.take() {
-                                        let _ = prev.await;
-                                    }
-                                    _pending_save = Some(tokio::spawn(async move {
-                                        match tokio::time::timeout(
-                                            BACKGROUND_TASK_TIMEOUT,
-                                            fs_ref.save_conversation_with_exit(&conv_clone, true),
-                                        ).await {
-                                            Ok(Ok(())) => {}
-                                            Ok(Err(e)) => tracing::error!("Failed to persist new session: {}", e),
-                                            Err(_) => tracing::warn!("Background task 'new_session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs()),
-                                        }
-                                    }));
                                 }
                                 InputAction::SubmitQuestionAnswer(answer) => {
                                     // Send answer back via oneshot channel
@@ -1414,6 +1539,19 @@ pub async fn run(
                                                 }
                                             }
                                         }
+                                    } else if cmd_name == "compact" {
+                                        // Story 7.4 AC4: /compact slash command
+                                        trigger_compaction(
+                                            &conversation,
+                                            &streaming,
+                                            &mut state,
+                                            &provider,
+                                            config,
+                                            &domain_tx,
+                                            CompactionPurpose::Inline,
+                                            &app_state,
+                                            &router,
+                                        );
                                     } else if cmd_name == "new" {
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
@@ -1448,6 +1586,7 @@ pub async fn run(
                                             usage: None,
                                             plans: std::collections::HashMap::new(),
                                             fork_source: None,
+                                            compaction: None,
                                         };
                                         skill_activator.on_new_conversation(&conversation.id).await;
                                         agent_activator.on_new_conversation(&conversation.id).await;
@@ -1615,7 +1754,8 @@ pub async fn run(
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         app_state.usage_ledger.clone()).await;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -4276,6 +4416,20 @@ pub async fn run(
                                         &mut pending_health_check,
                                     ).await;
                                 }
+                                InputAction::CompactThenSwitchModel { provider_id, model_id } => {
+                                    // Story 7.4 AC13: compact then switch model
+                                    trigger_compaction(
+                                        &conversation,
+                                        &streaming,
+                                        &mut state,
+                                        &provider,
+                                        config,
+                                        &domain_tx,
+                                        CompactionPurpose::SwitchAfter { provider_id, model_id },
+                                        &app_state,
+                                        &router,
+                                    );
+                                }
                             }
                         }
                     }
@@ -4331,8 +4485,52 @@ pub async fn run(
                                     state.status = StatusState::Idle;
                                     // Sync token usage from conversation to TUI state
                                     state.token_usage = conversation.usage.clone();
+
+                                    // Story 7.4 AC3: context-pressure warning state machine
+                                    let cw = active_context_window(&app_state, &router, &state, config,
+                                    );
+                                    if cw > 0 {
+                                        let pct = conversation.usage.as_ref().map_or(0, |u| {
+                                            u.input_tokens.saturating_mul(100) / cw
+                                        });
+                                        match state.context_warn_level {
+                                            crate::adapters::tui::state::ContextWarnLevel::None => {
+                                                if (80..95).contains(&pct) {
+                                                    upsert_context_warning(&mut state, pct);
+                                                    state.context_warn_level =
+                                                        crate::adapters::tui::state::ContextWarnLevel::Warn;
+                                                } else if pct >= 95 {
+                                                    upsert_context_warning(&mut state, pct);
+                                                    state.context_warn_level =
+                                                        crate::adapters::tui::state::ContextWarnLevel::Crit;
+                                                }
+                                            }
+                                            crate::adapters::tui::state::ContextWarnLevel::Warn => {
+                                                if pct >= 95 {
+                                                    upsert_context_warning(&mut state, pct);
+                                                    state.context_warn_level =
+                                                        crate::adapters::tui::state::ContextWarnLevel::Crit;
+                                                } else if pct < 80 {
+                                                    clear_context_warning(&mut state);
+                                                    state.context_warn_level =
+                                                        crate::adapters::tui::state::ContextWarnLevel::None;
+                                                }
+                                            }
+                                            crate::adapters::tui::state::ContextWarnLevel::Crit => {
+                                                if pct < 80 {
+                                                    clear_context_warning(&mut state);
+                                                    state.context_warn_level =
+                                                        crate::adapters::tui::state::ContextWarnLevel::None;
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // Clear stale feedback/retry state on successful turn
-                                    state.active_feedback_id = None;
+                                    // Preserve ctxwarn blocks so the user can interact with them
+                                    if state.active_feedback_id.as_deref().is_none_or(|id| !id.starts_with("ctxwarn-")) {
+                                        state.active_feedback_id = None;
+                                    }
                                     state.retry_state = None;
                                     state.needs_redraw = true;
                                     _active_turn = None;
@@ -4459,7 +4657,8 @@ pub async fn run(
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         app_state.usage_ledger.clone()).await;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -5270,7 +5469,8 @@ pub async fn run(
                             _agent_snap,
                                                               tab_manager.reset_and_clone_turn_cancel(),
                         app_state.usage_ledger.clone()).await;
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                        let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                         }
@@ -5317,6 +5517,177 @@ pub async fn run(
                             }));
                             // Redraw tab bar to show the new title
                             state.needs_redraw = true;
+                        }
+                    }
+                    AppEvent::CompactionComplete {
+                        conversation_id,
+                        summary,
+                        first_kept_message_id,
+                        pre_tokens,
+                        purpose,
+                    } => {
+                        let target = if conversation_id == conversation.id {
+                            Some((&mut conversation, true))
+                        } else {
+                            tab_manager
+                                .find_by_conversation_mut(&conversation_id)
+                                .map(|tab| (&mut tab.conversation, false))
+                        };
+                        if let Some((conv, is_active)) = target {
+                            match purpose {
+                                CompactionPurpose::Inline | CompactionPurpose::SwitchAfter { .. } => {
+                                    conv.compaction = Some(crate::domain::models::conversation::CompactionState {
+                                        summary: summary.clone(),
+                                        first_kept_message_id: first_kept_message_id.clone().unwrap_or_default(),
+                                        compacted_at: crate::domain::models::session_meta::now_unix(),
+                                        pre_compaction_tokens: pre_tokens,
+                                    });
+                                    // Heuristic estimate of new token count (only kept messages)
+                                    let summary_tokens = crate::adapters::tui::widgets::input_box::estimate_tokens(&summary) as u32;
+                                    let boundary = conv.messages.iter().position(|m| m.id == first_kept_message_id.as_deref().unwrap_or_default()).unwrap_or(0);
+                                    let kept_tokens: u32 = conv.messages[boundary..].iter().map(|m| {
+                                        crate::adapters::tui::widgets::input_box::estimate_tokens(&m.content) as u32
+                                    }).sum();
+                                    conv.usage = Some(UsageInfo {
+                                        input_tokens: summary_tokens + kept_tokens,
+                                        output_tokens: 0,
+                                        cache_creation_input_tokens: None,
+                                        cache_read_input_tokens: None,
+                                        reasoning_tokens: None,
+                                    });
+                                    if is_active {
+                                        state.token_usage = conv.usage.clone();
+                                    }
+                                    // Insert success feedback block (active tab only)
+                                    if is_active {
+                                        let fb = FeedbackBlock {
+                                            id: format!("cdone-{}", conversation_id),
+                                            level: FeedbackLevel::Info,
+                                            message: format!("Context compacted: {} → {} tokens. Conversation history preserved in session.",
+                                                crate::adapters::tui::widgets::model_selector::humanize_ctx(pre_tokens),
+                                                crate::adapters::tui::widgets::model_selector::humanize_ctx(summary_tokens + kept_tokens)),
+                                            actions: vec![],
+                                        };
+                                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                                        // Clear context warning
+                                        clear_context_warning(&mut state);
+                                        state.context_warn_level = crate::adapters::tui::state::ContextWarnLevel::None;
+                                    }
+                                    state.compacting = false;
+                                    state.needs_redraw = true;
+                                    // Persist
+                                    if let Some(prev) = _pending_save.take() {
+                                        let _ = prev.await;
+                                    }
+                                    let storage_ref = storage.clone();
+                                    let conv_clone = conv.clone();
+                                    _pending_save = Some(tokio::spawn(async move {
+                                        match tokio::time::timeout(
+                                            BACKGROUND_TASK_TIMEOUT,
+                                            storage_ref.save_conversation(&conv_clone),
+                                        ).await {
+                                            Ok(Ok(())) => {}
+                                            Ok(Err(e)) => tracing::error!("Failed to persist compaction: {}", e),
+                                            Err(_) => tracing::warn!("Background task 'compaction_save' timed out"),
+                                        }
+                                    }));
+                                    // Story 7.4 AC13: for SwitchAfter, apply the model switch after compaction
+                                    if let CompactionPurpose::SwitchAfter { provider_id, model_id } = purpose {
+                                        if is_active {
+                                            apply_model_switch(
+                                                &mut state,
+                                                &router,
+                                                &app_state,
+                                                &streaming,
+                                                &domain_tx,
+                                                &conversation,
+                                                Some(provider_id),
+                                                model_id,
+                                                &mut pending_health_check,
+                                            ).await;
+                                        }
+                                    }
+                                }
+                                CompactionPurpose::Carryover => {
+                                    // Story 7.4 AC11: run fresh-tab routine, then set carryover
+                                    if is_active {
+                                        // Abort any in-flight turn
+                                        if let Some(handle) = _active_turn.take() {
+                                            handle.abort();
+                                            streaming = StreamingState::default();
+                                        }
+                                        // Save current tab
+                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                        // Create new tab
+                                        tab_manager.create_tab();
+                                        // Load new tab
+                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                        // Reset input buffer / focus / status
+                                        state.input_buffer.clear();
+                                        state.cursor_position = 0;
+                                        state.focus = FocusState::Input;
+                                        state.status = StatusState::Idle;
+                                        state.active_agent_name = None;
+                                        session_index.set_open(&conversation.id, true);
+                                        session_index.set_active(Some(&conversation.id));
+                                        // Set carryover
+                                        state.pending_context_carryover = Some(summary);
+                                        state.compacting = false;
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    AppEvent::CompactionFailed {
+                        conversation_id,
+                        reason,
+                        purpose,
+                    } => {
+                        let is_active = conversation_id == conversation.id;
+                        match purpose {
+                            CompactionPurpose::Carryover => {
+                                // Story 7.4 AC11: open fresh tab without carryover + warning notice
+                                if is_active {
+                                    if let Some(handle) = _active_turn.take() {
+                                        handle.abort();
+                                        streaming = StreamingState::default();
+                                    }
+                                    save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                    tab_manager.create_tab();
+                                    load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                    state.input_buffer.clear();
+                                    state.cursor_position = 0;
+                                    state.focus = FocusState::Input;
+                                    state.status = StatusState::Idle;
+                                    state.active_agent_name = None;
+                                    session_index.set_open(&conversation.id, true);
+                                    session_index.set_active(Some(&conversation.id));
+                                    state.compacting = false;
+                                    state.needs_redraw = true;
+                                    let event = AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation_id),
+                                        level: NoticeLevel::Warning,
+                                        message: "Couldn't summarize previous conversation — started fresh without carryover.".to_string(),
+                                    };
+                                    let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: failure path warning (mirrors TitleGenerated pattern)
+                                }
+                            }
+                            _ => {
+                                if is_active {
+                                    let fb = FeedbackBlock {
+                                        id: format!("cfail-{}", conversation_id),
+                                        level: FeedbackLevel::Error,
+                                        message: format!("Compaction failed: {}. Context unchanged.", reason),
+                                        actions: vec![FeedbackAction::Retry, FeedbackAction::StartFresh],
+                                    };
+                                    let fb_id = fb.id.clone();
+                                    state.feedback_blocks.insert(fb_id.clone(), fb);
+                                    state.active_feedback_id = Some(fb_id);
+                                    state.compacting = false;
+                                    state.needs_redraw = true;
+                                }
+                            }
                         }
                     }
                     AppEvent::AskUserQuestion {
@@ -6064,7 +6435,8 @@ pub async fn run(
                 }
 
                 if state.needs_redraw {
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index) {
+                                        let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
                                         }
@@ -7166,6 +7538,8 @@ fn save_active_tab(
     tab.total_content_height = state.total_content_height;
     tab.pending_anchor = state.pending_anchor;
     tab.turn_queue = turn_queue.clone();
+    tab.pending_context_carryover = state.pending_context_carryover.clone();
+    tab.context_warn_level = state.context_warn_level;
 }
 
 /// Load the new active tab's state from TabManager into the proxy variables.
@@ -7200,6 +7574,8 @@ fn load_active_tab(
     state.active_feedback_id = tab.active_feedback_id.clone();
     state.total_content_height = tab.total_content_height;
     state.pending_anchor = tab.pending_anchor;
+    state.pending_context_carryover = tab.pending_context_carryover.clone();
+    state.context_warn_level = tab.context_warn_level;
     state.active_tab_id = tab_manager.active_tab_id();
     state.chord_leader_active = false;
     // tool_block_states is global (cleared on tab switch); version resets for new tab
@@ -7512,6 +7888,9 @@ async fn start_turn_inner(
     // Build messages list for provider
     let mut messages = message_builder::build_api_messages(conversation);
 
+    // Story 7.4 AC7: reshape messages when compaction is present
+    crate::domain::services::compaction::shape_compacted_messages(conversation, &mut messages);
+
     // Plan mode reminder injection (Story 6-0d AC2/AC8)
     if security.current_mode() == PermissionMode::Plan {
         if let Some(ref plan_path) = state.plan_file_path {
@@ -7519,7 +7898,11 @@ async fn start_turn_inner(
                 if let Some(first_user_msg) =
                     messages.iter_mut().find(|m| m.role == MessageRole::User)
                 {
-                    first_user_msg.context_prefix = Some(reminder);
+                    first_user_msg.context_prefix =
+                        Some(crate::domain::services::compaction::compose_context_prefix(
+                            first_user_msg.context_prefix.take(),
+                            reminder,
+                        ));
                 }
                 let assistant_turns = conversation
                     .messages
@@ -7567,10 +7950,18 @@ async fn start_turn_inner(
             .rev()
             .find(|m| m.role == MessageRole::User && m.content == text)
         {
-            target_msg.context_prefix = Some(context);
+            target_msg.context_prefix =
+                Some(crate::domain::services::compaction::compose_context_prefix(
+                    target_msg.context_prefix.take(),
+                    context,
+                ));
         } else if let Some(last_msg) = messages.last_mut() {
             // Fallback: attach to last message if exact match not found
-            last_msg.context_prefix = Some(context);
+            last_msg.context_prefix =
+                Some(crate::domain::services::compaction::compose_context_prefix(
+                    last_msg.context_prefix.take(),
+                    context,
+                ));
         }
         let new_session_id = generate_conversation_id();
         conversation.session_id = Some(new_session_id.clone());
@@ -7584,6 +7975,17 @@ async fn start_turn_inner(
                 msg_count
             ),
         }).ok();
+    }
+
+    // Story 7.4 AC11: consume pending context carryover on first turn of new conversation
+    if let Some(carry) = state.pending_context_carryover.take() {
+        if let Some(first_user) = messages.iter_mut().find(|m| m.role == MessageRole::User) {
+            first_user.context_prefix =
+                Some(crate::domain::services::compaction::compose_context_prefix(
+                    first_user.context_prefix.take(),
+                    format!("<conversation-summary>\n{}\n</conversation-summary>", carry),
+                ));
+        }
     }
 
     let all_tool_defs = tools.available_tools();
@@ -7807,6 +8209,7 @@ fn render(
     active_tab_index: usize,
     tab_manager_for_bar: Option<&crate::domain::models::tab::TabManager>,
     session_index: &SessionIndex,
+    context_window: u32,
 ) -> Result<()> {
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
@@ -8456,6 +8859,7 @@ fn render(
                     app_layout.chat_pane.height,
                     permission_mode,
                     token_usage.as_ref(),
+                    context_window,
                     has_project_context,
                     session_title,
                     multiline_mode,
@@ -8594,14 +8998,7 @@ async fn generate_title(
     };
 
     let stream = provider.stream_completion(messages, options).await?;
-    futures::pin_mut!(stream);
-
-    let mut title = String::new();
-    while let Some(chunk) = stream.next().await {
-        if let StreamChunk::Text { content, .. } = chunk {
-            title.push_str(&content);
-        }
-    }
+    let title = collect_completion_text(stream).await?;
 
     // Post-process: trim, strip surrounding quotes, enforce 60-char max
     let title = post_process_title(&title);
@@ -8609,6 +9006,207 @@ async fn generate_title(
         anyhow::bail!("Title generation produced empty result");
     }
     Ok(title)
+}
+
+/// Collect text from a completion stream, returning Err on StreamChunk::Error.
+async fn collect_completion_text(
+    stream: impl futures::Stream<Item = StreamChunk>,
+) -> Result<String> {
+    use futures::StreamExt;
+    futures::pin_mut!(stream);
+
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            StreamChunk::Text { content, .. } => {
+                text.push_str(&content);
+            }
+            StreamChunk::Error { content } => {
+                anyhow::bail!("Stream error: {}", content);
+            }
+            _ => {}
+        }
+    }
+    Ok(text)
+}
+
+/// Generate a compaction summary for a conversation using the LLM provider.
+async fn generate_compaction_summary(
+    provider: &dyn StreamingProvider,
+    model: &str,
+    history_text: &str,
+) -> Result<String> {
+    use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
+
+    let messages = vec![Message {
+        role: MsgRole::User,
+        content: history_text.to_string(),
+        images: vec![],
+        tool_results: vec![],
+        tool_uses: vec![],
+        context_prefix: None,
+    }];
+    let options = CompletionOptions {
+        model: model.to_string(),
+        max_tokens: 2048,
+        system_prompt: crate::domain::services::compaction::COMPACTION_SYSTEM_PROMPT.to_string(),
+        temperature: None,
+        tools: vec![],
+    };
+
+    let stream = provider.stream_completion(messages, options).await?;
+    let summary = collect_completion_text(stream).await?;
+    if summary.is_empty() {
+        anyhow::bail!("Compaction summary produced empty result");
+    }
+    Ok(summary)
+}
+
+/// Story 7.4: shared compaction trigger with guards.
+fn trigger_compaction(
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    state: &mut TuiState,
+    provider: &Arc<dyn StreamingProvider>,
+    config: &AppConfig,
+    domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    purpose: CompactionPurpose,
+    app_state: &crate::infrastructure::runtime::app_state::AppState,
+    router: &crate::adapters::provider::ProviderRouter,
+) {
+    use crate::domain::models::NoticeLevel;
+
+    if streaming.is_streaming || state.compacting {
+        let event = AppEvent::SystemNotice {
+            conversation_id: Some(conversation.id.clone()),
+            level: NoticeLevel::Info,
+            message: "Compaction unavailable while a turn is in progress.".to_string(),
+        };
+        let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: guard notice before async spawn
+        return;
+    }
+
+    let first_kept = match purpose {
+        CompactionPurpose::Inline | CompactionPurpose::SwitchAfter { .. } => {
+            match crate::domain::services::compaction::first_kept_message_id(conversation) {
+                Some(id) => Some(id),
+                None => {
+                    let event = AppEvent::SystemNotice {
+                        conversation_id: Some(conversation.id.clone()),
+                        level: NoticeLevel::Info,
+                        message: "Not enough conversation history to compact.".to_string(),
+                    };
+                    let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: guard notice before async spawn
+                    return;
+                }
+            }
+        }
+        CompactionPurpose::Carryover => None,
+    };
+
+    let pre_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
+    let history_text = match &purpose {
+        CompactionPurpose::Inline => {
+            let cw = active_context_window(app_state, router, state, config);
+            crate::domain::services::compaction::build_compaction_prompt_input(
+                conversation,
+                first_kept.as_deref().unwrap_or(""),
+                cw.max(1),
+            )
+        }
+        CompactionPurpose::SwitchAfter {
+            provider_id,
+            model_id,
+        } => {
+            // Budget the summary against the target model's context window (team decision)
+            let cw = app_state
+                .provider_registry
+                .get_model(provider_id, model_id)
+                .map_or(0, |m| m.context_window);
+            crate::domain::services::compaction::build_compaction_prompt_input(
+                conversation,
+                first_kept.as_deref().unwrap_or(""),
+                cw.max(1),
+            )
+        }
+        CompactionPurpose::Carryover => {
+            // Summarize entire conversation for carryover
+            let cw = active_context_window(app_state, router, state, config);
+            crate::domain::services::compaction::build_compaction_prompt_input(
+                conversation,
+                "", // empty boundary => not found => boundary = messages.len() => summarize all
+                cw.max(1),
+            )
+        }
+    };
+
+    state.compacting = true;
+    let event = AppEvent::SystemNotice {
+        conversation_id: Some(conversation.id.clone()),
+        level: NoticeLevel::Info,
+        message: "Compacting context…".to_string(),
+    };
+    let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: guard notice before async spawn
+
+    spawn_compaction(
+        provider.clone(),
+        effective_model(state, config).to_string(),
+        history_text,
+        conversation.id.clone(),
+        first_kept,
+        pre_tokens,
+        purpose,
+        domain_tx.clone(),
+    );
+}
+
+/// Story 7.4: spawn a detached compaction task.
+fn spawn_compaction(
+    provider: Arc<dyn StreamingProvider>,
+    model: String,
+    history_text: String,
+    conversation_id: String,
+    first_kept_message_id: Option<String>,
+    pre_tokens: u32,
+    purpose: CompactionPurpose,
+    domain_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+) {
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            BACKGROUND_TASK_TIMEOUT,
+            generate_compaction_summary(&*provider, &model, &history_text),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(summary)) => {
+                let event = AppEvent::CompactionComplete {
+                    conversation_id,
+                    summary,
+                    first_kept_message_id,
+                    pre_tokens,
+                    purpose,
+                };
+                let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: async round-trip pattern (mirrors TitleGenerated)
+            }
+            Ok(Err(e)) => {
+                let event = AppEvent::CompactionFailed {
+                    conversation_id,
+                    reason: format!("{}", e),
+                    purpose,
+                };
+                let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: async round-trip pattern (mirrors TitleGenerated)
+            }
+            Err(_) => {
+                let event = AppEvent::CompactionFailed {
+                    conversation_id,
+                    reason: "Compaction timed out".to_string(),
+                    purpose,
+                };
+                let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: async round-trip pattern (mirrors TitleGenerated)
+            }
+        }
+    });
 }
 
 /// Post-process a generated title: trim whitespace, strip surrounding quotes,
@@ -8758,6 +9356,18 @@ pub fn build_slash_suggestions_ordered(
 
 fn effective_model<'a>(state: &'a TuiState, config: &'a AppConfig) -> &'a str {
     state.selected_model.as_deref().unwrap_or(&config.model)
+}
+
+fn active_context_window(
+    app_state: &crate::infrastructure::runtime::app_state::AppState,
+    router: &crate::adapters::provider::ProviderRouter,
+    state: &TuiState,
+    config: &AppConfig,
+) -> u32 {
+    app_state
+        .provider_registry
+        .get_model(&router.active_delegate_id(), effective_model(state, config))
+        .map_or(0, |m| m.context_window)
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -9493,6 +10103,7 @@ mod tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         }
     }
 

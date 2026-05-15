@@ -57,6 +57,7 @@ fn make_forked_conversation(id: &str, parent_id: &str) -> Conversation {
             message_index: 2,
             checkpoint_id: CheckpointId(2),
         }),
+        compaction: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn make_plain_conversation(id: &str) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

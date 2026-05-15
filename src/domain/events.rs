@@ -47,6 +47,20 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         title: String,
     },
+    /// Compaction completed successfully.
+    CompactionComplete {
+        conversation_id: ConversationId,
+        summary: String,
+        first_kept_message_id: Option<String>,
+        pre_tokens: u32,
+        purpose: CompactionPurpose,
+    },
+    /// Compaction failed.
+    CompactionFailed {
+        conversation_id: ConversationId,
+        reason: String,
+        purpose: CompactionPurpose,
+    },
     /// AskUserQuestion tool call — display question card and send answer via oneshot.
     AskUserQuestion {
         conversation_id: ConversationId,
@@ -268,6 +282,17 @@ pub enum DomainKey {
     CtrlT,
     CtrlU,
     CtrlX,
+}
+
+/// Purpose of a compaction operation.
+#[derive(Debug, Clone)]
+pub enum CompactionPurpose {
+    Inline,
+    Carryover,
+    SwitchAfter {
+        provider_id: String,
+        model_id: String,
+    },
 }
 
 /// Payload for domain-originated events (placeholder for future stories).

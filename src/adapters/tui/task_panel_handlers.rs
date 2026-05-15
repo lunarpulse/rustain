@@ -630,6 +630,7 @@ mod tests {
             usage: None,
             plans: HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         conv.plans.insert(plan_id.to_string(), plan);
         (conv, plan_id)

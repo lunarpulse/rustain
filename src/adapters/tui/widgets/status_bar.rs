@@ -3,6 +3,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_index;
+use crate::adapters::tui::widgets::model_selector::humanize_ctx;
 use crate::domain::models::{PermissionMode, StatusState, UsageInfo};
 
 /// Render the status bar with model name, current status, scroll position, and permission mode.
@@ -20,6 +21,7 @@ pub fn render(
     viewport_height: u16,
     permission_mode: PermissionMode,
     token_usage: Option<&UsageInfo>,
+    context_window: u32,
     has_project_context: bool,
     session_title: Option<&str>,
     multiline_mode: bool,
@@ -126,6 +128,29 @@ pub fn render(
         left_spans.push(Span::styled(
             format_token_usage(usage),
             Style::default().fg(fg),
+        ));
+    }
+
+    // Context window ratio (Story 7.4 AC1/AC2)
+    if context_window > 0 {
+        let used = token_usage.map_or(0, |u| u.input_tokens);
+        let pct = used.saturating_mul(100) / context_window;
+        let ctx_color = if pct >= 95 {
+            theme.colors.error
+        } else if pct >= 80 {
+            theme.colors.warning
+        } else {
+            theme.colors.status_fg
+        };
+        left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+        left_spans.push(Span::styled(
+            format!(
+                "ctx: {}/{} ({}%)",
+                humanize_ctx(used),
+                humanize_ctx(context_window),
+                pct
+            ),
+            Style::default().fg(ctx_color),
         ));
     }
 

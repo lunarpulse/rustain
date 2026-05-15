@@ -79,6 +79,13 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "compact".to_string(),
+                description: "Summarize and compact the conversation to free context space"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

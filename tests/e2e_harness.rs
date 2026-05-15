@@ -208,6 +208,7 @@ impl TestHarness {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
 
         let (reducer, clock) = test_reducer_state(0);
@@ -280,6 +281,7 @@ impl TestHarness {
                         viewport_height,
                         PermissionMode::Normal,
                         None, // token_usage
+                        0,    // context_window
                         has_project_context,
                         None, // session_title
                         multiline_mode,

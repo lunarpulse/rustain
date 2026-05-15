@@ -351,6 +351,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 24,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false,

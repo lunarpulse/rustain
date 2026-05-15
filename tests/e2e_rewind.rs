@@ -74,6 +74,7 @@ fn make_conversation_5_messages() -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn make_conversation_5_messages_with_id(id: String) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 
@@ -1409,6 +1411,7 @@ fn make_mixed_conversation_n(n_messages: usize) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

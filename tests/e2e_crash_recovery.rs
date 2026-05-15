@@ -490,6 +490,7 @@ async fn test_e2e_crash_detection_full_cycle() {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
 
     // Step 1: Mark session in-flight (event loop start)
@@ -546,6 +547,7 @@ async fn test_e2e_recovery_n_saves_clean_exit() {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
 
     // Fix #8: should use save_conversation_with_exit(true)

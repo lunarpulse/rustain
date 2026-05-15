@@ -266,6 +266,7 @@ impl ConversationImporter for ClaudeCodeImporter {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
 
         // Write conversation + initial SessionMeta (imported_from: None)

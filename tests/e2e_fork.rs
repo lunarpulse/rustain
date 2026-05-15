@@ -70,6 +70,7 @@ fn make_conversation_5_messages() -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 
@@ -259,6 +260,7 @@ fn test_e2e_fork_tab_manager_create_tab_with_conversation() {
             message_index: 0,
             checkpoint_id: CheckpointId(0),
         }),
+        compaction: None,
     };
     let forked_id = forked_conv.id.clone();
 
@@ -714,6 +716,7 @@ async fn test_e2e_fork_empty_conversation_returns_error() {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
     let source_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();

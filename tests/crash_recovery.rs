@@ -58,6 +58,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
         }),
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

@@ -2989,6 +2989,7 @@ mod parts_aware_tests {
             usage: None,
             plans: HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let theme = Theme::dark();
         let streaming = StreamingState::default();
@@ -3177,6 +3178,7 @@ mod parts_aware_tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let view_state = ViewState::default();
         let mut trs = TabRenderState::default();
@@ -3222,6 +3224,7 @@ mod parts_aware_tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let view_state = ViewState::default();
         let mut trs = TabRenderState::default();
@@ -3276,6 +3279,7 @@ mod parts_aware_tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let mut view_state = ViewState::default();
         view_state.set_focused_turn(Some(turn2.id.clone()));

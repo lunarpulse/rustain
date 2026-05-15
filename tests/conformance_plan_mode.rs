@@ -101,6 +101,7 @@ fn make_conv(assistant_turns: usize) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

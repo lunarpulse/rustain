@@ -379,14 +379,14 @@ fn test_y_confirms_context_warning() {
 
     let action = h.type_char('y');
     match action {
-        InputAction::SwitchModelProvider {
+        InputAction::CompactThenSwitchModel {
             provider_id,
             model_id,
         } => {
-            assert_eq!(provider_id.as_deref(), Some("anthropic"));
+            assert_eq!(provider_id, "anthropic");
             assert_eq!(model_id, "claude-opus-4");
         }
-        other => panic!("Expected SwitchModelProvider after y, got {:?}", other),
+        other => panic!("Expected CompactThenSwitchModel after y, got {:?}", other),
     }
     assert!(h.state.model_selector.pending_context_warning.is_none());
 }

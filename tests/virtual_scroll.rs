@@ -41,6 +41,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 
@@ -481,6 +482,7 @@ fn test_virtual_scroll_only_user_messages() {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
     let streaming = StreamingState::default();
     let theme = Theme::dark();
@@ -583,6 +585,7 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

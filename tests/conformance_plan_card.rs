@@ -75,6 +75,7 @@ fn make_conv(messages: Vec<ChatMessage>) -> Conversation {
         usage: None,
         plans: HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

@@ -1992,6 +1992,7 @@ impl StoragePort for FileSystemStorage {
                 message_index,
                 checkpoint_id: checkpoint,
             }),
+            compaction: None,
         };
 
         // Collect unique image refs from the truncated range so we can hand a
@@ -2718,6 +2719,7 @@ mod tests {
             turns: Vec::new(),
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         }
     }
 
@@ -3837,6 +3839,7 @@ mod tests {
             turns: Vec::new(),
             plans,
             fork_source: None,
+            compaction: None,
         };
 
         storage.save_conversation(&source).await.unwrap();
@@ -3955,6 +3958,7 @@ mod tests {
             turns: Vec::new(),
             plans,
             fork_source: None,
+            compaction: None,
         };
 
         storage.save_conversation(&conv).await.unwrap();

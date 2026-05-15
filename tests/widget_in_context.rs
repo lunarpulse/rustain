@@ -36,6 +36,7 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn render_full_layout(
                 app_layout.chat_pane.height,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false, // multiline_mode
@@ -279,6 +281,7 @@ fn test_permission_prompt_in_full_layout() {
                 app_layout.chat_pane.height,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false, // multiline_mode
@@ -379,6 +382,7 @@ fn test_ask_user_question_in_full_layout() {
                 app_layout.chat_pane.height,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false, // multiline_mode

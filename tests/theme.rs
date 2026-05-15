@@ -403,6 +403,7 @@ fn test_tui_renders_with_theme_colors() {
                     app_layout.chat_pane.height,
                     rustain::domain::models::PermissionMode::Normal,
                     state.token_usage.as_ref(),
+                    0, // context_window
                     state.has_project_context,
                     None,
                     state.multiline_mode,

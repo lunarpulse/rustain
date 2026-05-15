@@ -103,6 +103,7 @@ fn make_conversation() -> Conversation {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 
@@ -419,6 +420,7 @@ fn test_title_guard_skips_when_title_exists() {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
 
     let trigger_title_generation = true;
@@ -441,6 +443,7 @@ fn test_title_guard_allows_when_title_empty() {
         usage: None,
         plans: std::collections::HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
 
     let trigger_title_generation = true;

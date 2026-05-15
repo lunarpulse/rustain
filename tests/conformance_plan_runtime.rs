@@ -60,6 +60,7 @@ fn make_conv_with_plan(plan: Plan) -> Conversation {
         usage: None,
         plans: HashMap::new(),
         fork_source: None,
+        compaction: None,
     };
     conv.plans.insert(plan_id, plan);
     conv

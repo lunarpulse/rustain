@@ -32,6 +32,7 @@ fn make_conversation(messages: Vec<ChatMessage>, turns: Vec<Turn>) -> Conversati
         usage: None,
         plans: HashMap::new(),
         fork_source: None,
+        compaction: None,
     }
 }
 

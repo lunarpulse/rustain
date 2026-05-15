@@ -21,6 +21,7 @@ fn render_status_bar(
     viewport_height: u16,
     permission_mode: PermissionMode,
     token_usage: Option<&UsageInfo>,
+    context_window: u32,
     has_project_context: bool,
     session_title: Option<&str>,
 ) -> Terminal<TestBackend> {
@@ -34,6 +35,7 @@ fn render_status_bar(
         viewport_height,
         permission_mode,
         token_usage,
+        context_window,
         has_project_context,
         session_title,
         false,
@@ -51,6 +53,7 @@ fn render_status_bar_ml(
     viewport_height: u16,
     permission_mode: PermissionMode,
     token_usage: Option<&UsageInfo>,
+    context_window: u32,
     has_project_context: bool,
     session_title: Option<&str>,
     multiline_mode: bool,
@@ -75,6 +78,7 @@ fn render_status_bar_ml(
                 viewport_height,
                 permission_mode,
                 token_usage,
+                context_window,
                 has_project_context,
                 session_title,
                 multiline_mode,
@@ -104,6 +108,7 @@ fn test_status_bar_shows_model_name() {
         20,
         PermissionMode::Normal,
         None,
+        0,
         false,
         None,
     );
@@ -128,6 +133,7 @@ fn test_status_bar_shows_normal_mode() {
         20,
         PermissionMode::Normal,
         None,
+        0,
         false,
         None,
     );
@@ -151,6 +157,7 @@ fn test_status_bar_shows_yolo_mode() {
         20,
         PermissionMode::Yolo,
         None,
+        0,
         false,
         None,
     );
@@ -175,6 +182,7 @@ fn test_status_bar_scroll_position() {
         20,
         PermissionMode::Normal,
         None,
+        0,
         false,
         None,
     );
@@ -199,6 +207,7 @@ fn test_status_bar_streaming_indicator() {
         20,
         PermissionMode::Normal,
         None,
+        0,
         false,
         None,
     );
@@ -229,6 +238,7 @@ fn test_status_bar_token_usage() {
         20,
         PermissionMode::Normal,
         Some(&usage),
+        0,
         false,
         None,
     );
@@ -256,6 +266,7 @@ fn test_status_bar_compact_width() {
         12,
         PermissionMode::Normal,
         None,
+        0,
         false,
         None,
     );
@@ -293,6 +304,7 @@ fn test_status_bar_shows_active_agent() {
                 20,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false,
@@ -337,6 +349,7 @@ fn test_status_bar_hides_agent_when_none() {
                 20,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false,
@@ -381,6 +394,7 @@ fn test_status_bar_agent_name_truncated() {
                 20,
                 PermissionMode::Normal,
                 None,
+                0, // context_window
                 false,
                 None,
                 false,
@@ -404,4 +418,154 @@ fn test_status_bar_agent_name_truncated() {
         !text.contains("a-very-long-agent-name-that-exceeds-twenty-four"),
         "Status bar should truncate long agent name"
     );
+}
+
+// ── Story 7.4 context-window segment tests ─────────────────────
+
+// Covers: AC1 — ctx: segment renders when context_window > 0
+#[test]
+fn test_status_bar_shows_context_window_ratio() {
+    let terminal = render_status_bar(
+        120,
+        "test-model",
+        &StatusState::Idle,
+        0,
+        &[],
+        0,
+        20,
+        PermissionMode::Normal,
+        Some(&UsageInfo {
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        }),
+        200_000,
+        false,
+        None,
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(
+        text.contains("ctx:"),
+        "Status bar should show ctx: segment when context_window > 0, got: {:?}",
+        text.trim()
+    );
+    assert!(
+        text.contains("12k/200k"),
+        "Status bar should show humanized ratio, got: {:?}",
+        text.trim()
+    );
+    assert!(
+        text.contains("(6%)"),
+        "Status bar should show percentage, got: {:?}",
+        text.trim()
+    );
+}
+
+// Covers: AC1 — ctx: segment omitted when context_window == 0
+#[test]
+fn test_status_bar_hides_context_window_when_zero() {
+    let terminal = render_status_bar(
+        120,
+        "test-model",
+        &StatusState::Idle,
+        0,
+        &[],
+        0,
+        20,
+        PermissionMode::Normal,
+        Some(&UsageInfo {
+            input_tokens: 12_000,
+            output_tokens: 3_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        }),
+        0, // unknown model / no context window
+        false,
+        None,
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(
+        !text.contains("ctx:"),
+        "Status bar should omit ctx: segment when context_window == 0, got: {:?}",
+        text.trim()
+    );
+}
+
+// Covers: AC2 — threshold color behavior is applied (text presence only; color verified via manual QA)
+#[test]
+fn test_status_bar_context_window_threshold_text() {
+    // <80% — normal text present
+    let terminal = render_status_bar(
+        120,
+        "test-model",
+        &StatusState::Idle,
+        0,
+        &[],
+        0,
+        20,
+        PermissionMode::Normal,
+        Some(&UsageInfo {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        }),
+        200_000, // 5%
+        false,
+        None,
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(text.contains("(5%)"), "Should show 5% ratio");
+
+    // 80–95% — warning text present
+    let terminal = render_status_bar(
+        120,
+        "test-model",
+        &StatusState::Idle,
+        0,
+        &[],
+        0,
+        20,
+        PermissionMode::Normal,
+        Some(&UsageInfo {
+            input_tokens: 170_000,
+            output_tokens: 1_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        }),
+        200_000, // 85%
+        false,
+        None,
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(text.contains("(85%)"), "Should show 85% ratio");
+
+    // >=95% — error text present
+    let terminal = render_status_bar(
+        120,
+        "test-model",
+        &StatusState::Idle,
+        0,
+        &[],
+        0,
+        20,
+        PermissionMode::Normal,
+        Some(&UsageInfo {
+            input_tokens: 196_000,
+            output_tokens: 1_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        }),
+        200_000, // 98%
+        false,
+        None,
+    );
+    let text = common::buffer_text(&terminal);
+    assert!(text.contains("(98%)"), "Should show 98% ratio");
 }

@@ -343,6 +343,11 @@ pub enum InputAction {
         provider_id: Option<String>,
         model_id: String,
     },
+    /// Compact context then switch model (Story 7.4 AC13).
+    CompactThenSwitchModel {
+        provider_id: String,
+        model_id: String,
+    },
 }
 
 /// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
@@ -2249,6 +2254,13 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /compact: summarize and compact conversation — Story 7.4 AC4
+            if cmd_name == "compact" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // /deactivate [name]: deactivate active skill(s) — Story 5-2 AC5
             if cmd_name == "deactivate" {
                 return InputAction::ExecuteCommand {
@@ -2637,10 +2649,11 @@ fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
     if state.model_selector.pending_context_warning.is_some() {
         return match c.to_ascii_lowercase() {
             'y' => {
+                // Story 7.4: the 7.2 advisory-warning seam is now wired to real compaction.
                 let warning = state.model_selector.pending_context_warning.take();
                 if let Some(w) = warning {
-                    return InputAction::SwitchModelProvider {
-                        provider_id: Some(w.provider_id),
+                    return InputAction::CompactThenSwitchModel {
+                        provider_id: w.provider_id,
                         model_id: w.model_id,
                     };
                 }

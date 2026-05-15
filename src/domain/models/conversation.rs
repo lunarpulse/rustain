@@ -94,7 +94,7 @@ pub fn generate_message_id() -> String {
 }
 
 /// Persistable conversation data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
     pub id: String,
@@ -116,6 +116,7 @@ pub struct Conversation {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub plans: std::collections::HashMap<String, super::plan::Plan>,
     pub fork_source: Option<ForkSource>,
+    pub compaction: Option<CompactionState>,
     // v0.5+: pub active_agent: Option<AgentDefinition>,
     // v1.0+: pub enabled_mcp_servers: Vec<String>,
     // v1.0+: pub external_context_paths: Vec<String>,
@@ -301,6 +302,16 @@ fn default_checkpoint_id() -> CheckpointId {
     CheckpointId(0)
 }
 
+/// State tracking a compaction operation on a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionState {
+    pub summary: String,
+    pub first_kept_message_id: String,
+    pub compacted_at: i64,
+    pub pre_compaction_tokens: u32,
+}
+
 /// Generate a unique conversation ID using nanoid.
 pub fn generate_conversation_id() -> String {
     nanoid::nanoid!()
@@ -334,6 +345,9 @@ pub struct PersistedConversation {
     pub usage: Option<UsageInfo>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub plans: std::collections::HashMap<String, super::plan::Plan>,
+    /// Story 7.4: compaction state for context-window management.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionState>,
     /// Crash detection flag: `false` while session is in-flight, `true` after graceful shutdown.
     /// Defaults to `false` for forward compat (old files trigger recovery prompt — safe default).
     #[serde(default)]
@@ -358,6 +372,7 @@ impl PersistedConversation {
             last_response_at: conv.last_response_at,
             usage: conv.usage.clone(),
             plans: conv.plans.clone(),
+            compaction: conv.compaction.clone(),
             clean_exit,
         }
     }
@@ -375,6 +390,7 @@ impl PersistedConversation {
             usage: self.usage,
             plans: self.plans,
             fork_source: self.fork_source,
+            compaction: self.compaction,
         };
 
         // Legacy-deserialization fallback: if `turns` is empty but `messages` is populated
@@ -575,6 +591,7 @@ mod tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         let plan = Plan {
             id: "p1".to_string(),

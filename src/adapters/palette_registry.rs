@@ -433,7 +433,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 18);
+        assert_eq!(reg.all_entries().len(), 19);
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/deactivate"));
@@ -449,7 +449,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 18);
+        assert_eq!(reg.all_entries().len(), 19);
     }
 
     #[test]
@@ -465,19 +465,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 18);
+        assert_eq!(reg.slash_entries.len(), 19);
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 19);
+        assert_eq!(reg.all_entries().len(), 20);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 19);
+        assert_eq!(reg.all_entries().len(), 20);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 20);
+        assert_eq!(reg.all_entries().len(), 21);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 20);
+        assert_eq!(reg.all_entries().len(), 21);
     }
 }

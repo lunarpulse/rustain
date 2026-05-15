@@ -439,6 +439,7 @@ mod tests {
             usage: None,
             plans: std::collections::HashMap::new(),
             fork_source: None,
+            compaction: None,
         };
         storage.save_conversation(&existing_conv).await.unwrap();
         let mut existing_meta = storage
