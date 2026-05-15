@@ -86,6 +86,8 @@ pub enum OverlayType {
     /// Bookmark list bottom panel (' key).
     // Covers: UX-DR91, Story 4-4 AC10
     BookmarkList,
+    /// Usage / cost panel (Ctrl+X, U). Story 7.5 AC3 (UX-DR111).
+    UsagePanel,
     /// Inline autocomplete popup (/ or @).
     // Covers: UX-DR75
     Autocomplete(super::autocomplete::AutocompleteKind),

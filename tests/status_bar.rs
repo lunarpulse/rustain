@@ -88,6 +88,7 @@ fn render_status_bar_ml(
                 None,
                 None,
                 false,
+                None, // daily_budget (Story 7.5)
             );
         })
         .unwrap();
@@ -314,6 +315,7 @@ fn test_status_bar_shows_active_agent() {
                 None,
                 None,
                 false,
+                None, // daily_budget (Story 7.5)
             );
         })
         .unwrap();
@@ -359,6 +361,7 @@ fn test_status_bar_hides_agent_when_none() {
                 None,
                 None,
                 false,
+                None, // daily_budget (Story 7.5)
             );
         })
         .unwrap();
@@ -404,6 +407,7 @@ fn test_status_bar_agent_name_truncated() {
                 None,
                 None,
                 false,
+                None, // daily_budget (Story 7.5)
             );
         })
         .unwrap();

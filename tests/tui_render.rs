@@ -68,6 +68,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     None,
                     None,
                     None, false,
+                    None, // daily_budget (Story 7.5)
                 );
                 input_box::render(
                     frame,

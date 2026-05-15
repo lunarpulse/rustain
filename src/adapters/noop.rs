@@ -191,6 +191,14 @@ impl UsageLedgerPort for NoOpUsageLedger {
     async fn append(&self, _entry: UsageLedgerEntry) -> Result<(), StorageError> {
         Ok(())
     }
+
+    async fn read_session(&self, _session_id: &str) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_since(&self, _since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 // ── ApprovalPersistencePort ─────────────────────────────────────

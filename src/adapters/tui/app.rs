@@ -348,6 +348,14 @@ pub enum InputAction {
         provider_id: String,
         model_id: String,
     },
+    /// Open the usage/cost panel overlay (Story 7.5 AC3).
+    OpenUsagePanel,
+    /// Daily-budget warning — user picked "Continue anyway" (Story 7.5 AC5).
+    FeedbackBudgetContinue,
+    /// Daily-budget warning — user picked "Switch to cheaper model" (Story 7.5 AC5).
+    FeedbackBudgetSwitchCheaper,
+    /// Daily-budget warning — user picked "Pause until tomorrow" (Story 7.5 AC5/AC7).
+    FeedbackBudgetPause,
 }
 
 /// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
@@ -360,6 +368,9 @@ fn feedback_action_to_input_action(action: crate::domain::models::FeedbackAction
         FeedbackAction::Compact => InputAction::FeedbackCompact,
         FeedbackAction::StartFresh => InputAction::FeedbackStartFresh,
         FeedbackAction::Dismiss => InputAction::FeedbackDismiss,
+        FeedbackAction::BudgetContinue => InputAction::FeedbackBudgetContinue,
+        FeedbackAction::BudgetSwitchCheaper => InputAction::FeedbackBudgetSwitchCheaper,
+        FeedbackAction::BudgetPause => InputAction::FeedbackBudgetPause,
         FeedbackAction::Custom(_) => {
             tracing::warn!("Custom feedback action dispatched via chord key — ignoring");
             InputAction::Consumed
@@ -544,6 +555,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return handle_model_selector_char(state, c);
     }
 
+    // Usage panel overlay (Story 7.5 AC3): all chars consumed; arrows handled in key path.
+    if state.focus == FocusState::Overlay(OverlayType::UsagePanel) {
+        // No char-action mappings yet — just consume.
+        let _ = c;
+        return InputAction::Consumed;
+    }
+
     // Which-key: single char lookup in chord map
     // Covers: UX-DR19
     if state.which_key.active {
@@ -574,6 +592,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 ChordAction::OpenModelSelector => {
                     state.which_key.dismiss();
                     return InputAction::OpenModelSelector;
+                }
+                ChordAction::OpenUsagePanel => {
+                    state.which_key.dismiss();
+                    return InputAction::OpenUsagePanel;
                 }
             }
             state.needs_redraw = true;
@@ -1535,6 +1557,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Story 7.2 AC1, AC3
     if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
         return handle_model_selector_key(state, key);
+    }
+
+    // Usage panel overlay (Story 7.5 AC3): Esc / Ctrl+C dismisses, arrows cycle sections.
+    if state.focus == FocusState::Overlay(OverlayType::UsagePanel) {
+        return handle_usage_panel_key(state, key);
     }
 
     // Command palette overlay handling — intercept keys when palette is active
@@ -2636,6 +2663,33 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
         }
         DomainKey::CtrlC => {
             state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+/// Handle special keys while the usage panel overlay is active (Story 7.5 AC3).
+/// Esc/Ctrl+C dismisses; Up/Down cycles the visual `selected_section` highlight.
+fn handle_usage_panel_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    match key {
+        DomainKey::Esc | DomainKey::CtrlC => {
+            state.focus = state.usage_panel.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Up => {
+            if state.usage_panel.selected_section > 0 {
+                state.usage_panel.selected_section -= 1;
+            } else {
+                state.usage_panel.selected_section = 3;
+            }
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        DomainKey::Down => {
+            state.usage_panel.selected_section = (state.usage_panel.selected_section + 1) % 4;
             state.needs_redraw = true;
             InputAction::Consumed
         }

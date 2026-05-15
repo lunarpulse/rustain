@@ -361,6 +361,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 None,
                 None,
                 false,
+                None, // daily_budget (Story 7.5)
             );
         })
         .unwrap();

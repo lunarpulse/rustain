@@ -19,12 +19,27 @@ pub struct UsageInfo {
 
 /// Token usage triple for the ledger — distinct from the raw provider
 /// `UsageInfo` which carries cache/reasoning breakdowns.
+///
+/// Story 7.5 AC8: extended with optional cache/reasoning fields so cost
+/// arithmetic can charge each token class at its correct rate. Legacy ledger
+/// lines (pre-7.5) deserialize with all three new fields as `None` via
+/// `#[serde(default)]` — backward-compat is asserted by the
+/// `flat_file::ledger_append_roundtrip` test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub parent_ctx: u32,
+    /// Anthropic cache-write tokens (Story 7.5 AC8). `None` for non-Anthropic adapters.
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u32>,
+    /// Anthropic cache-read tokens (Story 7.5 AC8). `None` for non-Anthropic adapters.
+    #[serde(default)]
+    pub cache_read_tokens: Option<u32>,
+    /// Reasoning tokens (extended thinking) (Story 7.5 AC8).
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
 }
 
 /// A single entry in the usage ledger — one row per provider call.

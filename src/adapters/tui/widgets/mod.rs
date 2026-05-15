@@ -28,4 +28,5 @@ pub mod task_detail;
 pub mod task_panel;
 pub mod task_skip_cascade_card;
 pub mod tool_block;
+pub mod usage_panel;
 pub mod which_key_bar;

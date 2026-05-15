@@ -6,6 +6,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+use crate::adapters::budget::BudgetStateStore;
 use crate::adapters::provider::ProviderRegistry;
 use crate::domain::models::SandboxPolicy;
 use crate::domain::ports::{StreamingProvider, UsageLedgerPort};
@@ -29,9 +30,12 @@ pub struct AppState {
     pub provider_registry: Arc<ProviderRegistry>,
     /// Usage ledger for per-call token tracking (Story 7.1c).
     pub usage_ledger: Arc<dyn UsageLedgerPort>,
+    /// Budget-pause persistence (Story 7.5 AC7).
+    pub budget_state_store: Arc<BudgetStateStore>,
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         raw_capacity: usize,
         approval_runtime: Arc<ApprovalRuntime>,
@@ -41,6 +45,7 @@ impl AppState {
         provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
         provider_registry: Arc<ProviderRegistry>,
         usage_ledger: Arc<dyn UsageLedgerPort>,
+        budget_state_store: Arc<BudgetStateStore>,
     ) -> (
         Self,
         tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
@@ -57,6 +62,7 @@ impl AppState {
                 provider,
                 provider_registry,
                 usage_ledger,
+                budget_state_store,
             },
             domain_rx,
         )

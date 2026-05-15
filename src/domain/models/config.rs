@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::budget::BudgetConfig;
+use crate::domain::models::pricing::PricingConfig;
+
 /// Configuration for a single LLM provider.
 ///
 /// `api_key_env` names an environment variable — the adapter reads
@@ -250,6 +253,13 @@ pub struct AppConfig {
     /// Tiered model router configuration. Story 7.1c, AC2.
     #[serde(default)]
     pub router: crate::domain::models::router::RouterConfig,
+    /// Per-model pricing rates keyed by `model_id`. Story 7.5 AC1.
+    /// Missing entries fall back to `n/a` cost display (AC6).
+    #[serde(default = "AppConfig::default_pricing_catalog")]
+    pub pricing: std::collections::HashMap<String, PricingConfig>,
+    /// Daily budget configuration. Story 7.5 AC5.
+    #[serde(default)]
+    pub budget: BudgetConfig,
 }
 
 impl AppConfig {
@@ -267,6 +277,132 @@ impl AppConfig {
     }
     fn default_snapshot_retention_count() -> Option<usize> {
         Some(100)
+    }
+
+    /// Curated default pricing catalog (Story 7.5 AC1; Dev Notes §"Default
+    /// pricing catalog"). USD per 1,000,000 tokens, verified May 2026.
+    ///
+    /// Local LLMs (Ollama, llama.cpp via `OpenAiCompatibleVariant::Custom`)
+    /// ship NO catalog entry — `cost_for_entry` returns `None` for them and
+    /// the panel renders `n/a` per AC6.
+    pub fn default_pricing_catalog() -> std::collections::HashMap<String, PricingConfig> {
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        // Anthropic
+        m.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            PricingConfig {
+                input_per_million: 3.00,
+                output_per_million: 15.00,
+                cache_creation_per_million: Some(3.75),
+                cache_read_per_million: Some(0.30),
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "claude-haiku-4-5-20251001".to_string(),
+            PricingConfig {
+                input_per_million: 0.80,
+                output_per_million: 4.00,
+                cache_creation_per_million: Some(1.00),
+                cache_read_per_million: Some(0.08),
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "claude-opus-4-7".to_string(),
+            PricingConfig {
+                input_per_million: 15.00,
+                output_per_million: 75.00,
+                cache_creation_per_million: Some(18.75),
+                cache_read_per_million: Some(1.50),
+                reasoning_per_million: None,
+            },
+        );
+        // OpenAI
+        m.insert(
+            "gpt-4o".to_string(),
+            PricingConfig {
+                input_per_million: 2.50,
+                output_per_million: 10.00,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "gpt-4o-mini".to_string(),
+            PricingConfig {
+                input_per_million: 0.15,
+                output_per_million: 0.60,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "o1".to_string(),
+            PricingConfig {
+                input_per_million: 15.00,
+                output_per_million: 60.00,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "o3-mini".to_string(),
+            PricingConfig {
+                input_per_million: 1.10,
+                output_per_million: 4.40,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        // Google
+        m.insert(
+            "gemini-2.0-flash".to_string(),
+            PricingConfig {
+                input_per_million: 0.10,
+                output_per_million: 0.40,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "gemini-2.5-pro-preview-03-25".to_string(),
+            PricingConfig {
+                input_per_million: 1.25,
+                output_per_million: 5.00,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        // DeepSeek
+        m.insert(
+            "deepseek-chat".to_string(),
+            PricingConfig {
+                input_per_million: 0.27,
+                output_per_million: 1.10,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        m.insert(
+            "deepseek-reasoner".to_string(),
+            PricingConfig {
+                input_per_million: 0.55,
+                output_per_million: 2.19,
+                cache_creation_per_million: None,
+                cache_read_per_million: None,
+                reasoning_per_million: None,
+            },
+        );
+        m
     }
 }
 
@@ -286,6 +422,8 @@ impl Default for AppConfig {
             mouse: MouseConfig::default(),
             tool_progress: ToolProgressConfig::default(),
             router: crate::domain::models::router::RouterConfig::default(),
+            pricing: Self::default_pricing_catalog(),
+            budget: BudgetConfig::default(),
         }
     }
 }
@@ -451,6 +589,73 @@ review = "flagship"
                 .get(&crate::domain::models::router::StepKind::Plan),
             Some(&crate::domain::models::router::ModelTier::Flagship)
         );
+    }
+
+    #[test]
+    fn app_config_pricing_roundtrip() {
+        let toml_input = r#"
+model = "test-model"
+
+[pricing."claude-sonnet-4-20250514"]
+inputPerMillion = 3.0
+outputPerMillion = 15.0
+"#;
+        let config: AppConfig = toml::from_str(toml_input).expect("deserialize pricing");
+        let p = config
+            .pricing
+            .get("claude-sonnet-4-20250514")
+            .expect("sonnet pricing");
+        assert_eq!(p.input_per_million, 3.0);
+        assert_eq!(p.output_per_million, 15.0);
+        assert_eq!(p.cache_creation_per_million, None);
+        assert_eq!(p.cache_read_per_million, None);
+        assert_eq!(p.reasoning_per_million, None);
+
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(
+            serialized.contains("inputPerMillion = 3.0"),
+            "serialized must round-trip inputPerMillion: {serialized}"
+        );
+        assert!(
+            serialized.contains("outputPerMillion = 15.0"),
+            "serialized must round-trip outputPerMillion: {serialized}"
+        );
+    }
+
+    #[test]
+    fn app_config_budget_roundtrip() {
+        let toml_input = r#"
+model = "test-model"
+
+[budget]
+dailyLimitUsd = 5.0
+"#;
+        let config: AppConfig = toml::from_str(toml_input).expect("deserialize budget");
+        assert_eq!(config.budget.daily_limit_usd, Some(5.0));
+
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(
+            serialized.contains("dailyLimitUsd = 5.0"),
+            "serialized must round-trip dailyLimitUsd: {serialized}"
+        );
+    }
+
+    #[test]
+    fn app_config_pricing_and_budget_defaults_when_missing() {
+        let toml_input = r#"model = "test-model""#;
+        let config: AppConfig = toml::from_str(toml_input).expect("deserialize");
+        // Pricing defaults to the curated catalog
+        assert!(
+            config.pricing.contains_key("claude-sonnet-4-20250514"),
+            "default pricing catalog must include claude-sonnet-4-20250514"
+        );
+        assert!(
+            config.pricing.contains_key("gpt-4o"),
+            "default pricing catalog must include gpt-4o"
+        );
+        // Budget defaults to no daily_limit_usd
+        assert_eq!(config.budget.daily_limit_usd, None);
+        assert_eq!(config.budget, BudgetConfig::default());
     }
 
     #[test]

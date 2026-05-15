@@ -67,6 +67,12 @@ pub async fn usage_ledger_path(session_id: &str) -> Result<PathBuf> {
     Ok(usage_dir().await?.join(format!("{}.jsonl", session_id)))
 }
 
+/// Path to the budget pause-state JSON file (Story 7.5 AC7).
+/// Sync since `data_dir()` already creates the parent dir; no need to async-create.
+pub fn budget_state_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("budget_state.json"))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

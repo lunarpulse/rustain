@@ -1,3 +1,4 @@
+pub mod clock_util;
 pub mod config;
 pub mod logging;
 pub mod paths;

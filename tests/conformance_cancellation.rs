@@ -249,6 +249,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         provider_swap.clone(),
         provider_registry,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
+        Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
     );
 
     app_state.session_cancel.cancel();

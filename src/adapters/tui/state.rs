@@ -726,6 +726,8 @@ pub enum ChordAction {
     ShowHelp,
     /// Open the model/provider selector overlay (Story 7.2 AC1).
     OpenModelSelector,
+    /// Open the usage/cost panel overlay (Story 7.5 AC3).
+    OpenUsagePanel,
     /// Not yet implemented — show feedback.
     Noop(String),
 }
@@ -870,6 +872,104 @@ impl ModelSelectorState {
 }
 
 impl Default for ModelSelectorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── UsagePanel (Story 7.5 AC3) ────────────────────────────────────────────
+
+/// One row in the panel's "Turn breakdown" section.
+#[derive(Debug, Clone)]
+pub struct TurnUsageRow {
+    pub turn_index: u32,
+    pub model: String,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    /// `None` when no pricing entry exists for the model (AC6 → "n/a").
+    pub cost_usd: Option<f64>,
+}
+
+/// Today's session aggregate (Story 7.5 AC3).
+#[derive(Debug, Clone, Default)]
+pub struct SessionUsageSummary {
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: Option<f64>,
+    pub task_count: u32,
+    pub elapsed_secs: i64,
+    pub cache_read_tokens: u64,
+    pub cache_total_tokens: u64,
+    pub cache_savings_usd: f64,
+}
+
+/// Daily budget warning state (Story 7.5 AC5).
+#[derive(Debug, Clone, Default)]
+pub struct DailyBudgetState {
+    pub spent_today_usd: f64,
+    pub limit_usd: f64,
+    pub computed_at_ms: i64,
+    pub dismissed_until_unix: i64,
+}
+
+impl DailyBudgetState {
+    pub fn percent(&self) -> u32 {
+        if self.limit_usd <= 0.0 {
+            return 0;
+        }
+        ((self.spent_today_usd / self.limit_usd) * 100.0).round() as u32
+    }
+}
+
+/// State for the usage/cost panel overlay (Ctrl+X, U). Story 7.5 AC3 / UX-DR111.
+/// Modelled on `ModelSelectorState` (open/dismiss + previous_focus).
+pub struct UsagePanelState {
+    pub active: bool,
+    pub previous_focus: Option<FocusState>,
+    /// Logical section cursor (0..4) — visual highlight only.
+    pub selected_section: usize,
+    pub turn_rows: Vec<TurnUsageRow>,
+    pub session_today: SessionUsageSummary,
+    pub per_model:
+        std::collections::BTreeMap<String, crate::domain::services::cost_calculator::ModelCost>,
+    pub missing_pricing_models: Vec<String>,
+    /// Context window snapshot at panel-open (in/out + window). Read from
+    /// `state.token_usage` / active model at open-time so the panel doesn't
+    /// poll providers.
+    pub context_used_tokens: u32,
+    pub context_window_tokens: u32,
+}
+
+impl UsagePanelState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            previous_focus: None,
+            selected_section: 0,
+            turn_rows: Vec::new(),
+            session_today: SessionUsageSummary::default(),
+            per_model: std::collections::BTreeMap::new(),
+            missing_pricing_models: Vec::new(),
+            context_used_tokens: 0,
+            context_window_tokens: 0,
+        }
+    }
+
+    /// Open the panel and stash the previous focus for Esc-dismiss.
+    pub fn open(&mut self, current_focus: FocusState) {
+        self.active = true;
+        self.previous_focus = Some(current_focus);
+        self.selected_section = 0;
+    }
+
+    /// Dismiss the panel, returning the focus to restore.
+    pub fn dismiss(&mut self) -> Option<FocusState> {
+        self.active = false;
+        self.previous_focus.take()
+    }
+}
+
+impl Default for UsagePanelState {
     fn default() -> Self {
         Self::new()
     }
@@ -1045,7 +1145,7 @@ impl WhichKeyState {
             't',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks),
         );
-        chord_map.insert('u', ChordAction::Noop("Usage/cost — Epic 7".to_string()));
+        chord_map.insert('u', ChordAction::OpenUsagePanel);
         chord_map.insert('w', ChordAction::Noop("Watch/monitor — future".to_string()));
         chord_map.insert('d', ChordAction::Noop("Dashboard — future".to_string()));
         chord_map.insert('?', ChordAction::ShowHelp);
@@ -1240,6 +1340,14 @@ pub struct TuiState {
     pub help_overlay: HelpOverlayState,
     /// Model/provider selector state (Ctrl+X, M) (Story 7.2).
     pub model_selector: ModelSelectorState,
+    /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
+    pub usage_panel: UsagePanelState,
+    /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
+    pub daily_budget: Option<DailyBudgetState>,
+    /// Captured resolved-model from `start_turn_inner`, consumed-and-cleared on
+    /// the first subsequent `ChunkAction::TurnComplete` to stamp `Turn.model`
+    /// (Story 7.5 AC1.5).
+    pub pending_resolved_model: Option<String>,
     /// Session-scoped active-model override (Story 7.2 AC3).
     /// `None` = use `config.model`. Runtime hot-swap — NOT a config mutation.
     pub selected_model: Option<String>,
@@ -1411,6 +1519,9 @@ impl TuiState {
             which_key: WhichKeyState::new(),
             help_overlay: HelpOverlayState::new(),
             model_selector: ModelSelectorState::new(),
+            usage_panel: UsagePanelState::new(),
+            daily_budget: None,
+            pending_resolved_model: None,
             selected_model: None,
             multiplexer_detected: false,
             is_vscode: false,

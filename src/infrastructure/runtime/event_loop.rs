@@ -40,7 +40,7 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, model_selector, reverse_search, sidebar, status_bar, which_key_bar,
+    input_box, model_selector, reverse_search, sidebar, status_bar, usage_panel, which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
 
@@ -140,6 +140,233 @@ fn clear_context_warning(state: &mut TuiState) {
     {
         state.active_feedback_id = None;
     }
+}
+
+/// Story 7.5 AC5: upsert a daily-budget warning feedback block when over the
+/// daily limit. Removes any prior `dailybudget-*` block first (at most one
+/// exists at a time). Suppressed when `unix_now <= dismissed_until_unix`.
+fn upsert_daily_budget_warning(
+    state: &mut TuiState,
+    budget: &crate::adapters::tui::state::DailyBudgetState,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static BUDGET_WARN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let now = crate::infrastructure::clock_util::now_unix();
+    let pct = budget.percent();
+    let paused = now <= budget.dismissed_until_unix;
+
+    if pct < 100 || paused {
+        clear_daily_budget_warning(state);
+        return;
+    }
+
+    // Remove any existing dailybudget-* block (at-most-one invariant)
+    state
+        .feedback_blocks
+        .retain(|id, _| !id.starts_with("dailybudget-"));
+    if state
+        .active_feedback_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("dailybudget-"))
+    {
+        state.active_feedback_id = None;
+    }
+
+    let fb_id = format!(
+        "dailybudget-{}",
+        BUDGET_WARN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let fb = FeedbackBlock {
+        id: fb_id.clone(),
+        level: FeedbackLevel::Error,
+        message: format!("Daily budget (${:.2}) reached.", budget.limit_usd),
+        actions: vec![
+            FeedbackAction::BudgetContinue,
+            FeedbackAction::BudgetSwitchCheaper,
+            FeedbackAction::BudgetPause,
+        ],
+    };
+    state.feedback_blocks.insert(fb_id.clone(), fb);
+    state.active_feedback_id = Some(fb_id);
+}
+
+/// Story 7.5 AC5: clear any daily-budget warning block.
+fn clear_daily_budget_warning(state: &mut TuiState) {
+    state
+        .feedback_blocks
+        .retain(|id, _| !id.starts_with("dailybudget-"));
+    if state
+        .active_feedback_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("dailybudget-"))
+    {
+        state.active_feedback_id = None;
+    }
+}
+
+/// Story 7.5 AC3: build the usage-panel state from today's ledger entries.
+/// Pure-ish: only I/O is `read_session` + `read_since` on the usage ledger.
+async fn open_usage_panel(
+    state: &mut TuiState,
+    conversation: &Conversation,
+    app_state: &AppState,
+    config: &crate::domain::models::AppConfig,
+    session_manager: &crate::domain::models::SessionManager,
+) {
+    use crate::adapters::tui::state::{SessionUsageSummary, TurnUsageRow};
+    use crate::domain::models::MessageRole;
+    use crate::domain::services::cost_calculator;
+    use crate::infrastructure::clock_util::{now_unix, today_start_unix_ms};
+
+    let since = today_start_unix_ms();
+    let entries_today = app_state
+        .usage_ledger
+        .read_since(since)
+        .await
+        .unwrap_or_default();
+
+    // Per-session entries for the current session (for turn-row join)
+    let session_id_opt = match session_manager.state() {
+        crate::domain::models::SessionState::Active { id } => Some(id.clone()),
+        _ => None,
+    };
+    let entries_session = match &session_id_opt {
+        Some(sid) => app_state
+            .usage_ledger
+            .read_session(sid)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let breakdown = cost_calculator::cost_breakdown(&entries_today, &config.pricing);
+    let total_in: u64 = entries_today.iter().map(|e| e.usage.tokens_in as u64).sum();
+    let total_out: u64 = entries_today
+        .iter()
+        .map(|e| e.usage.tokens_out as u64)
+        .sum();
+    let cache_read_today: u64 = entries_today
+        .iter()
+        .map(|e| e.usage.cache_read_tokens.unwrap_or(0) as u64)
+        .sum();
+    let cache_creation_today: u64 = entries_today
+        .iter()
+        .map(|e| e.usage.cache_creation_tokens.unwrap_or(0) as u64)
+        .sum();
+    let cache_total = cache_read_today + cache_creation_today + total_in;
+    let cache_savings_usd = cost_calculator::cache_savings(&entries_today, &config.pricing);
+
+    let task_count = conversation
+        .turns
+        .iter()
+        .filter(|t| t.role == MessageRole::Assistant)
+        .count() as u32;
+    let elapsed_secs = (now_unix() - conversation.created_at.max(0)).max(0);
+
+    // Build per-turn rows by joining each Assistant turn to its closest ledger entry.
+    let mut turn_rows: Vec<TurnUsageRow> = Vec::new();
+    for (idx, turn) in conversation
+        .turns
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.role == MessageRole::Assistant)
+    {
+        let matched: Option<&crate::domain::models::usage::UsageLedgerEntry> = entries_session
+            .iter()
+            .filter(|e| {
+                e.conversation_id == conversation.id
+                    && (turn.model.is_empty() || e.model == turn.model)
+            })
+            .min_by_key(|e| (e.timestamp_ms - turn.started_at).abs());
+        let (tokens_in, tokens_out, model, cost_usd) = if let Some(e) = matched {
+            (
+                e.usage.tokens_in,
+                e.usage.tokens_out,
+                e.model.clone(),
+                cost_calculator::cost_for_entry(e, &config.pricing),
+            )
+        } else {
+            (
+                0,
+                0,
+                if turn.model.is_empty() {
+                    effective_model(state, config).to_string()
+                } else {
+                    turn.model.clone()
+                },
+                None,
+            )
+        };
+        turn_rows.push(TurnUsageRow {
+            turn_index: idx as u32,
+            model,
+            tokens_in,
+            tokens_out,
+            cost_usd,
+        });
+    }
+
+    let panel_session_today = SessionUsageSummary {
+        tokens_in: total_in,
+        tokens_out: total_out,
+        cost_usd: if entries_today.is_empty() {
+            None
+        } else {
+            Some(breakdown.total_usd)
+        },
+        task_count,
+        elapsed_secs,
+        cache_read_tokens: cache_read_today,
+        cache_total_tokens: cache_total,
+        cache_savings_usd,
+    };
+
+    // Snapshot context window for the active model.
+    let token_usage_in = conversation.usage.as_ref().map_or(0u32, |u| u.input_tokens);
+    let context_window_tokens = app_state
+        .provider_registry
+        .get_model(
+            &app_state.provider.load().provider_id(),
+            effective_model(state, config),
+        )
+        .map_or(0u32, |m| m.context_window);
+
+    state.usage_panel.turn_rows = turn_rows;
+    state.usage_panel.session_today = panel_session_today;
+    state.usage_panel.per_model = breakdown.per_model;
+    state.usage_panel.missing_pricing_models = breakdown.missing_pricing_models;
+    state.usage_panel.context_used_tokens = token_usage_in;
+    state.usage_panel.context_window_tokens = context_window_tokens;
+    state.usage_panel.open(state.focus.clone());
+    state.focus = crate::domain::models::FocusState::Overlay(
+        crate::domain::models::visual::OverlayType::UsagePanel,
+    );
+    state.needs_redraw = true;
+}
+
+/// Story 7.5 AC5: recompute spent-today + percent against config.budget.daily_limit_usd.
+/// Returns `None` when budget alerting is disabled (no `daily_limit_usd`).
+async fn recompute_daily_budget(
+    app_state: &AppState,
+    config: &crate::domain::models::AppConfig,
+    prior_dismissed_until_unix: i64,
+) -> Option<crate::adapters::tui::state::DailyBudgetState> {
+    let limit = config.budget.daily_limit_usd?;
+    let since = crate::infrastructure::clock_util::today_start_unix_ms();
+    let entries = app_state
+        .usage_ledger
+        .read_since(since)
+        .await
+        .unwrap_or_default();
+    let spent =
+        crate::domain::services::cost_calculator::cumulative_cost(&entries, &config.pricing);
+    Some(crate::adapters::tui::state::DailyBudgetState {
+        spent_today_usd: spent,
+        limit_usd: limit,
+        computed_at_ms: chrono::Utc::now().timestamp_millis(),
+        dismissed_until_unix: prior_dismissed_until_unix,
+    })
 }
 
 /// Story 16.6 helper: pre/post layout + reconcile + mirror for fold mutations.
@@ -351,6 +578,19 @@ pub async fn run(
 
     // Set project context indicator based on persona
     state.has_project_context = !persona.system_prompt(&workspace_path).is_empty();
+
+    // Story 7.5 AC7 — seed daily-budget state at startup: load persisted
+    // dismissed_until_unix, compute current spent today, then apply the
+    // warning state if already over limit.
+    if config.budget.daily_limit_usd.is_some() {
+        let initial_bs = app_state.budget_state_store.load().await;
+        if let Some(b) =
+            recompute_daily_budget(&app_state, config, initial_bs.dismissed_until_unix).await
+        {
+            upsert_daily_budget_warning(&mut state, &b);
+            state.daily_budget = Some(b);
+        }
+    }
 
     let mut terminal_events = EventStream::new();
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(
@@ -4430,6 +4670,97 @@ pub async fn run(
                                         &router,
                                     );
                                 }
+                                InputAction::OpenUsagePanel => {
+                                    // Story 7.5 AC3: aggregate ledger + open panel.
+                                    open_usage_panel(
+                                        &mut state,
+                                        &conversation,
+                                        &app_state,
+                                        config,
+                                        &session_manager,
+                                    )
+                                    .await;
+                                }
+                                InputAction::FeedbackBudgetContinue => {
+                                    // Story 7.5 AC5/AC7: one-time dismiss. The next
+                                    // turn's recompute may re-insert if still over.
+                                    clear_daily_budget_warning(&mut state);
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::FeedbackBudgetSwitchCheaper => {
+                                    // Story 7.5 AC5/AC7: reuse the model-selector overlay.
+                                    clear_daily_budget_warning(&mut state);
+                                    let active_pid = router.active_delegate_id();
+                                    let effective_mid = effective_model(&state, config).to_string();
+                                    let providers = app_state.provider_registry.list_providers();
+                                    let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
+                                        .into_iter()
+                                        .map(|pd| {
+                                            let models = app_state
+                                                .provider_registry
+                                                .list_models_by_provider(&pd.provider_id);
+                                            crate::adapters::tui::state::ProviderColumn {
+                                                provider_id: pd.provider_id,
+                                                display_name: pd.display_name,
+                                                healthy: pd.healthy,
+                                                models,
+                                            }
+                                        })
+                                        .filter(|c| !c.models.is_empty())
+                                        .collect();
+                                    if !columns.is_empty() {
+                                        state.model_selector.open(
+                                            state.focus.clone(),
+                                            columns,
+                                            &active_pid,
+                                            &effective_mid,
+                                        );
+                                        state.focus = crate::domain::models::FocusState::Overlay(
+                                            crate::domain::models::visual::OverlayType::ModelSelector,
+                                        );
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::FeedbackBudgetPause => {
+                                    // Story 7.5 AC5/AC7: persist dismissed_until_unix
+                                    // = next local midnight, suppress warning till then.
+                                    let next_midnight =
+                                        crate::infrastructure::clock_util::next_midnight_unix();
+                                    let new_state =
+                                        crate::adapters::budget::BudgetState {
+                                            dismissed_until_unix: next_midnight,
+                                        };
+                                    match app_state
+                                        .budget_state_store
+                                        .save(&new_state)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            if let Some(db) = state.daily_budget.as_mut() {
+                                                db.dismissed_until_unix = next_midnight;
+                                            }
+                                            clear_daily_budget_warning(&mut state);
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message:
+                                                    "Budget warning paused until tomorrow.".to_string(),
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to persist budget pause: {e}"
+                                            );
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message:
+                                                    "Couldn't persist budget pause state.".to_string(),
+                                            });
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
                             }
                         }
                     }
@@ -4485,6 +4816,38 @@ pub async fn run(
                                     state.status = StatusState::Idle;
                                     // Sync token usage from conversation to TUI state
                                     state.token_usage = conversation.usage.clone();
+
+                                    // Story 7.5 AC1.5 — stamp the resolved model on the
+                                    // latest empty-string Assistant turn (the reducer left
+                                    // it blank). Consumed-and-cleared on first TurnComplete.
+                                    if let Some(model) = state.pending_resolved_model.take() {
+                                        if let Some(last) = conversation.turns.last_mut() {
+                                            if last.role == crate::domain::models::MessageRole::Assistant
+                                                && last.model.is_empty()
+                                            {
+                                                last.model = model;
+                                            }
+                                        }
+                                    }
+
+                                    // Story 7.5 AC5 — recompute daily budget.
+                                    // Race-window note: per Dev Notes §"Async budget
+                                    // recomputation", the per-call ledger write happens
+                                    // inside the spawned run_turn task; this recompute
+                                    // may see the prior turn's spend (1-turn lag at the
+                                    // threshold crossing). Acceptable for v0.
+                                    if config.budget.daily_limit_usd.is_some() {
+                                        let prior = state
+                                            .daily_budget
+                                            .as_ref()
+                                            .map_or(0, |b| b.dismissed_until_unix);
+                                        if let Some(new_budget) =
+                                            recompute_daily_budget(&app_state, config, prior).await
+                                        {
+                                            upsert_daily_budget_warning(&mut state, &new_budget);
+                                            state.daily_budget = Some(new_budget);
+                                        }
+                                    }
 
                                     // Story 7.4 AC3: context-pressure warning state machine
                                     let cw = active_context_window(&app_state, &router, &state, config,
@@ -8073,6 +8436,9 @@ async fn start_turn_inner(
             resolved.model
         );
     }
+    // Story 7.5 AC1.5 — capture resolved model for Turn.model stamping on the
+    // first subsequent TurnComplete (the reducer leaves Turn.model empty).
+    state.pending_resolved_model = Some(resolved.model.clone());
     let options = CompletionOptions {
         model: resolved.model.clone(),
         max_tokens: 8192,
@@ -8251,6 +8617,7 @@ fn render(
         ref which_key,
         ref help_overlay,
         ref model_selector,
+        ref usage_panel,
         ref selected_model,
         ref image_indicator,
         ref current_hint,
@@ -8874,6 +9241,7 @@ fn render(
                             crate::domain::models::AnchorMode::Pinned(_)
                         )
                     }),
+                    state.daily_budget.as_ref(),
                 );
                 input_box::render(
                     frame,
@@ -8923,6 +9291,11 @@ fn render(
                 // Story 7.2 AC1
                 if model_selector.active {
                     model_selector::render(frame, area, model_selector, theme);
+                }
+
+                // Render usage/cost panel overlay (Story 7.5 AC3)
+                if usage_panel.active {
+                    usage_panel::render(frame, area, usage_panel, theme);
                 }
             }
             None => {

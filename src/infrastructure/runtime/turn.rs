@@ -144,11 +144,21 @@ pub async fn run_turn(
                             tokens_in: u.input_tokens,
                             tokens_out: u.output_tokens,
                             parent_ctx: parent_ctx_tokens,
+                            // Story 7.5 AC8 — cache/reasoning attribution.
+                            // DF-S71c-1 carries forward: only the LAST Usage chunk per
+                            // iteration is retained; Anthropic emits Usage exactly once
+                            // per call so this is correct for the current adapter set.
+                            cache_creation_tokens: u.cache_creation_input_tokens,
+                            cache_read_tokens: u.cache_read_input_tokens,
+                            reasoning_tokens: u.reasoning_tokens,
                         },
                         None => TokenUsage {
                             tokens_in: 0,
                             tokens_out: 0,
                             parent_ctx: parent_ctx_tokens,
+                            cache_creation_tokens: None,
+                            cache_read_tokens: None,
+                            reasoning_tokens: None,
                         },
                     },
                 };
@@ -434,6 +444,10 @@ pub async fn run_turn(
                         tokens_in: 0,
                         tokens_out: 0,
                         parent_ctx: parent_ctx_tokens,
+                        // Failed call — no usage data to attribute (Story 7.5 AC8).
+                        cache_creation_tokens: None,
+                        cache_read_tokens: None,
+                        reasoning_tokens: None,
                     },
                 };
                 if let Err(le) = ledger.append(failure_entry).await {

@@ -156,6 +156,9 @@ pub async fn run() -> Result<()> {
     let usage_ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> =
         Arc::new(FileUsageLedger::new());
 
+    // Story 7.5 AC7 — load BudgetState (dismissed-until) once at startup.
+    let budget_state_store = Arc::new(crate::adapters::budget::BudgetStateStore::new());
+
     let (app_state, domain_rx) = AppState::new(
         raw_capacity,
         approval_runtime.clone(),
@@ -165,6 +168,7 @@ pub async fn run() -> Result<()> {
         provider_swap,
         provider_registry.clone(),
         usage_ledger,
+        budget_state_store,
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
 

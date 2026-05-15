@@ -1,10 +1,12 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+use crate::adapters::tui::state::DailyBudgetState;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_index;
 use crate::adapters::tui::widgets::model_selector::humanize_ctx;
 use crate::domain::models::{PermissionMode, StatusState, UsageInfo};
+use crate::infrastructure::clock_util::now_unix;
 
 /// Render the status bar with model name, current status, scroll position, and permission mode.
 // Covers: FR38, UX-DR76, UX-DR93
@@ -31,6 +33,7 @@ pub fn render(
     pending_plan_reminder_at_turn: Option<u32>,
     drill_down_breadcrumb: Option<&str>,
     pinned_active: bool,
+    daily_budget: Option<&DailyBudgetState>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -129,6 +132,30 @@ pub fn render(
             format_token_usage(usage),
             Style::default().fg(fg),
         ));
+    }
+
+    // Daily budget segment (Story 7.5 AC5). Suppressed when paused
+    // (`unix_now <= dismissed_until_unix`).
+    if let Some(b) = daily_budget {
+        if b.limit_usd > 0.0 && now_unix() > b.dismissed_until_unix {
+            let pct = b.percent();
+            // Only render when ≥80% (yellow) or ≥100% (red) per AC5.
+            if pct >= 80 {
+                let color = if pct >= 100 {
+                    theme.colors.error
+                } else {
+                    theme.colors.warning
+                };
+                left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+                left_spans.push(Span::styled(
+                    format!(
+                        "budget: ${:.2}/${:.2} ({}%)",
+                        b.spent_today_usd, b.limit_usd, pct
+                    ),
+                    Style::default().fg(color),
+                ));
+            }
+        }
     }
 
     // Context window ratio (Story 7.4 AC1/AC2)
@@ -247,7 +274,9 @@ pub fn render(
 }
 
 /// Format token counts compactly: raw numbers below 1000, `Xk` suffix above.
-fn format_token_count(count: u32) -> String {
+///
+/// Story 7.5: promoted from `fn` to `pub fn` for reuse by `usage_panel.rs`.
+pub fn format_token_count(count: u32) -> String {
     if count >= 1000 {
         format!("{:.1}k", count as f64 / 1000.0)
     } else {
@@ -294,6 +323,184 @@ mod tests {
             reasoning_tokens: None,
         };
         assert_eq!(format_token_usage(&usage), "↑1.2k ↓3.4k");
+    }
+
+    // ── Story 7.5 AC2 + AC5: fixture-driven status-bar render tests ─────────
+    // These tests use ratatui's TestBackend to verify the rendered buffer
+    // contains the expected `↑/↓` token segment (AC2 — already shipping from 7-4)
+    // and `budget:` segment (AC5 — new in 7-5) substrings.
+
+    use crate::adapters::tui::state::DailyBudgetState;
+    use crate::adapters::tui::theme::Theme;
+    use crate::domain::models::PermissionMode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn buffer_text(t: &Terminal<TestBackend>) -> String {
+        let buf = t.backend().buffer();
+        let mut s = String::new();
+        let term_size = t.size().unwrap();
+        for y in 0..term_size.height {
+            for x in 0..term_size.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    s.push_str(cell.symbol());
+                }
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn status_bar_renders_token_arrows_segment() {
+        let backend = TestBackend::new(200, 1);
+        let mut t = Terminal::new(backend).unwrap();
+        let theme = Theme::dark();
+        let usage = UsageInfo {
+            input_tokens: 1200,
+            output_tokens: 3400,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "sonnet-4-6",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                Some(&usage),
+                200_000, // context_window
+                false,
+                None,
+                false,
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+            );
+        })
+        .unwrap();
+        let txt = buffer_text(&t);
+        assert!(txt.contains("↑1.2k ↓3.4k"), "↑/↓ segment missing: {txt}");
+        assert!(txt.contains("ctx:"), "ctx: segment missing: {txt}");
+    }
+
+    #[test]
+    fn status_bar_renders_budget_warning_at_85_percent() {
+        let backend = TestBackend::new(200, 1);
+        let mut t = Terminal::new(backend).unwrap();
+        let theme = Theme::dark();
+        let usage = UsageInfo {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        let db = DailyBudgetState {
+            spent_today_usd: 4.25,
+            limit_usd: 5.00,
+            computed_at_ms: 0,
+            dismissed_until_unix: 0,
+        };
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "sonnet-4-6",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                Some(&usage),
+                0,
+                false,
+                None,
+                false,
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                Some(&db),
+            );
+        })
+        .unwrap();
+        let txt = buffer_text(&t);
+        assert!(
+            txt.contains("budget: $4.25/$5.00 (85%)"),
+            "85% budget segment missing: {txt}"
+        );
+    }
+
+    #[test]
+    fn status_bar_suppresses_budget_when_paused() {
+        let backend = TestBackend::new(200, 1);
+        let mut t = Terminal::new(backend).unwrap();
+        let theme = Theme::dark();
+        let usage = UsageInfo {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        let db = DailyBudgetState {
+            spent_today_usd: 10.0,
+            limit_usd: 5.00,
+            computed_at_ms: 0,
+            // far future → paused
+            dismissed_until_unix: now_unix() + 86_400,
+        };
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "sonnet-4-6",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                Some(&usage),
+                0,
+                false,
+                None,
+                false,
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                Some(&db),
+            );
+        })
+        .unwrap();
+        let txt = buffer_text(&t);
+        assert!(
+            !txt.contains("budget:"),
+            "paused budget should not render: {txt}"
+        );
     }
 
     #[test]

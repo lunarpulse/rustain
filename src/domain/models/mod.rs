@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod approval;
 pub mod autocomplete;
+pub mod budget;
 pub mod checkpoint;
 mod completion;
 mod config;
@@ -13,6 +14,7 @@ mod notice;
 pub mod palette;
 mod permission;
 pub mod plan;
+pub mod pricing;
 pub mod project_context;
 pub mod provider;
 pub mod router;
@@ -94,7 +96,11 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
+#[allow(unused_imports)]
+pub use budget::BudgetConfig;
 pub use launch_spec::AgentLaunchSpec;
+#[allow(unused_imports)]
+pub use pricing::PricingConfig;
 #[allow(unused_imports)]
 pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 #[allow(unused_imports)]

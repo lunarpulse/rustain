@@ -43,6 +43,7 @@ fn test_app_state_honors_raw_capacity() {
         provider_swap.clone(),
         provider_registry,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
+        Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -68,6 +69,7 @@ fn test_app_state_session_cancel_is_root_token() {
         provider_swap2.clone(),
         provider_registry2,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
+        Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
     );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());

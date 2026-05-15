@@ -1,6 +1,7 @@
 pub mod agent_activation;
 pub mod agent_registry;
 pub mod approval_persistence_toml;
+pub mod budget;
 pub mod cli;
 pub mod clipboard_adapter;
 pub mod command_registry;

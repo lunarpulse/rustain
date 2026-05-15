@@ -3,6 +3,7 @@ pub mod claude_code_jsonl;
 pub mod command_interpolation;
 pub mod command_normalize;
 pub mod compaction;
+pub mod cost_calculator;
 pub mod cross_search;
 pub mod export;
 pub mod frontmatter;
