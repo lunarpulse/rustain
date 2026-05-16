@@ -95,9 +95,10 @@ fn discover_models_fetch_timeout_falls_back_to_bundled() {
     #[cfg(feature = "openai")]
     {
         use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+        use rustain::domain::ports::StreamingProvider;
         let adapter = OpenAiAdapter::new(
             OpenAiCompatibleVariant::OpenAI,
-            String::new(),
+            "test-key".to_string(),
             "gpt-4o".to_string(),
             None,
         )
@@ -113,7 +114,7 @@ fn anthropic_discover_models_is_no_op() {
     // returns None for non-openai kinds.
     #[cfg(feature = "openai")]
     {
-        use rustain::domain::models::config::ProviderConfig;
+        use rustain::domain::models::ProviderConfig;
         use rustain::infrastructure::provider_factory::build_openai_for_discovery;
         let cfg = ProviderConfig {
             provider_id: "anthropic".to_string(),
@@ -127,7 +128,6 @@ fn anthropic_discover_models_is_no_op() {
             discover_models: true,
             model_filter: vec!["*".to_string()],
             cache_ttl_seconds: 3600,
-            pricing: None,
         };
         let result = build_openai_for_discovery("anthropic", &cfg);
         assert!(result.is_ok());

@@ -75,6 +75,7 @@ pub fn parse_and_filter_models(
             provider_id: variant.provider_id().to_string(),
             context_window: item
                 .context_length
+                .or_else(|| variant.context_window_for(&item.id))
                 .unwrap_or_else(|| variant_default_context(variant)),
             capabilities,
             pricing_tier: None,

@@ -193,23 +193,31 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
         (
             OpenAiCompatibleVariant::OpenAI,
             vec![
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "gpt-4.1-nano",
+                "gpt-4o",
                 "gpt-4o-2024-11-20",
-                "gpt-4o-mini-2024-07-18",
-                "o1-2024-12-17",
-                "o3-mini-2025-01-31",
+                "gpt-4o-mini",
+                "o1",
+                "o3-mini",
+                "o4-mini",
             ],
         ),
         (
             OpenAiCompatibleVariant::Google,
-            vec!["gemini-2.0-flash", "gemini-2.5-pro-preview-03-25"],
+            vec!["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
         ),
         (
             OpenAiCompatibleVariant::DeepSeek,
-            vec!["deepseek-chat", "deepseek-reasoner"],
+            vec!["deepseek-v4-pro", "deepseek-v4-flash"],
         ),
         (
             OpenAiCompatibleVariant::Moonshot,
-            vec!["moonshot-v1-auto", "kimi-k2-instruct"],
+            vec!["moonshot-v1-auto", "kimi-k2-instruct", "kimi-k2.6"],
         ),
     ];
 
@@ -229,7 +237,7 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
         }
     }
 
-    // OpenRouter returns single-entry catalog
+    // OpenRouter returns the full 7-model curated allowlist
     let adapter = OpenAiAdapter::new(
         OpenAiCompatibleVariant::OpenRouter,
         "test-key".to_string(),
@@ -238,9 +246,9 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
     )
     .unwrap();
     let models = adapter.list_models();
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0].model_id, "anthropic/claude-3.5-sonnet");
-    assert_eq!(models[0].provider_id, "openrouter");
+    assert_eq!(models.len(), 7);
+    assert!(models.iter().any(|m| m.model_id == "anthropic/claude-3.5-sonnet"));
+    assert!(models.iter().all(|m| m.provider_id == "openrouter"));
 }
 
 // ---------------------------------------------------------------------------

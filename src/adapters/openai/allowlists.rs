@@ -25,8 +25,8 @@ pub fn allowlist_for(variant: &OpenAiCompatibleVariant) -> &'static [&'static st
             "openai/gpt-4o",
             "openai/gpt-4o-mini",
             "google/gemini-2.5-pro-preview",
-            "deepseek/deepseek-chat",
-            "deepseek/deepseek-reasoner",
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v4-flash",
         ],
         OpenAiCompatibleVariant::OpenAI => &[
             "gpt-4o",
@@ -37,7 +37,7 @@ pub fn allowlist_for(variant: &OpenAiCompatibleVariant) -> &'static [&'static st
             "gpt-4.1-mini",
         ],
         OpenAiCompatibleVariant::Google => &["gemini-2.0-flash", "gemini-2.5-pro-preview-03-25"],
-        OpenAiCompatibleVariant::DeepSeek => &["deepseek-chat", "deepseek-reasoner"],
+        OpenAiCompatibleVariant::DeepSeek => &["deepseek-v4-flash", "deepseek-v4-pro"],
         OpenAiCompatibleVariant::Moonshot => &["moonshot-v1-auto", "kimi-k2-instruct"],
         OpenAiCompatibleVariant::Custom { .. } => &[],
     }
@@ -87,7 +87,7 @@ pub fn variant_default_context(variant: &OpenAiCompatibleVariant) -> u32 {
         OpenAiCompatibleVariant::OpenAI => 128_000,
         OpenAiCompatibleVariant::OpenRouter => 128_000,
         OpenAiCompatibleVariant::Google => 1_048_576,
-        OpenAiCompatibleVariant::DeepSeek => 64_000,
+        OpenAiCompatibleVariant::DeepSeek => 1_048_576,
         OpenAiCompatibleVariant::Moonshot => 128_000,
         OpenAiCompatibleVariant::Custom { context_window, .. } => context_window.unwrap_or(8_192),
     }
@@ -107,9 +107,9 @@ mod tests {
                 "anthropic/claude-3-haiku",
                 "openai/gpt-4o",
                 "openai/gpt-4o-mini",
-                "google/gemini-2.5-pro-preview",
-                "deepseek/deepseek-chat",
-                "deepseek/deepseek-reasoner",
+                    "google/gemini-2.5-pro-preview",
+                    "deepseek/deepseek-v4-pro",
+                    "deepseek/deepseek-v4-flash",
             ]
         );
     }
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn allowlist_deepseek_verbatim() {
         let list = allowlist_for(&OpenAiCompatibleVariant::DeepSeek);
-        assert_eq!(list, &["deepseek-chat", "deepseek-reasoner"]);
+        assert_eq!(list, &["deepseek-v4-flash", "deepseek-v4-pro"]);
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
         );
         assert_eq!(
             variant_default_context(&OpenAiCompatibleVariant::DeepSeek),
-            64_000
+            1_048_576
         );
         assert_eq!(
             variant_default_context(&OpenAiCompatibleVariant::Moonshot),

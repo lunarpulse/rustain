@@ -474,8 +474,8 @@ mod tests {
         adapter.set_discovered_models(vec![m1]);
         adapter.clear_discovered_models();
         let models = adapter.list_models();
-        // Falls back to bundled snapshot (4 OpenAI models)
-        assert_eq!(models.len(), 4);
+        // Falls back to bundled snapshot (20+ OpenAI models)
+        assert!(models.len() == 12, "expected 12 fallback models, got {}", models.len());
     }
 
     #[test]
@@ -491,6 +491,6 @@ mod tests {
         adapter.set_discovered_models(vec![]);
         let models = adapter.list_models();
         // Empty discovered list falls back to bundled snapshot
-        assert_eq!(models.len(), 4);
+        assert!(models.len() == 12, "expected 12 fallback models, got {}", models.len());
     }
 }

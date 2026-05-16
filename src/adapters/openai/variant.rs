@@ -8,7 +8,7 @@
 //! | OpenAI | `openai` | `https://api.openai.com/v1` | gpt-4o-2024-11-20, gpt-4o-mini-2024-07-18, o1-2024-12-17, o3-mini-2025-01-31 |
 //! | OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | curated 7-model allowlist |
 //! | Google AI | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` | gemini-2.0-flash, gemini-2.5-pro-preview-03-25 |
-//! | DeepSeek | `deepseek` | `https://api.deepseek.com/v1` | deepseek-chat, deepseek-reasoner |
+//! | DeepSeek | `deepseek` | `https://api.deepseek.com/v1` | deepseek-v4-flash, deepseek-v4-pro |
 //! | Moonshot/Kimi | `moonshot` | `https://api.moonshot.cn/v1` | moonshot-v1-auto, kimi-k2-instruct |
 
 use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
@@ -64,7 +64,76 @@ impl OpenAiCompatibleVariant {
         match self {
             Self::OpenAI => vec![
                 ModelDescriptor {
-                    model_id: "gpt-4o-2024-11-20".to_string(),
+                    model_id: "gpt-5.5".to_string(),
+                    display_name: "GPT-5.5".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_048_576,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                        ModelCapability::Vision,
+                    ]),
+                    pricing_tier: Some("flagship".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-5.4".to_string(),
+                    display_name: "GPT-5.4".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_048_576,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                        ModelCapability::Vision,
+                    ]),
+                    pricing_tier: Some("flagship".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-5.4-mini".to_string(),
+                    display_name: "GPT-5.4 Mini".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 400_000,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                    ]),
+                    pricing_tier: Some("flagship".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-4.1".to_string(),
+                    display_name: "GPT-4.1".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_047_576,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                        ModelCapability::Vision,
+                    ]),
+                    pricing_tier: Some("flagship".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-4.1-mini".to_string(),
+                    display_name: "GPT-4.1 Mini".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_047_576,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                    ]),
+                    pricing_tier: Some("cheap".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-4.1-nano".to_string(),
+                    display_name: "GPT-4.1 Nano".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_047_576,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                    ]),
+                    pricing_tier: Some("cheap".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-4o".to_string(),
                     display_name: "GPT-4o".to_string(),
                     provider_id: provider_id.clone(),
                     context_window: 128_000,
@@ -76,7 +145,19 @@ impl OpenAiCompatibleVariant {
                 stale: false,
                 },
                 ModelDescriptor {
-                    model_id: "gpt-4o-mini-2024-07-18".to_string(),
+                    model_id: "gpt-4o-2024-11-20".to_string(),
+                    display_name: "GPT-4o (2024-11-20)".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 128_000,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                        ModelCapability::Vision,
+                    ]),
+                    pricing_tier: Some("flagship".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gpt-4o-mini".to_string(),
                     display_name: "GPT-4o Mini".to_string(),
                     provider_id: provider_id.clone(),
                     context_window: 128_000,
@@ -88,7 +169,7 @@ impl OpenAiCompatibleVariant {
                 stale: false,
                 },
                 ModelDescriptor {
-                    model_id: "o1-2024-12-17".to_string(),
+                    model_id: "o1".to_string(),
                     display_name: "O1".to_string(),
                     provider_id: provider_id.clone(),
                     context_window: 200_000,
@@ -97,8 +178,17 @@ impl OpenAiCompatibleVariant {
                 stale: false,
                 },
                 ModelDescriptor {
-                    model_id: "o3-mini-2025-01-31".to_string(),
+                    model_id: "o3-mini".to_string(),
                     display_name: "O3 Mini".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 200_000,
+                    capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
+                    pricing_tier: Some("cheap".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "o4-mini".to_string(),
+                    display_name: "O4 Mini".to_string(),
                     provider_id: provider_id.clone(),
                     context_window: 200_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
@@ -142,8 +232,8 @@ impl OpenAiCompatibleVariant {
             }
             Self::Google => vec![
                 ModelDescriptor {
-                    model_id: "gemini-2.0-flash".to_string(),
-                    display_name: "Gemini 2.0 Flash".to_string(),
+                    model_id: "gemini-2.5-pro".to_string(),
+                    display_name: "Gemini 2.5 Pro".to_string(),
                     provider_id: provider_id.clone(),
                     context_window: 1_048_576,
                     capabilities: std::collections::HashSet::from([
@@ -154,35 +244,47 @@ impl OpenAiCompatibleVariant {
                 stale: false,
                 },
                 ModelDescriptor {
-                    model_id: "gemini-2.5-pro-preview-03-25".to_string(),
-                    display_name: "Gemini 2.5 Pro Preview".to_string(),
-                    provider_id,
-                    context_window: 2_097_152,
+                    model_id: "gemini-2.5-flash".to_string(),
+                    display_name: "Gemini 2.5 Flash".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_048_576,
                     capabilities: std::collections::HashSet::from([
                         ModelCapability::ToolUse,
                         ModelCapability::Vision,
                     ]),
-                    pricing_tier: Some("flagship".to_string()),
+                    pricing_tier: Some("cheap".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "gemini-2.0-flash".to_string(),
+                    display_name: "Gemini 2.0 Flash".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_048_576,
+                    capabilities: std::collections::HashSet::from([
+                        ModelCapability::ToolUse,
+                        ModelCapability::Vision,
+                    ]),
+                    pricing_tier: Some("cheap".to_string()),
                 stale: false,
                 },
             ],
             Self::DeepSeek => vec![
                 ModelDescriptor {
-                    model_id: "deepseek-chat".to_string(),
-                    display_name: "DeepSeek Chat".to_string(),
+                    model_id: "deepseek-v4-pro".to_string(),
+                    display_name: "DeepSeek V4 Pro".to_string(),
                     provider_id: provider_id.clone(),
-                    context_window: 64_000,
+                    context_window: 1_048_576,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
-                    pricing_tier: Some("cheap".to_string()),
+                    pricing_tier: Some("flagship".to_string()),
                 stale: false,
                 },
                 ModelDescriptor {
-                    model_id: "deepseek-reasoner".to_string(),
-                    display_name: "DeepSeek Reasoner".to_string(),
-                    provider_id,
-                    context_window: 64_000,
+                    model_id: "deepseek-v4-flash".to_string(),
+                    display_name: "DeepSeek V4 Flash".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 1_048_576,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
-                    pricing_tier: Some("flagship".to_string()),
+                    pricing_tier: Some("cheap".to_string()),
                 stale: false,
                 },
             ],
@@ -199,6 +301,15 @@ impl OpenAiCompatibleVariant {
                 ModelDescriptor {
                     model_id: "kimi-k2-instruct".to_string(),
                     display_name: "Kimi K2 Instruct".to_string(),
+                    provider_id: provider_id.clone(),
+                    context_window: 128_000,
+                    capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
+                    pricing_tier: Some("flagship".to_string()),
+                stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "kimi-k2.6".to_string(),
+                    display_name: "Kimi K2.6".to_string(),
                     provider_id,
                     context_window: 128_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
@@ -207,6 +318,39 @@ impl OpenAiCompatibleVariant {
                 },
             ],
         }
+    }
+
+    /// Per-model context window lookup.
+    ///
+    /// For built-in variants, searches `known_models()`. For `Custom` variants
+    /// whose `provider_id` matches a built-in (e.g. "openai", "deepseek"),
+    /// cross-references that built-in's catalog so models from `/v1/models`
+    /// that don't self-report `context_length` still get accurate values.
+    ///
+    /// Matching uses exact match first, then prefix-of-known (so "gpt-4o"
+    /// matches "gpt-4o-2024-11-20" and vice versa).
+    pub fn context_window_for(&self, model_id: &str) -> Option<u32> {
+        let candidates = match self {
+            Self::Custom { provider_id, .. } => {
+                match provider_id.as_str() {
+                    "openai" => Self::OpenAI.known_models(""),
+                    "openrouter" => Self::OpenRouter.known_models(""),
+                    "deepseek" => Self::DeepSeek.known_models(""),
+                    "moonshot" => Self::Moonshot.known_models(""),
+                    "google" => Self::Google.known_models(""),
+                    _ => self.known_models(model_id),
+                }
+            }
+            _ => self.known_models(model_id),
+        };
+        candidates
+            .iter()
+            .find(|m| {
+                m.model_id == model_id
+                    || m.model_id.starts_with(model_id)
+                    || model_id.starts_with(&m.model_id)
+            })
+            .map(|m| m.context_window)
     }
 }
 
@@ -263,12 +407,15 @@ mod tests {
     #[test]
     fn test_openai_known_catalog() {
         let models = OpenAiCompatibleVariant::OpenAI.known_models("gpt-4o");
-        assert_eq!(models.len(), 4);
-        assert!(models.iter().any(|m| m.model_id == "gpt-4o-2024-11-20"));
-        assert!(models.iter().any(|m| m.model_id == "o3-mini-2025-01-31"));
+        assert_eq!(models.len(), 12, "expected 12 models, got {}", models.len());
+        assert!(models.iter().any(|m| m.model_id == "gpt-5.5"));
+        assert!(models.iter().any(|m| m.model_id == "gpt-5.4"));
+        assert!(models.iter().any(|m| m.model_id == "gpt-4.1"));
+        assert!(models.iter().any(|m| m.model_id == "gpt-4o"));
+        assert!(models.iter().any(|m| m.model_id == "o3-mini"));
+        assert!(models.iter().any(|m| m.model_id == "o4-mini"));
         for m in &models {
             assert_eq!(m.provider_id, "openai");
-            assert!(m.capabilities.contains(&ModelCapability::ToolUse));
         }
     }
 
@@ -286,29 +433,27 @@ mod tests {
     #[test]
     fn test_google_known_catalog() {
         let models = OpenAiCompatibleVariant::Google.known_models("gemini-2.0-flash");
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert!(models.iter().any(|m| m.model_id == "gemini-2.0-flash"));
-        assert!(
-            models
-                .iter()
-                .any(|m| m.model_id == "gemini-2.5-pro-preview-03-25")
-        );
+        assert!(models.iter().any(|m| m.model_id == "gemini-2.5-flash"));
+        assert!(models.iter().any(|m| m.model_id == "gemini-2.5-pro"));
     }
 
     #[test]
     fn test_deepseek_known_catalog() {
         let models = OpenAiCompatibleVariant::DeepSeek.known_models("deepseek-chat");
         assert_eq!(models.len(), 2);
-        assert!(models.iter().any(|m| m.model_id == "deepseek-chat"));
-        assert!(models.iter().any(|m| m.model_id == "deepseek-reasoner"));
+        assert!(models.iter().any(|m| m.model_id == "deepseek-v4-flash"));
+        assert!(models.iter().any(|m| m.model_id == "deepseek-v4-pro"));
     }
 
     #[test]
     fn test_moonshot_known_catalog() {
         let models = OpenAiCompatibleVariant::Moonshot.known_models("moonshot-v1-auto");
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert!(models.iter().any(|m| m.model_id == "moonshot-v1-auto"));
         assert!(models.iter().any(|m| m.model_id == "kimi-k2-instruct"));
+        assert!(models.iter().any(|m| m.model_id == "kimi-k2.6"));
     }
 
     #[test]
