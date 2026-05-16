@@ -13,11 +13,14 @@ use crate::domain::ports::StreamingProvider;
 /// that was already created during provider layer init, ensuring discovery
 /// updates are visible to the ProviderRegistry.
 #[cfg(feature = "openai")]
-static OPENAI_ADAPTERS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Arc<crate::adapters::openai::OpenAiAdapter>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static OPENAI_ADAPTERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, Arc<crate::adapters::openai::OpenAiAdapter>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(feature = "openai")]
-pub fn get_openai_adapter(provider_id: &str) -> Option<Arc<crate::adapters::openai::OpenAiAdapter>> {
+pub fn get_openai_adapter(
+    provider_id: &str,
+) -> Option<Arc<crate::adapters::openai::OpenAiAdapter>> {
     OPENAI_ADAPTERS.lock().unwrap().get(provider_id).cloned()
 }
 
@@ -232,8 +235,9 @@ pub fn build_openai_for_discovery(
             };
             let base_url = cfg.base_url.clone();
             let adapter = Arc::new(
-                OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), base_url)
-                    .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+                OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), base_url).map_err(
+                    |e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)),
+                )?,
             );
             OPENAI_ADAPTERS
                 .lock()
@@ -278,8 +282,17 @@ mod tests {
     #[test]
     #[cfg(feature = "openai")]
     fn build_openai_for_discovery_kind_list_matches() {
-        unsafe { std::env::set_var("RUSTAIN_TEST_KEY", "sk-test-dummy-key"); }
-        let known_kinds = ["openai", "openrouter", "google", "deepseek", "moonshot", "openai-compatible"];
+        unsafe {
+            std::env::set_var("RUSTAIN_TEST_KEY", "sk-test-dummy-key");
+        }
+        let known_kinds = [
+            "openai",
+            "openrouter",
+            "google",
+            "deepseek",
+            "moonshot",
+            "openai-compatible",
+        ];
         for kind in known_kinds {
             let cfg = ProviderConfig {
                 provider_id: kind.to_string(),
@@ -293,7 +306,6 @@ mod tests {
                 discover_models: false,
                 model_filter: vec!["*".to_string()],
                 cache_ttl_seconds: 3600,
-
             };
             let result = build_openai_for_discovery(kind, &cfg);
             assert!(
@@ -318,7 +330,6 @@ mod tests {
                 discover_models: false,
                 model_filter: vec!["*".to_string()],
                 cache_ttl_seconds: 3600,
-
             };
             let result = build_openai_for_discovery(kind, &cfg);
             assert!(

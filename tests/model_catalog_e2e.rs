@@ -37,7 +37,9 @@ fn entry(models: Vec<ModelDescriptor>) -> CachedProviderEntry {
 async fn discover_models_off_no_disk_write() {
     // When no discovery targets exist, the cache file should not be created.
     let dir = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str()); }
+    unsafe {
+        std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str());
+    }
     let cache = ModelCatalogCache::new();
     let catalog = cache.load().await;
     assert!(catalog.providers.is_empty());
@@ -49,7 +51,9 @@ async fn discover_models_off_no_disk_write() {
 #[serial_test::serial]
 async fn discover_models_on_writes_cache_and_seeds_adapter() {
     let dir = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str()); }
+    unsafe {
+        std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str());
+    }
     let cache = ModelCatalogCache::new();
 
     let mut catalog = CachedCatalog::default();
@@ -68,7 +72,9 @@ async fn discover_models_on_writes_cache_and_seeds_adapter() {
 #[serial_test::serial]
 async fn discover_models_skips_fetch_when_cache_fresh() {
     let dir = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str()); }
+    unsafe {
+        std::env::set_var("RUSTAIN_DATA_DIR", dir.path().as_os_str());
+    }
     let cache = ModelCatalogCache::new();
 
     let mut catalog = CachedCatalog::default();
@@ -84,7 +90,11 @@ async fn discover_models_skips_fetch_when_cache_fresh() {
     cache.save(&catalog).await.unwrap();
 
     let entry = cache.load().await.providers["openrouter"].clone();
-    assert!(cache.is_fresh(&entry, 3600, rustain::infrastructure::clock_util::now_unix()));
+    assert!(cache.is_fresh(
+        &entry,
+        3600,
+        rustain::infrastructure::clock_util::now_unix()
+    ));
 }
 
 #[test]
@@ -104,7 +114,10 @@ fn discover_models_fetch_timeout_falls_back_to_bundled() {
         )
         .unwrap();
         let models = adapter.list_models();
-        assert!(!models.is_empty(), "fallback to bundled list should never be empty");
+        assert!(
+            !models.is_empty(),
+            "fallback to bundled list should never be empty"
+        );
     }
 }
 
@@ -170,17 +183,15 @@ fn keyword_search_accepts_unicode() {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
         healthy: true,
-        models: vec![
-            ModelDescriptor {
-                model_id: "google/gemini-flash".to_string(),
-                display_name: "Gemini Flash ★".to_string(),
-                provider_id: "openrouter".to_string(),
-                context_window: 1_000_000,
-                capabilities: HashSet::new(),
-                pricing_tier: None,
-                stale: false,
-            },
-        ],
+        models: vec![ModelDescriptor {
+            model_id: "google/gemini-flash".to_string(),
+            display_name: "Gemini Flash ★".to_string(),
+            provider_id: "openrouter".to_string(),
+            context_window: 1_000_000,
+            capabilities: HashSet::new(),
+            pricing_tier: None,
+            stale: false,
+        }],
     }];
     ms.search_active = true;
     ms.search_query = "flash ★".to_string();

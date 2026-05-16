@@ -44,7 +44,8 @@ pub struct OpenAiAdapter {
     variant: OpenAiCompatibleVariant,
     #[allow(dead_code)] // Used by abort() method
     abort_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    discovered_models: Arc<arc_swap::ArcSwap<Option<Vec<crate::adapters::model_catalog_cache::CachedModelEntry>>>>,
+    discovered_models:
+        Arc<arc_swap::ArcSwap<Option<Vec<crate::adapters::model_catalog_cache::CachedModelEntry>>>>,
 }
 
 impl OpenAiAdapter {
@@ -123,7 +124,10 @@ impl OpenAiAdapter {
     }
 
     /// Overlay discovered models into `list_models()`.
-    pub fn set_discovered_models(&self, models: Vec<crate::adapters::model_catalog_cache::CachedModelEntry>) {
+    pub fn set_discovered_models(
+        &self,
+        models: Vec<crate::adapters::model_catalog_cache::CachedModelEntry>,
+    ) {
         self.discovered_models.store(Arc::new(Some(models)));
     }
 
@@ -288,11 +292,12 @@ impl StreamingProvider for OpenAiAdapter {
         let guard = self.discovered_models.load();
         if let Some(ref entries) = **guard {
             if !entries.is_empty() {
-                return entries.iter().map(|e| {
-                    let mut desc = e.descriptor.clone();
-                    desc.stale = e.descriptor.stale;
-                    desc
-                }).collect();
+                return entries
+                    .iter()
+                    .map(|e| {
+                        e.descriptor.clone()
+                    })
+                    .collect();
             }
         }
         self.variant.known_models(&self.model)
@@ -474,8 +479,12 @@ mod tests {
         adapter.set_discovered_models(vec![m1]);
         adapter.clear_discovered_models();
         let models = adapter.list_models();
-        // Falls back to bundled snapshot (20+ OpenAI models)
-        assert!(models.len() == 12, "expected 12 fallback models, got {}", models.len());
+        // Falls back to embedded JSON seed (4 OpenAI models)
+        assert!(
+            models.len() == 4,
+            "expected 4 fallback models, got {}",
+            models.len()
+        );
     }
 
     #[test]
@@ -490,7 +499,11 @@ mod tests {
 
         adapter.set_discovered_models(vec![]);
         let models = adapter.list_models();
-        // Empty discovered list falls back to bundled snapshot
-        assert!(models.len() == 12, "expected 12 fallback models, got {}", models.len());
+        // Empty discovered list falls back to embedded JSON seed
+        assert!(
+            models.len() == 4,
+            "expected 4 fallback models, got {}",
+            models.len()
+        );
     }
 }

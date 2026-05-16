@@ -170,7 +170,7 @@ impl StreamingProvider for FailingHealthCheckProvider {
             context_window: 4096,
             capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
             pricing_tier: None,
-        stale: false,
+            stale: false,
         }]
     }
 

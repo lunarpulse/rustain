@@ -100,6 +100,21 @@ pub async fn run() -> Result<()> {
                 SubcommandExit.into()
             });
     }
+    #[cfg(feature = "openai")]
+    if let Some(Command::UpdateCatalog { output, provider }) = cli.command {
+        return crate::adapters::cli::update_catalog::run_update_catalog(output, provider)
+            .await
+            .map_err(|e| {
+                tracing::error!("UpdateCatalog subcommand failed: {e}");
+                SubcommandExit.into()
+            });
+    }
+    #[cfg(not(feature = "openai"))]
+    if let Some(Command::UpdateCatalog { .. }) = cli.command {
+        anyhow::bail!(
+            "update-catalog requires the 'openai' feature — rebuild with --features openai"
+        );
+    }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
@@ -194,12 +209,33 @@ pub async fn run() -> Result<()> {
         });
         tracing::warn!(
             "Provider '{}' (kind={}) uses a static catalog — dynamic discovery is not yet supported.",
-            id, kind
+            id,
+            kind
         );
     }
 
     #[cfg(feature = "openai")]
     {
+        // Story 7.7 AC1/AC6 — Tier-0 JSON seed from embedded models_variants.json (zero I/O)
+        if let Some(seed_catalog) =
+            crate::adapters::model_catalog_cache::load_embedded_seed()
+        {
+            for target in &discovery_targets {
+                if let Some(entry) = seed_catalog.providers.get(&target.provider_id) {
+                    target.adapter.set_discovered_models(entry.models.clone());
+                    tracing::info!(
+                        "Tier-0 seed: JSON catalog for '{}' ({} models)",
+                        target.provider_id,
+                        entry.models.len()
+                    );
+                }
+            }
+        } else {
+            tracing::error!(
+                "Failed to parse embedded models_variants.json — catalog seed unavailable"
+            );
+        }
+
         // Story 7.6 AC4/AC5 — Tier-1 disk cache seed BEFORE health check (synchronous, ≤10ms)
         let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
         let cached = cache.load().await;
@@ -259,6 +295,8 @@ pub async fn run() -> Result<()> {
         let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
         let cached = cache.load().await;
 
+        // Clone before the for-loop consumes it (used by periodic timer below)
+        let discovery_targets_periodic = discovery_targets.clone();
         let refresh_tracker_clone = refresh_tracker.clone();
         for target in discovery_targets {
             let cache = cache.clone();
@@ -302,7 +340,10 @@ pub async fn run() -> Result<()> {
                         let _lock = cache.lock().await;
                         let mut catalog = cache.load().await;
                         let models_with_stale =
-                            crate::adapters::model_catalog_cache::merge_with_live(catalog.providers.get(&provider_id), &models);
+                            crate::adapters::model_catalog_cache::merge_with_live(
+                                catalog.providers.get(&provider_id),
+                                &models,
+                            );
                         adapter.set_discovered_models(models_with_stale.clone());
                         catalog.providers.insert(
                             provider_id.clone(),
@@ -334,6 +375,14 @@ pub async fn run() -> Result<()> {
                 }
             });
         }
+
+        // Story 7.7 AC3 — periodic auto-refresh timer (4h intervals, UTC-aligned)
+        spawn_periodic_catalog_refresh(
+            cache.clone(),
+            discovery_targets_periodic,
+            refresh_tracker.clone(),
+            domain_tx.clone(),
+        );
     }
 
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
@@ -683,7 +732,8 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                             cfg.kind.as_deref().unwrap_or(id),
                             id
                         );
-                        unsupported_discovery.push((id.clone(), cfg.kind.as_deref().unwrap_or(id).to_string()));
+                        unsupported_discovery
+                            .push((id.clone(), cfg.kind.as_deref().unwrap_or(id).to_string()));
                     }
                     Err(e) => {
                         tracing::warn!("Failed to build discovery adapter for '{}': {}", id, e);
@@ -813,4 +863,143 @@ fn build_anthropic_provider_from_env(
     }
 }
 
+/// Spawn a background periodic catalog refresh timer (Story 7.7 AC3).
+///
+/// Fires every 4 hours aligned to UTC hour boundaries (00:00, 04:00, 08:00, ...).
+/// On each tick, re-fetches `/v1/models` for every provider with `discover_models = true`.
+/// Emits `ProviderCatalogRefreshed` on success, `SystemNotice` on failure.
+#[cfg(feature = "openai")]
+fn spawn_periodic_catalog_refresh(
+    cache: crate::adapters::model_catalog_cache::ModelCatalogCache,
+    discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
+    refresh_tracker: std::sync::Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>,
+    domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+) {
+    if discovery_targets.is_empty() {
+        return;
+    }
 
+    tokio::spawn(async move {
+        use chrono::Timelike;
+
+        // Align to next UTC 4h boundary
+        let now = chrono::Utc::now();
+        let current_hour = now.hour();
+        let next_boundary_hour = ((current_hour / 4) + 1) * 4;
+        let next_boundary = if next_boundary_hour >= 24 {
+            // Roll to next day at 00:00 UTC
+            now.date_naive()
+                .succ_opt()
+                .unwrap_or(now.date_naive())
+                .and_hms_opt(0, 0, 0)
+                .map(|dt| dt.and_utc())
+                .unwrap_or(now + chrono::Duration::hours(4))
+        } else {
+            now.date_naive()
+                .and_hms_opt(next_boundary_hour, 0, 0)
+                .map(|dt| dt.and_utc())
+                .unwrap_or(now + chrono::Duration::hours(4))
+        };
+
+        let until_first = (next_boundary - now)
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(3600 * 4));
+        tracing::info!(
+            "Periodic catalog refresh: first tick in {:.1}m (next UTC boundary {:02}:00)",
+            until_first.as_secs_f64() / 60.0,
+            next_boundary_hour % 24,
+        );
+
+        tokio::time::sleep(until_first).await;
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600 * 4));
+        // First tick fires immediately after sleep
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            tracing::info!("Periodic catalog refresh tick");
+
+            for target in &discovery_targets {
+                let provider_id = target.provider_id.clone();
+                let adapter = target.adapter.clone();
+                let model_filter = target.model_filter.clone();
+                let cache = cache.clone();
+                let domain_tx = domain_tx.clone();
+                let tracker = refresh_tracker.clone();
+
+                tokio::spawn(async move {
+                    let _guard = tracker.insert(provider_id.clone());
+                    match adapter.fetch_remote_models(&model_filter).await {
+                        Ok(models) => {
+                            if models.is_empty() {
+                                tracing::warn!(
+                                    "Periodic refresh: empty catalog from '{}'",
+                                    provider_id
+                                );
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: None,
+                                    level: NoticeLevel::Warning,
+                                    message: format!(
+                                        "Model catalog for '{}' returned empty — keeping current models",
+                                        provider_id
+                                    ),
+                                });
+                                return;
+                            }
+                            let _lock = cache.lock().await;
+                            let mut catalog = cache.load().await;
+                            let models_with_stale =
+                                crate::adapters::model_catalog_cache::merge_with_live(
+                                    catalog.providers.get(&provider_id),
+                                    &models,
+                                );
+                            adapter.set_discovered_models(models_with_stale.clone());
+                            catalog.providers.insert(
+                                provider_id.clone(),
+                                crate::adapters::model_catalog_cache::CachedProviderEntry {
+                                    fetched_at_unix: crate::infrastructure::clock_util::now_unix(),
+                                    models: models_with_stale,
+                                },
+                            );
+                            if let Err(e) = cache.save(&catalog).await {
+                                tracing::warn!("Periodic refresh save failed: {}", e);
+                            }
+                            let _ =
+                                domain_tx.send(AppEvent::ProviderCatalogRefreshed { provider_id }); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: Story 7.7 AC3 — periodic refresh redraw signal
+                        }
+                        Err(e) => {
+                            tracing::warn!("Periodic refresh for '{}' failed: {}", provider_id, e);
+
+                            // AC3: mark existing models as stale on refresh failure
+                            let current = adapter.list_models();
+                            let stale_entries: Vec<
+                                crate::adapters::model_catalog_cache::CachedModelEntry,
+                            > = current
+                                .into_iter()
+                                .map(|mut m| {
+                                    m.stale = true;
+                                    crate::adapters::model_catalog_cache::CachedModelEntry {
+                                        descriptor: m,
+                                    }
+                                })
+                                .collect();
+                            if !stale_entries.is_empty() {
+                                adapter.set_discovered_models(stale_entries);
+                            }
+
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Warning,
+                                message: format!(
+                                    "Model catalog refresh for '{}' failed: {} — showing current models",
+                                    provider_id, e
+                                ),
+                            });
+                        }
+                    }
+                });
+            }
+        }
+    });
+}

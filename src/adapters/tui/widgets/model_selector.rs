@@ -196,8 +196,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
             }
 
             // Stale-row footer tooltip (Preflight Consensus #9)
-            if let Some(&idx) = if use_filtered { indices.get(state.selected_model) } else { Some(&state.selected_model) } {
-                if col.models.get(idx).map_or(false, |m| m.stale) {
+            if let Some(&idx) = if use_filtered {
+                indices.get(state.selected_model)
+            } else {
+                Some(&state.selected_model)
+            } {
+                if col.models.get(idx).is_some_and(|m| m.stale) {
                     footer_hint.push_str(" │ Not in latest catalog — may fail at request time.");
                 }
             }
@@ -369,7 +373,11 @@ mod tests {
         })
         .unwrap();
         let txt = buffer_text(&term);
-        assert!(txt.contains("No models match your filter"), "empty catalog should show 'No models' hint: {}", txt);
+        assert!(
+            txt.contains("No models match your filter"),
+            "empty catalog should show 'No models' hint: {}",
+            txt
+        );
         assert!(
             txt.contains("config.toml"),
             "empty catalog should reference config path: {}",
@@ -424,6 +432,9 @@ mod tests {
                 }
             }
         }
-        assert!(found_ghost, "ghost model row should have CROSSED_OUT modifier");
+        assert!(
+            found_ghost,
+            "ghost model row should have CROSSED_OUT modifier"
+        );
     }
 }

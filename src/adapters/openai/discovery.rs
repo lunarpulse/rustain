@@ -1,19 +1,23 @@
 //! Pure parse + filter pipeline for OpenAI-compatible `/v1/models` responses.
 //!
 //! Story 7.6 AC3 — testable without HTTP; no I/O, no clock, minimal logging.
+//! Story 7.7 AC2 — allowlist intersection removed; noise regex + user model_filter only.
 
 use std::collections::HashSet;
 
 use crate::adapters::openai::allowlists::{
-    allowlist_for, compile_filter_patterns, is_noise_model_id, matches_any, variant_default_context,
+    compile_filter_patterns, is_noise_model_id, matches_any, variant_default_context,
 };
 use crate::adapters::openai::types::{ModelsListItem, ModelsListResponse};
 use crate::adapters::openai::variant::OpenAiCompatibleVariant;
 use crate::domain::errors::ProviderError;
 use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
 
-/// Parse a JSON payload and filter it through the noise regex, allowlist,
-/// and user `model_filter` globs.
+/// Parse a JSON payload and filter it through the noise regex and user `model_filter` globs.
+///
+/// Story 7.7: the allowlist AND-intersection gate is removed. For built-in
+/// variants the JSON seed provides the initial catalog; the live fetch
+/// replaces it entirely. For Custom, noise regex alone handles filtering.
 pub fn parse_and_filter_models(
     payload: &str,
     variant: &OpenAiCompatibleVariant,
@@ -22,42 +26,25 @@ pub fn parse_and_filter_models(
     let response: ModelsListResponse = serde_json::from_str(payload)
         .map_err(|e| ProviderError::Other(format!("Failed to parse models response: {}", e)))?;
 
-    let allow = allowlist_for(variant);
     let compiled_filter = &compile_filter_patterns(model_filter);
-
-    // Pre-compile allowlist globs once (Story 7.6 review patch — avoid O(N×M) recompilation).
-    let allowlist_literals: std::collections::HashSet<&str> = allow.iter().copied().collect();
-    let compiled_allowlist: Vec<globset::GlobMatcher> = allow
-        .iter()
-        .filter_map(|a| globset::Glob::new(a).ok().map(|g| g.compile_matcher()))
-        .collect();
+    let is_custom = matches!(variant, OpenAiCompatibleVariant::Custom { .. });
+    let data_len = response.data.len();
 
     let mut result = Vec::new();
-    for item in response.data {
-        // 1. Allowlist intersection (when non-empty) — checked BEFORE noise so
-        // curated allowlist entries are exempt from the noise regex.
-        let in_allowlist = allow.is_empty()
-            || allowlist_literals.contains(item.id.as_str())
-            || compiled_allowlist.iter().any(|m| m.is_match(&item.id));
-        if !in_allowlist {
-            tracing::debug!("Model {} not in allowlist for {:?}", item.id, variant);
-            continue;
-        }
-
-        // 2. Noise regex — skip for all explicitly-allowlisted items;
-        // apply when allow is empty (Custom variant lets server dictate catalog).
-        if allow.is_empty() && is_noise_model_id(&item.id) {
+    for item in &response.data {
+        // 1. Noise regex — applied to all variants; strip embedding/tts/image/customtools/preview noise
+        if is_noise_model_id(&item.id) {
             tracing::debug!("Skipping noisy model id: {}", item.id);
             continue;
         }
 
-        // 3. User model_filter AND-intersection
+        // 2. User model_filter AND-intersection
         if !matches_any(compiled_filter, &item.id) {
             tracing::debug!("Model {} does not match user model_filter", item.id);
             continue;
         }
 
-        // 4. Map to ModelDescriptor
+        // 3. Map to ModelDescriptor
         let capabilities = match &item.supported_parameters {
             None => HashSet::from([ModelCapability::ToolUse]),
             Some(params) => {
@@ -71,7 +58,7 @@ pub fn parse_and_filter_models(
 
         result.push(ModelDescriptor {
             model_id: item.id.clone(),
-            display_name: item.name.unwrap_or_else(|| item.id.clone()),
+            display_name: item.name.clone().unwrap_or_else(|| item.id.clone()),
             provider_id: variant.provider_id().to_string(),
             context_window: item
                 .context_length
@@ -79,8 +66,17 @@ pub fn parse_and_filter_models(
                 .unwrap_or_else(|| variant_default_context(variant)),
             capabilities,
             pricing_tier: None,
-        stale: false,
+            stale: false,
         });
+    }
+
+    // For Custom variants, if filtering produced nothing, warn but return empty (caller decides)
+    if is_custom && result.is_empty() && data_len > 0 {
+        tracing::warn!(
+            "All {} models from Custom provider '{}' were filtered out by noise regex or model_filter",
+            data_len,
+            variant.provider_id()
+        );
     }
 
     Ok(result)
@@ -192,35 +188,56 @@ mod tests {
     }
 
     #[test]
-    fn cross_product_allowlist_all_match() {
-        // Every entry in every non-Custom allowlist must parse through the filter.
-        let variants = [
-            OpenAiCompatibleVariant::OpenRouter,
-            OpenAiCompatibleVariant::OpenAI,
-            OpenAiCompatibleVariant::Google,
-            OpenAiCompatibleVariant::DeepSeek,
-            OpenAiCompatibleVariant::Moonshot,
+    fn noise_filter_removes_embedding() {
+        let payload = r#"{"data":[
+            {"id":"gpt-4o"},
+            {"id":"text-embedding-3"}
+        ]}"#;
+        let result = parse_and_filter_models(
+            payload,
+            &OpenAiCompatibleVariant::OpenAI,
+            &["*".to_string()],
+        )
+        .unwrap();
+        // text-embedding-3 is stripped by noise regex
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].model_id, "gpt-4o");
+    }
+
+    #[test]
+    fn noise_filter_lets_all_good_models_through() {
+        // Known model ids from the embedded JSON — none should be caught by noise regex.
+        let good_ids = [
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "gemini-3.1-pro-preview",
+            "kimi-k2.6",
+            "moonshot-v1-128k",
         ];
-        for v in &variants {
-            for id in allowlist_for(v) {
-                let item = ModelsListItem {
-                    id: id.to_string(),
-                    name: None,
-                    context_length: None,
-                    supported_parameters: Some(vec!["tools".to_string()]),
-                    object: None,
-                };
-                let payload =
-                    serde_json::to_string(&ModelsListResponse { data: vec![item] }).unwrap();
-                let result = parse_and_filter_models(&payload, v, &["*".to_string()]).unwrap();
-                assert_eq!(
-                    result.len(),
-                    1,
-                    "allowlist entry '{}' for {:?} should survive filter",
-                    id,
-                    v
-                );
-            }
+        for id in &good_ids {
+            let item = ModelsListItem {
+                id: id.to_string(),
+                name: None,
+                context_length: None,
+                supported_parameters: Some(vec!["tools".to_string()]),
+                object: None,
+            };
+            let payload = serde_json::to_string(&ModelsListResponse { data: vec![item] }).unwrap();
+            let result = parse_and_filter_models(
+                &payload,
+                &OpenAiCompatibleVariant::OpenAI,
+                &["*".to_string()],
+            )
+            .unwrap();
+            assert_eq!(
+                result.len(),
+                1,
+                "good model id '{}' should survive filter",
+                id
+            );
         }
     }
 

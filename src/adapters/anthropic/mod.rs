@@ -246,49 +246,14 @@ impl StreamingProvider for AnthropicAdapter {
     }
 
     fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
-        use crate::domain::models::ModelCapability;
-        vec![
-            crate::domain::models::ModelDescriptor {
-                model_id: "claude-sonnet-4-6".to_string(),
-                display_name: "Claude Sonnet 4".to_string(),
-                provider_id: "anthropic".to_string(),
-                context_window: 200_000,
-                capabilities: std::collections::HashSet::from([
-                    ModelCapability::Vision,
-                    ModelCapability::ToolUse,
-                    ModelCapability::Thinking,
-                    ModelCapability::ParallelToolCalls,
-                ]),
-                pricing_tier: Some("flagship".to_string()),
-            stale: false,
-            },
-            crate::domain::models::ModelDescriptor {
-                model_id: "claude-opus-4-6".to_string(),
-                display_name: "Claude Opus 4".to_string(),
-                provider_id: "anthropic".to_string(),
-                context_window: 200_000,
-                capabilities: std::collections::HashSet::from([
-                    ModelCapability::Vision,
-                    ModelCapability::ToolUse,
-                    ModelCapability::Thinking,
-                    ModelCapability::ParallelToolCalls,
-                ]),
-                pricing_tier: Some("flagship".to_string()),
-            stale: false,
-            },
-            crate::domain::models::ModelDescriptor {
-                model_id: "claude-haiku-4-5".to_string(),
-                display_name: "Claude Haiku 4.5".to_string(),
-                provider_id: "anthropic".to_string(),
-                context_window: 200_000,
-                capabilities: std::collections::HashSet::from([
-                    ModelCapability::Vision,
-                    ModelCapability::ToolUse,
-                ]),
-                pricing_tier: Some("cheap".to_string()),
-            stale: false,
-            },
-        ]
+        if let Some(catalog) = crate::adapters::model_catalog_cache::load_embedded_seed() {
+            if let Some(entry) = catalog.providers.get("anthropic") {
+                return entry.models.iter().map(|m| m.descriptor.clone()).collect();
+            }
+        }
+        // Fallback: empty catalog (should never happen with a valid JSON seed)
+        tracing::warn!("No embedded catalog entry for 'anthropic'; returning empty");
+        Vec::new()
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {

@@ -54,4 +54,13 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Fetch latest models from providers and update models_variants.json (Story 7.7 AC4)
+    UpdateCatalog {
+        /// Output path for the updated catalog JSON (default: ./models_variants.json)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Only update specific provider IDs (e.g., "openai", "deepseek")
+        #[arg(long)]
+        provider: Vec<String>,
+    },
 }

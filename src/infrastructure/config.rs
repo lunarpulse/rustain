@@ -126,8 +126,7 @@ mod tests {
     /// Mirrors what `load()` does internally, but with a synthetic string
     /// layer instead of a file — so tests don't touch the filesystem.
     fn figment_with_user_layer(user_toml: &str) -> Figment {
-        Figment::from(Serialized::defaults(AppConfig::default()))
-            .merge(Toml::string(user_toml))
+        Figment::from(Serialized::defaults(AppConfig::default())).merge(Toml::string(user_toml))
     }
 
     /// AI-7.2 Path A canary: user-supplied `[pricing."my-model"]` MUST add to
@@ -404,7 +403,11 @@ mod tests {
                 p.discover_models,
                 "discover_models must survive for provider '{id}'"
             );
-            assert_eq!(p.kind.as_deref(), Some("openai-compatible"), "kind for '{id}'");
+            assert_eq!(
+                p.kind.as_deref(),
+                Some("openai-compatible"),
+                "kind for '{id}'"
+            );
             assert!(p.enabled, "enabled for '{id}'");
         }
         assert_eq!(config.provider.len(), 5, "exactly 5 providers expected");
@@ -430,12 +433,10 @@ mod tests {
         "#;
         // Full figment chain: defaults layer + user layer. If this errors,
         // the same regression that broke 7-6 has resurfaced.
-        let config: AppConfig = figment_with_user_layer(user_toml)
-            .extract()
-            .expect(
-                "merging defaults + user budget MUST NOT produce duplicate field — \
+        let config: AppConfig = figment_with_user_layer(user_toml).extract().expect(
+            "merging defaults + user budget MUST NOT produce duplicate field — \
                  see Epic 7 retro AI-7.2 figment-fix root-cause analysis",
-            );
+        );
         assert_eq!(config.budget.daily_limit_usd, Some(10.00));
     }
 
@@ -455,4 +456,3 @@ mod tests {
         assert_eq!(config.model, "claude-sonnet-4-6");
     }
 }
-

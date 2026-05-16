@@ -1,47 +1,14 @@
-//! Per-variant curated model allowlists and filter helpers.
+//! Noise filtering and glob-matching helpers.
 //!
-//! Story 7.6 AC2 — bundled allowlists are the first line of defense against
-//! provider catalog noise. Each non-Custom variant ships a curated list of
-//! model_ids that rustain knows are good defaults. The live `/v1/models`
-//! response is intersected with this allowlist (AND semantics with the user
-//! `model_filter` globs).
-
-use std::collections::HashSet;
+//! Story 7.7 AC2 — the allowlist gate is removed; the embedded
+//! `models_variants.json` is the seed catalog. Live `/v1/models` results
+//! are filtered through the noise regex and user `model_filter` globs only
+//! (no allowlist AND-intersection).
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::variant::OpenAiCompatibleVariant;
-
-/// Curated allowlist per variant. Custom returns `&[]` — the user is
-/// signalling "trust the server's catalog" when they set `discover_models = true`
-/// on a Custom provider (single-model local servers; their `list_models()` already
-/// returns the right single descriptor).
-pub fn allowlist_for(variant: &OpenAiCompatibleVariant) -> &'static [&'static str] {
-    match variant {
-        OpenAiCompatibleVariant::OpenRouter => &[
-            "anthropic/claude-3.5-sonnet",
-            "anthropic/claude-3-haiku",
-            "openai/gpt-4o",
-            "openai/gpt-4o-mini",
-            "google/gemini-2.5-pro-preview",
-            "deepseek/deepseek-v4-pro",
-            "deepseek/deepseek-v4-flash",
-        ],
-        OpenAiCompatibleVariant::OpenAI => &[
-            "gpt-4o",
-            "gpt-4o-mini",
-            "o1",
-            "o3-mini",
-            "gpt-4.1",
-            "gpt-4.1-mini",
-        ],
-        OpenAiCompatibleVariant::Google => &["gemini-2.0-flash", "gemini-2.5-pro-preview-03-25"],
-        OpenAiCompatibleVariant::DeepSeek => &["deepseek-v4-flash", "deepseek-v4-pro"],
-        OpenAiCompatibleVariant::Moonshot => &["moonshot-v1-auto", "kimi-k2-instruct"],
-        OpenAiCompatibleVariant::Custom { .. } => &[],
-    }
-}
 
 /// Noise regex — drop any model id matching these patterns.
 /// Verbatim from hermes-agent `_NOISE_PATTERNS` at `agent/models_dev.py:436-441`.
@@ -96,89 +63,6 @@ pub fn variant_default_context(variant: &OpenAiCompatibleVariant) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn allowlist_openrouter_verbatim() {
-        let list = allowlist_for(&OpenAiCompatibleVariant::OpenRouter);
-        assert_eq!(
-            list,
-            &[
-                "anthropic/claude-3.5-sonnet",
-                "anthropic/claude-3-haiku",
-                "openai/gpt-4o",
-                "openai/gpt-4o-mini",
-                    "google/gemini-2.5-pro-preview",
-                    "deepseek/deepseek-v4-pro",
-                    "deepseek/deepseek-v4-flash",
-            ]
-        );
-    }
-
-    #[test]
-    fn allowlist_openai_verbatim() {
-        let list = allowlist_for(&OpenAiCompatibleVariant::OpenAI);
-        assert_eq!(
-            list,
-            &[
-                "gpt-4o",
-                "gpt-4o-mini",
-                "o1",
-                "o3-mini",
-                "gpt-4.1",
-                "gpt-4.1-mini",
-            ]
-        );
-    }
-
-    #[test]
-    fn allowlist_google_verbatim() {
-        let list = allowlist_for(&OpenAiCompatibleVariant::Google);
-        assert_eq!(list, &["gemini-2.0-flash", "gemini-2.5-pro-preview-03-25"]);
-    }
-
-    #[test]
-    fn allowlist_deepseek_verbatim() {
-        let list = allowlist_for(&OpenAiCompatibleVariant::DeepSeek);
-        assert_eq!(list, &["deepseek-v4-flash", "deepseek-v4-pro"]);
-    }
-
-    #[test]
-    fn allowlist_moonshot_verbatim() {
-        let list = allowlist_for(&OpenAiCompatibleVariant::Moonshot);
-        assert_eq!(list, &["moonshot-v1-auto", "kimi-k2-instruct"]);
-    }
-
-    #[test]
-    fn allowlist_custom_is_empty() {
-        let list = allowlist_for(&OpenAiCompatibleVariant::Custom {
-            provider_id: "local".to_string(),
-            display_name: "Local".to_string(),
-            context_window: None,
-            supports_tools: None,
-        });
-        assert!(list.is_empty());
-    }
-
-    #[test]
-    fn all_allowlists_unique() {
-        let variants = [
-            OpenAiCompatibleVariant::OpenRouter,
-            OpenAiCompatibleVariant::OpenAI,
-            OpenAiCompatibleVariant::Google,
-            OpenAiCompatibleVariant::DeepSeek,
-            OpenAiCompatibleVariant::Moonshot,
-        ];
-        for v in &variants {
-            let list = allowlist_for(v);
-            let set: HashSet<&str> = list.iter().copied().collect();
-            assert_eq!(
-                set.len(),
-                list.len(),
-                "allowlist for {:?} contains duplicates",
-                v
-            );
-        }
-    }
 
     #[test]
     fn noise_pattern_matches() {

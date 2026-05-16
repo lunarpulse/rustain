@@ -192,24 +192,11 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
     let cases = vec![
         (
             OpenAiCompatibleVariant::OpenAI,
-            vec![
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-4.1",
-                "gpt-4.1-mini",
-                "gpt-4.1-nano",
-                "gpt-4o",
-                "gpt-4o-2024-11-20",
-                "gpt-4o-mini",
-                "o1",
-                "o3-mini",
-                "o4-mini",
-            ],
+            vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"],
         ),
         (
             OpenAiCompatibleVariant::Google,
-            vec!["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+            vec!["gemini-3.1-pro-preview", "gemini-3.1-flash-lite-preview"],
         ),
         (
             OpenAiCompatibleVariant::DeepSeek,
@@ -217,7 +204,7 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
         ),
         (
             OpenAiCompatibleVariant::Moonshot,
-            vec!["moonshot-v1-auto", "kimi-k2-instruct", "kimi-k2.6"],
+            vec!["kimi-k2.6", "moonshot-v1-128k"],
         ),
     ];
 
@@ -237,17 +224,21 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
         }
     }
 
-    // OpenRouter returns the full 7-model curated allowlist
+    // OpenRouter returns the full 8-model curated seed catalog
     let adapter = OpenAiAdapter::new(
         OpenAiCompatibleVariant::OpenRouter,
         "test-key".to_string(),
-        "anthropic/claude-3.5-sonnet".to_string(),
+        "anthropic/claude-opus-4.7".to_string(),
         None,
     )
     .unwrap();
     let models = adapter.list_models();
-    assert_eq!(models.len(), 7);
-    assert!(models.iter().any(|m| m.model_id == "anthropic/claude-3.5-sonnet"));
+    assert_eq!(models.len(), 8);
+    assert!(
+        models
+            .iter()
+            .any(|m| m.model_id == "anthropic/claude-opus-4.7")
+    );
     assert!(models.iter().all(|m| m.provider_id == "openrouter"));
 }
 
@@ -535,7 +526,7 @@ fn test_domain_models_no_adapter_imports() {
         context_window: 1000,
         capabilities: Default::default(),
         pricing_tier: None,
-    stale: false,
+        stale: false,
     };
     assert_eq!(desc.model_id, "test");
     assert_eq!(desc.provider_id, "test");

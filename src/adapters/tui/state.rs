@@ -2072,7 +2072,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
-                stale: false,
+                    stale: false,
                 }],
             },
             ProviderColumn {
@@ -2086,7 +2086,7 @@ mod tests {
                     context_window: 128_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
-                stale: false,
+                    stale: false,
                 }],
             },
         ];
@@ -2113,7 +2113,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
-                stale: false,
+                    stale: false,
                 },
                 ModelDescriptor {
                     model_id: "m2".to_string(),
@@ -2122,7 +2122,7 @@ mod tests {
                     context_window: 128_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
-                stale: false,
+                    stale: false,
                 },
             ],
         }];
@@ -2165,7 +2165,7 @@ mod tests {
                 context_window: 200_000,
                 capabilities: Default::default(),
                 pricing_tier: None,
-            stale: false,
+                stale: false,
             }],
         }];
         ms.selected_provider = 0;
@@ -2191,7 +2191,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
-                stale: false,
+                    stale: false,
                 },
                 ModelDescriptor {
                     model_id: "claude-sonnet".to_string(),
@@ -2200,7 +2200,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
-                stale: false,
+                    stale: false,
                 },
             ],
         }];
@@ -2226,42 +2226,40 @@ mod tests {
 
     fn make_test_selector() -> ModelSelectorState {
         let mut ms = ModelSelectorState::new();
-        ms.columns = vec![
-            ProviderColumn {
-                provider_id: "openrouter".to_string(),
-                display_name: "OpenRouter".to_string(),
-                healthy: true,
-                models: vec![
-                    ModelDescriptor {
-                        model_id: "anthropic/claude-3.5-sonnet".to_string(),
-                        display_name: "Claude 3.5 Sonnet".to_string(),
-                        provider_id: "openrouter".to_string(),
-                        context_window: 200_000,
-                        capabilities: Default::default(),
-                        pricing_tier: None,
-                        stale: false,
-                    },
-                    ModelDescriptor {
-                        model_id: "openai/gpt-4o".to_string(),
-                        display_name: "GPT-4o".to_string(),
-                        provider_id: "openrouter".to_string(),
-                        context_window: 128_000,
-                        capabilities: Default::default(),
-                        pricing_tier: None,
-                        stale: false,
-                    },
-                    ModelDescriptor {
-                        model_id: "google/gemini-flash".to_string(),
-                        display_name: "Gemini Flash ★".to_string(),
-                        provider_id: "openrouter".to_string(),
-                        context_window: 1_000_000,
-                        capabilities: Default::default(),
-                        pricing_tier: None,
-                        stale: false,
-                    },
-                ],
-            },
-        ];
+        ms.columns = vec![ProviderColumn {
+            provider_id: "openrouter".to_string(),
+            display_name: "OpenRouter".to_string(),
+            healthy: true,
+            models: vec![
+                ModelDescriptor {
+                    model_id: "anthropic/claude-3.5-sonnet".to_string(),
+                    display_name: "Claude 3.5 Sonnet".to_string(),
+                    provider_id: "openrouter".to_string(),
+                    context_window: 200_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                    stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "openai/gpt-4o".to_string(),
+                    display_name: "GPT-4o".to_string(),
+                    provider_id: "openrouter".to_string(),
+                    context_window: 128_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                    stale: false,
+                },
+                ModelDescriptor {
+                    model_id: "google/gemini-flash".to_string(),
+                    display_name: "Gemini Flash ★".to_string(),
+                    provider_id: "openrouter".to_string(),
+                    context_window: 1_000_000,
+                    capabilities: Default::default(),
+                    pricing_tier: None,
+                    stale: false,
+                },
+            ],
+        }];
         ms
     }
 

@@ -1,13 +1,16 @@
 //! Disk cache for discovered model catalogs.
 //!
 //! Story 7.6 AC4 — three-tier catalog system:
-//! Tier 0: bundled snapshot (`variant.known_models()`)
+//! Tier 0: bundled snapshot (embedded `models_variants.json`)
 //! Tier 1: disk cache (`~/.rustain/models_cache.json`)
-//! Tier 2: live `/v1/models` fetch
+//! Tier 2: live `/v1/models` fetch (OpenAI-compatible only)
+//!
+//! Story 7.7 AC1 — the embedded JSON is the universal seed catalog for ALL
+//! providers (Anthropic, OpenAI, OpenRouter, Google, DeepSeek, Moonshot).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
@@ -79,16 +82,19 @@ pub fn merge_with_live(
             } else {
                 let mut ghost = cached_model.descriptor.clone();
                 ghost.stale = true;
-                result.push(CachedModelEntry {
-                    descriptor: ghost,
-                });
+                result.push(CachedModelEntry { descriptor: ghost });
             }
         }
     }
 
     // Add new live models not in cache
     let cached_ids: HashSet<&str> = cached
-        .map(|c| c.models.iter().map(|m| m.descriptor.model_id.as_str()).collect())
+        .map(|c| {
+            c.models
+                .iter()
+                .map(|m| m.descriptor.model_id.as_str())
+                .collect()
+        })
         .unwrap_or_default();
     for live_model in live {
         if !cached_ids.contains(live_model.model_id.as_str()) {
@@ -191,6 +197,25 @@ pub struct DiscoveryTarget {
     pub adapter: Arc<crate::adapters::openai::OpenAiAdapter>,
     pub cache_ttl_seconds: u64,
     pub model_filter: Vec<String>,
+}
+
+// ── Embedded seed catalog (Story 7.7 AC1) ────────────────────────────────
+
+/// Shipped `models_variants.json` content baked into the binary at compile time.
+/// Zero I/O — lives in `.rodata`. Used by all adapters as the Tier-0 seed.
+const EMBEDDED_SEED_JSON: &str = include_str!("../../models_variants.json");
+
+/// Accessor for the raw embedded JSON text (used by `update-catalog` CLI, startup).
+pub fn embedded_seed_json() -> &'static str {
+    EMBEDDED_SEED_JSON
+}
+
+/// Lazily deserialized embedded seed catalog. Returns a static reference —
+/// zero allocations after first call.
+pub fn load_embedded_seed() -> Option<&'static CachedCatalog> {
+    static SEED: OnceLock<Option<CachedCatalog>> = OnceLock::new();
+    SEED.get_or_init(|| serde_json::from_str(EMBEDDED_SEED_JSON).ok())
+        .as_ref()
 }
 
 #[cfg(test)]
@@ -363,7 +388,7 @@ mod tests {
                 context_window: 128_000,
                 capabilities: std::collections::HashSet::new(),
                 pricing_tier: None,
-            stale: false,
+                stale: false,
             },
             ModelDescriptor {
                 model_id: "b".to_string(),
@@ -372,12 +397,15 @@ mod tests {
                 context_window: 128_000,
                 capabilities: std::collections::HashSet::new(),
                 pricing_tier: None,
-            stale: false,
+                stale: false,
             },
         ];
 
         // Merge: live models get stale=false; missing models keep stale=true
-        let merged = merge_with_live(Some(catalog.providers.get("openrouter").unwrap()), &live_models);
+        let merged = merge_with_live(
+            Some(catalog.providers.get("openrouter").unwrap()),
+            &live_models,
+        );
         assert_eq!(merged.len(), 3);
         let a = merged
             .iter()
@@ -396,5 +424,4 @@ mod tests {
         assert!(c.descriptor.stale);
         assert_eq!(a.descriptor.display_name, "A-new"); // refreshed from live
     }
-
 }
