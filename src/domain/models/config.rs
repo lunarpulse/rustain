@@ -11,7 +11,7 @@ use crate::domain::models::pricing::PricingConfig;
 pub struct ProviderConfig {
     /// Unique provider identifier (e.g., `"anthropic"`).
     pub provider_id: String,
-    /// The model to use (e.g., `"claude-sonnet-4-20250514"`).
+    /// The model to use (e.g., `"claude-sonnet-4-6"`).
     pub model_id: String,
     /// Environment variable name that holds the API key or bearer token.
     pub api_key_env: String,
@@ -306,21 +306,12 @@ impl AppConfig {
         use std::collections::HashMap;
         let mut m = HashMap::new();
         // Anthropic
-        // default_model() returns "claude-sonnet-4-6" which is the
-        // model ID the Anthropic adapter sends to the API. The ledger records this
-        // string, so the pricing catalog MUST include it for cost attribution.
+        // `claude-sonnet-4-6` is the load-bearing key: returned by `default_model()`,
+        // used 7x in `src/adapters/anthropic/mod.rs` as the model ID sent to the API,
+        // and what the ledger records. There is exactly ONE Sonnet-4 catalog entry
+        // (per Epic 7 retro AI-7.3 canonicalization, resolving DF-S76-2).
         m.insert(
             "claude-sonnet-4-6".to_string(),
-            PricingConfig {
-                input_per_million: 3.00,
-                output_per_million: 15.00,
-                cache_creation_per_million: Some(3.75),
-                cache_read_per_million: Some(0.30),
-                reasoning_per_million: None,
-            },
-        );
-        m.insert(
-            "claude-sonnet-4-20250514".to_string(),
             PricingConfig {
                 input_per_million: 3.00,
                 output_per_million: 15.00,
@@ -623,17 +614,20 @@ review = "flagship"
 
     #[test]
     fn app_config_pricing_roundtrip() {
+        // Canonical form is snake_case (post-Epic-7 AI-7.2 figment fix).
+        // camelCase remains accepted as an alias for back-compat — see the
+        // separate `app_config_pricing_camelcase_alias` test below.
         let toml_input = r#"
 model = "test-model"
 
-[pricing."claude-sonnet-4-20250514"]
-inputPerMillion = 3.0
-outputPerMillion = 15.0
+[pricing."claude-sonnet-4-6"]
+input_per_million = 3.0
+output_per_million = 15.0
 "#;
         let config: AppConfig = toml::from_str(toml_input).expect("deserialize pricing");
         let p = config
             .pricing
-            .get("claude-sonnet-4-20250514")
+            .get("claude-sonnet-4-6")
             .expect("sonnet pricing");
         assert_eq!(p.input_per_million, 3.0);
         assert_eq!(p.output_per_million, 15.0);
@@ -643,13 +637,31 @@ outputPerMillion = 15.0
 
         let serialized = toml::to_string(&config).expect("serialize");
         assert!(
-            serialized.contains("inputPerMillion = 3.0"),
-            "serialized must round-trip inputPerMillion: {serialized}"
+            serialized.contains("input_per_million = 3.0"),
+            "serialized must use snake_case canonical: {serialized}"
         );
         assert!(
-            serialized.contains("outputPerMillion = 15.0"),
-            "serialized must round-trip outputPerMillion: {serialized}"
+            serialized.contains("output_per_million = 15.0"),
+            "serialized must use snake_case canonical: {serialized}"
         );
+    }
+
+    /// camelCase alias accepted on deserialization (back-compat for any
+    /// JSON-format configs migrated from Claude Code conventions).
+    #[test]
+    fn app_config_pricing_camelcase_alias() {
+        let toml_input = r#"
+model = "test-model"
+
+[pricing."claude-sonnet-4-6"]
+inputPerMillion = 3.0
+outputPerMillion = 15.0
+"#;
+        let config: AppConfig =
+            toml::from_str(toml_input).expect("deserialize pricing via camelCase alias");
+        let p = config.pricing.get("claude-sonnet-4-6").unwrap();
+        assert_eq!(p.input_per_million, 3.0);
+        assert_eq!(p.output_per_million, 15.0);
     }
 
     #[test]
@@ -684,20 +696,35 @@ daily_limit_usd = 10.0
 
     #[test]
     fn app_config_budget_roundtrip() {
+        // Canonical form is snake_case (post-Epic-7 AI-7.2 figment fix).
         let toml_input = r#"
 model = "test-model"
 
 [budget]
-dailyLimitUsd = 5.0
+daily_limit_usd = 5.0
 "#;
         let config: AppConfig = toml::from_str(toml_input).expect("deserialize budget");
         assert_eq!(config.budget.daily_limit_usd, Some(5.0));
 
         let serialized = toml::to_string(&config).expect("serialize");
         assert!(
-            serialized.contains("dailyLimitUsd = 5.0"),
-            "serialized must round-trip dailyLimitUsd: {serialized}"
+            serialized.contains("daily_limit_usd = 5.0"),
+            "serialized must use snake_case canonical: {serialized}"
         );
+    }
+
+    /// camelCase alias still accepted on deserialization (back-compat).
+    #[test]
+    fn app_config_budget_camelcase_alias() {
+        let toml_input = r#"
+model = "test-model"
+
+[budget]
+dailyLimitUsd = 7.50
+"#;
+        let config: AppConfig =
+            toml::from_str(toml_input).expect("deserialize budget via camelCase alias");
+        assert_eq!(config.budget.daily_limit_usd, Some(7.50));
     }
 
     #[test]
@@ -706,8 +733,9 @@ dailyLimitUsd = 5.0
         let config: AppConfig = toml::from_str(toml_input).expect("deserialize");
         // Pricing defaults to the curated catalog
         assert!(
-            config.pricing.contains_key("claude-sonnet-4-20250514"),
-            "default pricing catalog must include claude-sonnet-4-20250514"
+            config.pricing.contains_key("claude-sonnet-4-6"),
+            "default pricing catalog must include claude-sonnet-4-6 \
+             (the load-bearing key returned by default_model())"
         );
         assert!(
             config.pricing.contains_key("gpt-4o"),
@@ -716,6 +744,38 @@ dailyLimitUsd = 5.0
         // Budget defaults to no daily_limit_usd
         assert_eq!(config.budget.daily_limit_usd, None);
         assert_eq!(config.budget, BudgetConfig::default());
+    }
+
+    /// Regression test for Epic 7 retro AI-7.3 (DF-S76-2): the default pricing
+    /// catalog must NOT contain duplicate semantic entries for the same model
+    /// family. Specifically, `claude-sonnet-4-6` (load-bearing) and
+    /// `claude-sonnet-4-20250514` (dated-format alias, removed) must not coexist.
+    #[test]
+    fn app_config_default_pricing_catalog_has_no_sonnet4_duplicate() {
+        let catalog = AppConfig::default_pricing_catalog();
+        assert!(
+            catalog.contains_key("claude-sonnet-4-6"),
+            "canonical Sonnet-4 key claude-sonnet-4-6 missing from catalog"
+        );
+        assert!(
+            !catalog.contains_key("claude-sonnet-4-20250514"),
+            "dated-format Sonnet-4 alias claude-sonnet-4-20250514 must not be \
+             present alongside the canonical key (DF-S76-2 / Epic 7 retro AI-7.3)"
+        );
+    }
+
+    /// Regression test for AI-7.3 + Epic 8 future-proofing: the model returned by
+    /// `default_model()` must have a matching entry in `default_pricing_catalog()`
+    /// so an out-of-the-box config shows cost as a number, not `n/a`.
+    #[test]
+    fn app_config_default_model_has_pricing_entry() {
+        let default_model = AppConfig::default_model();
+        let catalog = AppConfig::default_pricing_catalog();
+        assert!(
+            catalog.contains_key(&default_model),
+            "default_model() returns '{default_model}' but default_pricing_catalog() \
+             has no entry for it — out-of-the-box config would show cost: n/a"
+        );
     }
 
     #[test]

@@ -24,25 +24,32 @@
 use serde::{Deserialize, Serialize};
 
 /// Per-model pricing rates, USD per 1,000,000 tokens (Story 7.5 AC1).
+///
+/// **Serialization:** snake_case canonical (matches TOML idiom + user configs).
+/// The prior `rename_all = "camelCase"` + per-field snake_case alias dual-form
+/// support was dropped post-Epic-7 to fix a figment merge conflict — when both
+/// the defaults layer (camelCase canonical) and a user TOML layer (snake_case
+/// alias) define the same field, figment produces a value tree with both keys
+/// and serde rejects it as a duplicate field. camelCase is preserved as an
+/// alias for any existing JSON-format configs. See Epic 7 retro AI-7.2.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PricingConfig {
     /// Cost in USD per million **input** tokens.
-    #[serde(alias = "input_per_million")]
+    #[serde(alias = "inputPerMillion")]
     pub input_per_million: f64,
     /// Cost in USD per million **output** tokens.
-    #[serde(alias = "output_per_million")]
+    #[serde(alias = "outputPerMillion")]
     pub output_per_million: f64,
     /// Cost in USD per million **cache-creation** tokens (Anthropic prompt caching).
     /// When `None`, `cost_calculator` defaults to `1.25 × input_per_million`.
-    #[serde(default, alias = "cache_creation_per_million")]
+    #[serde(default, alias = "cacheCreationPerMillion")]
     pub cache_creation_per_million: Option<f64>,
     /// Cost in USD per million **cache-read** tokens (Anthropic prompt caching).
     /// When `None`, `cost_calculator` defaults to `0.10 × input_per_million`.
-    #[serde(default, alias = "cache_read_per_million")]
+    #[serde(default, alias = "cacheReadPerMillion")]
     pub cache_read_per_million: Option<f64>,
     /// Cost in USD per million **reasoning** tokens (extended thinking).
     /// When `None`, `cost_calculator` defaults to `output_per_million`.
-    #[serde(default, alias = "reasoning_per_million")]
+    #[serde(default, alias = "reasoningPerMillion")]
     pub reasoning_per_million: Option<f64>,
 }

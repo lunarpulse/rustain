@@ -18,13 +18,15 @@ pub struct SecurityAdapter {
     mode: Arc<AtomicU8>,
     /// Active skill directories that are readable regardless of workspace boundary (AC7).
     ///
-    /// CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: held only for short critical sections
-    /// (HashSet::contains/insert/remove on a small set, ≤1µs), never across `.await`.
-    /// Verified by audit of all 26 call sites. Converting to `tokio::sync::RwLock`
-    /// would propagate `async fn` through `PermissionChain::check` into
-    /// the synchronous tool-execution path — cost disproportionate to risk.
-    /// See Story 16-0 AC3.
-    active_skill_dirs: std::sync::RwLock<std::collections::HashSet<PathBuf>>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: held only for short critical sections, never across await; see AC3 of Story 16-0.
+    /// CONFORMANCE_EXCEPTION_STD_SYNC_LOCK (PERMANENT, ADR-07-01): held only for
+    /// short critical sections (HashSet::contains/insert/remove on a small set,
+    /// ≤1µs), never across `.await`. Verified by audit of all 26 call sites.
+    /// Migration to `tokio::sync::RwLock` would propagate `async fn` through
+    /// `PermissionChain::check` into the synchronous tool-execution path
+    /// (ADR-06-02 ToolCall FSM stability concern) — migration cost exceeds
+    /// runtime benefit. This exception is INTENTIONAL and PERMANENT, not a
+    /// to-fix item. See ADR-07-01 (Epic 7 retro AI-7.5, closes DF-158).
+    active_skill_dirs: std::sync::RwLock<std::collections::HashSet<PathBuf>>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: PERMANENT per ADR-07-01 (closes DF-158); short critical sections, never across await.
 }
 
 impl SecurityAdapter {
@@ -57,7 +59,7 @@ impl SecurityAdapter {
             blocked_commands,
             blocked_paths,
             mode: Arc::new(AtomicU8::new(PermissionMode::Normal as u8)),
-            active_skill_dirs: std::sync::RwLock::new(std::collections::HashSet::new()), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: held only for short critical sections, never across await; see AC3 of Story 16-0.
+            active_skill_dirs: std::sync::RwLock::new(std::collections::HashSet::new()), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: PERMANENT per ADR-07-01 (closes DF-158); short critical sections, never across await.
         }
     }
 

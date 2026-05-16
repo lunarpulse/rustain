@@ -384,8 +384,12 @@ fn test_no_new_eventbus_bypass() {
     // Ratchet: count must NOT grow.
     assert!(
         actual <= MAX_KNOWN_BYPASSES,
-        "EventBus bypass count grew from {MAX_KNOWN_BYPASSES} to {actual}. \
-         Use `app_state.event_bus.emit_domain(event)` instead of `*_tx.send(AppEvent::...)`. \
+        "EventBus bypass count grew from {MAX_KNOWN_BYPASSES} to {actual}.\n\
+         Use `app_state.event_bus.emit_domain(event)` instead of `*_tx.send(AppEvent::...)`.\n\
+         If a bypass is genuinely required, satisfy the AppEvent ratchet guard-rail\n\
+         (AC citation OR architect sign-off) per\n\
+         `_bmad-output/planning-artifacts/architecture/process-architecture.md` §1.1,\n\
+         then tag the line with `// CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: <story-id> AC<N> — <why>`.\n\
          New violations:\n{}",
         bypass_sites.join("\n")
     );
@@ -404,19 +408,30 @@ fn test_no_new_eventbus_bypass() {
 // `std::sync::RwLock`/`Mutex` must not appear in `src/infrastructure/` or
 // `src/adapters/` unless tagged with `// CONFORMANCE_EXCEPTION_STD_SYNC_LOCK`
 // on the same line.  The project policy (see rustain/CLAUDE.md "Async Lock
-// Policy") requires tokio-aware locks in async code paths.
+// Policy" and `_bmad-output/planning-artifacts/architecture/process-architecture.md`
+// §1.2) requires tokio-aware locks in async code paths.
 //
-// The SecurityAdapter uses `std::sync::RwLock` for `active_skill_dirs`
-// (short critical sections, never across `.await`) — that use is tagged
-// and excluded from the ratchet.  This test locks the count at zero:
-// any new untagged `std::sync::*Lock` in the scanned directories fails
-// the ratchet.
+// Tagged PERMANENT exceptions (NOT counted, NOT migration candidates):
+//   - `src/adapters/security_adapter.rs:27,60` — SecurityAdapter::active_skill_dirs
+//     (ADR-07-01 ratifies; closes DF-158 after 3 epochs of carry-forward)
+//   - `src/adapters/tui/refresh_tracker.rs` — RefreshTracker.inner
+//     (RAII-encapsulated newtype; cannot escape; Story 7-6 Dev Notes
+//      §RefreshTracker design)
 //
-// To add a justified exception:
-//   1. Tag every line containing the lock type with the comment tag.
-//   2. Document the justification in a code comment (see SecurityAdapter
-//      AC3 pattern in Story 16-0).
-//   3. Raise MAX_KNOWN_STD_SYNC_LOCKS if the usage is truly unavoidable.
+// This test locks the UNTAGGED count: any new untagged `std::sync::*Lock` in
+// the scanned directories fails the ratchet. The tagged permanent exceptions
+// above are excluded by the line-skip on the tag comment.
+//
+// To add a NEW PERMANENT exception:
+//   1. Write an ADR explaining why migration cost exceeds benefit
+//      (see ADR-07-01 as template).
+//   2. Tag every line containing the lock type with
+//      `// CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: PERMANENT per ADR-<id>`.
+//   3. Add the site to the `process-architecture.md` §1.2 table.
+//
+// To add a TEMPORARY exception (will be migrated later):
+//   1. Tag every line + document migration target in a `DF-` deferred-work entry.
+//   2. Raise MAX_KNOWN_STD_SYNC_LOCKS only if the use is genuinely untagged.
 #[test]
 fn test_no_std_sync_lock_in_async_module() {
     const MAX_KNOWN_STD_SYNC_LOCKS: usize = 1;
@@ -463,9 +478,11 @@ fn test_no_std_sync_lock_in_async_module() {
 
     assert!(
         actual <= MAX_KNOWN_STD_SYNC_LOCKS,
-        "std::sync::RwLock/Mutex count grew from {MAX_KNOWN_STD_SYNC_LOCKS} to {actual}. \
-         Use tokio::sync::RwLock/Mutex instead, or add // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK \
-         with justification (see Story 16-0 AC3). \
+        "std::sync::RwLock/Mutex count grew from {MAX_KNOWN_STD_SYNC_LOCKS} to {actual}.\n\
+         Use tokio::sync::RwLock/Mutex instead.\n\
+         If the lock is genuinely required (short critical section, never across `.await`),\n\
+         add `// CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: <reason + ADR id>` on every line,\n\
+         per `_bmad-output/planning-artifacts/architecture/process-architecture.md` §1.2.\n\
          New violations:\n{}",
         violations.join("\n")
     );
