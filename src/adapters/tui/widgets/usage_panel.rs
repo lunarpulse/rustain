@@ -18,6 +18,7 @@ use crate::adapters::tui::widgets::status_bar::format_token_count;
 
 /// USD formatter: 2-decimal for ≥$0.01, 4-decimal for <$0.01 (Story 7.5 Dev Notes §"Cost formatting").
 pub(crate) fn format_cost(usd: f64) -> String {
+    let usd = usd.max(0.0);
     if usd >= 0.01 {
         format!("${:.2}", usd)
     } else {

@@ -31,6 +31,7 @@ fn model(id: &str, display: &str, provider: &str, ctx: u32) -> ModelDescriptor {
         context_window: ctx,
         capabilities: HashSet::new(),
         pricing_tier: None,
+    stale: false,
     }
 }
 

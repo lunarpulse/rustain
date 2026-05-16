@@ -260,6 +260,7 @@ impl StreamingProvider for AnthropicAdapter {
                     ModelCapability::ParallelToolCalls,
                 ]),
                 pricing_tier: Some("flagship".to_string()),
+            stale: false,
             },
             crate::domain::models::ModelDescriptor {
                 model_id: "claude-opus-4-6".to_string(),
@@ -273,6 +274,7 @@ impl StreamingProvider for AnthropicAdapter {
                     ModelCapability::ParallelToolCalls,
                 ]),
                 pricing_tier: Some("flagship".to_string()),
+            stale: false,
             },
             crate::domain::models::ModelDescriptor {
                 model_id: "claude-haiku-4-5".to_string(),
@@ -284,6 +286,7 @@ impl StreamingProvider for AnthropicAdapter {
                     ModelCapability::ToolUse,
                 ]),
                 pricing_tier: Some("cheap".to_string()),
+            stale: false,
             },
         ]
     }

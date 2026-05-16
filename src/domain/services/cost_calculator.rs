@@ -11,7 +11,7 @@
 //!   - `cache_read`     → 0.10 × input_per_million (Anthropic 90%-off cache-read)
 //!   - `reasoning`      → output_per_million         (billed at output rate)
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::domain::models::pricing::PricingConfig;
 use crate::domain::models::usage::UsageLedgerEntry;
@@ -72,7 +72,7 @@ pub fn cost_breakdown(
     pricing: &HashMap<String, PricingConfig>,
 ) -> CostBreakdown {
     let mut per_model: BTreeMap<String, ModelCost> = BTreeMap::new();
-    let mut missing: Vec<String> = Vec::new();
+    let mut missing: HashSet<String> = HashSet::new();
     let mut total: f64 = 0.0;
 
     for entry in entries {
@@ -87,20 +87,18 @@ pub fn cost_breakdown(
                 total += c;
             }
             None => {
-                // missing pricing — keep cost_usd as-is (None unless a prior
-                // entry with the same model was priced, which can't happen
-                // because pricing is keyed by model_id)
-                if !missing.iter().any(|m| m == &entry.model) {
-                    missing.push(entry.model.clone());
-                }
+                missing.insert(entry.model.clone());
             }
         }
     }
 
+    let mut missing_vec: Vec<String> = missing.into_iter().collect();
+    missing_vec.sort();
+
     CostBreakdown {
         total_usd: total,
         per_model,
-        missing_pricing_models: missing,
+        missing_pricing_models: missing_vec,
     }
 }
 
@@ -288,7 +286,7 @@ mod tests {
         let bd = cost_breakdown(&entries, &test_pricing());
         assert_eq!(
             bd.missing_pricing_models,
-            vec!["unknown".to_string(), "also-unknown".to_string()]
+            vec!["also-unknown".to_string(), "unknown".to_string()]
         );
         assert_eq!(bd.total_usd, 0.0);
     }

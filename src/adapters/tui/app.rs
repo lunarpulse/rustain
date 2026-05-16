@@ -2635,12 +2635,30 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
             InputAction::Consumed
         }
         DomainKey::Up => {
-            state.model_selector.navigate_model(Direction::Up);
+            if state.model_selector.search_active
+                && !state.model_selector.filtered_indices.is_empty()
+            {
+                if state.model_selector.selected_model == 0 {
+                    state.model_selector.selected_model =
+                        state.model_selector.filtered_indices.len() - 1;
+                } else {
+                    state.model_selector.selected_model -= 1;
+                }
+            } else if !state.model_selector.search_active {
+                state.model_selector.navigate_model(Direction::Up);
+            }
             state.needs_redraw = true;
             InputAction::Consumed
         }
         DomainKey::Down => {
-            state.model_selector.navigate_model(Direction::Down);
+            if state.model_selector.search_active
+                && !state.model_selector.filtered_indices.is_empty()
+            {
+                state.model_selector.selected_model = (state.model_selector.selected_model + 1)
+                    % state.model_selector.filtered_indices.len();
+            } else if !state.model_selector.search_active {
+                state.model_selector.navigate_model(Direction::Down);
+            }
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -2657,9 +2675,25 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
             InputAction::Consumed
         }
         DomainKey::Esc => {
+            if state.model_selector.search_active {
+                state.model_selector.search_active = false;
+                state.model_selector.search_query.clear();
+                state.model_selector.filtered_indices.clear();
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
             state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
+        }
+        DomainKey::Backspace => {
+            if state.model_selector.search_active {
+                state.model_selector.search_query.pop();
+                state.model_selector.recompute_filter();
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+            InputAction::Ignored
         }
         DomainKey::CtrlC => {
             state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
@@ -2698,7 +2732,8 @@ fn handle_usage_panel_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 }
 
 /// Handle char keys while the model selector overlay is active.
-/// Story 7.2 AC1 (vim-style h/l/j/k), AC5 (y/n context-warning confirmation).
+/// Story 7.2 AC1 (vim-style h/l/j/k), AC5 (y/n context-warning confirmation),
+/// Story 7.6 AC9 (keyword search).
 fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
     if state.model_selector.pending_context_warning.is_some() {
         return match c.to_ascii_lowercase() {
@@ -2721,6 +2756,27 @@ fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
             _ => InputAction::Consumed,
         };
     }
+
+    // '/' activates search mode unconditionally (Preflight Consensus #7)
+    if c == '/' && !state.model_selector.search_active {
+        state.model_selector.search_active = true;
+        state.model_selector.search_query.clear();
+        state.model_selector.recompute_filter();
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+
+    if state.model_selector.search_active {
+        if c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | ' ' | ':' | '+') {
+            state.model_selector.search_query.push(c);
+            state.model_selector.recompute_filter();
+            state.needs_redraw = true;
+            return InputAction::Consumed;
+        }
+        // Ignore other chars while searching
+        return InputAction::Consumed;
+    }
+
     match c.to_ascii_lowercase() {
         'h' => {
             state.model_selector.navigate_provider(Direction::Left);

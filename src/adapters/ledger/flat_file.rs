@@ -84,6 +84,10 @@ impl UsageLedgerPort for FileUsageLedger {
     }
 
     async fn read_since(&self, since_unix_ms: i64) -> Result<Vec<UsageLedgerEntry>, StorageError> {
+        // usage_dir() calls data_dir() which calls create_dir_all.
+        // This means a read operation has a directory-creation side effect.
+        // Acceptable because the dir must exist for any write anyway; the
+        // read would fail on a missing dir regardless.
         let dir = match crate::infrastructure::paths::usage_dir().await {
             Ok(d) => d,
             Err(_) => return Ok(Vec::new()),

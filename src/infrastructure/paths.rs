@@ -73,6 +73,17 @@ pub fn budget_state_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("budget_state.json"))
 }
 
+/// Path to the main config file (`~/.config/rustain/config.toml`).
+pub fn config_file_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.toml"))
+}
+
+/// Path to the model catalog cache JSON file (Story 7.6 AC4).
+/// Sync since `data_dir()` already creates the parent dir; no need to async-create.
+pub fn models_cache_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("models_cache.json"))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

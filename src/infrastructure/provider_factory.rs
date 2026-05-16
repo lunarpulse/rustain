@@ -160,6 +160,54 @@ fn build_openai_compatible_from_config(
     Ok(Arc::new(adapter))
 }
 
+/// Build a typed `OpenAiAdapter` for discovery purposes.
+/// Returns `Some(Arc<OpenAiAdapter>)` for OpenAI-compatible kinds,
+/// `None` for non-OpenAI kinds (Anthropic, Ollama).
+///
+/// MUST stay kind-list-synced with `build_provider_for_config` — see Story 7.6 AC5.
+#[cfg(feature = "openai")]
+pub fn build_openai_for_discovery(
+    provider_id: &str,
+    cfg: &ProviderConfig,
+) -> Result<Option<Arc<crate::adapters::openai::OpenAiAdapter>>, ProviderError> {
+    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+
+    let kind = cfg.kind.as_deref().unwrap_or(provider_id);
+    let api_key = if cfg.api_key_env.is_empty() {
+        String::new()
+    } else {
+        crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
+    };
+
+    let variant = match kind {
+        "openai" => OpenAiCompatibleVariant::OpenAI,
+        "openrouter" => OpenAiCompatibleVariant::OpenRouter,
+        "google" => OpenAiCompatibleVariant::Google,
+        "deepseek" => OpenAiCompatibleVariant::DeepSeek,
+        "moonshot" => OpenAiCompatibleVariant::Moonshot,
+        "openai-compatible" => OpenAiCompatibleVariant::Custom {
+            provider_id: cfg.provider_id.clone(),
+            display_name: cfg.provider_id.clone(),
+            context_window: cfg.context_window,
+            supports_tools: cfg.supports_tools,
+        },
+        _ => return Ok(None),
+    };
+
+    let base_url = cfg.base_url.clone();
+    let adapter = OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), base_url)
+        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?;
+    Ok(Some(Arc::new(adapter)))
+}
+
+#[cfg(not(feature = "openai"))]
+pub fn build_openai_for_discovery(
+    _provider_id: &str,
+    _cfg: &ProviderConfig,
+) -> Result<Option<()>, ProviderError> {
+    Ok(None)
+}
+
 #[cfg(feature = "ollama")]
 fn build_ollama_from_config(
     cfg: &ProviderConfig,
@@ -176,4 +224,63 @@ fn build_ollama_from_config(
     let adapter = OllamaAdapter::new(cfg.model_id.clone(), cfg.base_url.clone())
         .map_err(|e| ProviderError::Other(format!("Failed to create Ollama adapter: {}", e)))?;
     Ok(Arc::new(adapter))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "openai")]
+    fn build_openai_for_discovery_kind_list_matches() {
+        unsafe { std::env::set_var("RUSTAIN_TEST_KEY", "sk-test-dummy-key"); }
+        let known_kinds = ["openai", "openrouter", "google", "deepseek", "moonshot", "openai-compatible"];
+        for kind in known_kinds {
+            let cfg = ProviderConfig {
+                provider_id: kind.to_string(),
+                enabled: true,
+                model_id: "test".to_string(),
+                api_key_env: "RUSTAIN_TEST_KEY".to_string(),
+                base_url: Some("http://localhost".to_string()),
+                kind: Some(kind.to_string()),
+                context_window: None,
+                supports_tools: None,
+                discover_models: false,
+                model_filter: vec!["*".to_string()],
+                cache_ttl_seconds: 3600,
+
+            };
+            let result = build_openai_for_discovery(kind, &cfg);
+            assert!(
+                result.is_ok() && result.unwrap().is_some(),
+                "kind='{}' should produce a discovery adapter",
+                kind
+            );
+        }
+
+        // Unknown kinds return None (not an error)
+        let unknown_kinds = ["anthropic", "ollama", "foo-bar"];
+        for kind in unknown_kinds {
+            let cfg = ProviderConfig {
+                provider_id: kind.to_string(),
+                enabled: true,
+                model_id: "test".to_string(),
+                api_key_env: "RUSTAIN_TEST_KEY".to_string(),
+                base_url: Some("http://localhost".to_string()),
+                kind: Some(kind.to_string()),
+                context_window: None,
+                supports_tools: None,
+                discover_models: false,
+                model_filter: vec!["*".to_string()],
+                cache_ttl_seconds: 3600,
+
+            };
+            let result = build_openai_for_discovery(kind, &cfg);
+            assert!(
+                result.is_ok() && result.unwrap().is_none(),
+                "kind='{}' should return None for unsupported discovery",
+                kind
+            );
+        }
+    }
 }

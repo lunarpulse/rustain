@@ -136,6 +136,10 @@ pub fn render(
 
     // Daily budget segment (Story 7.5 AC5). Suppressed when paused
     // (`unix_now <= dismissed_until_unix`).
+    // The segment only appears at ≥80% utilization (yellow/red).
+    // Below 80% the budget is invisible — users see utilization in the
+    // usage panel (Ctrl+X, U) instead. This is intentional: the status bar
+    // is reserved for actionable warnings, not informational displays.
     if let Some(b) = daily_budget {
         if b.limit_usd > 0.0 && now_unix() > b.dismissed_until_unix {
             let pct = b.percent();

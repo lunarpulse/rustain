@@ -11,7 +11,7 @@ use rustain::domain::errors::ProviderError;
 use rustain::domain::models::provider::{ModelCapability, ModelDescriptor};
 use rustain::domain::models::{AppConfig, CompletionOptions, Message, ProviderConfig, StreamChunk};
 use rustain::domain::ports::StreamingProvider;
-use rustain::infrastructure::startup::init_provider_layer;
+use rustain::infrastructure::startup::{ProviderLayer, init_provider_layer};
 
 #[test]
 #[cfg(feature = "ollama")]
@@ -29,6 +29,9 @@ fn test_startup_registers_configured_providers() {
                 base_url: None,
                 context_window: None,
                 supports_tools: None,
+                discover_models: false,
+                model_filter: vec!["*".to_string()],
+                cache_ttl_seconds: 3600,
             },
         ),
         (
@@ -42,6 +45,9 @@ fn test_startup_registers_configured_providers() {
                 base_url: None,
                 context_window: None,
                 supports_tools: None,
+                discover_models: false,
+                model_filter: vec!["*".to_string()],
+                cache_ttl_seconds: 3600,
             },
         ),
         (
@@ -55,11 +61,20 @@ fn test_startup_registers_configured_providers() {
                 base_url: None,
                 context_window: None,
                 supports_tools: None,
+                discover_models: false,
+                model_filter: vec!["*".to_string()],
+                cache_ttl_seconds: 3600,
             },
         ),
     ]);
 
-    let (router, registry, deferred, active_id) = init_provider_layer(&config);
+    let ProviderLayer {
+        router,
+        registry,
+        deferred_notices: deferred,
+        active_id,
+        ..
+    } = init_provider_layer(&config);
 
     // Only enabled providers that successfully construct are registered
     let ids = registry.provider_ids();
@@ -104,7 +119,13 @@ fn test_startup_legacy_fallback_when_provider_map_empty() {
     let config = AppConfig::default();
     assert!(config.provider.is_empty());
 
-    let (router, registry, deferred, active_id) = init_provider_layer(&config);
+    let ProviderLayer {
+        router,
+        registry,
+        deferred_notices: deferred,
+        active_id,
+        ..
+    } = init_provider_layer(&config);
 
     // Should fall back to legacy Anthropic path
     let ids = registry.provider_ids();
@@ -149,6 +170,7 @@ impl StreamingProvider for FailingHealthCheckProvider {
             context_window: 4096,
             capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
             pricing_tier: None,
+        stale: false,
         }]
     }
 
@@ -189,6 +211,9 @@ fn test_factory_routes_kind_openai_compatible() {
         base_url: Some("http://localhost:8080/v1".to_string()),
         context_window: Some(32_768),
         supports_tools: Some(true),
+        discover_models: false,
+        model_filter: vec!["*".to_string()],
+        cache_ttl_seconds: 3600,
     };
 
     let provider = build_provider_for_config("my-llamacpp", &cfg).unwrap();
@@ -214,6 +239,9 @@ fn test_factory_openai_compatible_requires_base_url() {
         base_url: None,
         context_window: Some(32_768),
         supports_tools: Some(true),
+        discover_models: false,
+        model_filter: vec!["*".to_string()],
+        cache_ttl_seconds: 3600,
     };
 
     let result = build_provider_for_config("my-llamacpp", &cfg);
@@ -244,6 +272,9 @@ fn test_factory_kind_absent_uses_provider_id() {
         base_url: Some("http://localhost:11434".to_string()),
         context_window: None,
         supports_tools: None,
+        discover_models: false,
+        model_filter: vec!["*".to_string()],
+        cache_ttl_seconds: 3600,
     };
 
     let provider = build_provider_for_config("ollama", &cfg).unwrap();

@@ -48,6 +48,9 @@ pub struct ModelDescriptor {
     pub capabilities: std::collections::HashSet<ModelCapability>,
     /// Optional pricing tier for UI grouping (`"cheap"`, `"flagship"`, `None`).
     pub pricing_tier: Option<String>,
+    /// Ghost marker — true when this model was absent from the latest live fetch (Story 7.6 AC9).
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// Lightweight descriptor for a registered provider.

@@ -32,11 +32,28 @@ pub struct ProviderConfig {
     /// Whether the model supports tool use (for single-model servers).
     #[serde(default)]
     pub supports_tools: Option<bool>,
+    /// Enable dynamic model discovery from /v1/models endpoint.
+    #[serde(default)]
+    pub discover_models: bool,
+    /// Glob patterns to filter discovered models. AND-intersected with the bundled allowlist.
+    #[serde(default = "ProviderConfig::default_model_filter")]
+    pub model_filter: Vec<String>,
+    /// Seconds before cached catalog is considered stale.
+    #[serde(default = "ProviderConfig::default_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
 }
 
 impl ProviderConfig {
     fn default_enabled() -> bool {
         true
+    }
+
+    fn default_model_filter() -> Vec<String> {
+        vec!["*".to_string()]
+    }
+
+    fn default_cache_ttl_seconds() -> u64 {
+        3600
     }
 }
 
@@ -289,6 +306,19 @@ impl AppConfig {
         use std::collections::HashMap;
         let mut m = HashMap::new();
         // Anthropic
+        // default_model() returns "claude-sonnet-4-6" which is the
+        // model ID the Anthropic adapter sends to the API. The ledger records this
+        // string, so the pricing catalog MUST include it for cost attribution.
+        m.insert(
+            "claude-sonnet-4-6".to_string(),
+            PricingConfig {
+                input_per_million: 3.00,
+                output_per_million: 15.00,
+                cache_creation_per_million: Some(3.75),
+                cache_read_per_million: Some(0.30),
+                reasoning_per_million: None,
+            },
+        );
         m.insert(
             "claude-sonnet-4-20250514".to_string(),
             PricingConfig {
@@ -715,5 +745,56 @@ supports_tools = true
             serialized.contains("supports_tools = true"),
             "serialized must contain local supports_tools"
         );
+    }
+
+    #[test]
+    fn provider_discover_models_roundtrip() {
+        let toml = r#"
+model = "test-model"
+
+[provider.or]
+provider_id = "openrouter"
+model_id = "anthropic/claude-3.5-sonnet"
+api_key_env = "OPENROUTER_API_KEY"
+discover_models = true
+model_filter = ["anthropic/*"]
+cache_ttl_seconds = 1800
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        let or = config.provider.get("or").expect("openrouter provider");
+        assert!(or.discover_models);
+        assert_eq!(or.model_filter, vec!["anthropic/*"]);
+        assert_eq!(or.cache_ttl_seconds, 1800);
+
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(
+            serialized.contains("discover_models = true"),
+            "serialized must contain discover_models"
+        );
+        assert!(
+            serialized.contains("cache_ttl_seconds = 1800"),
+            "serialized must contain cache_ttl_seconds"
+        );
+        assert!(
+            serialized.contains(r#"model_filter = ["anthropic/*"]"#),
+            "serialized must contain model_filter: {serialized}"
+        );
+    }
+
+    #[test]
+    fn provider_discover_models_defaults() {
+        let toml = r#"
+model = "test-model"
+
+[provider.an]
+provider_id = "anthropic"
+model_id = "claude-sonnet-4-6"
+api_key_env = "ANTHROPIC_API_KEY"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        let an = config.provider.get("an").expect("anthropic provider");
+        assert!(!an.discover_models);
+        assert_eq!(an.model_filter, vec!["*"]);
+        assert_eq!(an.cache_ttl_seconds, 3600);
     }
 }

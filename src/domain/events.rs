@@ -148,6 +148,12 @@ pub enum AppEvent {
         event: crate::domain::services::approval_runtime::ApprovalRuntimeEvent,
     },
 
+    /// Story 7.6 AC8 — fired by the discovery background task on successful catalog refresh.
+    /// The event-loop handler sets needs_redraw = true.
+    ProviderCatalogRefreshed {
+        provider_id: String,
+    },
+
     /// Plan mode exit requested — present the plan approval card to the user.
     PlanApprovalRequested {
         conversation_id: ConversationId,

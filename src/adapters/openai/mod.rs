@@ -9,6 +9,8 @@
 //! Wire format: OpenAI Chat Completions with `stream: true`.
 //! Auth: `Authorization: Bearer {api_key}`.
 
+pub mod allowlists;
+pub mod discovery;
 pub mod stream;
 pub mod types;
 pub mod variant;
@@ -42,6 +44,7 @@ pub struct OpenAiAdapter {
     variant: OpenAiCompatibleVariant,
     #[allow(dead_code)] // Used by abort() method
     abort_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    discovered_models: Arc<arc_swap::ArcSwap<Option<Vec<crate::adapters::model_catalog_cache::CachedModelEntry>>>>,
 }
 
 impl OpenAiAdapter {
@@ -81,7 +84,52 @@ impl OpenAiAdapter {
             base_url: resolved_base_url,
             variant,
             abort_handle: Arc::new(Mutex::new(None)),
+            discovered_models: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
         })
+    }
+
+    /// Fetch model catalog from the provider's `/v1/models` endpoint.
+    pub async fn fetch_remote_models(
+        &self,
+        model_filter: &[String],
+    ) -> Result<Vec<crate::domain::models::ModelDescriptor>, ProviderError> {
+        let url = format!("{}/models", self.base_url);
+        let mut req = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5));
+        if !self.api_key.is_empty() {
+            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = req.send().await;
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await.map_err(|e| {
+                    ProviderError::Other(format!("Failed to read models response: {}", e))
+                })?;
+                crate::adapters::openai::discovery::parse_and_filter_models(
+                    &text,
+                    &self.variant,
+                    model_filter,
+                )
+            }
+            Ok(resp) if resp.status().as_u16() == 401 => Err(ProviderError::AuthenticationFailed),
+            Ok(resp) => Err(ProviderError::Other(format!(
+                "Models fetch failed: HTTP {}",
+                resp.status()
+            ))),
+            Err(e) => Err(ProviderError::ConnectionFailed(e.to_string())),
+        }
+    }
+
+    /// Overlay discovered models into `list_models()`.
+    pub fn set_discovered_models(&self, models: Vec<crate::adapters::model_catalog_cache::CachedModelEntry>) {
+        self.discovered_models.store(Arc::new(Some(models)));
+    }
+
+    /// Clear the discovered models overlay (falls back to bundled snapshot).
+    pub fn clear_discovered_models(&self) {
+        self.discovered_models.store(Arc::new(None));
     }
 }
 
@@ -237,6 +285,16 @@ impl StreamingProvider for OpenAiAdapter {
     }
 
     fn list_models(&self) -> Vec<crate::domain::models::ModelDescriptor> {
+        let guard = self.discovered_models.load();
+        if let Some(ref entries) = **guard {
+            if !entries.is_empty() {
+                return entries.iter().map(|e| {
+                    let mut desc = e.descriptor.clone();
+                    desc.stale = e.descriptor.stale;
+                    desc
+                }).collect();
+            }
+        }
         self.variant.known_models(&self.model)
     }
 
@@ -351,5 +409,88 @@ mod tests {
 
         let debug = format!("{:?}", adapter);
         assert!(!debug.contains(key), "API key leaked in Debug output");
+    }
+
+    #[test]
+    fn test_set_discovered_models_overlay() {
+        let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::OpenAI,
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let m1 = crate::adapters::model_catalog_cache::CachedModelEntry {
+            descriptor: crate::domain::models::ModelDescriptor {
+                model_id: "m1".to_string(),
+                display_name: "M1".to_string(),
+                provider_id: "openai".to_string(),
+                context_window: 128_000,
+                capabilities: std::collections::HashSet::new(),
+                pricing_tier: None,
+                stale: false,
+            },
+        };
+        let m2 = crate::adapters::model_catalog_cache::CachedModelEntry {
+            descriptor: crate::domain::models::ModelDescriptor {
+                model_id: "m2".to_string(),
+                display_name: "M2".to_string(),
+                provider_id: "openai".to_string(),
+                context_window: 128_000,
+                capabilities: std::collections::HashSet::new(),
+                pricing_tier: None,
+                stale: false,
+            },
+        };
+        adapter.set_discovered_models(vec![m1.clone(), m2.clone()]);
+        let models = adapter.list_models();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].model_id, "m1");
+        assert_eq!(models[1].model_id, "m2");
+    }
+
+    #[test]
+    fn test_clear_discovered_models_fallback() {
+        let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::OpenAI,
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            None,
+        )
+        .unwrap();
+
+        let m1 = crate::adapters::model_catalog_cache::CachedModelEntry {
+            descriptor: crate::domain::models::ModelDescriptor {
+                model_id: "m1".to_string(),
+                display_name: "M1".to_string(),
+                provider_id: "openai".to_string(),
+                context_window: 128_000,
+                capabilities: std::collections::HashSet::new(),
+                pricing_tier: None,
+                stale: false,
+            },
+        };
+        adapter.set_discovered_models(vec![m1]);
+        adapter.clear_discovered_models();
+        let models = adapter.list_models();
+        // Falls back to bundled snapshot (4 OpenAI models)
+        assert_eq!(models.len(), 4);
+    }
+
+    #[test]
+    fn test_empty_discovered_models_fallback() {
+        let adapter = OpenAiAdapter::new(
+            OpenAiCompatibleVariant::OpenAI,
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            None,
+        )
+        .unwrap();
+
+        adapter.set_discovered_models(vec![]);
+        let models = adapter.list_models();
+        // Empty discovered list falls back to bundled snapshot
+        assert_eq!(models.len(), 4);
     }
 }

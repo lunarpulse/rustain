@@ -114,8 +114,16 @@ pub async fn run() -> Result<()> {
     }
 
     // 5a. Construct provider layer
-    let (router, provider_registry, deferred_notices, _active_id) =
-        init_provider_layer(&app_config);
+    let ProviderLayer {
+        router,
+        registry: provider_registry,
+        deferred_notices,
+        active_id: _active_id,
+        unsupported_discovery,
+        discovery_targets,
+    } = init_provider_layer(&app_config);
+    #[cfg(not(feature = "openai"))]
+    let _ = &discovery_targets; // suppress unused-variable warning on non-openai builds
 
     // ArcSwap hot-swap holder wraps the router (not a bare adapter)
     let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -159,6 +167,8 @@ pub async fn run() -> Result<()> {
     // Story 7.5 AC7 — load BudgetState (dismissed-until) once at startup.
     let budget_state_store = Arc::new(crate::adapters::budget::BudgetStateStore::new());
 
+    let refresh_tracker = crate::adapters::tui::refresh_tracker::RefreshTracker::new();
+
     let (app_state, domain_rx) = AppState::new(
         raw_capacity,
         approval_runtime.clone(),
@@ -171,6 +181,36 @@ pub async fn run() -> Result<()> {
         budget_state_store,
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
+
+    // Story 7.6 AC7 — emit startup toast for providers that don't support discovery
+    for (id, kind) in &unsupported_discovery {
+        let _ = domain_tx.send(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: format!(
+                "{} doesn't support model discovery — using config.toml list",
+                kind
+            ),
+        });
+        tracing::warn!(
+            "Provider '{}' (kind={}) uses a static catalog — dynamic discovery is not yet supported.",
+            id, kind
+        );
+    }
+
+    #[cfg(feature = "openai")]
+    {
+        // Story 7.6 AC4/AC5 — Tier-1 disk cache seed BEFORE health check (synchronous, ≤10ms)
+        let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
+        let cached = cache.load().await;
+
+        for target in &discovery_targets {
+            if let Some(entry) = cached.providers.get(&target.provider_id) {
+                target.adapter.set_discovered_models(entry.models.clone());
+                tracing::info!("Tier-1 seed: cached catalog for '{}'", target.provider_id);
+            }
+        }
+    }
 
     // D2: Health check — emit TUI warning notice on failure and update registry (AC4)
     // Health-check ALL registered providers and emit notices for failures.
@@ -212,6 +252,74 @@ pub async fn run() -> Result<()> {
             message: format!("Failed to construct provider '{}': {}", id, e),
         });
     }
+
+    #[cfg(feature = "openai")]
+    {
+        // Story 7.6 AC4/AC5 — Tier-2 background refresh AFTER health check (non-blocking)
+        let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
+        let cached = cache.load().await;
+
+        let refresh_tracker_clone = refresh_tracker.clone();
+        for target in discovery_targets {
+            let cache = cache.clone();
+            let tracker = refresh_tracker_clone.clone();
+            let domain_tx = domain_tx.clone();
+            let provider_id = target.provider_id.clone();
+            let adapter = target.adapter.clone();
+            let model_filter = target.model_filter.clone();
+            let ttl = target.cache_ttl_seconds;
+
+            // Check freshness before spawning
+            let is_fresh = cached.providers.get(&provider_id).is_some_and(|entry| {
+                cache.is_fresh(entry, ttl, crate::infrastructure::clock_util::now_unix())
+            });
+
+            if is_fresh {
+                tracing::debug!(
+                    "catalog cache fresh for '{}'; skipping refresh",
+                    provider_id
+                );
+                continue;
+            }
+
+            tokio::spawn(async move {
+                let _guard = tracker.insert(provider_id.clone());
+                match adapter.fetch_remote_models(&model_filter).await {
+                    Ok(models) => {
+                        if models.is_empty() {
+                            tracing::warn!("Empty catalog from '{}'; not caching", provider_id);
+                            return;
+                        }
+                        // Serialize cache writes so concurrent providers don't overwrite each other.
+                        let _lock = cache.lock().await;
+                        let mut catalog = cache.load().await;
+                        let models_with_stale =
+                            crate::adapters::model_catalog_cache::merge_with_live(catalog.providers.get(&provider_id), &models);
+                        adapter.set_discovered_models(models_with_stale.clone());
+                        catalog.providers.insert(
+                            provider_id.clone(),
+                            crate::adapters::model_catalog_cache::CachedProviderEntry {
+                                fetched_at_unix: crate::infrastructure::clock_util::now_unix(),
+                                models: models_with_stale,
+                            },
+                        );
+                        if let Err(e) = cache.save(&catalog).await {
+                            tracing::warn!("models_cache.json save failed: {}", e);
+                        }
+                        let _ = domain_tx.send(AppEvent::ProviderCatalogRefreshed { provider_id }); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: Story 7.6 AC8 — live refresh redraw signal
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "model discovery for '{}' failed: {}; using cached/bundled catalog",
+                            provider_id,
+                            e
+                        );
+                    }
+                }
+            });
+        }
+    }
+
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
     security_adapter.set_mode(initial_mode);
     let security: Arc<dyn SecurityPort> = Arc::new(security_adapter);
@@ -452,6 +560,7 @@ pub async fn run() -> Result<()> {
         approval_runtime,
         progress_tx,
         progress_rx,
+        Some(refresh_tracker),
     )
     .await;
 
@@ -465,12 +574,19 @@ pub async fn run() -> Result<()> {
 }
 
 /// Extract the provider construction logic for testability.
-type ProviderLayer = (
-    Arc<crate::adapters::provider::ProviderRouter>,
-    Arc<crate::adapters::provider::ProviderRegistry>,
-    Vec<(String, ProviderError)>,
-    String,
-);
+/// Use named fields — do NOT revert to a tuple alias. Story 7.6 amendment.
+pub struct ProviderLayer {
+    pub router: Arc<crate::adapters::provider::ProviderRouter>,
+    pub registry: Arc<crate::adapters::provider::ProviderRegistry>,
+    pub deferred_notices: Vec<(String, ProviderError)>,
+    pub active_id: String,
+    /// Providers where `discover_models = true` but the kind doesn't support it (Story 7.6 AC7).
+    pub unsupported_discovery: Vec<(String, String)>, // (provider_id, kind)
+    #[cfg(feature = "openai")]
+    pub discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
+    #[cfg(not(feature = "openai"))]
+    pub discovery_targets: Vec<()>,
+}
 
 pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> ProviderLayer {
     let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
@@ -478,6 +594,11 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
+    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
+
+    #[cfg(feature = "openai")]
+    let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =
+        Vec::new();
 
     let enabled_configs: Vec<(&String, &ProviderConfig)> = app_config
         .provider
@@ -497,19 +618,55 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                     cfg.provider_id
                 );
             }
-            match crate::infrastructure::provider_factory::build_provider_for_config(id, cfg) {
-                Ok(adapter) => {
-                    let adapter_arc = Arc::clone(&adapter);
-                    router.register(adapter);
-                    provider_registry.register_arc(adapter_arc);
-                    if first_enabled_id.is_none() {
-                        first_enabled_id = Some(id.clone());
+
+            // Build provider FIRST; only add discovery target if construction succeeds (Story 7.6 AC5).
+            let _provider_built =
+                match crate::infrastructure::provider_factory::build_provider_for_config(id, cfg) {
+                    Ok(adapter) => {
+                        let adapter_arc = Arc::clone(&adapter);
+                        router.register(adapter);
+                        provider_registry.register_arc(adapter_arc);
+                        if first_enabled_id.is_none() {
+                            first_enabled_id = Some(id.clone());
+                        }
+                        tracing::info!("Provider '{}' registered from config", id);
+                        true
                     }
-                    tracing::info!("Provider '{}' registered from config", id);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to construct provider '{}': {}", id, e);
-                    deferred_notices.push((id.clone(), e));
+                    Err(e) => {
+                        tracing::warn!("Failed to construct provider '{}': {}", id, e);
+                        deferred_notices.push((id.clone(), e));
+                        false
+                    }
+                };
+
+            #[cfg(feature = "openai")]
+            // Build typed OpenAI adapter for discovery (Story 7.6 AC5)
+            if _provider_built && cfg.discover_models {
+                match crate::infrastructure::provider_factory::build_openai_for_discovery(id, cfg) {
+                    Ok(Some(adapter)) => {
+                        discovery_targets.push(
+                            crate::adapters::model_catalog_cache::DiscoveryTarget {
+                                provider_id: id.clone(),
+                                adapter,
+                                cache_ttl_seconds: cfg.cache_ttl_seconds,
+                                model_filter: cfg.model_filter.clone(),
+                            },
+                        );
+                    }
+                    Ok(None) => {
+                        // Anthropic or Ollama — warn that discovery is not supported
+                        tracing::warn!(
+                            "Provider '{}' (kind={}) uses a static catalog — dynamic discovery is not yet supported. \
+                             Edit [providers.{}] in config.toml to remove discover_models, or accept the static list.",
+                            id,
+                            cfg.kind.as_deref().unwrap_or(id),
+                            id
+                        );
+                        unsupported_discovery.push((id.clone(), cfg.kind.as_deref().unwrap_or(id).to_string()));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to build discovery adapter for '{}': {}", id, e);
+                    }
                 }
             }
         }
@@ -547,7 +704,28 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         );
     }
 
-    (router, provider_registry, deferred_notices, active_id)
+    #[cfg(feature = "openai")]
+    {
+        ProviderLayer {
+            router,
+            registry: provider_registry,
+            deferred_notices,
+            active_id,
+            unsupported_discovery,
+            discovery_targets,
+        }
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        ProviderLayer {
+            router,
+            registry: provider_registry,
+            deferred_notices,
+            active_id,
+            unsupported_discovery,
+            discovery_targets: Vec::new(),
+        }
+    }
 }
 
 /// Build the Anthropic provider from environment variables (legacy fallback).
@@ -613,3 +791,5 @@ fn build_anthropic_provider_from_env(
         Ok(Arc::new(crate::adapters::noop::NoOpProvider))
     }
 }
+
+

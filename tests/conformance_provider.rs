@@ -527,6 +527,7 @@ fn test_domain_models_no_adapter_imports() {
         context_window: 1000,
         capabilities: Default::default(),
         pricing_tier: None,
+    stale: false,
     };
     assert_eq!(desc.model_id, "test");
     assert_eq!(desc.provider_id, "test");

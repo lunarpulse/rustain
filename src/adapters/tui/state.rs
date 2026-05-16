@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::adapters::agent_registry::AgentRegistry;
 use crate::adapters::skill_registry::SkillRegistry;
+use crate::adapters::tui::refresh_tracker::RefreshTracker;
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::ImageAttachment;
@@ -762,6 +763,10 @@ pub struct ModelSelectorState {
     pub previous_focus: Option<FocusState>,
     pub connecting: Option<String>,
     pub pending_context_warning: Option<ContextWarning>,
+    pub refreshing: Arc<RefreshTracker>,
+    pub search_active: bool,
+    pub search_query: String,
+    pub filtered_indices: Vec<usize>,
 }
 
 impl ModelSelectorState {
@@ -774,6 +779,10 @@ impl ModelSelectorState {
             previous_focus: None,
             connecting: None,
             pending_context_warning: None,
+            refreshing: RefreshTracker::new(),
+            search_active: false,
+            search_query: String::new(),
+            filtered_indices: Vec::new(),
         }
     }
 
@@ -789,6 +798,9 @@ impl ModelSelectorState {
         self.previous_focus = Some(current_focus);
         self.connecting = None;
         self.pending_context_warning = None;
+        self.search_active = false;
+        self.search_query.clear();
+        self.filtered_indices.clear();
         self.columns = columns;
 
         self.selected_provider = self
@@ -814,6 +826,9 @@ impl ModelSelectorState {
         self.columns.clear();
         self.connecting = None;
         self.pending_context_warning = None;
+        self.search_active = false;
+        self.search_query.clear();
+        self.filtered_indices.clear();
         self.previous_focus.take()
     }
 
@@ -836,6 +851,9 @@ impl ModelSelectorState {
             _ => {}
         }
         self.selected_model = 0;
+        self.search_active = false;
+        self.search_query.clear();
+        self.filtered_indices.clear();
     }
 
     /// Navigate between models (Up/Down). Wraps within current column.
@@ -863,11 +881,54 @@ impl ModelSelectorState {
         }
     }
 
+    /// Recompute filtered_indices based on search_query.
+    pub fn recompute_filter(&mut self) {
+        self.filtered_indices.clear();
+        if !self.search_active || self.search_query.is_empty() {
+            return;
+        }
+        let needle = self.search_query.to_lowercase();
+        if let Some(col) = self.columns.get(self.selected_provider) {
+            for (i, m) in col.models.iter().enumerate() {
+                let id_lc = m.model_id.to_lowercase();
+                let dn_lc = m.display_name.to_lowercase();
+                if id_lc.contains(&needle) || dn_lc.contains(&needle) {
+                    self.filtered_indices.push(i);
+                }
+            }
+        }
+        self.selected_model = 0;
+        // Defensive clamp invariant (Preflight Consensus #6)
+        if !self.filtered_indices.is_empty() && self.selected_model >= self.filtered_indices.len() {
+            self.selected_model = self.filtered_indices.len() - 1;
+        }
+    }
+
+    /// Return the effective index into columns[selected_provider].models.
+    pub fn selected_model_index(&self) -> Option<usize> {
+        if self.search_active && !self.search_query.is_empty() {
+            self.filtered_indices.get(self.selected_model).copied()
+        } else {
+            let col = self.columns.get(self.selected_provider)?;
+            if self.selected_model < col.models.len() {
+                Some(self.selected_model)
+            } else {
+                None
+            }
+        }
+    }
+
     /// Get the currently selected (provider_id, model).
     pub fn selected(&self) -> Option<(&str, &crate::domain::models::provider::ModelDescriptor)> {
         let col = self.columns.get(self.selected_provider)?;
-        let model = col.models.get(self.selected_model)?;
+        let idx = self.selected_model_index()?;
+        let model = col.models.get(idx)?;
         Some((&col.provider_id, model))
+    }
+
+    /// Clone the RefreshTracker handle for spawning background tasks.
+    pub fn refreshing_handle(&self) -> Arc<RefreshTracker> {
+        Arc::clone(&self.refreshing)
     }
 }
 
@@ -917,7 +978,9 @@ impl DailyBudgetState {
         if self.limit_usd <= 0.0 {
             return 0;
         }
-        ((self.spent_today_usd / self.limit_usd) * 100.0).round() as u32
+        ((self.spent_today_usd / self.limit_usd) * 100.0)
+            .round()
+            .min(u32::MAX as f64) as u32
     }
 }
 
@@ -2009,6 +2072,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
+                stale: false,
                 }],
             },
             ProviderColumn {
@@ -2022,6 +2086,7 @@ mod tests {
                     context_window: 128_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
+                stale: false,
                 }],
             },
         ];
@@ -2048,6 +2113,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "m2".to_string(),
@@ -2056,6 +2122,7 @@ mod tests {
                     context_window: 128_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
+                stale: false,
                 },
             ],
         }];
@@ -2098,6 +2165,7 @@ mod tests {
                 context_window: 200_000,
                 capabilities: Default::default(),
                 pricing_tier: None,
+            stale: false,
             }],
         }];
         ms.selected_provider = 0;
@@ -2123,6 +2191,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "claude-sonnet".to_string(),
@@ -2131,6 +2200,7 @@ mod tests {
                     context_window: 200_000,
                     capabilities: Default::default(),
                     pricing_tier: None,
+                stale: false,
                 },
             ],
         }];
@@ -2149,5 +2219,142 @@ mod tests {
     fn test_selected_model_initializes_none() {
         let state = TuiState::new(80, 24);
         assert!(state.selected_model.is_none());
+    }
+
+    // Story 7.6 AC9 — model selector search/filter tests
+    use crate::domain::models::provider::ModelDescriptor;
+
+    fn make_test_selector() -> ModelSelectorState {
+        let mut ms = ModelSelectorState::new();
+        ms.columns = vec![
+            ProviderColumn {
+                provider_id: "openrouter".to_string(),
+                display_name: "OpenRouter".to_string(),
+                healthy: true,
+                models: vec![
+                    ModelDescriptor {
+                        model_id: "anthropic/claude-3.5-sonnet".to_string(),
+                        display_name: "Claude 3.5 Sonnet".to_string(),
+                        provider_id: "openrouter".to_string(),
+                        context_window: 200_000,
+                        capabilities: Default::default(),
+                        pricing_tier: None,
+                        stale: false,
+                    },
+                    ModelDescriptor {
+                        model_id: "openai/gpt-4o".to_string(),
+                        display_name: "GPT-4o".to_string(),
+                        provider_id: "openrouter".to_string(),
+                        context_window: 128_000,
+                        capabilities: Default::default(),
+                        pricing_tier: None,
+                        stale: false,
+                    },
+                    ModelDescriptor {
+                        model_id: "google/gemini-flash".to_string(),
+                        display_name: "Gemini Flash ★".to_string(),
+                        provider_id: "openrouter".to_string(),
+                        context_window: 1_000_000,
+                        capabilities: Default::default(),
+                        pricing_tier: None,
+                        stale: false,
+                    },
+                ],
+            },
+        ];
+        ms
+    }
+
+    #[test]
+    fn recompute_filter_finds_substring_in_model_id() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = "gpt".to_string();
+        ms.recompute_filter();
+        assert_eq!(ms.filtered_indices, vec![1]);
+    }
+
+    #[test]
+    fn recompute_filter_case_insensitive() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = "CLAUde".to_string();
+        ms.recompute_filter();
+        assert_eq!(ms.filtered_indices, vec![0]);
+    }
+
+    #[test]
+    fn recompute_filter_matches_display_name() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = "flash".to_string();
+        ms.recompute_filter();
+        assert_eq!(ms.filtered_indices, vec![2]);
+    }
+
+    #[test]
+    fn recompute_filter_unicode_in_display_name() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = "★".to_string();
+        ms.recompute_filter();
+        assert_eq!(ms.filtered_indices, vec![2]);
+    }
+
+    #[test]
+    fn recompute_filter_empty_query_returns_empty_indices() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = String::new();
+        ms.recompute_filter();
+        assert!(ms.filtered_indices.is_empty());
+    }
+
+    #[test]
+    fn recompute_filter_no_match_returns_empty() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = "zzzzz".to_string();
+        ms.recompute_filter();
+        assert!(ms.filtered_indices.is_empty());
+    }
+
+    #[test]
+    fn column_switch_clears_search() {
+        let mut ms = make_test_selector();
+        ms.columns.push(ProviderColumn {
+            provider_id: "anthropic".to_string(),
+            display_name: "Anthropic".to_string(),
+            healthy: true,
+            models: vec![ModelDescriptor {
+                model_id: "claude-sonnet".to_string(),
+                display_name: "Claude Sonnet".to_string(),
+                provider_id: "anthropic".to_string(),
+                context_window: 200_000,
+                capabilities: Default::default(),
+                pricing_tier: None,
+                stale: false,
+            }],
+        });
+        ms.search_active = true;
+        ms.search_query = "gpt".to_string();
+        ms.filtered_indices = vec![1];
+        ms.navigate_provider(Direction::Right);
+        assert!(!ms.search_active);
+        assert!(ms.search_query.is_empty());
+        assert!(ms.filtered_indices.is_empty());
+    }
+
+    #[test]
+    fn recompute_filter_clamps_selection_on_shrink() {
+        let mut ms = make_test_selector();
+        ms.search_active = true;
+        ms.search_query = "a".to_string(); // matches all 3
+        ms.recompute_filter();
+        ms.selected_model = 2; // last index
+        ms.search_query = "gpt".to_string(); // now only matches 1
+        ms.recompute_filter();
+        // After recompute, selected_model should be clamped to valid range
+        assert_eq!(ms.selected_model, 0);
     }
 }

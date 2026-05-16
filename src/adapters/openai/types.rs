@@ -188,3 +188,26 @@ pub struct OpenAiDeltaFunction {
     pub name: Option<String>,
     pub arguments: Option<String>,
 }
+
+// ─── Models List Response Types (Story 7.6 AC3) ────────────────────────────
+
+/// Wire format for OpenAI-compatible `/v1/models` endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsListResponse {
+    pub data: Vec<ModelsListItem>,
+}
+
+/// Individual model entry from `/v1/models`.
+/// Permissive — only `id` is required; other fields are provider-specific.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsListItem {
+    pub id: String,
+    /// Friendly display name (OpenRouter populates this; most providers do not).
+    pub name: Option<String>,
+    /// Context window length in tokens (OpenRouter).
+    pub context_length: Option<u32>,
+    /// Supported parameter names, e.g. `["tools", "top_p"]` (OpenRouter).
+    pub supported_parameters: Option<Vec<String>>,
+    /// Object type literal, e.g. `"model"` (OpenAI).
+    pub object: Option<String>,
+}

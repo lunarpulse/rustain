@@ -8,6 +8,7 @@ pub mod hints;
 pub mod image;
 pub mod layout;
 pub mod markdown;
+pub mod refresh_tracker;
 pub mod state;
 pub mod task_panel_handlers;
 pub mod terminal;

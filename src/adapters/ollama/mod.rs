@@ -318,6 +318,7 @@ impl StreamingProvider for OllamaAdapter {
                             context_window,
                             capabilities,
                             pricing_tier: Some("local".to_string()),
+                        stale: false,
                         }
                     })
                     .collect();

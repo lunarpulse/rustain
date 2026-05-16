@@ -72,6 +72,7 @@ impl OpenAiCompatibleVariant {
                         ModelCapability::Vision,
                     ]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "gpt-4o-mini-2024-07-18".to_string(),
@@ -83,6 +84,7 @@ impl OpenAiCompatibleVariant {
                         ModelCapability::Vision,
                     ]),
                     pricing_tier: Some("cheap".to_string()),
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "o1-2024-12-17".to_string(),
@@ -91,6 +93,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 200_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "o3-mini-2025-01-31".to_string(),
@@ -99,6 +102,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 200_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: Some("cheap".to_string()),
+                stale: false,
                 },
             ],
             Self::OpenRouter => {
@@ -109,6 +113,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 128_000, // sensible default for OpenRouter
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: None,
+                stale: false,
                 }]
             }
             Self::Custom {
@@ -128,6 +133,7 @@ impl OpenAiCompatibleVariant {
                     context_window: context_window.unwrap_or(8_192),
                     capabilities: caps,
                     pricing_tier: Some("local".to_string()),
+                stale: false,
                 }]
             }
             Self::Google => vec![
@@ -141,6 +147,7 @@ impl OpenAiCompatibleVariant {
                         ModelCapability::Vision,
                     ]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "gemini-2.5-pro-preview-03-25".to_string(),
@@ -152,6 +159,7 @@ impl OpenAiCompatibleVariant {
                         ModelCapability::Vision,
                     ]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
             ],
             Self::DeepSeek => vec![
@@ -162,6 +170,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 64_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: Some("cheap".to_string()),
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "deepseek-reasoner".to_string(),
@@ -170,6 +179,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 64_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
             ],
             Self::Moonshot => vec![
@@ -180,6 +190,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 128_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
                 ModelDescriptor {
                     model_id: "kimi-k2-instruct".to_string(),
@@ -188,6 +199,7 @@ impl OpenAiCompatibleVariant {
                     context_window: 128_000,
                     capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
                     pricing_tier: Some("flagship".to_string()),
+                stale: false,
                 },
             ],
         }

@@ -188,6 +188,9 @@ fn upsert_daily_budget_warning(
         ],
     };
     state.feedback_blocks.insert(fb_id.clone(), fb);
+    // Note: this unconditionally sets active_feedback_id. If a ctxwarn-*
+    // block from 7-4 was active, it gets displaced (remains in feedback_blocks
+    // but is no longer "active"). Budget warning takes priority per AC5.
     state.active_feedback_id = Some(fb_id);
 }
 
@@ -323,7 +326,14 @@ async fn open_usage_panel(
     };
 
     // Snapshot context window for the active model.
-    let token_usage_in = conversation.usage.as_ref().map_or(0u32, |u| u.input_tokens);
+    // Anthropic input_tokens does NOT include cache tokens.
+    // The context window gauge should reflect all tokens occupying the context,
+    // so we add cache_creation + cache_read to the raw input count.
+    let token_usage_in = conversation.usage.as_ref().map_or(0u32, |u| {
+        u.input_tokens
+            .saturating_add(u.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(u.cache_read_input_tokens.unwrap_or(0))
+    });
     let context_window_tokens = app_state
         .provider_registry
         .get_model(
@@ -552,11 +562,15 @@ pub async fn run(
     approval_runtime: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
     progress_tx: Option<mpsc::UnboundedSender<crate::domain::events::ToolProgressEvent>>,
     progress_rx: Option<mpsc::UnboundedReceiver<crate::domain::events::ToolProgressEvent>>,
+    refresh_tracker: Option<Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
+    if let Some(tracker) = refresh_tracker {
+        state.model_selector.refreshing = tracker;
+    }
     state.skill_registry = skill_activator.registry_arc();
     state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
 
@@ -6624,6 +6638,10 @@ pub async fn run(
                                 });
                             }
                         }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::ProviderCatalogRefreshed { provider_id } => {
+                        state.model_selector.refreshing.remove(&provider_id);
                         state.needs_redraw = true;
                     }
                     _ => {
