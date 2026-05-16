@@ -686,3 +686,120 @@ fn test_openai_compatible_custom_metadata() {
     assert!(!models[0].capabilities.contains(&ModelCapability::ToolUse));
     assert_eq!(models[0].pricing_tier, Some("local".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// RCA tests — deterministic provider resolution
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct CatalogedMockProvider {
+    id: String,
+    models: Vec<ModelDescriptor>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for CatalogedMockProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        Ok(Box::pin(futures::stream::iter(Vec::<StreamChunk>::new())))
+    }
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+    fn provider_id(&self) -> String {
+        self.id.clone()
+    }
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        self.models.clone()
+    }
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+}
+
+fn descriptor(provider_id: &str, model_id: &str) -> ModelDescriptor {
+    ModelDescriptor {
+        model_id: model_id.to_string(),
+        display_name: model_id.to_string(),
+        provider_id: provider_id.to_string(),
+        context_window: 200_000,
+        capabilities: Default::default(),
+        pricing_tier: None,
+        stale: false,
+    }
+}
+
+/// `get_model_provider` must prefer the supplied `prefer` provider when the
+/// model id appears in multiple catalogs. Without this, the resolver returned
+/// a HashMap-iteration-order winner (RCA Cause C).
+#[test]
+fn test_get_model_provider_honors_prefer_when_id_shared() {
+    let registry = ProviderRegistry::new();
+    registry.register(Box::new(CatalogedMockProvider {
+        id: "anthropic".to_string(),
+        models: vec![descriptor("anthropic", "claude-sonnet-4-6")],
+    }));
+    registry.register(Box::new(CatalogedMockProvider {
+        id: "openrouter".to_string(),
+        models: vec![descriptor("openrouter", "claude-sonnet-4-6")],
+    }));
+
+    assert_eq!(
+        registry.get_model_provider("claude-sonnet-4-6", Some("openrouter")),
+        Some("openrouter".to_string()),
+    );
+    assert_eq!(
+        registry.get_model_provider("claude-sonnet-4-6", Some("anthropic")),
+        Some("anthropic".to_string()),
+    );
+}
+
+/// Without `prefer`, `get_model_provider` must return a deterministic
+/// (lexicographically-first) provider — BTreeMap iteration order.
+#[test]
+fn test_get_model_provider_deterministic_without_prefer() {
+    // Build twice, assert same answer — and assert it's the BTreeMap-first id.
+    for _ in 0..100 {
+        let registry = ProviderRegistry::new();
+        registry.register(Box::new(CatalogedMockProvider {
+            id: "openrouter".to_string(),
+            models: vec![descriptor("openrouter", "claude-sonnet-4-6")],
+        }));
+        registry.register(Box::new(CatalogedMockProvider {
+            id: "anthropic".to_string(),
+            models: vec![descriptor("anthropic", "claude-sonnet-4-6")],
+        }));
+
+        assert_eq!(
+            registry.get_model_provider("claude-sonnet-4-6", None),
+            Some("anthropic".to_string()),
+            "BTreeMap iteration must yield 'anthropic' before 'openrouter'"
+        );
+    }
+}
+
+/// `get_model_provider` returns None when no provider lists the model — even
+/// when `prefer` is supplied.
+#[test]
+fn test_get_model_provider_returns_none_when_absent() {
+    let registry = ProviderRegistry::new();
+    registry.register(Box::new(CatalogedMockProvider {
+        id: "anthropic".to_string(),
+        models: vec![descriptor("anthropic", "claude-sonnet-4-6")],
+    }));
+
+    assert_eq!(
+        registry.get_model_provider("does-not-exist", Some("anthropic")),
+        None
+    );
+    assert_eq!(
+        registry.get_model_provider("does-not-exist", None),
+        None
+    );
+}

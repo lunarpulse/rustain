@@ -30,7 +30,10 @@ fn test_palette_registry_register_and_query_by_scope() {
         description: "OpenAI model".to_string(),
         shortcut: Some("Ctrl+X, M".to_string()),
         scope: PaletteScope::Model,
-        action: PaletteAction::SwitchModel("gpt-4".to_string()),
+        action: PaletteAction::SwitchModel {
+            provider_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+        },
     });
 
     assert_eq!(reg.all_entries().len(), 2);

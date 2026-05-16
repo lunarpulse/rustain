@@ -769,9 +769,10 @@ pub async fn run(
                 description: format!("{} ctx{}", humanize_ctx(model.context_window), cap_summary),
                 shortcut: Some("Ctrl+X, M".to_string()),
                 scope: crate::domain::models::palette::PaletteScope::Model,
-                action: crate::domain::models::palette::PaletteAction::SwitchModel(
-                    model.model_id.clone(),
-                ),
+                action: crate::domain::models::palette::PaletteAction::SwitchModel {
+                    provider_id: model.provider_id.clone(),
+                    model_id: model.model_id.clone(),
+                },
             });
         }
     }
@@ -975,6 +976,17 @@ pub async fn run(
 
     // Story 7.3 AC9: one-shot startup provider fallback
     apply_startup_provider_fallback(&mut state, &router, &app_state, &domain_tx).await;
+
+    // RCA fix: ensure the displayed/effective model is valid for the active provider.
+    // Without this, status bar can show {active_provider}/{config.model} where
+    // config.model belongs to a different provider, leading to request-time failures.
+    reconcile_startup_selected_model(
+        &mut state,
+        &router.active_delegate_id(),
+        &app_state.provider_registry,
+        &config.model,
+        &domain_tx,
+    );
 
     loop {
         tokio::select! {
@@ -9782,17 +9794,23 @@ async fn apply_model_switch(
 
     let resolved_pid = match provider_id {
         Some(pid) => pid,
-        None => match app_state.provider_registry.get_model_provider(&model_id) {
-            Some(pid) => pid,
-            None => {
-                let _ = domain_tx.send(AppEvent::SystemNotice {
-                    conversation_id: None,
-                    level: NoticeLevel::Warning,
-                    message: format!("Unknown model: {}", model_id),
-                });
-                return;
+        None => {
+            let active = router.active_delegate_id();
+            match app_state
+                .provider_registry
+                .get_model_provider(&model_id, Some(&active))
+            {
+                Some(pid) => pid,
+                None => {
+                    let _ = domain_tx.send(AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: NoticeLevel::Warning,
+                        message: format!("Unknown model: {}", model_id),
+                    });
+                    return;
+                }
             }
-        },
+        }
     };
 
     if streaming.is_streaming {
@@ -10043,6 +10061,44 @@ async fn apply_startup_provider_fallback(
             message: "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M.".to_string(),
         });
     }
+}
+
+/// One-shot startup reconciliation: if `state.selected_model` is unset and
+/// `config_model` is not in the active provider's catalog, seed
+/// `state.selected_model` to that provider's first listed model.
+///
+/// Prevents the status bar from displaying `{active_provider}/{config_model}`
+/// pairs that the provider cannot actually serve (RCA root cause B).
+fn reconcile_startup_selected_model(
+    state: &mut TuiState,
+    active_provider_id: &str,
+    registry: &crate::adapters::provider::ProviderRegistry,
+    config_model: &str,
+    domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+) {
+    use crate::domain::events::AppEvent;
+    use crate::domain::models::NoticeLevel;
+
+    if state.selected_model.is_some() {
+        return;
+    }
+    let models = registry.list_models_by_provider(active_provider_id);
+    if models.is_empty() {
+        return;
+    }
+    if models.iter().any(|m| m.model_id == config_model) {
+        return;
+    }
+    let first_id = models[0].model_id.clone();
+    state.selected_model = Some(first_id.clone());
+    let _ = domain_tx.send(AppEvent::SystemNotice {
+        conversation_id: None,
+        level: NoticeLevel::Info,
+        message: format!(
+            "Default model '{}' not in provider '{}' catalog — using '{}'.",
+            config_model, active_provider_id, first_id
+        ),
+    });
 }
 
 /// Populate command palette filtered entries from the registry.
@@ -10745,5 +10801,159 @@ mod tests {
                 i + 1,
             );
         }
+    }
+
+    // ---------- RCA tests: startup model reconciliation ----------
+
+    use crate::adapters::provider::ProviderRegistry;
+    use crate::domain::events::AppEvent;
+    use crate::domain::ports::StreamingProvider;
+
+    #[derive(Debug)]
+    struct ReconcileMockProvider {
+        id: String,
+        models: Vec<crate::domain::models::provider::ModelDescriptor>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for ReconcileMockProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<crate::domain::models::Message>,
+            _options: crate::domain::models::CompletionOptions,
+        ) -> Result<
+            futures::stream::BoxStream<'static, crate::domain::models::StreamChunk>,
+            crate::domain::errors::ProviderError,
+        > {
+            Ok(Box::pin(futures::stream::iter(Vec::<
+                crate::domain::models::StreamChunk,
+            >::new())))
+        }
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            self.id.clone()
+        }
+        fn list_models(&self) -> Vec<crate::domain::models::provider::ModelDescriptor> {
+            self.models.clone()
+        }
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+    }
+
+    fn make_descriptor(
+        provider_id: &str,
+        model_id: &str,
+    ) -> crate::domain::models::provider::ModelDescriptor {
+        crate::domain::models::provider::ModelDescriptor {
+            model_id: model_id.to_string(),
+            display_name: model_id.to_string(),
+            provider_id: provider_id.to_string(),
+            context_window: 200_000,
+            capabilities: Default::default(),
+            pricing_tier: None,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn reconcile_no_op_when_config_model_in_active_catalog() {
+        let registry = ProviderRegistry::new();
+        registry.register(Box::new(ReconcileMockProvider {
+            id: "anthropic".to_string(),
+            models: vec![make_descriptor("anthropic", "claude-sonnet-4-6")],
+        }));
+
+        let mut state = TuiState::new(80, 24);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        reconcile_startup_selected_model(
+            &mut state,
+            "anthropic",
+            &registry,
+            "claude-sonnet-4-6",
+            &tx,
+        );
+
+        assert!(
+            state.selected_model.is_none(),
+            "selected_model should remain None when config.model is valid for active provider"
+        );
+    }
+
+    #[test]
+    fn reconcile_seeds_selected_model_when_config_model_not_in_active_catalog() {
+        let registry = ProviderRegistry::new();
+        registry.register(Box::new(ReconcileMockProvider {
+            id: "openrouter".to_string(),
+            models: vec![
+                make_descriptor("openrouter", "openrouter/auto"),
+                make_descriptor("openrouter", "x-ai/grok-2"),
+            ],
+        }));
+
+        let mut state = TuiState::new(80, 24);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        reconcile_startup_selected_model(
+            &mut state,
+            "openrouter",
+            &registry,
+            "claude-sonnet-4-6",
+            &tx,
+        );
+
+        assert_eq!(
+            state.selected_model.as_deref(),
+            Some("openrouter/auto"),
+            "selected_model should fall back to active provider's first listed model"
+        );
+    }
+
+    #[test]
+    fn reconcile_preserves_user_selection() {
+        let registry = ProviderRegistry::new();
+        registry.register(Box::new(ReconcileMockProvider {
+            id: "openrouter".to_string(),
+            models: vec![make_descriptor("openrouter", "openrouter/auto")],
+        }));
+
+        let mut state = TuiState::new(80, 24);
+        state.selected_model = Some("user-picked-model".to_string());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        reconcile_startup_selected_model(
+            &mut state,
+            "openrouter",
+            &registry,
+            "claude-sonnet-4-6",
+            &tx,
+        );
+
+        assert_eq!(
+            state.selected_model.as_deref(),
+            Some("user-picked-model"),
+            "reconcile must not overwrite an existing user selection"
+        );
+    }
+
+    #[test]
+    fn reconcile_no_op_when_active_provider_catalog_empty() {
+        let registry = ProviderRegistry::new();
+        registry.register(Box::new(ReconcileMockProvider {
+            id: "empty".to_string(),
+            models: vec![],
+        }));
+
+        let mut state = TuiState::new(80, 24);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        reconcile_startup_selected_model(
+            &mut state,
+            "empty",
+            &registry,
+            "claude-sonnet-4-6",
+            &tx,
+        );
+
+        assert!(state.selected_model.is_none());
     }
 }

@@ -259,8 +259,12 @@ pub struct AppConfig {
     pub default_plan_mode: bool,
     /// Provider configurations keyed by provider_id.
     /// If no `[provider]` section exists, the default Anthropic config is used.
+    ///
+    /// `BTreeMap` (not `HashMap`): startup picks the active provider as the
+    /// lexicographically-first enabled entry — iteration order must be
+    /// deterministic across launches.
     #[serde(default)]
-    pub provider: std::collections::HashMap<String, ProviderConfig>,
+    pub provider: std::collections::BTreeMap<String, ProviderConfig>,
     /// Mouse configuration (scroll lines, capture on/off). Story 16.8, AC6 + AC14.
     #[serde(default)]
     pub mouse: MouseConfig,
@@ -439,7 +443,7 @@ impl Default for AppConfig {
             runtime: RuntimeConfig::default(),
             layout: LayoutConfig::default(),
             default_plan_mode: false,
-            provider: std::collections::HashMap::new(),
+            provider: std::collections::BTreeMap::new(),
             mouse: MouseConfig::default(),
             tool_progress: ToolProgressConfig::default(),
             router: crate::domain::models::router::RouterConfig::default(),

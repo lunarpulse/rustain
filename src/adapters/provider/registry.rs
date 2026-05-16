@@ -15,7 +15,7 @@
 //! - `list_providers()` — provider-level descriptors for UI
 //! - `update_health(provider_id, healthy)` — record health-check result
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock; // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: ProviderRegistry methods are sync, short critical sections, never across .await
 
@@ -24,14 +24,17 @@ use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
 use crate::domain::ports::StreamingProvider;
 
 pub struct ProviderRegistry {
-    providers: RwLock<HashMap<String, Arc<dyn StreamingProvider>>>,
+    /// `BTreeMap` (not `HashMap`): `get_model_provider` and `list_providers`
+    /// iterate this map, and callers (status bar, model selector, palette)
+    /// expect a stable order across processes.
+    providers: RwLock<BTreeMap<String, Arc<dyn StreamingProvider>>>,
     health_status: RwLock<HashMap<String, bool>>,
 }
 
 impl ProviderRegistry {
     pub fn new() -> Self {
         Self {
-            providers: RwLock::new(HashMap::new()),
+            providers: RwLock::new(BTreeMap::new()),
             health_status: RwLock::new(HashMap::new()),
         }
     }
@@ -163,19 +166,40 @@ impl ProviderRegistry {
     }
 
     /// Resolve the provider_id that owns a given model_id (Story 7.2 AC6).
-    /// Scans all providers' model lists; returns the first match.
-    pub fn get_model_provider(&self, model_id: &str) -> Option<String> {
+    ///
+    /// Precedence (deterministic):
+    /// 1. If `prefer` is supplied and that provider lists the model, return it.
+    /// 2. Otherwise the lexicographically-first registered provider that lists
+    ///    the model (BTreeMap iteration order).
+    ///
+    /// Callers that already know the provider should pass it via `prefer` to
+    /// avoid surprises when a model_id appears in multiple catalogs (e.g.,
+    /// Anthropic ids mirrored on OpenRouter).
+    pub fn get_model_provider(&self, model_id: &str, prefer: Option<&str>) -> Option<String> {
         let providers = self
             .providers
             .read()
             .expect("ProviderRegistry lock poisoned");
-        for (_id, provider) in providers.iter() {
+
+        if let Some(pid) = prefer {
+            if let Some(provider) = providers.get(pid) {
+                if provider
+                    .list_models()
+                    .iter()
+                    .any(|m| m.model_id == model_id)
+                {
+                    return Some(pid.to_string());
+                }
+            }
+        }
+
+        for (id, provider) in providers.iter() {
             if provider
                 .list_models()
                 .iter()
                 .any(|m| m.model_id == model_id)
             {
-                return Some(provider.provider_id());
+                return Some(id.clone());
             }
         }
         None

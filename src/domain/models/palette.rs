@@ -28,8 +28,15 @@ pub enum PaletteAction {
     ExecuteCommand(String, Option<String>),
     /// Insert a mention at cursor position (e.g., "@path/to/file").
     InsertMention(String),
-    /// Switch to a model by ID (stub for Epic 7).
-    SwitchModel(String),
+    /// Switch to a specific (provider, model) pair.
+    ///
+    /// Both fields are required so the palette never falls back to
+    /// nondeterministic provider resolution when a model_id is shared across
+    /// catalogs (Story 7.2 RCA).
+    SwitchModel {
+        provider_id: String,
+        model_id: String,
+    },
     /// Switch to a profile by name (stub for Epic 8).
     SwitchProfile(String),
     /// Open a sidebar panel (stub for future).

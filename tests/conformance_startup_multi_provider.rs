@@ -2,7 +2,7 @@
 //!
 //! Tests the `init_provider_layer` extraction from `startup.rs`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -17,7 +17,7 @@ use rustain::infrastructure::startup::{ProviderLayer, init_provider_layer};
 #[cfg(feature = "ollama")]
 fn test_startup_registers_configured_providers() {
     let mut config = AppConfig::default();
-    config.provider = HashMap::from([
+    config.provider = BTreeMap::from([
         (
             "anthropic".to_string(),
             ProviderConfig {

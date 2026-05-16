@@ -2833,8 +2833,8 @@ fn dispatch_palette_action(
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        PaletteAction::SwitchModel(model_id) => InputAction::SwitchModelProvider {
-            provider_id: None,
+        PaletteAction::SwitchModel { provider_id, model_id } => InputAction::SwitchModelProvider {
+            provider_id: Some(provider_id),
             model_id,
         },
         PaletteAction::SwitchProfile(_) | PaletteAction::OpenPanel(_) => InputAction::Consumed,
