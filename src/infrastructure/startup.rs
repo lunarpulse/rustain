@@ -42,8 +42,8 @@ impl std::error::Error for SubcommandExit {}
 
 /// Ordered startup sequence.
 /// 1. Parse CLI args
-/// 2. Load config
-/// 3. Initialize logging
+/// 2. Initialize logging (so config warnings are captured)
+/// 3. Load config
 /// 4. Install panic hook
 /// 5. Construct provider
 /// 6. Setup terminal
@@ -61,12 +61,12 @@ pub async fn run() -> Result<()> {
         Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
     };
 
-    // 2. Load config
-    let app_config = config::load();
-
-    // 3. Initialize logging (hold guard to flush on drop)
+    // 2. Initialize logging BEFORE config load so parse warnings are captured
     let _log_guard = logging::init(&cli.log_level)?;
     tracing::info!("Starting rustain...");
+
+    // 3. Load config
+    let app_config = config::load();
 
     // 4. Install panic hook
     signals::install_panic_hook();
@@ -288,6 +288,14 @@ pub async fn run() -> Result<()> {
                     Ok(models) => {
                         if models.is_empty() {
                             tracing::warn!("Empty catalog from '{}'; not caching", provider_id);
+                            let _ = domain_tx.send(AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: NoticeLevel::Warning,
+                                message: format!(
+                                    "Model catalog for '{}' returned empty — showing bundled models",
+                                    provider_id
+                                ),
+                            });
                             return;
                         }
                         // Serialize cache writes so concurrent providers don't overwrite each other.
@@ -314,6 +322,14 @@ pub async fn run() -> Result<()> {
                             provider_id,
                             e
                         );
+                        let _ = domain_tx.send(AppEvent::SystemNotice {
+                            conversation_id: None,
+                            level: NoticeLevel::Warning,
+                            message: format!(
+                                "Model catalog refresh for '{}' failed: {} — showing bundled/cached models",
+                                provider_id, e
+                            ),
+                        });
                     }
                 }
             });
@@ -589,6 +605,11 @@ pub struct ProviderLayer {
 }
 
 pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> ProviderLayer {
+    // Clear the openai adapter cache so stale references from previous sessions
+    // (e.g., hot-reload in tests) don't leak into the new ProviderLayer.
+    #[cfg(feature = "openai")]
+    crate::infrastructure::provider_factory::clear_openai_adapters();
+
     let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
     let router = Arc::new(crate::adapters::provider::ProviderRouter::new(
         "anthropic".to_string(),

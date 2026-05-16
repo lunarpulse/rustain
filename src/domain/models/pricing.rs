@@ -28,19 +28,21 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct PricingConfig {
     /// Cost in USD per million **input** tokens.
+    #[serde(alias = "input_per_million")]
     pub input_per_million: f64,
     /// Cost in USD per million **output** tokens.
+    #[serde(alias = "output_per_million")]
     pub output_per_million: f64,
     /// Cost in USD per million **cache-creation** tokens (Anthropic prompt caching).
     /// When `None`, `cost_calculator` defaults to `1.25 × input_per_million`.
-    #[serde(default)]
+    #[serde(default, alias = "cache_creation_per_million")]
     pub cache_creation_per_million: Option<f64>,
     /// Cost in USD per million **cache-read** tokens (Anthropic prompt caching).
     /// When `None`, `cost_calculator` defaults to `0.10 × input_per_million`.
-    #[serde(default)]
+    #[serde(default, alias = "cache_read_per_million")]
     pub cache_read_per_million: Option<f64>,
     /// Cost in USD per million **reasoning** tokens (extended thinking).
     /// When `None`, `cost_calculator` defaults to `output_per_million`.
-    #[serde(default)]
+    #[serde(default, alias = "reasoning_per_million")]
     pub reasoning_per_million: Option<f64>,
 }

@@ -6,12 +6,13 @@
 //! | Variant | provider_id | Default base URL | Hard-coded catalog |
 //! |---|---|---|---|
 //! | OpenAI | `openai` | `https://api.openai.com/v1` | gpt-4o-2024-11-20, gpt-4o-mini-2024-07-18, o1-2024-12-17, o3-mini-2025-01-31 |
-//! | OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | configured model only |
+//! | OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | curated 7-model allowlist |
 //! | Google AI | `google` | `https://generativelanguage.googleapis.com/v1beta/openai` | gemini-2.0-flash, gemini-2.5-pro-preview-03-25 |
 //! | DeepSeek | `deepseek` | `https://api.deepseek.com/v1` | deepseek-chat, deepseek-reasoner |
 //! | Moonshot/Kimi | `moonshot` | `https://api.moonshot.cn/v1` | moonshot-v1-auto, kimi-k2-instruct |
 
 use crate::domain::models::provider::{ModelCapability, ModelDescriptor};
+use super::allowlists;
 
 /// Identifies which OpenAI-compatible provider an adapter instance targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,8 +57,8 @@ impl OpenAiCompatibleVariant {
 
     /// Known model catalog for this variant.
     ///
-    /// For `OpenRouter` and `Custom`, returns a single descriptor for the
-    /// configured model (the full OpenRouter catalog is too large to hard-code).
+    /// For built-in variants this is the curated allowlist (Tier-0 fallback).
+    /// For `Custom`, returns a single descriptor for the configured model.
     pub fn known_models(&self, configured_model: &str) -> Vec<ModelDescriptor> {
         let provider_id = self.provider_id().to_string();
         match self {
@@ -106,15 +107,18 @@ impl OpenAiCompatibleVariant {
                 },
             ],
             Self::OpenRouter => {
-                vec![ModelDescriptor {
-                    model_id: configured_model.to_string(),
-                    display_name: configured_model.to_string(),
-                    provider_id,
-                    context_window: 128_000, // sensible default for OpenRouter
-                    capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
-                    pricing_tier: None,
-                stale: false,
-                }]
+                allowlists::allowlist_for(self)
+                    .iter()
+                    .map(|&id| ModelDescriptor {
+                        model_id: id.to_string(),
+                        display_name: id.to_string(),
+                        provider_id: provider_id.clone(),
+                        context_window: allowlists::variant_default_context(self),
+                        capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
+                        pricing_tier: None,
+                        stale: false,
+                    })
+                    .collect()
             }
             Self::Custom {
                 provider_id: _,
@@ -269,12 +273,14 @@ mod tests {
     }
 
     #[test]
-    fn test_openrouter_single_entry() {
+    fn test_openrouter_returns_curated_allowlist() {
         let models =
             OpenAiCompatibleVariant::OpenRouter.known_models("anthropic/claude-3.5-sonnet");
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].model_id, "anthropic/claude-3.5-sonnet");
-        assert_eq!(models[0].provider_id, "openrouter");
+        // Should return the full 7-model curated allowlist, not just the configured model.
+        assert_eq!(models.len(), 7);
+        assert!(models.iter().any(|m| m.model_id == "anthropic/claude-3.5-sonnet"));
+        assert!(models.iter().any(|m| m.model_id == "openai/gpt-4o"));
+        assert!(models.iter().all(|m| m.provider_id == "openrouter"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ fn try_load_from(path: &Path) -> Option<AppConfig> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Config file unreadable at {}: {}", path.display(), e);
+            tracing::error!("Config file unreadable at {}: {}", path.display(), e);
             return None;
         }
     };
@@ -28,7 +28,12 @@ fn try_load_from(path: &Path) -> Option<AppConfig> {
             Some(config)
         }
         Err(e) => {
-            tracing::warn!("Config file malformed at {}: {}", path.display(), e);
+            tracing::error!(
+                "Config file at {} is malformed: {}. Falling through to next config source. \
+                 Fix the file or run `rustain doctor` to diagnose.",
+                path.display(),
+                e
+            );
             None
         }
     }

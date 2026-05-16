@@ -653,6 +653,36 @@ outputPerMillion = 15.0
     }
 
     #[test]
+    fn app_config_pricing_snake_case_alias() {
+        let toml_input = r#"
+model = "test-model"
+
+[pricing."deepseek/deepseek-v4-flash"]
+input_per_million = 0.1122
+output_per_million = 0.244
+"#;
+        let config: AppConfig = toml::from_str(toml_input).expect("deserialize pricing snake_case");
+        let p = config
+            .pricing
+            .get("deepseek/deepseek-v4-flash")
+            .expect("deepseek pricing");
+        assert_eq!(p.input_per_million, 0.1122);
+        assert_eq!(p.output_per_million, 0.244);
+    }
+
+    #[test]
+    fn app_config_budget_snake_case_alias() {
+        let toml_input = r#"
+model = "test-model"
+
+[budget]
+daily_limit_usd = 10.0
+"#;
+        let config: AppConfig = toml::from_str(toml_input).expect("deserialize budget snake_case");
+        assert_eq!(config.budget.daily_limit_usd, Some(10.0));
+    }
+
+    #[test]
     fn app_config_budget_roundtrip() {
         let toml_input = r#"
 model = "test-model"

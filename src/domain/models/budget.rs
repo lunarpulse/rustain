@@ -18,6 +18,6 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct BudgetConfig {
     /// Daily spending limit in USD. `None` disables budget alerting.
-    #[serde(default)]
+    #[serde(default, alias = "daily_limit_usd")]
     pub daily_limit_usd: Option<f64>,
 }

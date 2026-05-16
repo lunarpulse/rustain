@@ -2,11 +2,29 @@
 //!
 //! Used by `startup.rs` to build adapters from the `[provider]` config map.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::domain::errors::ProviderError;
 use crate::domain::models::ProviderConfig;
 use crate::domain::ports::StreamingProvider;
+
+/// Shared cache of built OpenAI-compatible adapters keyed by config key (provider_id).
+/// Used so that `build_openai_for_discovery` can return the same `Arc`
+/// that was already created during provider layer init, ensuring discovery
+/// updates are visible to the ProviderRegistry.
+#[cfg(feature = "openai")]
+static OPENAI_ADAPTERS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Arc<crate::adapters::openai::OpenAiAdapter>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(feature = "openai")]
+pub fn get_openai_adapter(provider_id: &str) -> Option<Arc<crate::adapters::openai::OpenAiAdapter>> {
+    OPENAI_ADAPTERS.lock().unwrap().get(provider_id).cloned()
+}
+
+#[cfg(feature = "openai")]
+pub fn clear_openai_adapters() {
+    OPENAI_ADAPTERS.lock().unwrap().clear();
+}
 
 /// Build a provider adapter from a `ProviderConfig` entry.
 ///
@@ -22,7 +40,7 @@ pub fn build_provider_for_config(
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
-                build_openai_from_config(kind, cfg)
+                build_openai_from_config(provider_id, cfg)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -46,7 +64,7 @@ pub fn build_provider_for_config(
         "openai-compatible" => {
             #[cfg(feature = "openai")]
             {
-                build_openai_compatible_from_config(cfg)
+                build_openai_compatible_from_config(provider_id, cfg)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -104,13 +122,14 @@ fn build_openai_from_config(
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
 
+    let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     let api_key = if cfg.api_key_env.is_empty() {
         String::new()
     } else {
         crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
     };
 
-    let variant = match provider_id {
+    let variant = match kind {
         "openai" => OpenAiCompatibleVariant::OpenAI,
         "openrouter" => OpenAiCompatibleVariant::OpenRouter,
         "google" => OpenAiCompatibleVariant::Google,
@@ -124,13 +143,20 @@ fn build_openai_from_config(
         },
     };
 
-    let adapter = OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), None)
-        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?;
-    Ok(Arc::new(adapter))
+    let adapter = Arc::new(
+        OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), cfg.base_url.clone())
+            .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+    );
+    OPENAI_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(provider_id.to_string(), Arc::clone(&adapter));
+    Ok(adapter)
 }
 
 #[cfg(feature = "openai")]
 fn build_openai_compatible_from_config(
+    provider_id: &str,
     cfg: &ProviderConfig,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
@@ -155,9 +181,15 @@ fn build_openai_compatible_from_config(
         supports_tools: cfg.supports_tools,
     };
 
-    let adapter = OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), Some(base_url))
-        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?;
-    Ok(Arc::new(adapter))
+    let adapter = Arc::new(
+        OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), Some(base_url))
+            .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+    );
+    OPENAI_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(provider_id.to_string(), Arc::clone(&adapter));
+    Ok(adapter)
 }
 
 /// Build a typed `OpenAiAdapter` for discovery purposes.
@@ -170,34 +202,47 @@ pub fn build_openai_for_discovery(
     provider_id: &str,
     cfg: &ProviderConfig,
 ) -> Result<Option<Arc<crate::adapters::openai::OpenAiAdapter>>, ProviderError> {
-    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
-
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
-    let api_key = if cfg.api_key_env.is_empty() {
-        String::new()
-    } else {
-        crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
-    };
-
-    let variant = match kind {
-        "openai" => OpenAiCompatibleVariant::OpenAI,
-        "openrouter" => OpenAiCompatibleVariant::OpenRouter,
-        "google" => OpenAiCompatibleVariant::Google,
-        "deepseek" => OpenAiCompatibleVariant::DeepSeek,
-        "moonshot" => OpenAiCompatibleVariant::Moonshot,
-        "openai-compatible" => OpenAiCompatibleVariant::Custom {
-            provider_id: cfg.provider_id.clone(),
-            display_name: cfg.provider_id.clone(),
-            context_window: cfg.context_window,
-            supports_tools: cfg.supports_tools,
-        },
-        _ => return Ok(None),
-    };
-
-    let base_url = cfg.base_url.clone();
-    let adapter = OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), base_url)
-        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?;
-    Ok(Some(Arc::new(adapter)))
+    match kind {
+        "openai" | "openrouter" | "google" | "deepseek" | "moonshot" | "openai-compatible" => {
+            // Reuse the production adapter if one was already built for this provider_id.
+            if let Some(adapter) = get_openai_adapter(provider_id) {
+                return Ok(Some(adapter));
+            }
+            // Fallback: build a fresh adapter (e.g., when called from tests).
+            use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+            let api_key = if cfg.api_key_env.is_empty() {
+                String::new()
+            } else {
+                crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
+            };
+            let variant = match kind {
+                "openai" => OpenAiCompatibleVariant::OpenAI,
+                "openrouter" => OpenAiCompatibleVariant::OpenRouter,
+                "google" => OpenAiCompatibleVariant::Google,
+                "deepseek" => OpenAiCompatibleVariant::DeepSeek,
+                "moonshot" => OpenAiCompatibleVariant::Moonshot,
+                "openai-compatible" => OpenAiCompatibleVariant::Custom {
+                    provider_id: cfg.provider_id.clone(),
+                    display_name: cfg.provider_id.clone(),
+                    context_window: cfg.context_window,
+                    supports_tools: cfg.supports_tools,
+                },
+                _ => unreachable!(),
+            };
+            let base_url = cfg.base_url.clone();
+            let adapter = Arc::new(
+                OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), base_url)
+                    .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+            );
+            OPENAI_ADAPTERS
+                .lock()
+                .unwrap()
+                .insert(provider_id.to_string(), Arc::clone(&adapter));
+            Ok(Some(adapter))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[cfg(not(feature = "openai"))]
