@@ -20,6 +20,8 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::AppConfig;
 use crate::domain::ports::ConfigStorePort;
 use crate::domain::ports::ProfileResolver;
+use crate::infrastructure::composition::ComposeContext;
+use crate::infrastructure::runtime::agent_core::AgentCore;
 
 use super::HandlerOutcome;
 
@@ -27,6 +29,10 @@ pub struct ReloadContext<'a> {
     pub cli: &'a Cli,
     pub config_store: &'a dyn ConfigStorePort,
     pub profile_store: &'a Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
+    /// Story 8.3 AC-8 — AgentCore for re-composition on profile change.
+    pub agent_core: &'a Arc<crate::infrastructure::runtime::agent_core::AgentCore>,
+    /// Story 8.3 AC-8 — ComposeContext snapshot for reload-time re-composition.
+    pub compose_snapshot: &'a Arc<crate::infrastructure::composition::ComposeContext>,
 }
 
 pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutcome {
@@ -84,9 +90,52 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
     match result {
         Ok(new_config) => {
             ctx.config_store.store(new_config);
-            if let Some(resolver) = new_resolver {
-                ctx.profile_store.store(Arc::new(resolver));
+            if let Some(resolver) = &new_resolver {
+                ctx.profile_store.store(Arc::new(resolver.clone()));
             }
+
+            // Story 8.3 AC-8 — re-compose AgentCore with new profile selection.
+            // Extends the D5 exemption precedent chain (8.1 → 8.2 → 8.3).
+            // Config + profile swaps above completed successfully; this block
+            // re-builds 7 port adapters. On composition failure, config + profile
+            // remain swapped but previous adapters are preserved (partial-reload).
+            if let Some(resolver_arc) = new_resolver.as_ref() {
+                if let Some(new_resolved) = resolver_arc.resolve_active() {
+                    let snapshot: &ComposeContext = ctx.compose_snapshot;
+                    match AgentCore::compose(&new_resolved.name, &new_resolved.selection, snapshot) {
+                        Ok(new_core) => {
+                            // ArcSwap each port individually — per spec AC-8,
+                            // no inter-port ordering invariant exists (Story 8.4
+                            // introduces hot/warm/cold tier transitions).
+                            ctx.agent_core.persona.store(Arc::clone(&*new_core.persona.load()));
+                            ctx.agent_core.memory.store(Arc::clone(&*new_core.memory.load()));
+                            ctx.agent_core.session.store(Arc::clone(&*new_core.session.load()));
+                            ctx.agent_core.tools.store(Arc::clone(&*new_core.tools.load()));
+                            ctx.agent_core.channels.store(Arc::clone(&*new_core.channels.load()));
+                            ctx.agent_core.scheduler.store(Arc::clone(&*new_core.scheduler.load()));
+                            ctx.agent_core.context.store(Arc::clone(&*new_core.context.load()));
+                            tracing::info!(
+                                profile = %new_resolved.name,
+                                "AgentCore re-composed on reload"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "AgentCore re-composition failed on reload: {}",
+                                e
+                            );
+                            return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
+                                success: false,
+                                error: Some(format!(
+                                    "Profile reload completed but adapter composition failed: {}. Previous adapters remain active.",
+                                    e
+                                )),
+                            });
+                        }
+                    }
+                }
+            }
+
             HandlerOutcome::Notify(AppEvent::ConfigReloaded {
                 success: true,
                 error: None,
@@ -161,10 +210,25 @@ mod tests {
             Arc::new(crate::adapters::profile_resolver::noop::NoopProfileResolver)
                 as Arc<dyn ProfileResolver>,
         ));
+        let agent_core_arc = Arc::new(AgentCore::test_noop());
+        let compose_snapshot_arc = Arc::new(
+            crate::infrastructure::composition::ComposeContext {
+                workspace_path: std::path::PathBuf::from("."),
+                project_context:
+                    crate::domain::models::project_context::ProjectContext::empty(),
+                storage: Arc::new(crate::adapters::noop::NoOpStorage::default())
+                    as Arc<dyn crate::domain::ports::StoragePort>,
+                skill_activator: Arc::new(
+                    crate::adapters::skill_activation::SkillActivator::new(),
+                ),
+            },
+        );
         let ctx = ReloadContext {
             cli: &test_cli(),
             config_store: &store,
             profile_store: &profile_swap,
+            agent_core: &agent_core_arc,
+            compose_snapshot: &compose_snapshot_arc,
         };
         let outcome = handle_config_reload_with_two_pass(ctx);
         match outcome {

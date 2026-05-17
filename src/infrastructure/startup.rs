@@ -18,7 +18,8 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
 use crate::domain::models::{PermissionMode, ProviderConfig, SandboxPolicy};
 use crate::domain::ports::{
-    ClipboardPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
+    ClipboardPort, PersonaPort, ProfileResolver, SecurityPort, StoragePort, StreamingProvider,
+    ToolSetPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
@@ -297,28 +298,20 @@ pub async fn run() -> Result<()> {
 
     let refresh_tracker = crate::adapters::tui::refresh_tracker::RefreshTracker::new();
 
-    let (app_state, domain_rx) = AppState::new(
-        raw_capacity,
-        approval_runtime.clone(),
-        sandbox_policy,
-        plan_manager.clone(),
-        plan_injector.clone(),
-        provider_swap,
-        provider_registry.clone(),
-        usage_ledger,
-        budget_state_store,
-        app_config_swap.clone(),
-        profile_resolver_swap,
-        cli_snapshot,
-    );
-    let domain_tx = app_state.event_bus.domain_tx.clone();
+    // Story 8.3 AC-7 — create EventBus early so domain_tx is available
+    // for storage/tools/persona construction and AgentCore composition
+    // before AppState::new is called later.
+    let (event_bus, domain_rx) =
+        crate::infrastructure::runtime::event_bus::EventBus::new(raw_capacity);
+    let event_bus = Arc::new(event_bus);
+    let domain_tx = event_bus.domain_tx.clone();
 
     // Flush accumulated profile-related notices after EventBus is wired.  Story 8.2
     // AC-6 fallback + AC-10 preview-warning both queue notices during two-pass load
     // (before EventBus exists); emit them now via emit_domain to preserve the
     // EventBus bypass ratchet (MAX_KNOWN_BYPASSES = 48, unchanged).
     for msg in &accumulated_notices {
-        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+        event_bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
             message: msg.clone(),
@@ -552,7 +545,7 @@ pub async fn run() -> Result<()> {
         (None, None)
     };
 
-    let tools: Arc<dyn ToolSetPort> = Arc::new(tools_adapter);
+    let _tools_direct: Arc<dyn ToolSetPort> = Arc::new(tools_adapter); // Story 8.3: kept for dual-construction, superseded by agent_core-sourced tools below
 
     // 5c. Discover and load project context
     let context_loader = ProjectContextLoader::new(workspace_path.clone());
@@ -560,7 +553,7 @@ pub async fn run() -> Result<()> {
         tracing::warn!("Failed to discover project context: {}", e);
         crate::domain::models::project_context::ProjectContext::empty()
     });
-    let persona_adapter = PersonaAdapter::new(project_context);
+    let persona_adapter = PersonaAdapter::new(project_context.clone());
 
     // Emit context loading notices (Phase D: Task 7)
     if persona_adapter.has_context() {
@@ -600,7 +593,53 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    let persona: Arc<dyn PersonaPort> = Arc::new(persona_adapter);
+    // Story 8.3 AC-7 — compose AgentCore from active profile selection
+    let resolved = profile_resolver_arc
+        .resolve_active()
+        .expect("post-Pass-2 toml_resolver always has resolve_active populated");
+    let compose_ctx = crate::infrastructure::composition::ComposeContext {
+        workspace_path: workspace_path.clone(),
+        project_context: project_context.clone(),
+        storage: Arc::clone(&tools_storage) as Arc<dyn StoragePort>,
+        skill_activator: Arc::clone(&skill_activator),
+    };
+    let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
+        &resolved.name,
+        &resolved.selection,
+        &compose_ctx,
+    ) {
+        Ok(core) => Arc::new(core),
+        Err(e) => {
+            eprintln!("Adapter composition failed: {}", e);
+            std::process::exit(2);
+        }
+    };
+    let compose_snapshot = Arc::new(compose_ctx);
+
+    // Story 8.3 AC-9 — replace legacy direct port extraction with agent_core-sourced
+    let persona: Arc<dyn PersonaPort> =
+        Arc::clone(&*agent_core_inner.persona.load());
+    let tools: Arc<dyn ToolSetPort> =
+        Arc::clone(&*agent_core_inner.tools.load());
+
+    // Deferred AppState::new — now that AgentCore is composed, create the runtime state
+    let (app_state, domain_rx) = AppState::new(
+        event_bus,
+        domain_rx,
+        approval_runtime.clone(),
+        sandbox_policy,
+        plan_manager.clone(),
+        plan_injector.clone(),
+        provider_swap,
+        provider_registry.clone(),
+        usage_ledger,
+        budget_state_store,
+        app_config_swap.clone(),
+        agent_core_inner,
+        compose_snapshot,
+        profile_resolver_swap,
+        cli_snapshot,
+    );
 
     // 5d. Use the same storage adapter constructed above for session management.
     // Both tools and the event loop share one FileSystemStorage instance pointing
@@ -792,7 +831,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
+    let unsupported_discovery: Vec<(String, String)> = Vec::new();
 
     #[cfg(feature = "openai")]
     let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =

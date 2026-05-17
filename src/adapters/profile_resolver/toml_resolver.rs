@@ -34,7 +34,7 @@ impl FileSystemProfileSource {
 
 impl ProfileSource for FileSystemProfileSource {
     fn get(&self, name: &str) -> Option<String> {
-        if name.contains(|c: char| c == '/' || c == '\\') {
+        if name.contains(['/', '\\']) {
             return None;
         }
 

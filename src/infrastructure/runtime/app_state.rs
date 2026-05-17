@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +16,8 @@ use crate::domain::ports::{StreamingProvider, UsageLedgerPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
 use crate::domain::services::plan_mode_injector::DefaultPlanInjector;
+use crate::infrastructure::composition::ComposeContext;
+use crate::infrastructure::runtime::agent_core::AgentCore;
 use crate::infrastructure::runtime::event_bus::EventBus;
 
 /// Thin newtype implementing `ConfigStorePort` for the handler domain-isolation
@@ -50,8 +53,13 @@ pub struct AppState {
     pub budget_state_store: Arc<BudgetStateStore>,
     /// Atomic config holder (Story 8.1 AC-7). Read with `.app_config.load()`.
     pub app_config: Arc<ArcSwap<AppConfig>>,
+    /// Central runtime holder of composed port adapters (Story 8.3 AC-1).
+    /// Per-port ArcSwap slots on AgentCore support independent hot-swap (Story 8.4).
+    pub agent_core: Arc<AgentCore>,
     /// Domain-pure config access for handlers (Story 8.1 AC-14).
     pub config_store: Arc<AppConfigStore>,
+    /// Snapshot of ComposeContext for reload-time re-composition (Story 8.3 AC-8).
+    pub compose_snapshot: Arc<ComposeContext>,
     /// Profile resolver (wrapped for hot-swap via Story 8.2 AC-15.2 / Story 8.4).
     pub profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     /// CLI snapshot for config reload (Story 8.1 AC-10).
@@ -61,7 +69,8 @@ pub struct AppState {
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        raw_capacity: usize,
+        event_bus: Arc<EventBus>,
+        domain_rx: mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
         approval_runtime: Arc<ApprovalRuntime>,
         sandbox_policy: SandboxPolicy,
         plan_manager: Arc<PlanManager>,
@@ -71,20 +80,21 @@ impl AppState {
         usage_ledger: Arc<dyn UsageLedgerPort>,
         budget_state_store: Arc<BudgetStateStore>,
         app_config: Arc<ArcSwap<AppConfig>>,
+        agent_core: Arc<AgentCore>,
+        compose_snapshot: Arc<ComposeContext>,
         profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
         cli_snapshot: crate::adapters::cli::commands::Cli,
     ) -> (
         Self,
-        tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
+        mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
     ) {
-        let (event_bus, domain_rx) = EventBus::new(raw_capacity);
         let config_store = Arc::new(AppConfigStore {
             inner: app_config.clone(),
         });
         (
             Self {
                 session_cancel: CancellationToken::new(),
-                event_bus: Arc::new(event_bus),
+                event_bus,
                 approval_runtime,
                 sandbox_policy: Arc::new(RwLock::new(sandbox_policy)),
                 plan_manager,
@@ -94,7 +104,9 @@ impl AppState {
                 usage_ledger,
                 budget_state_store,
                 app_config,
+                agent_core,
                 config_store,
+                compose_snapshot,
                 profile_resolver,
                 cli_snapshot,
             },

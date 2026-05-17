@@ -44,6 +44,9 @@ pub enum DomainError {
     TurnQueue(#[from] TurnQueueError),
 
     #[error(transparent)]
+    Composition(#[from] AdapterCompositionError),
+
+    #[error(transparent)]
     ApprovalPersistence(#[from] ApprovalPersistenceError),
 
     #[error("Startup error: {0}")]
@@ -313,6 +316,48 @@ pub enum ClipboardError {
     Backend(String),
     #[error("clipboard read timed out")]
     Timeout,
+}
+
+/// Story 8.3 — adapter composition errors.
+/// Composition failures are FATAL at startup (exit code 2);
+/// on reload they are surfaced as SystemNotice while preserving
+/// the previous adapters.
+#[derive(Debug, Error)]
+pub enum AdapterCompositionError {
+    #[error(
+        "Internal: profile composer encountered unknown adapter '{name}' for port '{port:?}'. \
+         This is a bug — please report. Available: {available:?}."
+    )]
+    UnknownAdapter {
+        port: crate::domain::models::PortDimension,
+        name: String,
+        available: Vec<String>,
+    },
+
+    #[error("Failed to construct adapter '{name}' for port '{port:?}': {source}")]
+    AdapterConstructionFailed {
+        port: crate::domain::models::PortDimension,
+        name: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error(
+        "Adapter '{name}' for port '{port:?}' requires field '{missing_field}' on ComposeContext."
+    )]
+    MissingComposeContext {
+        port: crate::domain::models::PortDimension,
+        name: String,
+        missing_field: String,
+    },
+
+    #[error(
+        "Profile selection is missing a required adapter for port '{port:?}'. \
+         This is likely a profile validation bug."
+    )]
+    MissingDimension {
+        port: crate::domain::models::PortDimension,
+    },
 }
 
 #[allow(dead_code)]

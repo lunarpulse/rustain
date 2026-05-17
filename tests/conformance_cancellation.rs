@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use rustain::adapters::filesystem::FileSystemStorage;
-use rustain::adapters::noop::NoOpProvider;
+use rustain::adapters::noop::{NoOpProvider, NoOpStorage};
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
 use rustain::domain::errors::ToolError;
 use rustain::domain::models::SandboxPolicy;
@@ -17,6 +17,9 @@ use rustain::domain::ports::StreamingProvider;
 use rustain::domain::ports::ToolSetPort;
 use rustain::domain::services::plan_manager::PlanManager;
 use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
+use rustain::infrastructure::composition::ComposeContext;
+use rustain::infrastructure::runtime::agent_core::AgentCore;
+use rustain::infrastructure::runtime::event_bus::EventBus;
 use tokio_util::sync::CancellationToken;
 
 fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
@@ -240,8 +243,19 @@ async fn ac4_signal_cancel_before_shutdown() {
         Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
     let provider_registry = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
+    let (event_bus, domain_rx) = EventBus::new(16);
+    let event_bus = Arc::new(event_bus);
+    let agent_core = Arc::new(AgentCore::test_noop());
+    let compose_snapshot = Arc::new(ComposeContext {
+        workspace_path: std::path::PathBuf::from("."),
+        project_context: rustain::domain::models::project_context::ProjectContext::empty(),
+        storage: Arc::new(NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
+        skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+    });
     let (app_state, _domain_rx) = AppState::new(
-        16,
+        event_bus,
+        domain_rx,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
@@ -251,6 +265,8 @@ async fn ac4_signal_cancel_before_shutdown() {
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
         Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        agent_core,
+        compose_snapshot,
         Arc::new(ArcSwap::from_pointee(
             Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
                 as Arc<dyn rustain::domain::ports::ProfileResolver>,

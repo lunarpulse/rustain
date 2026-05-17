@@ -19,6 +19,8 @@ use rustain::domain::models::{NoticeLevel, PermissionMode, SandboxPolicy, Stream
 use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::plan_manager::PlanManager;
 use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
+use rustain::infrastructure::composition::ComposeContext;
+use rustain::infrastructure::runtime::agent_core::AgentCore;
 use rustain::infrastructure::runtime::app_state::AppState;
 use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent, RawEventKind};
 
@@ -47,8 +49,19 @@ fn test_app_state_honors_raw_capacity() {
         Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
     let provider_registry = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
+    let (event_bus, domain_rx) = EventBus::new(64);
+    let event_bus = Arc::new(event_bus);
+    let agent_core = Arc::new(AgentCore::test_noop());
+    let compose_snapshot = Arc::new(ComposeContext {
+        workspace_path: std::path::PathBuf::from("."),
+        project_context: rustain::domain::models::project_context::ProjectContext::empty(),
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
+        skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+    });
     let (app_state, _domain_rx) = AppState::new(
-        64,
+        event_bus,
+        domain_rx,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
@@ -58,6 +71,8 @@ fn test_app_state_honors_raw_capacity() {
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
         Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        agent_core,
+        compose_snapshot,
         Arc::new(ArcSwap::from_pointee(
             Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
                 as Arc<dyn rustain::domain::ports::ProfileResolver>,
@@ -79,8 +94,19 @@ fn test_app_state_session_cancel_is_root_token() {
         Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
     ));
     let provider_registry2 = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
+    let (event_bus2, domain_rx2) = EventBus::new(16);
+    let event_bus2 = Arc::new(event_bus2);
+    let agent_core2 = Arc::new(AgentCore::test_noop());
+    let compose_snapshot2 = Arc::new(ComposeContext {
+        workspace_path: std::path::PathBuf::from("."),
+        project_context: rustain::domain::models::project_context::ProjectContext::empty(),
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
+        skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+    });
     let (app_state, _domain_rx) = AppState::new(
-        16,
+        event_bus2,
+        domain_rx2,
         approval_runtime,
         SandboxPolicy::ReadOnly { network: false },
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
@@ -90,6 +116,8 @@ fn test_app_state_session_cancel_is_root_token() {
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
         Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        agent_core2,
+        compose_snapshot2,
         Arc::new(ArcSwap::from_pointee(
             Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
                 as Arc<dyn rustain::domain::ports::ProfileResolver>,

@@ -67,13 +67,13 @@ impl AdapterCatalog {
 fn catalog_for(port: PortDimension) -> &'static [&'static AdapterDescriptor] {
     use PortDimension::*;
     match port {
-        Persona => &PERSONA_ADAPTERS,
-        Memory => &MEMORY_ADAPTERS,
-        Session => &SESSION_ADAPTERS,
-        Tools => &TOOLS_ADAPTERS,
-        Channels => &CHANNELS_ADAPTERS,
-        Scheduler => &SCHEDULER_ADAPTERS,
-        Context => &CONTEXT_ADAPTERS,
+        Persona => PERSONA_ADAPTERS,
+        Memory => MEMORY_ADAPTERS,
+        Session => SESSION_ADAPTERS,
+        Tools => TOOLS_ADAPTERS,
+        Channels => CHANNELS_ADAPTERS,
+        Scheduler => SCHEDULER_ADAPTERS,
+        Context => CONTEXT_ADAPTERS,
     }
 }
 

@@ -6380,6 +6380,9 @@ pub async fn run(
                             cli: &app_state.cli_snapshot,
                             config_store: app_state.config_store.as_ref(),
                             profile_store: &app_state.profile_resolver,
+                            // Story 8.3 AC-8 — pass AgentCore + ComposeContext for reload re-composition
+                            agent_core: &app_state.agent_core,
+                            compose_snapshot: &app_state.compose_snapshot,
                         };
                         let outcome = crate::adapters::tui::handlers::config::handle_config_reload_with_two_pass(ctx);
                         let notice_level = match &outcome {

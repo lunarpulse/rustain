@@ -139,7 +139,7 @@ Selective — provider adapters, tools, MCP only:
 - **Own streaming provider:** `StreamingProvider` trait + Anthropic SSE client (rustycode is request-response)
 - **Own conversation model:** Claudian-compatible types, not rustycode's `Session`/`Message`
 - **Capability Provider Architecture:** Protocol-agnostic extensibility. Future protocols = implement one trait
-- **Profile System:** Named TOML profiles compose one adapter per port dimension. See `docs/profiles.md` for built-in profiles and schema.
+- **Profile System:** Named TOML profiles compose one adapter per port dimension. See `docs/profiles.md` for built-in profiles and schema. See `docs/adapter-composition.md` for the per-port factory dispatch pattern.
 - **Ownership topology:** Hierarchical ownership + peer networking + self-destruct-on-abandonment
 - **Event loop:** `tokio::select!` on unified `AppEvent` channel
 - **ApprovalRuntime pub/sub:** `tokio::sync::broadcast` channel between `ToolScheduler` and TUI event loop; `ApprovalRuntime` holds pending requests and session auto-allow set; resolves via `oneshot` per request
