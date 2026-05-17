@@ -1,3 +1,4 @@
+pub mod adapter_catalog;
 pub mod approval_runtime;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;
@@ -17,6 +18,7 @@ pub mod plan_manager;
 pub mod plan_mode_injector;
 pub mod plan_parser;
 pub mod plan_runtime;
+pub mod profile_loader;
 pub mod reducer;
 pub mod search;
 pub mod session_index;

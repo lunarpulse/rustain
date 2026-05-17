@@ -251,6 +251,10 @@ async fn ac4_signal_cancel_before_shutdown() {
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
         Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
+                as Arc<dyn rustain::domain::ports::ProfileResolver>,
+        )),
         rustain::adapters::cli::commands::Cli {
             log_level: Some("info".to_string()),
             command: None,
@@ -259,6 +263,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             snapshot_retention: None,
             config_file: None,
             model: None,
+            profile: None,
         },
     );
 

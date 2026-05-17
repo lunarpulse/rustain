@@ -1,0 +1,19 @@
+name = "personal-assistant"
+description = "Personal-life assistant (preview). Daily-log memory; Telegram + cron coming in Epic 12."
+extends = "base"
+preview = true
+
+[persona]
+adapter = "personal-assistant"
+
+[memory]
+adapter = "daily-log"
+
+[channels]
+adapter = "telegram"
+
+[scheduler]
+adapter = "cron"
+
+[context]
+adapter = "daily"

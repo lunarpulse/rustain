@@ -189,6 +189,92 @@ pub enum OwnershipError {
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ProfileError {
+    #[error("Profile '{name}' not found in any search path: {search_paths:?}. \
+             Available built-ins: base, coding, personal-assistant.")]
+    ProfileNotFound {
+        name: String,
+        search_paths: Vec<std::path::PathBuf>,
+    },
+
+    #[error("Profile '{child}' extends parent '{parent}' which does not exist. \
+             Searched: {search_paths:?}.")]
+    ParentNotFound {
+        child: String,
+        parent: String,
+        search_paths: Vec<std::path::PathBuf>,
+    },
+
+    #[error(
+        "Circular profile extension chain detected: {}. \
+         Remove the cycle by changing one extends pointer.",
+        chain.join(" → ")
+    )]
+    CircularExtends { chain: Vec<String> },
+
+    #[error(
+        "Profile extends chain exceeds maximum depth (4): {}. Flatten the hierarchy.",
+        chain.join(" → ")
+    )]
+    ExtendsTooDeep { chain: Vec<String> },
+
+    #[error(
+        "Profile '{profile}' missing required dimensions: {dimensions:?}. \
+         Either define them in the profile or extend a profile that does."
+    )]
+    DimensionMissing {
+        profile: String,
+        dimensions: Vec<crate::domain::models::PortDimension>,
+    },
+
+    #[error(
+        "Profile '{profile}': unknown adapter '{adapter}' for port '{port:?}'. \
+         Available: {available:?}.{}",
+        suggestion.as_ref().map(|s| format!(" (Did you mean '{}'?)", s)).unwrap_or_default()
+    )]
+    AdapterUnknown {
+        profile: String,
+        port: crate::domain::models::PortDimension,
+        adapter: String,
+        available: Vec<String>,
+        suggestion: Option<String>,
+    },
+
+    #[error(
+        "Profile '{profile}' references adapter '{adapter}' (port '{port:?}') which requires cargo feature '{feature}'. \
+         Recompile with: cargo install rustain --features {feature}"
+    )]
+    AdapterFeatureGated {
+        profile: String,
+        port: crate::domain::models::PortDimension,
+        adapter: String,
+        feature: String,
+    },
+
+    // Stub variant; raised by Story 8.3+ when adapters carry version metadata.
+    #[error(
+        "Profile '{profile}': adapter '{adapter}' (port '{port:?}') version mismatch: requires {required}, found {found}"
+    )]
+    IncompatibleAdapterVersion {
+        profile: String,
+        port: crate::domain::models::PortDimension,
+        adapter: String,
+        required: String,
+        found: String,
+    },
+
+    #[error("Profile '{path}' failed to parse: {reason}")]
+    Parse {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+
+    #[error("Profile I/O error reading {path}: {source}")]
+    IoRead {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("{0}")]
     Other(String),
 }

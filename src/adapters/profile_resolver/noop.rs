@@ -5,8 +5,4 @@ use crate::domain::ports::ProfileResolver;
 
 pub struct NoopProfileResolver;
 
-impl ProfileResolver for NoopProfileResolver {
-    fn resolve_active_profile_defaults(&self) -> Option<figment::value::Value> {
-        None
-    }
-}
+impl ProfileResolver for NoopProfileResolver {}

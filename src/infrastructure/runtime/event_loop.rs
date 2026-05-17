@@ -6374,23 +6374,25 @@ pub async fn run(
                         state.model_selector.refreshing.remove(&provider_id);
                         state.needs_redraw = true;
                     }
-                    // Story 8.1 AC-10 — Config reload.
+                    // Story 8.1 AC-10, Story 8.2 AC-15.2 — Config reload via handler.
                     AppEvent::ConfigReload => {
-                        let result = crate::infrastructure::config::try_load(
-                            &app_state.cli_snapshot,
-                            app_state.profile_resolver.as_ref(),
-                        );
-                        let outcome = crate::adapters::tui::handlers::config::handle_config_reload(
-                            result,
-                            app_state.config_store.as_ref(),
-                        );
-                        // Emit ConfigReloaded for telemetry (AC-15) + SystemNotice for status bar (AC-12)
-                        let (_, notice_level, notice_msg) = match &outcome {
+                        let ctx = crate::adapters::tui::handlers::config::ReloadContext {
+                            cli: &app_state.cli_snapshot,
+                            config_store: app_state.config_store.as_ref(),
+                            profile_store: &app_state.profile_resolver,
+                        };
+                        let outcome = crate::adapters::tui::handlers::config::handle_config_reload_with_two_pass(ctx);
+                        let notice_level = match &outcome {
                             crate::adapters::tui::handlers::HandlerOutcome::Notify(
                                 AppEvent::ConfigReloaded { success: true, .. },
-                            ) => (true, crate::domain::models::NoticeLevel::Info, "Configuration reloaded"),
-                            _ => (false, crate::domain::models::NoticeLevel::Warning,
-                                 "Configuration reload failed — keeping previous config"),
+                            ) => crate::domain::models::NoticeLevel::Info,
+                            _ => crate::domain::models::NoticeLevel::Warning,
+                        };
+                        let notice_msg = match &outcome {
+                            crate::adapters::tui::handlers::HandlerOutcome::Notify(
+                                AppEvent::ConfigReloaded { success: true, .. },
+                            ) => "Configuration reloaded",
+                            _ => "Configuration reload failed — keeping previous config",
                         };
                         if let crate::adapters::tui::handlers::HandlerOutcome::Notify(event) = outcome {
                             app_state.event_bus.emit_domain(event);
@@ -6400,7 +6402,6 @@ pub async fn run(
                             level: notice_level,
                             message: notice_msg.to_string(),
                         });
-                        // Re-snap config so synchronous event-loop reads pick up the reloaded config
                         config_arc = app_state.app_config.load_full();
                         config = &config_arc;
                         state.needs_redraw = true;

@@ -74,13 +74,98 @@ pub async fn run() -> Result<()> {
         snapshot_retention: cli.snapshot_retention,
         config_file: cli.config_file.clone(),
         model: cli.model.clone(),
+        profile: cli.profile.clone(),
     };
 
-    // 3. Load config
-    let app_config = config::load(
-        &cli,
-        &crate::adapters::profile_resolver::noop::NoopProfileResolver,
-    );
+    // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
+    //
+    // Pass 1: bootstrap config with NoopProfileResolver to discover active_profile name
+    let noop = crate::adapters::profile_resolver::noop::NoopProfileResolver;
+    let bootstrap_config = config::load(&cli, &noop);
+
+    // Resolve effective active profile name (CLI > env > config > default "coding")
+    let config_dir = paths::config_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
+    let profiles_dir = config_dir.join("profiles");
+
+    let effective_name = cli
+        .profile
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| crate::infrastructure::utils::env_var_trimmed("RUSTAIN_PROFILE"))
+        .unwrap_or_else(|| bootstrap_config.active_profile.clone());
+
+    // Pass 2: construct TomlProfileResolver, load full config with profile overrides at layer 6
+    let (toml_resolver, startup_notices): (
+        crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver,
+        Vec<String>,
+    ) = match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
+        &effective_name,
+        profiles_dir.clone(),
+    ) {
+        Ok(r) => (r, Vec::new()),
+        Err(crate::domain::errors::ProfileError::ProfileNotFound { name, search_paths: _ }) => {
+            // AC-6 fallback: profile not found -> fall back to coding + emit warning
+            tracing::warn!(
+                "Profile '{}' not found; falling back to 'coding'",
+                name
+            );
+            let fallback = match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
+                "coding",
+                profiles_dir.clone(),
+            ) {
+                Ok(r) => r,
+                Err(fallback_err) => {
+                    tracing::error!("Critical: coding profile fallback failed: {}", fallback_err);
+                    eprintln!("Critical: built-in 'coding' profile failed to load: {}", fallback_err);
+                    std::process::exit(2);
+                }
+            };
+            let notices = vec![format!(
+                "Profile '{}' not found in any search path; falling back to 'coding'",
+                name
+            )];
+            (fallback, notices)
+        }
+        Err(e) => {
+            // AC-8: ALL OTHER validation errors are FATAL at startup
+            eprintln!("Profile load failed: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    let app_config = config::load(&cli, &toml_resolver);
+
+    // Accumulate any profile-related notices for post-EventBus flush
+    let mut accumulated_notices: Vec<String> = startup_notices;
+
+    // AC-10: preview warning notice (once per process lifetime)
+    if let Some(preview_name) = toml_resolver.take_preview_warning() {
+        accumulated_notices.push(format!(
+            "Profile '{} (preview)' partially loaded: telegram, cron adapters not yet available (coming in Epic 12)",
+            preview_name
+        ));
+    }
+
+    // AC-10: warn if custom (non-built-in) profile sets preview=true
+    {
+        use crate::domain::ports::ProfileResolver;
+        if let Some(resolved) = toml_resolver.resolve_active() {
+            if resolved.preview && !crate::adapters::profile_resolver::embedded::embedded_names().contains(&resolved.name.as_str()) {
+                accumulated_notices.push(format!(
+                    "Profile '{}' sets preview=true but is not a built-in profile. The preview flag is intended for built-in profiles only.",
+                    resolved.name
+                ));
+            }
+        }
+    }
+
+    // Wrap resolver for hot-swap (Story 8.4 — profile switching) per Gate 1.5
+    let profile_resolver_arc: Arc<dyn crate::domain::ports::ProfileResolver> = Arc::new(toml_resolver);
+    let profile_resolver_swap: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ProfileResolver>>> =
+        Arc::new(arc_swap::ArcSwap::from_pointee(profile_resolver_arc.clone()));
+
+    // Replace line: let app_config = config::load(&cli, &NoopProfileResolver);
 
     // 4. Install panic hook
     signals::install_panic_hook();
@@ -223,9 +308,22 @@ pub async fn run() -> Result<()> {
         usage_ledger,
         budget_state_store,
         app_config_swap.clone(),
+        profile_resolver_swap,
         cli_snapshot,
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
+
+    // Flush accumulated profile-related notices after EventBus is wired.  Story 8.2
+    // AC-6 fallback + AC-10 preview-warning both queue notices during two-pass load
+    // (before EventBus exists); emit them now via emit_domain to preserve the
+    // EventBus bypass ratchet (MAX_KNOWN_BYPASSES = 48, unchanged).
+    for msg in &accumulated_notices {
+        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: msg.clone(),
+        });
+    }
 
     // Story 7.6 AC7 — emit startup toast for providers that don't support discovery
     for (id, kind) in &unsupported_discovery {

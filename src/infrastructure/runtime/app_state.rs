@@ -7,7 +7,6 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::adapters::budget::BudgetStateStore;
-use crate::adapters::profile_resolver::noop::NoopProfileResolver;
 use crate::adapters::provider::ProviderRegistry;
 use crate::domain::models::{AppConfig, SandboxPolicy};
 use crate::domain::ports::ConfigStorePort;
@@ -53,8 +52,8 @@ pub struct AppState {
     pub app_config: Arc<ArcSwap<AppConfig>>,
     /// Domain-pure config access for handlers (Story 8.1 AC-14).
     pub config_store: Arc<AppConfigStore>,
-    /// Profile resolver (no-op until Story 8.2).
-    pub profile_resolver: Arc<dyn ProfileResolver>,
+    /// Profile resolver (wrapped for hot-swap via Story 8.2 AC-15.2 / Story 8.4).
+    pub profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     /// CLI snapshot for config reload (Story 8.1 AC-10).
     pub cli_snapshot: crate::adapters::cli::commands::Cli,
 }
@@ -72,6 +71,7 @@ impl AppState {
         usage_ledger: Arc<dyn UsageLedgerPort>,
         budget_state_store: Arc<BudgetStateStore>,
         app_config: Arc<ArcSwap<AppConfig>>,
+        profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
         cli_snapshot: crate::adapters::cli::commands::Cli,
     ) -> (
         Self,
@@ -95,7 +95,7 @@ impl AppState {
                 budget_state_store,
                 app_config,
                 config_store,
-                profile_resolver: Arc::new(NoopProfileResolver),
+                profile_resolver,
                 cli_snapshot,
             },
             domain_rx,

@@ -143,6 +143,7 @@ pub fn load_default() -> AppConfig {
         snapshot_retention: None,
         config_file: None,
         model: None,
+        profile: None,
     };
     load(&cli, &crate::adapters::profile_resolver::noop::NoopProfileResolver)
 }
@@ -233,6 +234,7 @@ mod tests {
             snapshot_retention: None,
             config_file: None,
             model: None,
+            profile: None,
         }
     }
 

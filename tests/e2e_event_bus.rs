@@ -31,6 +31,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         snapshot_retention: None,
         config_file: None,
         model: None,
+        profile: None,
     }
 }
 
@@ -57,6 +58,10 @@ fn test_app_state_honors_raw_capacity() {
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
         Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
+                as Arc<dyn rustain::domain::ports::ProfileResolver>,
+        )),
         test_cli(),
     );
     // AppState should own an EventBus with the requested capacity.
@@ -85,6 +90,10 @@ fn test_app_state_session_cancel_is_root_token() {
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
         Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        Arc::new(ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
+                as Arc<dyn rustain::domain::ports::ProfileResolver>,
+        )),
         test_cli(),
     );
     // The session_cancel should be a root token (no parent)

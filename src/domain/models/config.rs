@@ -235,6 +235,10 @@ pub struct LayoutConfig {
 pub struct AppConfig {
     #[serde(default = "AppConfig::default_model")]
     pub model: String,
+    /// Active profile name (Story 8.2 AC-13). Default: "coding".
+    /// Overridable via --profile CLI flag (highest), RUSTAIN_PROFILE env var, or this field.
+    #[serde(default = "AppConfig::default_active_profile", alias = "activeProfile")]
+    pub active_profile: String,
     #[serde(default = "AppConfig::default_log_level")]
     pub log_level: String,
     #[serde(default = "AppConfig::default_log_max_size_mb")]
@@ -286,6 +290,9 @@ pub struct AppConfig {
 impl AppConfig {
     fn default_model() -> String {
         "claude-sonnet-4-6".to_string()
+    }
+    fn default_active_profile() -> String {
+        "coding".to_string()
     }
     fn default_log_level() -> String {
         "info".to_string()
@@ -435,6 +442,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model: "claude-sonnet-4-6".to_string(),
+            active_profile: "coding".to_string(),
             log_level: "info".to_string(),
             log_max_size_mb: 10,
             log_retain_count: 3,
@@ -890,5 +898,29 @@ api_key_env = "ANTHROPIC_API_KEY"
         assert!(!an.discover_models);
         assert_eq!(an.model_filter, vec!["*"]);
         assert_eq!(an.cache_ttl_seconds, 3600);
+    }
+
+    #[test]
+    fn app_config_active_profile_default() {
+        let toml = "model = \"test-model\"\n";
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.active_profile, "coding");
+    }
+
+    #[test]
+    fn app_config_active_profile_override() {
+        let toml = r#"
+model = "test-model"
+active_profile = "personal-assistant"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.active_profile, "personal-assistant");
+    }
+
+    #[test]
+    fn app_config_active_profile_camelcase_alias() {
+        let json = r#"{"model":"test","activeProfile":"base"}"#;
+        let config: AppConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(config.active_profile, "base");
     }
 }

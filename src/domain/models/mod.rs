@@ -15,6 +15,7 @@ pub mod palette;
 mod permission;
 pub mod plan;
 pub mod pricing;
+pub mod profile;
 pub mod project_context;
 pub mod provider;
 pub mod router;
@@ -126,3 +127,5 @@ pub use view_state::{
 };
 #[allow(unused_imports)]
 pub use visual::{BlockBorder, DensityMode, OverlayType, PanelType, symbols};
+#[allow(unused_imports)]
+pub use profile::{AdapterRef, PortDimension, ProfileDefinition, ProfileSelection, ResolvedProfile};

@@ -32,6 +32,9 @@ pub struct Cli {
     /// Path to a workspace-level config file (overrides {workspace}/.rustain/config.toml)
     #[arg(long)]
     pub config_file: Option<PathBuf>,
+    /// Active profile name. Overrides RUSTAIN_PROFILE env var and active_profile config field. Default: coding.
+    #[arg(long, short = 'p', global = true)]
+    pub profile: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
