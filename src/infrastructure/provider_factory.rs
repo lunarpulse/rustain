@@ -2,7 +2,7 @@
 //!
 //! Used by `startup.rs` to build adapters from the `[provider]` config map.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex}; // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: Mutex guards static OPENAI_ADAPTERS cache, short critical sections, never across .await
 
 use crate::domain::errors::ProviderError;
 use crate::domain::models::ProviderConfig;

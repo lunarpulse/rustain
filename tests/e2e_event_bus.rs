@@ -22,6 +22,18 @@ use rustain::domain::services::plan_mode_injector::DefaultPlanInjector;
 use rustain::infrastructure::runtime::app_state::AppState;
 use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent, RawEventKind};
 
+fn test_cli() -> rustain::adapters::cli::commands::Cli {
+    rustain::adapters::cli::commands::Cli {
+        log_level: Some("info".to_string()),
+        command: None,
+        new: false,
+        session: None,
+        snapshot_retention: None,
+        config_file: None,
+        model: None,
+    }
+}
+
 // ── AC8 / AC5: AppState wires EventBus with configurable capacity ────────────
 
 #[test]
@@ -44,6 +56,8 @@ fn test_app_state_honors_raw_capacity() {
         provider_registry,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
+        Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        test_cli(),
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -70,6 +84,8 @@ fn test_app_state_session_cancel_is_root_token() {
         provider_registry2,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
+        Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        test_cli(),
     );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());

@@ -17,7 +17,7 @@ fn test_cli_init_subcommand() {
     // Default flags preserved
     assert!(!cli.new);
     assert!(cli.session.is_none());
-    assert_eq!(cli.log_level, "info");
+    assert!(cli.log_level.is_none(), "no --log-level => None (Story 8.1 D5)");
 }
 
 /// Bare `rustain` sets command = None.
@@ -56,7 +56,7 @@ fn test_cli_session_flag_still_works() {
 fn test_cli_log_level_with_init() {
     let cli = Cli::parse_from(["rustain", "--log-level", "debug", "init"]);
     assert!(matches!(cli.command, Some(Command::Init)));
-    assert_eq!(cli.log_level, "debug");
+    assert_eq!(cli.log_level.as_deref(), Some("debug"));
 }
 
 // ──────────────────────────────────────────────────

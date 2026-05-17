@@ -6,9 +6,9 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(name = "rustain", version, about)]
 pub struct Cli {
-    /// Log level override (default: info)
-    #[arg(long, default_value = "info", global = true)]
-    pub log_level: String,
+    /// Log level override (default: info). Absent → defer to config layers.
+    #[arg(long, global = true)]
+    pub log_level: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -24,6 +24,14 @@ pub struct Cli {
     /// Override snapshot retention count (default: 100, from config)
     #[arg(long)]
     pub snapshot_retention: Option<usize>,
+
+    /// Override the default model (Story 8.1 AC-2 — highest-priority config layer)
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Path to a workspace-level config file (overrides {workspace}/.rustain/config.toml)
+    #[arg(long)]
+    pub config_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -63,4 +71,15 @@ pub enum Command {
         #[arg(long)]
         provider: Vec<String>,
     },
+    /// Configuration management commands (Story 8.1 AC-9)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Reload configuration in the running TUI (cross-process reload stub — see AC-9)
+    Reload,
 }

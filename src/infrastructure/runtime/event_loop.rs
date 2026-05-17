@@ -164,7 +164,6 @@ pub async fn run(
     terminal: &mut Tui,
     mut domain_events_rx: mpsc::UnboundedReceiver<AppEvent>,
     app_state: AppState,
-    config: &AppConfig,
     provider: Arc<dyn StreamingProvider>,
     router: Arc<crate::adapters::provider::ProviderRouter>,
     security: Arc<dyn SecurityPort>,
@@ -184,6 +183,8 @@ pub async fn run(
     refresh_tracker: Option<Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
+    let mut config_arc = app_state.app_config.load_full(); // Story 8.1 AC-7 — live ArcSwap snapshot
+    let mut config: &AppConfig = &config_arc;
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
@@ -1557,6 +1558,21 @@ pub async fn run(
                                                 name: "__deactivate_all__".to_string(),
                                                 arguments: String::new(),
                                             });
+                                        }
+                                    } else if cmd_name == "config" {
+                                        // /config reload — Story 8.1 AC-9
+                                        if cmd_arg.is_some_and(|a| a.eq_ignore_ascii_case("reload")) {
+                                            app_state.event_bus.emit_domain(AppEvent::ConfigReload);
+                                        } else {
+                                            if !matches!(state.status, StatusState::Flash { .. }) {
+                                                state.status_before_flash = Some(state.status.clone());
+                                            }
+                                            state.status = StatusState::Flash {
+                                                message: "/config reload — reload configuration from disk"
+                                                    .to_string(),
+                                                remaining_ms: state.theme.timing.status_flash_ms,
+                                            };
+                                            state.needs_redraw = true;
                                         }
                                     } else {
                                         // Check if command matches a discovered skill name (Story 5-2 AC8)
@@ -6356,6 +6372,37 @@ pub async fn run(
                     }
                     AppEvent::ProviderCatalogRefreshed { provider_id } => {
                         state.model_selector.refreshing.remove(&provider_id);
+                        state.needs_redraw = true;
+                    }
+                    // Story 8.1 AC-10 — Config reload.
+                    AppEvent::ConfigReload => {
+                        let result = crate::infrastructure::config::try_load(
+                            &app_state.cli_snapshot,
+                            app_state.profile_resolver.as_ref(),
+                        );
+                        let outcome = crate::adapters::tui::handlers::config::handle_config_reload(
+                            result,
+                            app_state.config_store.as_ref(),
+                        );
+                        // Emit ConfigReloaded for telemetry (AC-15) + SystemNotice for status bar (AC-12)
+                        let (_, notice_level, notice_msg) = match &outcome {
+                            crate::adapters::tui::handlers::HandlerOutcome::Notify(
+                                AppEvent::ConfigReloaded { success: true, .. },
+                            ) => (true, crate::domain::models::NoticeLevel::Info, "Configuration reloaded"),
+                            _ => (false, crate::domain::models::NoticeLevel::Warning,
+                                 "Configuration reload failed — keeping previous config"),
+                        };
+                        if let crate::adapters::tui::handlers::HandlerOutcome::Notify(event) = outcome {
+                            app_state.event_bus.emit_domain(event);
+                        }
+                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            conversation_id: None,
+                            level: notice_level,
+                            message: notice_msg.to_string(),
+                        });
+                        // Re-snap config so synchronous event-loop reads pick up the reloaded config
+                        config_arc = app_state.app_config.load_full();
+                        config = &config_arc;
                         state.needs_redraw = true;
                     }
                     _ => {

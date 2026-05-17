@@ -9,6 +9,7 @@ use crate::domain::events::AppEvent;
 use crate::infrastructure::paths;
 
 static SHUTDOWN_TX: OnceLock<mpsc::UnboundedSender<AppEvent>> = OnceLock::new();
+static EVENT_BUS_REF: OnceLock<std::sync::Arc<crate::infrastructure::runtime::event_bus::EventBus>> = OnceLock::new();
 static SESSION_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
 
 /// Install the panic hook that restores the terminal, writes a crash log,
@@ -48,12 +49,17 @@ pub fn set_shutdown_sender(tx: mpsc::UnboundedSender<AppEvent>) {
     let _ = SHUTDOWN_TX.set(tx);
 }
 
+pub fn set_event_bus(bus: std::sync::Arc<crate::infrastructure::runtime::event_bus::EventBus>) {
+    let _ = EVENT_BUS_REF.set(bus);
+}
+
 pub fn set_session_cancel(token: CancellationToken) {
     let _ = SESSION_CANCEL.set(token);
 }
 
 pub async fn install_signal_handlers() {
-    let tx = SHUTDOWN_TX.get().cloned();
+    let tx_shutdown = SHUTDOWN_TX.get().cloned();
+    let bus = EVENT_BUS_REF.get().cloned();
     let cancel = SESSION_CANCEL.get().cloned();
 
     tokio::spawn(async move {
@@ -61,26 +67,35 @@ pub async fn install_signal_handlers() {
             .expect("Failed to install SIGTERM handler");
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
             .expect("Failed to install SIGINT handler");
-        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            .expect("Failed to install SIGHUP handler");
+        let mut sighup =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("Failed to install SIGHUP handler");
 
-        tokio::select! {
-            _ = sigterm.recv() => {}
-            _ = sigint.recv() => {}
-            _ = sighup.recv() => {}
+        loop {
+            tokio::select! {
+                // SIGHUP — reload config (Story 8.1 AC-8). Does NOT shut down.
+                _ = sighup.recv() => {
+                    if let Some(ref bus) = bus {
+                        bus.emit_domain(AppEvent::ConfigReload);
+                    }
+                }
+                // SIGTERM / SIGINT — graceful shutdown. Second signal force-exits.
+                _ = sigterm.recv() => break,
+                _ = sigint.recv() => break,
+            }
         }
 
         if let Some(ref token) = cancel {
             token.cancel();
         }
-        if let Some(ref tx) = tx {
+        if let Some(ref tx) = tx_shutdown {
             let _ = tx.send(AppEvent::Shutdown);
         }
 
         tokio::select! {
-            _ = sigterm.recv() => {}
-            _ = sigint.recv() => {}
-            _ = sighup.recv() => {}
+            _ = sigterm.recv() => {},
+            _ = sigint.recv() => {},
+            _ = sighup.recv() => {},
         }
 
         restore_terminal_raw();

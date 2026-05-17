@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
-use crate::adapters::cli::commands::{Cli, Command};
+use crate::adapters::cli::commands::{Cli, Command, ConfigAction};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
 use crate::adapters::persona_adapter::PersonaAdapter;
@@ -62,11 +62,25 @@ pub async fn run() -> Result<()> {
     };
 
     // 2. Initialize logging BEFORE config load so parse warnings are captured
-    let _log_guard = logging::init(&cli.log_level)?;
+    let _log_guard = logging::init(cli.log_level.as_deref().unwrap_or("info"))?;
     tracing::info!("Starting rustain...");
 
+    // Story 8.1 AC-10 — capture CLI snapshot for config reload handler
+    let cli_snapshot = Cli {
+        log_level: cli.log_level.clone(),
+        command: None, // subcommand consumed at startup; irrelevant for reload
+        new: cli.new,
+        session: cli.session.clone(),
+        snapshot_retention: cli.snapshot_retention,
+        config_file: cli.config_file.clone(),
+        model: cli.model.clone(),
+    };
+
     // 3. Load config
-    let app_config = config::load();
+    let app_config = config::load(
+        &cli,
+        &crate::adapters::profile_resolver::noop::NoopProfileResolver,
+    );
 
     // 4. Install panic hook
     signals::install_panic_hook();
@@ -115,9 +129,19 @@ pub async fn run() -> Result<()> {
             "update-catalog requires the 'openai' feature — rebuild with --features openai"
         );
     }
+    // Story 8.1 AC-9 — Config subcommand intercept
+    if let Some(Command::Config { action: ConfigAction::Reload }) = cli.command {
+        return crate::adapters::cli::config_cmd::run_config_reload()
+            .await
+            .map_err(|e| {
+                tracing::error!("Config reload subcommand failed: {e}");
+                SubcommandExit.into()
+            });
+    }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
+    // CONFORMANCE_EXCEPTION_ENV_LAYER_BYPASS: legacy env-var, see Story 8.1 Decision Gate item 1.2
     if let Some(model_override) =
         crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_DEFAULT_SONNET_MODEL")
     {
@@ -127,6 +151,10 @@ pub async fn run() -> Result<()> {
         );
         app_config.model = model_override;
     }
+
+    // Story 8.1 AC-7 — wrap config in ArcSwap for atomic reload
+    // Clone the config into the ArcSwap; keep app_config for the rest of startup.
+    let app_config_swap = Arc::new(arc_swap::ArcSwap::from_pointee(app_config.clone()));
 
     // 5a. Construct provider layer
     let ProviderLayer {
@@ -194,6 +222,8 @@ pub async fn run() -> Result<()> {
         provider_registry.clone(),
         usage_ledger,
         budget_state_store,
+        app_config_swap.clone(),
+        cli_snapshot,
     );
     let domain_tx = app_state.event_bus.domain_tx.clone();
 
@@ -578,6 +608,7 @@ pub async fn run() -> Result<()> {
     let storage_port: Arc<dyn StoragePort> = storage.clone();
 
     signals::set_shutdown_sender(app_state.event_bus.domain_tx.clone());
+    signals::set_event_bus(app_state.event_bus.clone());
     signals::set_session_cancel(app_state.session_cancel.clone());
     signals::install_signal_handlers().await;
 
@@ -590,7 +621,7 @@ pub async fn run() -> Result<()> {
         Arc::new(crate::adapters::clipboard_adapter::NoOpClipboard::new());
 
     // 7. Setup terminal (mouse capture gated by config + RUSTAIN_NO_MOUSE env. Story 16.8, AC14)
-    let mouse_enabled = app_config.mouse.capture
+    let mouse_enabled = app_config_swap.load().mouse.capture
         && crate::infrastructure::utils::env_var_trimmed("RUSTAIN_NO_MOUSE")
             != Some("1".to_string());
     let mut tui = terminal::setup(mouse_enabled)?;
@@ -608,7 +639,6 @@ pub async fn run() -> Result<()> {
         &mut tui,
         domain_rx,
         app_state,
-        &app_config,
         router.clone(),
         router.clone(),
         security,

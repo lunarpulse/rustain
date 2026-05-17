@@ -13,6 +13,7 @@ pub mod model_catalog_cache;
 pub mod noop;
 pub mod palette_registry;
 pub mod persona_adapter;
+pub mod profile_resolver;
 pub mod project_context_loader;
 pub mod provider;
 pub mod security_adapter;

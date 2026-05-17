@@ -37,7 +37,7 @@ toml = "0.8"
 # Layered config merge (Epic 7 retro AI-7.2 / Path A). Provides field-level
 # merge across config layers — required by Epic 8 Story 8.1 AC. The `toml`
 # feature loads TOML files; `env` enables RUSTAIN_* env-var layer (Epic 8).
-figment = { version = "0.10", features = ["toml", "env"] }
+figment = { version = "0.10", features = ["toml", "env", "json"] }
 
 # ── Error handling ───────────────────────────────────────────────
 thiserror = "2.0"

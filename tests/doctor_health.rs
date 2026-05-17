@@ -23,7 +23,7 @@ fn test_cli_doctor_subcommand() {
     ));
     assert!(!cli.new);
     assert!(cli.session.is_none());
-    assert_eq!(cli.log_level, "info");
+    assert!(cli.log_level.is_none(), "no --log-level => None (Story 8.1 D5)");
 }
 
 /// `rustain doctor --terminal` sets terminal = true.
@@ -80,7 +80,7 @@ fn test_cli_log_level_with_doctor() {
         cli.command,
         Some(Command::Doctor { terminal: false })
     ));
-    assert_eq!(cli.log_level, "debug");
+    assert_eq!(cli.log_level.as_deref(), Some("debug"));
 }
 
 // ──────────────────────────────────────────────────

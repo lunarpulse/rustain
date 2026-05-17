@@ -64,6 +64,18 @@ pub enum ConfigError {
 
     #[error("Failed to read config file: {0}")]
     IoError(String),
+
+    /// Story 8.1 AC-11 — parse error in a specific config file.
+    #[error("Config parse error in {path}: line {line:?}: {reason}")]
+    Parse {
+        path: std::path::PathBuf,
+        line: Option<u32>,
+        reason: String,
+    },
+
+    /// Story 8.1 AC-11 — root-level figment extraction failure.
+    #[error("Config extraction failed: {reason}")]
+    Extract { reason: String },
 }
 
 #[allow(dead_code)]

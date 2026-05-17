@@ -45,6 +45,8 @@ pub enum RawEventKind {
     SystemNotice { level: NoticeLevel, message: String },
     Tool(ToolCallTransition),
     Approval(crate::domain::services::approval_runtime::ApprovalRuntimeEvent),
+    /// Story 8.1 AC-10 — config reload result for daemon/telemetry subscribers.
+    ConfigReloaded { success: bool, error: Option<String> },
 }
 
 pub struct EventBus {
@@ -129,7 +131,16 @@ impl RawEvent {
                     kind: RawEventKind::Approval(event.clone()),
                 }
             }
+            AppEvent::ConfigReloaded { success, error } => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::ConfigReloaded {
+                    success: *success,
+                    error: error.clone(),
+                },
+            },
             AppEvent::Tick
+            | AppEvent::ConfigReload
             | AppEvent::Resize(..)
             | AppEvent::InputEvent(..)
             | AppEvent::DomainEvent(..) => return None,

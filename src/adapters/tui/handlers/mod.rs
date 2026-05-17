@@ -22,6 +22,7 @@ use crate::domain::ports::StreamingProvider;
 pub mod bookmark;
 pub mod budget;
 pub mod compaction;
+pub mod config;
 pub mod context_warning;
 pub mod model_switch;
 pub mod notice;

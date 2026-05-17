@@ -211,6 +211,17 @@ pub enum AppEvent {
         /// Task that triggered the cancel; None for whole-plan cancel from 6.4 user action.
         cancelled_at_task: Option<u32>,
     },
+    /// Story 8.1 AC-10 — emitted by SIGHUP handler, /config reload slash command,
+    /// and (in future) `rustain config reload` cross-process IPC. The handler
+    /// reloads the layered config chain and atomically swaps the active AppConfig.
+    ConfigReload,
+    /// Story 8.1 AC-15 — result of a config reload, emitted by the handler after
+    /// the reload succeeds or fails. Carries the actual outcome so telemetry
+    /// subscribers receive truthful data (not hardcoded success).
+    ConfigReloaded {
+        success: bool,
+        error: Option<String>,
+    },
     /// Story 6.4: emitted when the executing plan deviates from the approved plan
     /// (auto-skip of blocked tasks; agent-proposed revision deferred to 6.4-FU1).
     /// TUI renders a PlanDeviationCard requiring reapproval in Normal/Plan modes;
