@@ -553,4 +553,119 @@ mod tests {
 
         unsafe { std::env::remove_var("RUSTAIN_LOG_LEVEL"); }
     }
+
+    /// Story 8.1 AC-1 — full 7-layer priority chain: sets model in all layers,
+    /// asserts CLI wins (highest-priority layer).
+    #[test]
+    fn test_layer_priority_full_chain() {
+        // Layer 7: built-in defaults
+        let mut figment = Figment::from(Serialized::defaults(AppConfig::default()));
+        // Layer 6: profile defaults (via mock resolver returning a model)
+        let profile_value = figment::value::Value::from(figment::value::Dict::from_iter(vec![(
+            "model".to_string(),
+            figment::value::Value::from("profile-model"),
+        )]));
+        figment = figment.merge(Serialized::defaults(profile_value));
+        // Layer 5: user-global TOML (simulated via string)
+        figment = figment.merge(Toml::string(r#"model = "user-toml-model""#));
+        // Layer 4: workspace TOML
+        figment = figment.merge(Toml::string(r#"model = "workspace-toml-model""#));
+        // Layer 3: JSON local override
+        figment = figment.merge(Json::string(r#"{"model": "json-override-model"}"#));
+        // Layer 2: env vars
+        unsafe { std::env::set_var("RUSTAIN_MODEL", "env-model"); }
+        figment = figment.merge(Env::prefixed("RUSTAIN_").split("__"));
+        // Layer 1: CLI flags (TOP)
+        let cli = Cli {
+            model: Some("cli-model".to_string()),
+            log_level: None,
+            config_file: None,
+            ..test_cli()
+        };
+        figment = figment.merge(Serialized::globals(CliOverrides::from(&cli)));
+
+        let config: AppConfig = figment.extract().expect("full chain extract");
+        assert_eq!(config.model, "cli-model", "CLI layer (highest) must win");
+
+        unsafe { std::env::remove_var("RUSTAIN_MODEL"); }
+    }
+
+    /// Story 8.1 AC-6 — multi-layer merge for provider: defaults + 2 TOML
+    /// layers contribute different providers without whole-map replacement.
+    #[test]
+    fn multi_layer_provider_merge_preserves_all_entries() {
+        let layer1 = r#"
+            [provider.openai]
+            provider_id = "openai"
+            model_id = "gpt-4o"
+            api_key_env = "OPENAI_API_KEY"
+            kind = "openai-compatible"
+            enabled = true
+        "#;
+        let layer2 = r#"
+            [provider.openrouter]
+            provider_id = "openrouter"
+            model_id = "anthropic/claude-3.5-sonnet"
+            api_key_env = "OPENROUTER_API_KEY"
+            kind = "openai-compatible"
+            enabled = true
+        "#;
+        let figment = Figment::from(Serialized::defaults(AppConfig::default()))
+            .merge(Toml::string(layer1))
+            .merge(Toml::string(layer2));
+
+        let config: AppConfig = figment.extract().expect("provider multi-layer extract");
+        assert!(config.provider.contains_key("openai"));
+        assert!(config.provider.contains_key("openrouter"));
+        assert!(config.provider["openai"].enabled);
+        assert!(config.provider["openrouter"].enabled);
+    }
+
+    /// Story 8.1 AC-6 — multi-layer merge for step_tiers: defaults + user
+    /// override merge without whole-map replacement.
+    #[test]
+    fn multi_layer_step_tiers_merge_preserves_other_entries() {
+        use crate::domain::models::router::{ModelTier, StepKind};
+
+        let user_toml = r#"
+            [router.step_tiers]
+            codegen = "flagship"
+        "#;
+        let figment = Figment::from(Serialized::defaults(AppConfig::default()))
+            .merge(Toml::string(user_toml))
+            .merge(Env::prefixed("RUSTAIN_").split("__"));
+
+        let config: AppConfig = figment.extract().expect("step_tiers multi-layer extract");
+        // User override: codegen → Flagship
+        assert_eq!(config.router.step_tiers.get(&StepKind::Codegen), Some(&ModelTier::Flagship));
+        // Default entries survive
+        assert!(config.router.step_tiers.contains_key(&StepKind::Plan));
+        assert!(config.router.step_tiers.contains_key(&StepKind::Edit));
+    }
+
+    /// Story 8.1 AC-6 — multi-layer merge for tier_models: user entries
+    /// are additive (default tier_models map is empty, so nothing to clobber).
+    #[test]
+    fn multi_layer_tier_models_merge_preserves_other_entries() {
+        use crate::domain::models::router::ModelTier;
+
+        let layer1 = r#"
+            [router.tier_models]
+            cheap_agentic = "gpt-4o"
+        "#;
+        let layer2 = r#"
+            [router.tier_models]
+            flagship = "claude-sonnet-4-6"
+        "#;
+        let figment = Figment::from(Serialized::defaults(AppConfig::default()))
+            .merge(Toml::string(layer1))
+            .merge(Toml::string(layer2));
+
+        let config: AppConfig = figment.extract().expect("tier_models multi-layer extract");
+        // Layer2 overrides cheap_agentic? No — cheap_agentic is in layer1 only.
+        // Both entries from different layers survive field-level merge.
+        assert_eq!(config.router.tier_models.get(&ModelTier::CheapAgentic).map(|s| s.as_str()), Some("gpt-4o"));
+        // Layer2 adds flagship
+        assert_eq!(config.router.tier_models.get(&ModelTier::Flagship).map(|s| s.as_str()), Some("claude-sonnet-4-6"));
+    }
 }
