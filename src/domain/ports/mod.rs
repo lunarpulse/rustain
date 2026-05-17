@@ -16,6 +16,8 @@ mod persona;
 #[allow(unused_imports)]
 mod provider;
 #[allow(unused_imports)]
+mod provider_info;
+#[allow(unused_imports)]
 mod scheduler;
 #[allow(unused_imports)]
 mod security;
@@ -36,6 +38,7 @@ pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
 pub use persona::PersonaPort;
 pub use provider::StreamingProvider;
+pub use provider_info::ProviderInfoPort;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
 pub use session_port::SessionPort;

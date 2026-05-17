@@ -35,6 +35,7 @@ use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
+use crate::adapters::tui::handlers::{self, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
@@ -66,318 +67,23 @@ use crate::domain::services::message_builder;
 use crate::domain::services::plan_mode_injector::PlanModeInjector;
 use crate::domain::services::reducer::{reduce, update_streaming_mirror};
 use crate::domain::services::turn_queue::TurnQueue;
+use crate::infrastructure::runtime::app_context::AppContext;
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::turn;
 
-/// Apply a warning-level notice to TUI state.
-/// Creates a FeedbackBlock, sets active_feedback_id, and returns the block ID.
-/// Does NOT mutate focus — this is the regression guard for AC6.
-fn apply_warning_notice(state: &mut TuiState, msg: String) -> String {
-    static WFB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let fb_id = format!("wfb-{}", WFB_COUNTER.fetch_add(1, Ordering::Relaxed));
-    let fb = FeedbackBlock {
-        id: fb_id.clone(),
-        level: FeedbackLevel::Warning,
-        message: msg,
-        actions: vec![FeedbackAction::Dismiss],
-    };
-    state.feedback_blocks.insert(fb_id.clone(), fb);
-    state.active_feedback_id = Some(fb_id.clone());
-    fb_id
-}
+// `apply_warning_notice` extracted to `crate::adapters::tui::handlers::notice`
+// per Story 8.0a Phase 4 Task 10 (notice sub-task). Inline test moved per DGI-E.
 
-/// Story 7.4: upsert a context-warning feedback block.
-fn upsert_context_warning(state: &mut TuiState, pct: u32) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CTXWARN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+// Context-warning handlers extracted to `crate::adapters::tui::handlers::context_warning`
+// per Story 8.0a Phase 4 Task 6. The functions `upsert_context_warning` and
+// `clear_context_warning` previously lived here.
 
-    // Remove any existing ctxwarn-* block
-    state
-        .feedback_blocks
-        .retain(|id, _| !id.starts_with("ctxwarn-"));
-    if state
-        .active_feedback_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("ctxwarn-"))
-    {
-        state.active_feedback_id = None;
-    }
+// Daily-budget handlers extracted to `crate::adapters::tui::handlers::budget`
+// per Story 8.0a Phase 4 Task 7. `upsert_daily_budget_warning`,
+// `clear_daily_budget_warning`, and `recompute_daily_budget` previously lived here.
 
-    let fb_id = format!(
-        "ctxwarn-{}",
-        CTXWARN_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let (level, actions) = if pct >= 95 {
-        (
-            FeedbackLevel::Error,
-            vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
-        )
-    } else {
-        (
-            FeedbackLevel::Warning,
-            vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
-        )
-    };
-    let fb = FeedbackBlock {
-        id: fb_id.clone(),
-        level,
-        message: format!("Running low on context ({}%).", pct),
-        actions,
-    };
-    state.feedback_blocks.insert(fb_id.clone(), fb);
-    state.active_feedback_id = Some(fb_id);
-}
-
-/// Story 7.4: clear all context-warning feedback blocks.
-fn clear_context_warning(state: &mut TuiState) {
-    state
-        .feedback_blocks
-        .retain(|id, _| !id.starts_with("ctxwarn-"));
-    if state
-        .active_feedback_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("ctxwarn-"))
-    {
-        state.active_feedback_id = None;
-    }
-}
-
-/// Story 7.5 AC5: upsert a daily-budget warning feedback block when over the
-/// daily limit. Removes any prior `dailybudget-*` block first (at most one
-/// exists at a time). Suppressed when `unix_now <= dismissed_until_unix`.
-fn upsert_daily_budget_warning(
-    state: &mut TuiState,
-    budget: &crate::adapters::tui::state::DailyBudgetState,
-) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static BUDGET_WARN_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    let now = crate::infrastructure::clock_util::now_unix();
-    let pct = budget.percent();
-    let paused = now <= budget.dismissed_until_unix;
-
-    if pct < 100 || paused {
-        clear_daily_budget_warning(state);
-        return;
-    }
-
-    // Remove any existing dailybudget-* block (at-most-one invariant)
-    state
-        .feedback_blocks
-        .retain(|id, _| !id.starts_with("dailybudget-"));
-    if state
-        .active_feedback_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("dailybudget-"))
-    {
-        state.active_feedback_id = None;
-    }
-
-    let fb_id = format!(
-        "dailybudget-{}",
-        BUDGET_WARN_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
-    let fb = FeedbackBlock {
-        id: fb_id.clone(),
-        level: FeedbackLevel::Error,
-        message: format!("Daily budget (${:.2}) reached.", budget.limit_usd),
-        actions: vec![
-            FeedbackAction::BudgetContinue,
-            FeedbackAction::BudgetSwitchCheaper,
-            FeedbackAction::BudgetPause,
-        ],
-    };
-    state.feedback_blocks.insert(fb_id.clone(), fb);
-    // Note: this unconditionally sets active_feedback_id. If a ctxwarn-*
-    // block from 7-4 was active, it gets displaced (remains in feedback_blocks
-    // but is no longer "active"). Budget warning takes priority per AC5.
-    state.active_feedback_id = Some(fb_id);
-}
-
-/// Story 7.5 AC5: clear any daily-budget warning block.
-fn clear_daily_budget_warning(state: &mut TuiState) {
-    state
-        .feedback_blocks
-        .retain(|id, _| !id.starts_with("dailybudget-"));
-    if state
-        .active_feedback_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("dailybudget-"))
-    {
-        state.active_feedback_id = None;
-    }
-}
-
-/// Story 7.5 AC3: build the usage-panel state from today's ledger entries.
-/// Pure-ish: only I/O is `read_session` + `read_since` on the usage ledger.
-async fn open_usage_panel(
-    state: &mut TuiState,
-    conversation: &Conversation,
-    app_state: &AppState,
-    config: &crate::domain::models::AppConfig,
-    session_manager: &crate::domain::models::SessionManager,
-) {
-    use crate::adapters::tui::state::{SessionUsageSummary, TurnUsageRow};
-    use crate::domain::models::MessageRole;
-    use crate::domain::services::cost_calculator;
-    use crate::infrastructure::clock_util::{now_unix, today_start_unix_ms};
-
-    let since = today_start_unix_ms();
-    let entries_today = app_state
-        .usage_ledger
-        .read_since(since)
-        .await
-        .unwrap_or_default();
-
-    // Per-session entries for the current session (for turn-row join)
-    let session_id_opt = match session_manager.state() {
-        crate::domain::models::SessionState::Active { id } => Some(id.clone()),
-        _ => None,
-    };
-    let entries_session = match &session_id_opt {
-        Some(sid) => app_state
-            .usage_ledger
-            .read_session(sid)
-            .await
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
-
-    let breakdown = cost_calculator::cost_breakdown(&entries_today, &config.pricing);
-    let total_in: u64 = entries_today.iter().map(|e| e.usage.tokens_in as u64).sum();
-    let total_out: u64 = entries_today
-        .iter()
-        .map(|e| e.usage.tokens_out as u64)
-        .sum();
-    let cache_read_today: u64 = entries_today
-        .iter()
-        .map(|e| e.usage.cache_read_tokens.unwrap_or(0) as u64)
-        .sum();
-    let cache_creation_today: u64 = entries_today
-        .iter()
-        .map(|e| e.usage.cache_creation_tokens.unwrap_or(0) as u64)
-        .sum();
-    let cache_total = cache_read_today + cache_creation_today + total_in;
-    let cache_savings_usd = cost_calculator::cache_savings(&entries_today, &config.pricing);
-
-    let task_count = conversation
-        .turns
-        .iter()
-        .filter(|t| t.role == MessageRole::Assistant)
-        .count() as u32;
-    let elapsed_secs = (now_unix() - conversation.created_at.max(0)).max(0);
-
-    // Build per-turn rows by joining each Assistant turn to its closest ledger entry.
-    let mut turn_rows: Vec<TurnUsageRow> = Vec::new();
-    for (idx, turn) in conversation
-        .turns
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.role == MessageRole::Assistant)
-    {
-        let matched: Option<&crate::domain::models::usage::UsageLedgerEntry> = entries_session
-            .iter()
-            .filter(|e| {
-                e.conversation_id == conversation.id
-                    && (turn.model.is_empty() || e.model == turn.model)
-            })
-            .min_by_key(|e| (e.timestamp_ms - turn.started_at).abs());
-        let (tokens_in, tokens_out, model, cost_usd) = if let Some(e) = matched {
-            (
-                e.usage.tokens_in,
-                e.usage.tokens_out,
-                e.model.clone(),
-                cost_calculator::cost_for_entry(e, &config.pricing),
-            )
-        } else {
-            (
-                0,
-                0,
-                if turn.model.is_empty() {
-                    effective_model(state, config).to_string()
-                } else {
-                    turn.model.clone()
-                },
-                None,
-            )
-        };
-        turn_rows.push(TurnUsageRow {
-            turn_index: idx as u32,
-            model,
-            tokens_in,
-            tokens_out,
-            cost_usd,
-        });
-    }
-
-    let panel_session_today = SessionUsageSummary {
-        tokens_in: total_in,
-        tokens_out: total_out,
-        cost_usd: if entries_today.is_empty() {
-            None
-        } else {
-            Some(breakdown.total_usd)
-        },
-        task_count,
-        elapsed_secs,
-        cache_read_tokens: cache_read_today,
-        cache_total_tokens: cache_total,
-        cache_savings_usd,
-    };
-
-    // Snapshot context window for the active model.
-    // Anthropic input_tokens does NOT include cache tokens.
-    // The context window gauge should reflect all tokens occupying the context,
-    // so we add cache_creation + cache_read to the raw input count.
-    let token_usage_in = conversation.usage.as_ref().map_or(0u32, |u| {
-        u.input_tokens
-            .saturating_add(u.cache_creation_input_tokens.unwrap_or(0))
-            .saturating_add(u.cache_read_input_tokens.unwrap_or(0))
-    });
-    let context_window_tokens = app_state
-        .provider_registry
-        .get_model(
-            &app_state.provider.load().provider_id(),
-            effective_model(state, config),
-        )
-        .map_or(0u32, |m| m.context_window);
-
-    state.usage_panel.turn_rows = turn_rows;
-    state.usage_panel.session_today = panel_session_today;
-    state.usage_panel.per_model = breakdown.per_model;
-    state.usage_panel.missing_pricing_models = breakdown.missing_pricing_models;
-    state.usage_panel.context_used_tokens = token_usage_in;
-    state.usage_panel.context_window_tokens = context_window_tokens;
-    state.usage_panel.open(state.focus.clone());
-    state.focus = crate::domain::models::FocusState::Overlay(
-        crate::domain::models::visual::OverlayType::UsagePanel,
-    );
-    state.needs_redraw = true;
-}
-
-/// Story 7.5 AC5: recompute spent-today + percent against config.budget.daily_limit_usd.
-/// Returns `None` when budget alerting is disabled (no `daily_limit_usd`).
-async fn recompute_daily_budget(
-    app_state: &AppState,
-    config: &crate::domain::models::AppConfig,
-    prior_dismissed_until_unix: i64,
-) -> Option<crate::adapters::tui::state::DailyBudgetState> {
-    let limit = config.budget.daily_limit_usd?;
-    let since = crate::infrastructure::clock_util::today_start_unix_ms();
-    let entries = app_state
-        .usage_ledger
-        .read_since(since)
-        .await
-        .unwrap_or_default();
-    let spent =
-        crate::domain::services::cost_calculator::cumulative_cost(&entries, &config.pricing);
-    Some(crate::adapters::tui::state::DailyBudgetState {
-        spent_today_usd: spent,
-        limit_usd: limit,
-        computed_at_ms: chrono::Utc::now().timestamp_millis(),
-        dismissed_until_unix: prior_dismissed_until_unix,
-    })
-}
+// Usage-panel handler extracted to `crate::adapters::tui::handlers::usage_panel`
+// per Story 8.0a Phase 4 Task 8. `open_usage_panel` previously lived here.
 
 /// Story 16.6 helper: pre/post layout + reconcile + mirror for fold mutations.
 /// Eliminates ~30-line duplication across the five fold-toggle dispatch arms.
@@ -449,95 +155,8 @@ fn reconcile_fold_toggle<F>(
     state.needs_redraw = true;
 }
 
-/// S16.8 AC15: Two-stage anchor-confirmation gate for scroll-intent events.
-///
-/// When the user is Pinned and emits a scroll-intent (j/k/wheel/page-scroll):
-/// first tick shows a toast and no-ops; second tick within 2000ms drops the
-/// anchor via `ViewEvent::DropAnchorAndScroll` and applies the scroll.
-///
-/// Jump-intents (G, gg) and non-scroll inputs (BlockJump) are NOT gated here.
-fn apply_scroll_intent(
-    tab_manager: &mut crate::domain::models::tab::TabManager,
-    state: &mut TuiState,
-    conversation: &Conversation,
-    app_state: &AppState,
-    delta: crate::domain::models::view_state::ScrollDelta,
-) {
-    use crate::domain::models::AnchorMode;
-
-    let is_pinned = matches!(
-        tab_manager.active_tab().view_state.mode,
-        AnchorMode::Pinned(_)
-    );
-
-    if !is_pinned {
-        dispatch_view_scroll(tab_manager, state, conversation, delta);
-        return;
-    }
-
-    // Pinned: two-stage confirmation (AC15 clauses 1-3).
-    let clock = tab_manager.active_tab().clock.clone();
-    let now = clock.now();
-    let needs_toast = match state.pending_anchor_drop {
-        None => true,
-        Some(t) => now.duration_since(t) > std::time::Duration::from_millis(2000),
-    };
-
-    if needs_toast {
-        state.pending_anchor_drop = Some(now);
-        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-            conversation_id: Some(conversation.id.clone()),
-            level: crate::domain::models::NoticeLevel::Info,
-            message: "Anchored to this turn. Scroll again to release, or press ]] .".to_string(),
-        });
-        state.needs_redraw = true;
-    } else {
-        // Second tick within 2000ms: drop anchor via explicit ViewEvent.
-        state.pending_anchor_drop = None;
-        // Pre-flip mode to Reading so apply_scroll sees Reading not Pinned.
-        tab_manager.active_tab_mut().view_state.mode = AnchorMode::Reading;
-        dispatch_view_scroll(tab_manager, state, conversation, delta);
-    }
-}
-
-/// Dispatch a scroll delta through `view_state.reconcile()` — the single
-/// write-path into ViewState.
-///
-/// D1 (2026-05-03): Rewritten from direct mutation to the reconcile pathway.
-/// Uses a minimal LayoutMetrics built from state.total_content_height (the
-/// render-derived height from `chat_pane::render`, which walks `messages`)
-/// rather than from `build_layout_metrics` (which walks `conversation.turns`).
-/// These can diverge; the renderer's value is what the user sees on screen.
-///
-/// Scroll math is exclusively in `view_state.rs::apply_scroll`.
-fn dispatch_view_scroll(
-    tab_manager: &mut crate::domain::models::tab::TabManager,
-    state: &mut TuiState,
-    _conversation: &Conversation,
-    delta: crate::domain::models::view_state::ScrollDelta,
-) {
-    use crate::domain::models::ViewEvent;
-    use crate::domain::models::view_state::LayoutMetrics;
-
-    let layout = LayoutMetrics {
-        viewport_height: state.viewport_height as usize,
-        total_content_height: state.total_content_height,
-        turn_top_offsets: vec![],
-        focused_turn_top: None,
-    };
-
-    let resolved = tab_manager
-        .active_tab_mut()
-        .view_state
-        .reconcile(Some(ViewEvent::Scroll(delta)), &layout);
-
-    state.scroll_snapshot = resolved;
-    state.auto_snapshot = matches!(
-        tab_manager.active_tab().view_state.mode,
-        crate::domain::models::AnchorMode::Following
-    );
-    state.needs_redraw = true;
-}
+// Scroll-intent handler + dispatch_view_scroll helper extracted to
+// `crate::adapters::tui::handlers::scroll` per Story 8.0a Phase 4 Task 9 (scroll).
 
 /// Run the 4-branch tokio::select! event loop.
 #[allow(clippy::too_many_arguments)]
@@ -598,10 +217,11 @@ pub async fn run(
     // warning state if already over limit.
     if config.budget.daily_limit_usd.is_some() {
         let initial_bs = app_state.budget_state_store.load().await;
+        let app_context = AppContext::new(&app_state, &router);
         if let Some(b) =
-            recompute_daily_budget(&app_state, config, initial_bs.dismissed_until_unix).await
+            handlers::budget::recompute_daily_budget(&*app_state.usage_ledger, config, initial_bs.dismissed_until_unix, &app_context).await
         {
-            upsert_daily_budget_warning(&mut state, &b);
+            handlers::budget::handle_upsert_daily_budget_warning(&mut state, &b, &app_context);
             state.daily_budget = Some(b);
         }
     }
@@ -864,7 +484,7 @@ pub async fn run(
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
-            handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal);
+            handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal);
             if state.should_quit {
                 return Ok(());
             }
@@ -974,8 +594,17 @@ pub async fn run(
         });
     }
 
-    // Story 7.3 AC9: one-shot startup provider fallback
-    apply_startup_provider_fallback(&mut state, &router, &app_state, &domain_tx).await;
+    // Story 7.3 AC9: one-shot startup provider fallback (Phase 2 Task 4 extraction)
+    {
+        let app_context = AppContext::new(&app_state, &router);
+        match handlers::model_switch::handle_apply_startup_provider_fallback(&mut state, &app_context).await {
+            HandlerOutcome::Quiet => {}
+            HandlerOutcome::Notify(ev) => {
+                app_state.event_bus.emit_domain(ev);
+            }
+            _ => unreachable!("apply_startup_provider_fallback only returns Quiet or Notify"),
+        }
+    }
 
     // RCA fix: ensure the displayed/effective model is valid for the active provider.
     // Without this, status bar can show {active_provider}/{config.model} where
@@ -1065,7 +694,8 @@ pub async fn run(
                                         state.active_feedback_id = None;
                                         state.compacting = true;
                                         state.needs_redraw = true;
-                                        trigger_compaction(
+                                        let app_context = AppContext::new(&app_state, &router);
+                                        match handlers::compaction::handle_trigger_compaction(
                                             &conversation,
                                             &streaming,
                                             &mut state,
@@ -1073,9 +703,14 @@ pub async fn run(
                                             config,
                                             &domain_tx,
                                             CompactionPurpose::Carryover,
-                                            &app_state,
-                                            &router,
-                                        );
+                                            &app_context,
+                                        ) {
+                                            HandlerOutcome::Quiet => {}
+                                            HandlerOutcome::RequestCompaction(payload) => {
+                                                tokio::spawn(handlers::compaction::run_compaction(payload));
+                                            }
+                                            _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
+                                        }
                                         continue;
                                     }
                                     DomainInputEvent::KeyPress('n') | DomainInputEvent::KeyPress('N')
@@ -1230,7 +865,7 @@ pub async fn run(
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
                                     }
                                 }
@@ -1589,7 +1224,8 @@ pub async fn run(
                                         if let Some(fb_id) = state.active_feedback_id.take() {
                                             state.feedback_blocks.remove(&fb_id);
                                         }
-                                        trigger_compaction(
+                                        let app_context = AppContext::new(&app_state, &router);
+                                        match handlers::compaction::handle_trigger_compaction(
                                             &conversation,
                                             &streaming,
                                             &mut state,
@@ -1597,9 +1233,14 @@ pub async fn run(
                                             config,
                                             &domain_tx,
                                             CompactionPurpose::Inline,
-                                            &app_state,
-                                            &router,
-                                        );
+                                            &app_context,
+                                        ) {
+                                            HandlerOutcome::Quiet => {}
+                                            HandlerOutcome::RequestCompaction(payload) => {
+                                                tokio::spawn(handlers::compaction::run_compaction(payload));
+                                            }
+                                            _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
+                                        }
                                         continue;
                                     }
                                     // Clear the feedback block and retry the last user message
@@ -1664,7 +1305,8 @@ pub async fn run(
                                         state.feedback_blocks.remove(&fb_id);
                                     }
                                     state.needs_redraw = true;
-                                    trigger_compaction(
+                                    let app_context = AppContext::new(&app_state, &router);
+                                    match handlers::compaction::handle_trigger_compaction(
                                         &conversation,
                                         &streaming,
                                         &mut state,
@@ -1672,9 +1314,14 @@ pub async fn run(
                                         config,
                                         &domain_tx,
                                         CompactionPurpose::Inline,
-                                        &app_state,
-                                        &router,
-                                    );
+                                        &app_context,
+                                    ) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::RequestCompaction(payload) => {
+                                            tokio::spawn(handlers::compaction::run_compaction(payload));
+                                        }
+                                        _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
+                                    }
                                 }
                                 InputAction::FeedbackDismiss => {
                                     if let Some(fb_id) = state.active_feedback_id.take() {
@@ -1807,7 +1454,8 @@ pub async fn run(
                                         }
                                     } else if cmd_name == "compact" {
                                         // Story 7.4 AC4: /compact slash command
-                                        trigger_compaction(
+                                        let app_context = AppContext::new(&app_state, &router);
+                                        match handlers::compaction::handle_trigger_compaction(
                                             &conversation,
                                             &streaming,
                                             &mut state,
@@ -1815,9 +1463,14 @@ pub async fn run(
                                             config,
                                             &domain_tx,
                                             CompactionPurpose::Inline,
-                                            &app_state,
-                                            &router,
-                                        );
+                                            &app_context,
+                                        ) {
+                                            HandlerOutcome::Quiet => {}
+                                            HandlerOutcome::RequestCompaction(payload) => {
+                                                tokio::spawn(handlers::compaction::run_compaction(payload));
+                                            }
+                                            _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
+                                        }
                                     } else if cmd_name == "new" {
                                         // /new command: save current, create fresh session
                                         // AC7: save current conversation if it has messages
@@ -2023,7 +1676,7 @@ pub async fn run(
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
                                     }
                                 }
@@ -3959,7 +3612,7 @@ pub async fn run(
                                 InputAction::SearchQueryChanged
                                 | InputAction::SearchClear
                                 | InputAction::SearchReturnToTyping => {
-                                    apply_search_rescan(&conversation, &mut state);
+                                    handlers::search::handle_apply_search_rescan(&conversation, &mut state);
                                 }
                                 InputAction::SearchCommit => {
                                     if !state.search_state.matches.is_empty() {
@@ -3975,10 +3628,10 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::SearchNext => {
-                                    apply_search_navigate(&mut state, 1);
+                                    handlers::search::handle_apply_search_navigate(&mut state, 1);
                                 }
                                 InputAction::SearchPrev => {
-                                    apply_search_navigate(&mut state, -1);
+                                    handlers::search::handle_apply_search_navigate(&mut state, -1);
                                 }
                                 // ── Story 4-4: Bookmarks ──────────────────────────────
                                 InputAction::ToggleBookmark => {
@@ -3988,39 +3641,39 @@ pub async fn run(
                                     if let Some(prev) = _pending_save.take() {
                                         let _ = prev.await;
                                     }
-                                    apply_bookmark_toggle(
+                                    handlers::bookmark::handle_apply_bookmark_toggle(
                                         &mut tab_manager,
                                         &mut state,
                                         &conversation,
-                                        &fs_storage,
+                                        &*fs_storage,
                                     ).await;
                                 }
                                 InputAction::OpenBookmarkList => {
-                                    apply_open_bookmark_list(&tab_manager, &mut state);
+                                    handlers::bookmark::handle_apply_open_bookmark_list(&tab_manager, &mut state);
                                 }
                                 InputAction::JumpToBookmark => {
-                                    apply_jump_bookmark(&tab_manager, &mut state);
+                                    handlers::bookmark::handle_apply_jump_bookmark(&tab_manager, &mut state);
                                 }
                                 InputAction::DeleteBookmark => {
                                     if let Some(prev) = _pending_save.take() {
                                         let _ = prev.await;
                                     }
-                                    apply_delete_bookmark(
+                                    handlers::bookmark::handle_apply_delete_bookmark(
                                         &mut tab_manager,
                                         &mut state,
                                         &conversation,
-                                        &fs_storage,
+                                        &*fs_storage,
                                     ).await;
                                 }
                                 InputAction::UndoBookmarkDelete => {
                                     if let Some(prev) = _pending_save.take() {
                                         let _ = prev.await;
                                     }
-                                    apply_undo_bookmark_delete(
+                                    handlers::bookmark::handle_apply_undo_bookmark_delete(
                                         &mut tab_manager,
                                         &mut state,
                                         &conversation,
-                                        &fs_storage,
+                                        &*fs_storage,
                                     ).await;
                                 }
                                 InputAction::CloseBookmarkList => {
@@ -4575,10 +4228,18 @@ pub async fn run(
                                 // === Story 16.8: Fast scroll + mouse dispatchers ===
 
                                 InputAction::ScrollLineDown => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::LineDown);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::LineDown) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
                                 InputAction::ScrollLineUp => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::LineUp);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::LineUp) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
                                 InputAction::BlockJump { offset, auto_scroll } => {
                                     // S16.8, AC7: Block-boundary jumps set absolute scroll offset.
@@ -4594,19 +4255,35 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::ScrollHalfPageDown => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::HalfPageDown);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::HalfPageDown) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
                                 InputAction::ScrollHalfPageUp => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::HalfPageUp);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::HalfPageUp) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
                                 InputAction::ScrollFullPageDown => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::FullPageDown);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::FullPageDown) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
                                 InputAction::ScrollFullPageUp => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, crate::domain::models::view_state::ScrollDelta::FullPageUp);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::FullPageUp) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
                                 InputAction::ScrollToTop => {
-                                    dispatch_view_scroll(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::Top);
+                                    handlers::scroll::dispatch_view_scroll(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::Top);
                                 }
                                 InputAction::ScrollToBottom => {
                                     // Mode-aware G handler: Pinned → no-op + teaching toast; else ScrollToBottom.
@@ -4620,11 +4297,15 @@ pub async fn run(
                                         });
                                         state.needs_redraw = true;
                                     } else {
-                                        dispatch_view_scroll(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::Bottom);
+                                        handlers::scroll::dispatch_view_scroll(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::Bottom);
                                     }
                                 }
                                 InputAction::MouseScroll(delta) => {
-                                    apply_scroll_intent(&mut tab_manager, &mut state, &conversation, &app_state, delta);
+                                    match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, delta) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        _ => unreachable!("scroll_intent only returns Quiet or Notify"),
+                                    }
                                 }
 
                                 InputAction::Consumed | InputAction::Ignored => {}
@@ -4670,21 +4351,28 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::SwitchModelProvider { provider_id, model_id } => {
-                                    apply_model_switch(
+                                    let app_context = AppContext::new(&app_state, &router);
+                                    match handlers::model_switch::handle_apply_model_switch(
                                         &mut state,
-                                        &router,
-                                        &app_state,
+                                        &app_context,
                                         &streaming,
                                         &domain_tx,
                                         &conversation,
                                         provider_id,
                                         model_id,
-                                        &mut pending_health_check,
-                                    ).await;
+                                    ).await {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::RequestSpawn(SpawnRequest::HealthCheck { provider_id, model_id, provider }) => {
+                                            let handle = tokio::spawn(async move { provider.health_check().await });
+                                            pending_health_check = Some((provider_id, model_id, handle));
+                                        }
+                                        _ => unreachable!("apply_model_switch only returns Quiet or RequestSpawn(HealthCheck)"),
+                                    }
                                 }
                                 InputAction::CompactThenSwitchModel { provider_id, model_id } => {
                                     // Story 7.4 AC13: compact then switch model
-                                    trigger_compaction(
+                                    let app_context = AppContext::new(&app_state, &router);
+                                    match handlers::compaction::handle_trigger_compaction(
                                         &conversation,
                                         &streaming,
                                         &mut state,
@@ -4692,16 +4380,23 @@ pub async fn run(
                                         config,
                                         &domain_tx,
                                         CompactionPurpose::SwitchAfter { provider_id, model_id },
-                                        &app_state,
-                                        &router,
-                                    );
+                                        &app_context,
+                                    ) {
+                                        HandlerOutcome::Quiet => {}
+                                        HandlerOutcome::RequestCompaction(payload) => {
+                                            tokio::spawn(handlers::compaction::run_compaction(payload));
+                                        }
+                                        _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
+                                    }
                                 }
                                 InputAction::OpenUsagePanel => {
                                     // Story 7.5 AC3: aggregate ledger + open panel.
-                                    open_usage_panel(
+                                    let app_context = AppContext::new(&app_state, &router);
+                                    handlers::usage_panel::handle_open_usage_panel(
                                         &mut state,
                                         &conversation,
-                                        &app_state,
+                                        &*app_state.usage_ledger,
+                                        &app_context,
                                         config,
                                         &session_manager,
                                     )
@@ -4710,12 +4405,12 @@ pub async fn run(
                                 InputAction::FeedbackBudgetContinue => {
                                     // Story 7.5 AC5/AC7: one-time dismiss. The next
                                     // turn's recompute may re-insert if still over.
-                                    clear_daily_budget_warning(&mut state);
+                                    handlers::budget::handle_clear_daily_budget_warning(&mut state);
                                     state.needs_redraw = true;
                                 }
                                 InputAction::FeedbackBudgetSwitchCheaper => {
                                     // Story 7.5 AC5/AC7: reuse the model-selector overlay.
-                                    clear_daily_budget_warning(&mut state);
+                                    handlers::budget::handle_clear_daily_budget_warning(&mut state);
                                     let active_pid = router.active_delegate_id();
                                     let effective_mid = effective_model(&state, config).to_string();
                                     let providers = app_state.provider_registry.list_providers();
@@ -4765,7 +4460,7 @@ pub async fn run(
                                             if let Some(db) = state.daily_budget.as_mut() {
                                                 db.dismissed_until_unix = next_midnight;
                                             }
-                                            clear_daily_budget_warning(&mut state);
+                                            handlers::budget::handle_clear_daily_budget_warning(&mut state);
                                             app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Info,
@@ -4867,10 +4562,11 @@ pub async fn run(
                                             .daily_budget
                                             .as_ref()
                                             .map_or(0, |b| b.dismissed_until_unix);
+                                        let app_context = AppContext::new(&app_state, &router);
                                         if let Some(new_budget) =
-                                            recompute_daily_budget(&app_state, config, prior).await
+                                            handlers::budget::recompute_daily_budget(&*app_state.usage_ledger, config, prior, &app_context).await
                                         {
-                                            upsert_daily_budget_warning(&mut state, &new_budget);
+                                            handlers::budget::handle_upsert_daily_budget_warning(&mut state, &new_budget, &app_context);
                                             state.daily_budget = Some(new_budget);
                                         }
                                     }
@@ -4885,29 +4581,29 @@ pub async fn run(
                                         match state.context_warn_level {
                                             crate::adapters::tui::state::ContextWarnLevel::None => {
                                                 if (80..95).contains(&pct) {
-                                                    upsert_context_warning(&mut state, pct);
+                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, pct);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::Warn;
                                                 } else if pct >= 95 {
-                                                    upsert_context_warning(&mut state, pct);
+                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, pct);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::Crit;
                                                 }
                                             }
                                             crate::adapters::tui::state::ContextWarnLevel::Warn => {
                                                 if pct >= 95 {
-                                                    upsert_context_warning(&mut state, pct);
+                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, pct);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::Crit;
                                                 } else if pct < 80 {
-                                                    clear_context_warning(&mut state);
+                                                    handlers::context_warning::handle_clear_context_warning(&mut state);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::None;
                                                 }
                                             }
                                             crate::adapters::tui::state::ContextWarnLevel::Crit => {
                                                 if pct < 80 {
-                                                    clear_context_warning(&mut state);
+                                                    handlers::context_warning::handle_clear_context_warning(&mut state);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::None;
                                                 }
@@ -5049,7 +4745,7 @@ pub async fn run(
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
                                     }
                                 }
@@ -5256,7 +4952,7 @@ pub async fn run(
                                     state.focus = FocusState::Chat;
                                 }
                                 crate::domain::models::NoticeLevel::Warning => {
-                                    apply_warning_notice(&mut state, msg);
+                                    handlers::notice::apply_warning_notice(&mut state, msg);
                                 }
                                 _ => {
                                     state.status_before_flash = Some(state.status.clone());
@@ -5861,7 +5557,7 @@ pub async fn run(
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                             Ok(()) => state.needs_redraw = false,
-                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                         }
                     }
                     AppEvent::TitleGenerated { conversation_id, title } => {
@@ -5959,7 +5655,7 @@ pub async fn run(
                                         };
                                         state.feedback_blocks.insert(fb.id.clone(), fb);
                                         // Clear context warning
-                                        clear_context_warning(&mut state);
+                                        handlers::context_warning::handle_clear_context_warning(&mut state);
                                         state.context_warn_level = crate::adapters::tui::state::ContextWarnLevel::None;
                                     }
                                     state.compacting = false;
@@ -5983,17 +5679,23 @@ pub async fn run(
                                     // Story 7.4 AC13: for SwitchAfter, apply the model switch after compaction
                                     if let CompactionPurpose::SwitchAfter { provider_id, model_id } = purpose {
                                         if is_active {
-                                            apply_model_switch(
+                                            let app_context = AppContext::new(&app_state, &router);
+                                            match handlers::model_switch::handle_apply_model_switch(
                                                 &mut state,
-                                                &router,
-                                                &app_state,
+                                                &app_context,
                                                 &streaming,
                                                 &domain_tx,
                                                 &conversation,
                                                 Some(provider_id),
                                                 model_id,
-                                                &mut pending_health_check,
-                                            ).await;
+                                            ).await {
+                                                HandlerOutcome::Quiet => {}
+                                                HandlerOutcome::RequestSpawn(SpawnRequest::HealthCheck { provider_id, model_id, provider }) => {
+                                                    let handle = tokio::spawn(async move { provider.health_check().await });
+                                                    pending_health_check = Some((provider_id, model_id, handle));
+                                                }
+                                                _ => unreachable!("apply_model_switch only returns Quiet or RequestSpawn(HealthCheck)"),
+                                            }
                                         }
                                     }
                                 }
@@ -6742,11 +6444,10 @@ pub async fn run(
                             let saved_pid = pid.clone();
                             let saved_mid = mid.clone();
                             pending_health_check = None;
-                            complete_model_switch(
+                            let app_context = AppContext::new(&app_state, &router);
+                            let _ = handlers::model_switch::handle_complete_model_switch(
                                 &mut state,
-                                &router,
-                                &app_state,
-                                &conversation,
+                                &app_context,
                                 &saved_pid,
                                 &saved_mid,
                             ).await;
@@ -6831,7 +6532,7 @@ pub async fn run(
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal),
+                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
                                     }
 
@@ -6952,54 +6653,8 @@ pub async fn run(
 ///   1. Jump to match 0 only if match count transitioned 0 → ≥1
 ///   2. Jump to match 0 only if the previously focused match no longer exists
 ///   3. Otherwise preserve the viewport (no yo-yo)
-fn apply_search_rescan(conversation: &Conversation, state: &mut TuiState) {
-    use crate::adapters::tui::widgets::chat_pane;
-    use crate::domain::services::search::find_matches;
-
-    // Story 4-4 Task 3.3 — debounce guard: skip the scan if the last scan
-    // happened less than 30 ms ago AND the query length did not change.
-    // This avoids burning CPU on held-key repeats without losing accuracy on
-    // normal typing (where length changes every keystroke).
-    let prev_query_len = state.search_state.last_query_len;
-    let cur_query_len = state.search_state.query.chars().count();
-    if let Some(last) = state.search_state.last_search_instant {
-        if last.elapsed() < std::time::Duration::from_millis(30) && prev_query_len == cur_query_len
-        {
-            return;
-        }
-    }
-    state.search_state.last_query_len = cur_query_len;
-
-    let prev_focused = state
-        .search_state
-        .matches
-        .get(state.search_state.focused_match_index)
-        .cloned();
-    let prev_was_empty = state.search_state.matches.is_empty();
-
-    let new_matches = find_matches(conversation, &state.search_state.query);
-    let new_is_empty = new_matches.is_empty();
-    let prev_focused_still_valid = match &prev_focused {
-        Some(f) => new_matches.contains(f),
-        None => false,
-    };
-    state.search_state.matches = new_matches;
-    state.search_state.last_search_instant = Some(std::time::Instant::now());
-
-    let should_jump = (prev_was_empty && !new_is_empty) || !prev_focused_still_valid;
-    if should_jump && !state.search_state.matches.is_empty() {
-        state.search_state.focused_match_index = 0;
-        let target_msg = state.search_state.matches[0].message_index;
-        state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
-            target_msg,
-            &state.message_boundaries,
-            state.total_content_height,
-            state.viewport_height as usize,
-        );
-        state.auto_snapshot = state.scroll_snapshot == 0;
-    }
-    state.needs_redraw = true;
-}
+// `apply_search_rescan` extracted to `crate::adapters::tui::handlers::search`
+// per Story 8.0a Phase 4 Task 9 (search sub-task).
 
 /// Action returned by `apply_cross_search_query_change` so the event loop
 /// knows whether to spawn an async scan task or skip scanning entirely
@@ -7150,311 +6805,15 @@ pub fn apply_cross_search_results(
     CrossSearchResultsOutcome::Applied
 }
 
-/// Advance or reverse the focused search match, wrapping at boundaries.
-/// Emits a "Wrapped to top" / "Wrapped to bottom" flash (800 ms) when the
-/// index wraps past 0 or `matches.len() - 1` (Story 4-4 AC3 amendment Fix 3).
-///
-/// `delta`: +1 for `n` (next), -1 for `N` (previous).
-fn apply_search_navigate(state: &mut TuiState, delta: i32) {
-    use crate::adapters::tui::widgets::chat_pane;
-    if state.search_state.matches.is_empty() {
-        state.needs_redraw = true;
-        return;
-    }
-    let len = state.search_state.matches.len();
-    let prev = state.search_state.focused_match_index;
-    let new_idx = if delta > 0 {
-        (prev + 1) % len
-    } else {
-        (prev + len - 1) % len
-    };
-    state.search_state.focused_match_index = new_idx;
-    let target_msg = state.search_state.matches[new_idx].message_index;
-    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
-        target_msg,
-        &state.message_boundaries,
-        state.total_content_height,
-        state.viewport_height as usize,
-    );
-    state.auto_snapshot = state.scroll_snapshot == 0;
+// `apply_search_navigate` extracted to `crate::adapters::tui::handlers::search`
+// per Story 8.0a Phase 4 Task 9 (search sub-task).
+// `apply_open_cross_search_result` DEFERRED — see DF-NNN follow-up in
+// `_bmad-output/implementation-artifacts/deferred-work.md`.
 
-    // Wrap-around flash (only fires when len > 1 — a single match never wraps visibly).
-    if len > 1 {
-        let wrapped_forward = delta > 0 && prev == len - 1 && new_idx == 0;
-        let wrapped_backward = delta < 0 && prev == 0 && new_idx == len - 1;
-        if wrapped_forward {
-            state.status_before_flash = Some(state.status.clone());
-            state.status = StatusState::Flash {
-                message: "Wrapped to top".to_string(),
-                remaining_ms: 800,
-            };
-        } else if wrapped_backward {
-            state.status_before_flash = Some(state.status.clone());
-            state.status = StatusState::Flash {
-                message: "Wrapped to bottom".to_string(),
-                remaining_ms: 800,
-            };
-        }
-    }
-    state.needs_redraw = true;
-}
-
-/// Story 4-4 AC8: toggle a bookmark on the currently focused message.
-///
-/// Resolves the target via `find_message_index_from_scroll_offset`, mutates
-/// the in-memory mirror on the active tab's `session_meta.bookmarks`, then
-/// atomically persists `meta.json` via `save_session_meta`. If the disk save
-/// fails, the in-memory change is rolled back and an error flash is shown
-/// (AC8 optimistic-UI contract).
-///
-/// Rejects tool-call / tool-result messages with a flash — bookmarks only
-/// apply to user/assistant messages per Dev Notes § Bookmarkable Message
-/// Types.
-async fn apply_bookmark_toggle(
-    tab_manager: &mut TabManager,
-    state: &mut TuiState,
-    conversation: &Conversation,
-    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-) {
-    use crate::adapters::tui::widgets::chat_pane::find_message_index_from_scroll_offset;
-
-    if conversation.messages.is_empty() {
-        state.status = StatusState::Flash {
-            message: "No messages to bookmark".to_string(),
-            remaining_ms: 2000,
-        };
-        state.needs_redraw = true;
-        return;
-    }
-    if state.message_boundaries.is_empty() {
-        state.status = StatusState::Flash {
-            message: "Chat pane not ready — try again after first render".to_string(),
-            remaining_ms: 2000,
-        };
-        state.needs_redraw = true;
-        return;
-    }
-
-    let target_idx = find_message_index_from_scroll_offset(
-        state.auto_snapshot,
-        state.scroll_snapshot,
-        &state.message_boundaries,
-        state.total_content_height,
-        state.viewport_height as usize,
-        conversation.messages.len(),
-    );
-
-    // Guard: bookmark only user/assistant messages. Tool messages have
-    // structural first lines; prefixing them with `» ` looks like an error.
-    use crate::domain::models::MessageRole;
-    let role = conversation.messages[target_idx].role;
-    if !matches!(
-        role,
-        MessageRole::User | MessageRole::Assistant | MessageRole::System
-    ) {
-        state.status = StatusState::Flash {
-            message: "Cannot bookmark tool message — target a user or assistant message"
-                .to_string(),
-            remaining_ms: 2000,
-        };
-        state.needs_redraw = true;
-        return;
-    }
-
-    // Clone-mutate-save pattern for rollback safety.
-    let mut new_meta = tab_manager.active_tab().session_meta.clone();
-    let was_bookmarked = new_meta.bookmarks.binary_search(&target_idx).is_ok();
-    if was_bookmarked {
-        new_meta.bookmarks.retain(|&i| i != target_idx);
-    } else {
-        match new_meta.bookmarks.binary_search(&target_idx) {
-            Ok(_) => {} // already there, should not happen given we checked above
-            Err(pos) => new_meta.bookmarks.insert(pos, target_idx),
-        }
-    }
-
-    // Optimistic UI: update in-memory first.
-    let old_meta = tab_manager.active_tab().session_meta.clone();
-    tab_manager.active_tab_mut().session_meta = new_meta.clone();
-
-    // Persist to disk. Rollback on failure.
-    match fs_storage
-        .save_session_meta(&conversation.id, &new_meta)
-        .await
-    {
-        Ok(()) => {
-            // Third-audit Fix R1: flash indices are 0-based per AC10 — match
-            // the bookmark list display and the internal Vec<usize> storage.
-            let msg = if was_bookmarked {
-                format!("Bookmark removed (msg {})", target_idx)
-            } else {
-                format!("Bookmark added (msg {})", target_idx)
-            };
-            state.status = StatusState::Flash {
-                message: msg,
-                remaining_ms: 2000,
-            };
-        }
-        Err(e) => {
-            tab_manager.active_tab_mut().session_meta = old_meta;
-            state.status = StatusState::Flash {
-                message: format!("Failed to save bookmark: {}", e),
-                remaining_ms: 3000,
-            };
-        }
-    }
-    state.needs_redraw = true;
-}
-
-/// Story 4-4 AC10: open the bookmark list panel. Flashes a teaching message
-/// when the active tab has no bookmarks (reviewer Fix 10 — warmer copy).
-fn apply_open_bookmark_list(tab_manager: &TabManager, state: &mut TuiState) {
-    let bookmarks = &tab_manager.active_tab().session_meta.bookmarks;
-    if bookmarks.is_empty() {
-        state.status = StatusState::Flash {
-            message: "No bookmarks in this conversation — press 'm' on a message to add one"
-                .to_string(),
-            remaining_ms: 2000,
-        };
-        state.needs_redraw = true;
-        return;
-    }
-    state.focus = FocusState::Overlay(crate::domain::models::visual::OverlayType::BookmarkList);
-    // AC10 amendment (party-mode Fix 30): reset selection to 0 on every open
-    // so a stale index from a previous session doesn't survive the close.
-    state.bookmark_list_selected = 0;
-    // AC10 amendment (party-mode Fix 18): mirror bookmark count onto state
-    // for the key-handler's upper-bound clamp (j / Down).
-    state.bookmark_list_count = bookmarks.len();
-    state.needs_redraw = true;
-}
-
-/// Story 4-4 AC10: jump to the currently selected bookmark.
-fn apply_jump_bookmark(tab_manager: &TabManager, state: &mut TuiState) {
-    use crate::adapters::tui::widgets::chat_pane;
-    let bookmarks = &tab_manager.active_tab().session_meta.bookmarks;
-    if bookmarks.is_empty() {
-        state.focus = FocusState::Chat;
-        state.needs_redraw = true;
-        return;
-    }
-    let sel = state.bookmark_list_selected.min(bookmarks.len() - 1);
-    let target_msg = bookmarks[sel];
-    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
-        target_msg,
-        &state.message_boundaries,
-        state.total_content_height,
-        state.viewport_height as usize,
-    );
-    state.auto_snapshot = state.scroll_snapshot == 0;
-    state.focus = FocusState::Chat;
-    state.bookmark_list_selected = 0;
-    state.needs_redraw = true;
-}
-
-/// Story 4-4 AC10: delete the currently selected bookmark, stashing it in
-/// the undo buffer for 5 s (synthesis of Sally #7 + Reviewer Fix 8).
-async fn apply_delete_bookmark(
-    tab_manager: &mut TabManager,
-    state: &mut TuiState,
-    conversation: &Conversation,
-    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-) {
-    let mut new_meta = tab_manager.active_tab().session_meta.clone();
-    if new_meta.bookmarks.is_empty() {
-        return;
-    }
-    let sel = state
-        .bookmark_list_selected
-        .min(new_meta.bookmarks.len() - 1);
-    let removed_idx = new_meta.bookmarks.remove(sel);
-
-    let old_meta = tab_manager.active_tab().session_meta.clone();
-    tab_manager.active_tab_mut().session_meta = new_meta.clone();
-
-    match fs_storage
-        .save_session_meta(&conversation.id, &new_meta)
-        .await
-    {
-        Ok(()) => {
-            // Stash in undo buffer (single-entry, 5 s window).
-            state.bookmark_undo_buffer = Some((removed_idx, std::time::Instant::now()));
-            // Keep the mirror count in sync for the key handler's clamp.
-            state.bookmark_list_count = new_meta.bookmarks.len();
-            // Clamp selection to the new list length.
-            if new_meta.bookmarks.is_empty() {
-                state.bookmark_list_selected = 0;
-                state.focus = FocusState::Chat;
-            } else {
-                state.bookmark_list_selected = state
-                    .bookmark_list_selected
-                    .min(new_meta.bookmarks.len() - 1);
-            }
-            state.status = StatusState::Flash {
-                message: format!("Bookmark removed (msg {}) — press u to undo", removed_idx),
-                remaining_ms: 2000,
-            };
-        }
-        Err(e) => {
-            tab_manager.active_tab_mut().session_meta = old_meta;
-            state.status = StatusState::Flash {
-                message: format!("Failed to delete bookmark: {}", e),
-                remaining_ms: 3000,
-            };
-        }
-    }
-    state.needs_redraw = true;
-}
-
-/// Story 4-4 AC10: undo the most recent bookmark delete (if within 5 s).
-async fn apply_undo_bookmark_delete(
-    tab_manager: &mut TabManager,
-    state: &mut TuiState,
-    conversation: &Conversation,
-    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-) {
-    let Some((idx, when)) = state.bookmark_undo_buffer else {
-        return; // silent no-op
-    };
-    if when.elapsed() > std::time::Duration::from_secs(5) {
-        state.bookmark_undo_buffer = None;
-        return; // silent no-op (expired)
-    }
-
-    let mut new_meta = tab_manager.active_tab().session_meta.clone();
-    // Re-insert sorted.
-    match new_meta.bookmarks.binary_search(&idx) {
-        Ok(_) => {
-            // Already present — nothing to do but clear the buffer.
-            state.bookmark_undo_buffer = None;
-            return;
-        }
-        Err(pos) => new_meta.bookmarks.insert(pos, idx),
-    }
-
-    let old_meta = tab_manager.active_tab().session_meta.clone();
-    tab_manager.active_tab_mut().session_meta = new_meta.clone();
-    match fs_storage
-        .save_session_meta(&conversation.id, &new_meta)
-        .await
-    {
-        Ok(()) => {
-            state.bookmark_undo_buffer = None;
-            state.status = StatusState::Flash {
-                message: format!("Bookmark restored (msg {})", idx),
-                remaining_ms: 1500,
-            };
-        }
-        Err(e) => {
-            tab_manager.active_tab_mut().session_meta = old_meta;
-            state.status = StatusState::Flash {
-                message: format!("Failed to restore bookmark: {}", e),
-                remaining_ms: 3000,
-            };
-        }
-    }
-    state.needs_redraw = true;
-}
+// Bookmark handlers extracted to `crate::adapters::tui::handlers::bookmark`
+// per Story 8.0a Phase 4 Task 9 (bookmark sub-task).
+// Old functions: apply_bookmark_toggle, apply_open_bookmark_list, apply_jump_bookmark,
+// apply_delete_bookmark, apply_undo_bookmark_delete.
 
 /// Story 4-4 AC11/AC12: export the active conversation to markdown.
 ///
@@ -7699,43 +7058,6 @@ async fn find_available_numbered_path(
     })
     .await
     .unwrap_or_else(|_| exports_dir_fallback.join(format!("{}.md", base_slug_fallback)))
-}
-
-/// Story 4-4 AC5: run a cross-conversation search scan and populate
-/// `state.cross_search` with the results. Blocks the event loop for up to
-/// DEPRECATED in favor of the async-spawned path that delivers results via
-/// `AppEvent::CrossSearchResultsReady`. Kept temporarily for reference until
-/// Phase 5 E2E tests are rewritten. No longer called from the event loop.
-#[allow(dead_code)]
-async fn apply_cross_search_scan(
-    storage: &dyn StoragePort,
-    session_index: &SessionIndex,
-    state: &mut TuiState,
-) {
-    use crate::domain::services::cross_search::{CrossSearchBudget, run_cross_search};
-    state.cross_search.running = true;
-    let outcome = run_cross_search(
-        storage,
-        session_index,
-        &state.cross_search.query,
-        CrossSearchBudget::default(),
-    )
-    .await;
-    state.cross_search.running = false;
-    state.cross_search.results = outcome.results;
-    state.cross_search.truncated_by_count = outcome.truncated_by_count;
-    state.cross_search.truncated_by_time = outcome.truncated_by_time;
-    state.cross_search.scanned = outcome.scanned;
-    state.cross_search.total = outcome.total;
-    // Clamp selection.
-    if state.cross_search.results.is_empty() {
-        state.cross_search.selected = 0;
-    } else {
-        state.cross_search.selected = state
-            .cross_search
-            .selected
-            .min(state.cross_search.results.len() - 1);
-    }
 }
 
 /// Story 4-4 AC6 (amended): open the selected cross-search result in a new
@@ -8523,49 +7845,8 @@ async fn start_turn_inner(
     state.needs_redraw = true;
 }
 
-/// Handle a render failure: abort active turn, reset streaming, attempt terminal recovery.
-fn handle_render_error(
-    err: anyhow::Error,
-    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-    streaming: &mut StreamingState,
-    state: &mut TuiState,
-    terminal: &mut Tui,
-) {
-    tracing::error!("Render failed: {}", err);
-
-    // Abort active turn if running
-    if let Some(handle) = active_turn.take() {
-        handle.abort();
-    }
-
-    // Reset streaming state
-    streaming.is_streaming = false;
-    streaming.phase = crate::domain::models::StreamingPhase::Idle;
-    streaming.current_text_buffer.clear();
-    streaming.current_blocks.clear();
-    streaming.active_tool_calls.clear();
-
-    state.status_before_flash = Some(state.status.clone());
-    state.status = StatusState::Flash {
-        message: format!("Render failed: {}", err),
-        remaining_ms: state.theme.timing.status_flash_ms,
-    };
-    state.needs_redraw = true;
-
-    // Attempt terminal recovery
-    crate::adapters::tui::terminal::restore_terminal_raw();
-    match crate::adapters::tui::terminal::setup(crate::adapters::tui::terminal::is_mouse_enabled())
-    {
-        Ok(new_terminal) => {
-            *terminal = new_terminal;
-            tracing::info!("Terminal recovered after render failure");
-        }
-        Err(recovery_err) => {
-            tracing::error!("Terminal recovery failed: {}", recovery_err);
-            state.should_quit = true;
-        }
-    }
-}
+// `handle_render_error` extracted to `crate::adapters::tui::handlers::render_error`
+// per Story 8.0a Phase 4 Task 10 (render_error sub-task).
 
 /// Advance the permission queue: pop next pending request or restore Input focus.
 fn advance_permission_queue(state: &mut TuiState) {
@@ -9401,7 +8682,7 @@ async fn generate_title(
     };
 
     let stream = provider.stream_completion(messages, options).await?;
-    let title = collect_completion_text(stream).await?;
+    let title = crate::domain::services::streaming_collect::collect_text(stream).await?;
 
     // Post-process: trim, strip surrounding quotes, enforce 60-char max
     let title = post_process_title(&title);
@@ -9411,206 +8692,16 @@ async fn generate_title(
     Ok(title)
 }
 
-/// Collect text from a completion stream, returning Err on StreamChunk::Error.
-async fn collect_completion_text(
-    stream: impl futures::Stream<Item = StreamChunk>,
-) -> Result<String> {
-    use futures::StreamExt;
-    futures::pin_mut!(stream);
+// `collect_completion_text` consolidated to `domain/services/streaming_collect::collect_text`
+// per Story 8.0a Phase 4 (Winston Decision Gate amendment, 2026-05-17).
 
-    let mut text = String::new();
-    while let Some(chunk) = stream.next().await {
-        match chunk {
-            StreamChunk::Text { content, .. } => {
-                text.push_str(&content);
-            }
-            StreamChunk::Error { content } => {
-                anyhow::bail!("Stream error: {}", content);
-            }
-            _ => {}
-        }
-    }
-    Ok(text)
-}
-
-/// Generate a compaction summary for a conversation using the LLM provider.
-async fn generate_compaction_summary(
-    provider: &dyn StreamingProvider,
-    model: &str,
-    history_text: &str,
-) -> Result<String> {
-    use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
-
-    let messages = vec![Message {
-        role: MsgRole::User,
-        content: history_text.to_string(),
-        images: vec![],
-        tool_results: vec![],
-        tool_uses: vec![],
-        context_prefix: None,
-    }];
-    let options = CompletionOptions {
-        model: model.to_string(),
-        max_tokens: 2048,
-        system_prompt: crate::domain::services::compaction::COMPACTION_SYSTEM_PROMPT.to_string(),
-        temperature: None,
-        tools: vec![],
-    };
-
-    let stream = provider.stream_completion(messages, options).await?;
-    let summary = collect_completion_text(stream).await?;
-    if summary.is_empty() {
-        anyhow::bail!("Compaction summary produced empty result");
-    }
-    Ok(summary)
-}
-
-/// Story 7.4: shared compaction trigger with guards.
-fn trigger_compaction(
-    conversation: &Conversation,
-    streaming: &StreamingState,
-    state: &mut TuiState,
-    provider: &Arc<dyn StreamingProvider>,
-    config: &AppConfig,
-    domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    purpose: CompactionPurpose,
-    app_state: &crate::infrastructure::runtime::app_state::AppState,
-    router: &crate::adapters::provider::ProviderRouter,
-) {
-    use crate::domain::models::NoticeLevel;
-
-    if streaming.is_streaming || state.compacting {
-        let event = AppEvent::SystemNotice {
-            conversation_id: Some(conversation.id.clone()),
-            level: NoticeLevel::Info,
-            message: "Compaction unavailable while a turn is in progress.".to_string(),
-        };
-        let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: guard notice before async spawn
-        return;
-    }
-
-    let first_kept = match purpose {
-        CompactionPurpose::Inline | CompactionPurpose::SwitchAfter { .. } => {
-            match crate::domain::services::compaction::first_kept_message_id(conversation) {
-                Some(id) => Some(id),
-                None => {
-                    let event = AppEvent::SystemNotice {
-                        conversation_id: Some(conversation.id.clone()),
-                        level: NoticeLevel::Info,
-                        message: "Not enough conversation history to compact.".to_string(),
-                    };
-                    let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: guard notice before async spawn
-                    return;
-                }
-            }
-        }
-        CompactionPurpose::Carryover => None,
-    };
-
-    let pre_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
-    let history_text = match &purpose {
-        CompactionPurpose::Inline => {
-            let cw = active_context_window(app_state, router, state, config);
-            crate::domain::services::compaction::build_compaction_prompt_input(
-                conversation,
-                first_kept.as_deref().unwrap_or(""),
-                cw.max(1),
-            )
-        }
-        CompactionPurpose::SwitchAfter {
-            provider_id,
-            model_id,
-        } => {
-            // Budget the summary against the target model's context window (team decision)
-            let cw = app_state
-                .provider_registry
-                .get_model(provider_id, model_id)
-                .map_or(0, |m| m.context_window);
-            crate::domain::services::compaction::build_compaction_prompt_input(
-                conversation,
-                first_kept.as_deref().unwrap_or(""),
-                cw.max(1),
-            )
-        }
-        CompactionPurpose::Carryover => {
-            // Summarize entire conversation for carryover
-            let cw = active_context_window(app_state, router, state, config);
-            crate::domain::services::compaction::build_compaction_prompt_input(
-                conversation,
-                "", // empty boundary => not found => boundary = messages.len() => summarize all
-                cw.max(1),
-            )
-        }
-    };
-
-    state.compacting = true;
-    let event = AppEvent::SystemNotice {
-        conversation_id: Some(conversation.id.clone()),
-        level: NoticeLevel::Info,
-        message: "Compacting context…".to_string(),
-    };
-    let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: guard notice before async spawn
-
-    spawn_compaction(
-        provider.clone(),
-        effective_model(state, config).to_string(),
-        history_text,
-        conversation.id.clone(),
-        first_kept,
-        pre_tokens,
-        purpose,
-        domain_tx.clone(),
-    );
-}
-
-/// Story 7.4: spawn a detached compaction task.
-fn spawn_compaction(
-    provider: Arc<dyn StreamingProvider>,
-    model: String,
-    history_text: String,
-    conversation_id: String,
-    first_kept_message_id: Option<String>,
-    pre_tokens: u32,
-    purpose: CompactionPurpose,
-    domain_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-) {
-    tokio::spawn(async move {
-        let result = tokio::time::timeout(
-            BACKGROUND_TASK_TIMEOUT,
-            generate_compaction_summary(&*provider, &model, &history_text),
-        )
-        .await;
-
-        match result {
-            Ok(Ok(summary)) => {
-                let event = AppEvent::CompactionComplete {
-                    conversation_id,
-                    summary,
-                    first_kept_message_id,
-                    pre_tokens,
-                    purpose,
-                };
-                let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: async round-trip pattern (mirrors TitleGenerated)
-            }
-            Ok(Err(e)) => {
-                let event = AppEvent::CompactionFailed {
-                    conversation_id,
-                    reason: format!("{}", e),
-                    purpose,
-                };
-                let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: async round-trip pattern (mirrors TitleGenerated)
-            }
-            Err(_) => {
-                let event = AppEvent::CompactionFailed {
-                    conversation_id,
-                    reason: "Compaction timed out".to_string(),
-                    purpose,
-                };
-                let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: async round-trip pattern (mirrors TitleGenerated)
-            }
-        }
-    });
-}
+// Compaction handlers extracted to `crate::adapters::tui::handlers::compaction`
+// per Story 8.0a Phase 2 Task 3 (Phase 2 prototype). The functions
+// `trigger_compaction`, `spawn_compaction`, and `generate_compaction_summary`
+// previously lived here. Dispatch arms now call
+// `handlers::compaction::handle_trigger_compaction` + spawn
+// `handlers::compaction::run_compaction(payload)` from the dispatch site
+// per ADR-08-01 §D2 (spawn-stays-in-dispatch-arm invariant).
 
 /// Post-process a generated title: trim whitespace, strip surrounding quotes,
 /// enforce 60-character maximum with ellipsis truncation.
@@ -9773,295 +8864,11 @@ fn active_context_window(
         .map_or(0, |m| m.context_window)
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-async fn apply_model_switch(
-    state: &mut TuiState,
-    router: &crate::adapters::provider::ProviderRouter,
-    app_state: &crate::infrastructure::runtime::app_state::AppState,
-    streaming: &StreamingState,
-    domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    conversation: &Conversation,
-    provider_id: Option<String>,
-    model_id: String,
-    pending_health_check: &mut Option<(
-        String,
-        String,
-        tokio::task::JoinHandle<Result<(), crate::domain::errors::ProviderError>>,
-    )>,
-) {
-    use crate::domain::events::AppEvent;
-    use crate::domain::models::NoticeLevel;
-
-    let resolved_pid = match provider_id {
-        Some(pid) => pid,
-        None => {
-            let active = router.active_delegate_id();
-            match app_state
-                .provider_registry
-                .get_model_provider(&model_id, Some(&active))
-            {
-                Some(pid) => pid,
-                None => {
-                    let _ = domain_tx.send(AppEvent::SystemNotice {
-                        conversation_id: None,
-                        level: NoticeLevel::Warning,
-                        message: format!("Unknown model: {}", model_id),
-                    });
-                    return;
-                }
-            }
-        }
-    };
-
-    if streaming.is_streaming {
-        let _ = domain_tx.send(AppEvent::SystemNotice {
-            conversation_id: None,
-            level: NoticeLevel::Info,
-            message: "Cannot switch model while streaming".to_string(),
-        });
-        return;
-    }
-
-    let provider_desc = app_state
-        .provider_registry
-        .list_providers()
-        .into_iter()
-        .find(|p| p.provider_id == resolved_pid);
-    let is_healthy = provider_desc.as_ref().is_some_and(|p| p.healthy);
-    let provider_display_name = provider_desc
-        .as_ref()
-        .map(|p| p.display_name.clone())
-        .unwrap_or_else(|| resolved_pid.clone());
-
-    if !is_healthy {
-        if let Some(provider) = router.get_provider(&resolved_pid) {
-            state.model_selector.connecting = Some(provider_display_name.clone());
-            state.needs_redraw = true;
-            let pid_clone = resolved_pid.clone();
-            let mid_clone = model_id.clone();
-            let handle = tokio::spawn(async move { provider.health_check().await });
-            *pending_health_check = Some((pid_clone, mid_clone, handle));
-            return;
-        } else {
-            let fb = crate::domain::models::FeedbackBlock {
-                id: generate_conversation_id(),
-                level: crate::domain::models::FeedbackLevel::Warning,
-                message: format!("Provider '{}' not found", resolved_pid),
-                actions: vec![],
-            };
-            state.feedback_blocks.insert(fb.id.clone(), fb);
-            state.needs_redraw = true;
-            return;
-        }
-    }
-
-    // If triggered from palette (model selector not open), open it for context-warning display
-    let model_desc = app_state
-        .provider_registry
-        .get_model(&resolved_pid, &model_id);
-    let context_window = model_desc.as_ref().map_or(0, |m| m.context_window);
-    let model_display_name = model_desc
-        .as_ref()
-        .map(|m| m.display_name.clone())
-        .unwrap_or_else(|| model_id.clone());
-
-    if !state.model_selector.active && model_desc.is_some() {
-        let providers = app_state.provider_registry.list_providers();
-        let columns: Vec<crate::adapters::tui::state::ProviderColumn> = providers
-            .into_iter()
-            .map(|pd| {
-                let models = app_state
-                    .provider_registry
-                    .list_models_by_provider(&pd.provider_id);
-                crate::adapters::tui::state::ProviderColumn {
-                    provider_id: pd.provider_id,
-                    display_name: pd.display_name,
-                    healthy: pd.healthy,
-                    models,
-                }
-            })
-            .filter(|c| !c.models.is_empty())
-            .collect();
-        if !columns.is_empty() {
-            state
-                .model_selector
-                .open(state.focus.clone(), columns, &resolved_pid, &model_id);
-            state.focus = crate::domain::models::FocusState::Overlay(
-                crate::domain::models::visual::OverlayType::ModelSelector,
-            );
-        }
-    }
-
-    if let Some(ref warning) = state.model_selector.pending_context_warning {
-        if warning.model_id == model_id && warning.provider_id == resolved_pid {
-            state.model_selector.pending_context_warning = None;
-        }
-    } else {
-        let current_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
-        if context_window > 0 && current_tokens > context_window {
-            state.model_selector.pending_context_warning =
-                Some(crate::adapters::tui::state::ContextWarning {
-                    provider_id: resolved_pid.clone(),
-                    model_id: model_id.clone(),
-                    model_display_name: model_display_name.clone(),
-                    context_window,
-                    current_tokens,
-                });
-            state.needs_redraw = true;
-            return;
-        }
-    }
-
-    complete_model_switch(
-        state,
-        router,
-        app_state,
-        conversation,
-        &resolved_pid,
-        &model_id,
-    )
-    .await;
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn complete_model_switch(
-    state: &mut TuiState,
-    router: &crate::adapters::provider::ProviderRouter,
-    app_state: &crate::infrastructure::runtime::app_state::AppState,
-    _conversation: &Conversation,
-    resolved_pid: &str,
-    model_id: &str,
-) {
-    use crate::adapters::tui::widgets::model_selector::humanize_ctx;
-
-    if resolved_pid != router.active_delegate_id() {
-        if let Err(e) = router.set_active(resolved_pid) {
-            let fb = crate::domain::models::FeedbackBlock {
-                id: generate_conversation_id(),
-                level: crate::domain::models::FeedbackLevel::Warning,
-                message: format!("Switch failed: {}", e),
-                actions: vec![],
-            };
-            state.feedback_blocks.insert(fb.id.clone(), fb);
-            state.needs_redraw = true;
-            return;
-        }
-    }
-
-    state.selected_model = Some(model_id.to_string());
-
-    let model_desc = app_state
-        .provider_registry
-        .get_model(resolved_pid, model_id);
-    let context_window = model_desc.as_ref().map_or(0, |m| m.context_window);
-    let provider_display_name = app_state
-        .provider_registry
-        .list_providers()
-        .into_iter()
-        .find(|p| p.provider_id == resolved_pid)
-        .map(|p| p.display_name)
-        .unwrap_or_else(|| resolved_pid.to_string());
-    let model_display_name = model_desc
-        .as_ref()
-        .map(|m| m.display_name.clone())
-        .unwrap_or_else(|| model_id.to_string());
-
-    let fb = crate::domain::models::FeedbackBlock {
-        id: generate_conversation_id(),
-        level: crate::domain::models::FeedbackLevel::Info,
-        message: format!(
-            "Switched to {}/{} (context: {})",
-            provider_display_name,
-            model_display_name,
-            humanize_ctx(context_window)
-        ),
-        actions: vec![],
-    };
-    state.feedback_blocks.insert(fb.id.clone(), fb);
-
-    // Story 7.3 AC7: warn when switching to a non-tool model
-    if let Some(ref md) = model_desc {
-        use crate::domain::models::provider::ModelCapability;
-        if !md.capabilities.contains(&ModelCapability::ToolUse) {
-            let warning_fb = crate::domain::models::FeedbackBlock {
-                id: generate_conversation_id(),
-                level: crate::domain::models::FeedbackLevel::Warning,
-                message: format!(
-                    "{} does not support tool use. Tool execution will be unavailable.",
-                    md.display_name
-                ),
-                actions: vec![],
-            };
-            state
-                .feedback_blocks
-                .insert(warning_fb.id.clone(), warning_fb);
-        }
-    }
-
-    if state.model_selector.active {
-        state.focus = state
-            .model_selector
-            .dismiss()
-            .unwrap_or(crate::domain::models::FocusState::Input);
-    }
-    state.needs_redraw = true;
-}
-
-/// One-shot startup convenience: if the active provider is unhealthy,
-/// fall back to the first healthy registered provider (deterministic — sorted).
-/// Runtime provider failures are surfaced via the existing apply_model_switch path.
-async fn apply_startup_provider_fallback(
-    state: &mut TuiState,
-    router: &crate::adapters::provider::ProviderRouter,
-    app_state: &crate::infrastructure::runtime::app_state::AppState,
-    _domain_tx: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
-) {
-    let active = router.active_delegate_id();
-    let providers = app_state.provider_registry.list_providers();
-    let active_healthy = providers
-        .iter()
-        .find(|p| p.provider_id == active)
-        .is_some_and(|p| p.healthy);
-
-    if active_healthy {
-        return;
-    }
-
-    let mut healthy_ids: Vec<String> = providers
-        .iter()
-        .filter(|p| p.healthy)
-        .map(|p| p.provider_id.clone())
-        .collect();
-    healthy_ids.sort();
-
-    if let Some(healthy_id) = healthy_ids.into_iter().next() {
-        if let Err(e) = router.set_active(&healthy_id) {
-            tracing::warn!("Failed to set active provider to '{}': {}", healthy_id, e);
-            return;
-        }
-        if let Some(first_model) = app_state
-            .provider_registry
-            .list_models_by_provider(&healthy_id)
-            .first()
-        {
-            state.selected_model = Some(first_model.model_id.clone());
-        }
-        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-            conversation_id: None,
-            level: NoticeLevel::Info,
-            message: format!(
-                "Active provider '{}' unavailable — using '{}'.",
-                active, healthy_id
-            ),
-        });
-    } else {
-        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-            conversation_id: None,
-            level: NoticeLevel::Warning,
-            message: "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M.".to_string(),
-        });
-    }
-}
+// Model-switch handlers extracted to `crate::adapters::tui::handlers::model_switch`
+// per Story 8.0a Phase 2 Task 4 (prototype). The functions `apply_model_switch`,
+// `complete_model_switch`, and `apply_startup_provider_fallback` previously lived here.
+// Dispatch arms now call `handlers::model_switch::handle_apply_model_switch` etc. and
+// spawn the health-check task at the dispatch site per ADR-08-01 §D2.
 
 /// One-shot startup reconciliation: if `state.selected_model` is unset and
 /// `config_model` is not in the active provider's catalog, seed
@@ -10352,26 +9159,8 @@ fn resolve_command_context(
 mod tests {
     use super::*;
 
-    #[test]
-    fn warning_notice_does_not_transfer_focus() {
-        let mut state = TuiState::new(80, 24);
-        state.focus = FocusState::Input;
-        let fb_id = apply_warning_notice(&mut state, "Auto-skipped task 3".to_string());
-        assert_eq!(
-            state.focus,
-            FocusState::Input,
-            "Warning notice must not transfer focus from Input"
-        );
-        assert_eq!(
-            state.active_feedback_id,
-            Some(fb_id.clone()),
-            "Warning notice must set active_feedback_id"
-        );
-        assert!(
-            state.feedback_blocks.contains_key(&fb_id),
-            "Warning notice must insert feedback block"
-        );
-    }
+    // `warning_notice_does_not_transfer_focus` moved to `handlers/notice.rs`
+    // per DGI-E (Winston Task 1 sign-off). Story 8.0a Phase 4 Task 10.
 
     #[test]
     fn test_post_process_title_trims_whitespace() {
