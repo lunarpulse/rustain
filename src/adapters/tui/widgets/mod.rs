@@ -19,6 +19,7 @@ pub mod permission_prompt;
 pub mod plan_approval;
 pub mod plan_card;
 pub mod plan_deviation_card;
+pub mod profile_switcher;
 pub mod reverse_search;
 pub mod search_bar;
 pub mod skill_trust_prompt;

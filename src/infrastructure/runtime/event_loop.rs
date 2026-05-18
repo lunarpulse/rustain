@@ -41,7 +41,7 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, model_selector, reverse_search, sidebar, status_bar, usage_panel, which_key_bar,
+    input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar, usage_panel, which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
 
@@ -193,6 +193,22 @@ pub async fn run(
     }
     state.skill_registry = skill_activator.registry_arc();
     state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
+
+    // P-23: Initialize active_profile snapshot from resolved profile
+    {
+        let active_profile_snapshot = {
+            let resolver = app_state.profile_resolver.load_full();
+            resolver.resolve_active().map(|r| {
+                let ic = crate::domain::services::identity_color::derive_identity_color(&r.name, None);
+                crate::domain::models::ActiveProfileSnapshot {
+                    name: r.name.clone(),
+                    identity_color: ic,
+                    preview: r.preview,
+                }
+            })
+        };
+        state.active_profile = active_profile_snapshot;
+    }
 
     // Cache multiplexer detection once at startup (UX-DR62)
     state.multiplexer_detected = crate::adapters::tui::help_data::is_multiplexer_session();
@@ -394,6 +410,21 @@ pub async fn run(
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
                 },
+            });
+        }
+    }
+
+    // P-36: Register profile entries in the '>' palette scope
+    {
+        let resolver = app_state.profile_resolver.load_full();
+        for profile in resolver.list_profiles() {
+            let is_active = profile.name == config.active_profile;
+            palette_registry.register(crate::domain::models::palette::PaletteEntry {
+                name: format!("> {}", profile.name),
+                description: profile.description.clone().unwrap_or_else(|| format!("Switch to '{}'", profile.name)),
+                shortcut: if is_active { Some("(active)".into()) } else { None },
+                scope: crate::domain::models::palette::PaletteScope::Profile,
+                action: crate::domain::models::palette::PaletteAction::SwitchProfile(profile.name.clone()),
             });
         }
     }
@@ -4498,6 +4529,110 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
+                                InputAction::OpenProfileSwitcher => {
+                                    let resolver = app_state.profile_resolver.load_full();
+                                    let profiles = resolver.list_profiles();
+                                    let current_config = app_state.app_config.load_full();
+                                    let active_name = &current_config.active_profile;
+                                    let current_dims = resolver
+                                        .resolve_active()
+                                        .map(|r| r.selection.dimensions)
+                                        .unwrap_or_default();
+                                    state.profile_switcher.open(
+                                        state.focus.clone(),
+                                        profiles,
+                                        active_name,
+                                        current_dims,
+                                    );
+                                    state.focus = crate::domain::models::FocusState::Overlay(
+                                        crate::domain::models::visual::OverlayType::ProfileSwitcher,
+                                    );
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ProfileSwitchRequested(name) => {
+                                    let resolver = app_state.profile_resolver.load_full();
+                                    let profiles = resolver.list_profiles();
+                                    let current_config = app_state.app_config.load_full();
+                                    let active_name = &current_config.active_profile;
+                                    let current_dims = resolver
+                                        .resolve_active()
+                                        .map(|r| r.selection.dimensions)
+                                        .unwrap_or_default();
+                                    state.profile_switcher.open(
+                                        state.focus.clone(),
+                                        profiles,
+                                        active_name,
+                                        current_dims,
+                                    );
+                                    if let Some(idx) = state.profile_switcher.profiles.iter().position(|p| p.name == name) {
+                                        state.profile_switcher.selected = idx;
+                                    }
+                                    if let Some(profile) = state.profile_switcher
+                                        .selected_profile()
+                                        .cloned()
+                                    {
+                                        if let Some(plan) = state.profile_switcher
+                                            .compute_diff_for_selected(&profile)
+                                        {
+                                            state.profile_switcher.enter_preview(plan);
+                                        }
+                                    }
+                                    state.focus = crate::domain::models::FocusState::Overlay(
+                                        crate::domain::models::visual::OverlayType::ProfileSwitcher,
+                                    );
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::ConfirmProfileSwitch(target_name) => {
+                                    let outcome = handlers::profile_switch::handle_profile_switch_requested(
+                                        &mut state,
+                                        &app_state.agent_core,
+                                        &app_state.compose_snapshot,
+                                        &app_state.app_config,
+                                        &app_state.profile_resolver,
+                                        target_name.clone(),
+                                    )
+                                    .await;
+                                    match outcome {
+                                        HandlerOutcome::Notify(event) => {
+                                            app_state.event_bus.emit_domain(event);
+                                        }
+                                        HandlerOutcome::RequestSpawn(spawn_req) => {
+                                            if let crate::adapters::tui::handlers::SpawnRequest::ProfileSwap {
+                                                profile_name,
+                                                identity_color,
+                                                warm_cold_diffs,
+                                                agent_core,
+                                                compose_snapshot,
+                                                profile_resolver,
+                                                app_config,
+                                                guard: _guard,
+                                                new_resolver,
+                                            } = spawn_req
+                                            {
+                                                let event_bus = Arc::clone(&app_state.event_bus);
+                                                tokio::spawn(async move {
+                                                    let result = handlers::profile_switch::handle_profile_swap_continuation(
+                                                        warm_cold_diffs,
+                                                        agent_core,
+                                                        compose_snapshot,
+                                                        profile_name,
+                                                        identity_color,
+                                                        app_config,
+                                                        profile_resolver,
+                                                        new_resolver,
+                                                    )
+                                                    .await;
+                                                    let event = match result {
+                                                        Ok(ev) | Err(ev) => ev,
+                                                    };
+                                                    let _ = event_bus.emit_domain(event);
+                                                });
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    state.needs_redraw = true;
+                                }
                             }
                         }
                     }
@@ -6409,6 +6544,80 @@ pub async fn run(
                         config = &config_arc;
                         state.needs_redraw = true;
                     }
+                    AppEvent::ProfileSwitched {
+                        profile_name,
+                        identity_color,
+                        summary,
+                        ..
+                    } => {
+                        let preview = state
+                            .profile_switcher
+                            .selected_profile()
+                            .map(|p| p.preview)
+                            .unwrap_or(false);
+                        state.active_profile = Some(crate::domain::models::ActiveProfileSnapshot {
+                            name: profile_name.clone(),
+                            identity_color,
+                            preview,
+                        });
+                        if state.focus
+                            == crate::domain::models::FocusState::Overlay(
+                                crate::domain::models::visual::OverlayType::ProfileSwitcher,
+                            )
+                        {
+                            if let Some(prev) = state.profile_switcher.dismiss() {
+                                state.focus = prev;
+                            }
+                        }
+                        let fb = crate::domain::models::FeedbackBlock {
+                            id: format!(
+                                "profile-switch-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_nanos()
+                            ),
+                            level: crate::domain::models::FeedbackLevel::Info,
+                            message: format!(
+                                "Profile switched to '{profile_name}' — {summary}\nBridge previous conversation context? [y/n]"
+                            ),
+                            actions: vec![
+                                crate::domain::models::FeedbackAction::Custom("bridge-context".into()),
+                                crate::domain::models::FeedbackAction::Dismiss,
+                            ],
+                        };
+                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::ProfileSwitchFailed {
+                        profile_name,
+                        error,
+                        rolled_back,
+                    } => {
+                        if state.focus
+                            == crate::domain::models::FocusState::Overlay(
+                                crate::domain::models::visual::OverlayType::ProfileSwitcher,
+                            )
+                        {
+                            if let Some(prev) = state.profile_switcher.dismiss() {
+                                state.focus = prev;
+                            }
+                        }
+                        let rollback_note = if rolled_back {
+                            " (previous adapters preserved)"
+                        } else {
+                            " (PARTIAL — restart recommended)"
+                        };
+                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            conversation_id: None,
+                            level: crate::domain::models::NoticeLevel::Warning,
+                            message: format!(
+                                "Profile switch to '{}' failed: {}{}",
+                                profile_name, error, rollback_note
+                            ),
+                        });
+                        state.needs_redraw = true;
+                    }
                     _ => {
                         state.needs_redraw = true;
                     }
@@ -7979,6 +8188,8 @@ fn render(
         ref which_key,
         ref help_overlay,
         ref model_selector,
+        ref profile_switcher,
+        active_profile: ref _active_profile,
         ref usage_panel,
         ref selected_model,
         ref image_indicator,
@@ -8604,6 +8815,7 @@ fn render(
                         )
                     }),
                     state.daily_budget.as_ref(),
+                    state.active_profile.as_ref(),
                 );
                 input_box::render(
                     frame,
@@ -8658,6 +8870,11 @@ fn render(
                 // Render usage/cost panel overlay (Story 7.5 AC3)
                 if usage_panel.active {
                     usage_panel::render(frame, area, usage_panel, theme);
+                }
+
+                // Render profile switcher overlay (Story 8.4 AC-1)
+                if profile_switcher.active {
+                    profile_switcher::render(frame, area, profile_switcher, theme);
                 }
             }
             None => {

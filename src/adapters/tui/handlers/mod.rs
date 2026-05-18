@@ -26,6 +26,7 @@ pub mod config;
 pub mod context_warning;
 pub mod model_switch;
 pub mod notice;
+pub mod profile_switch;
 pub mod render_error;
 pub mod scroll;
 pub mod search;
@@ -98,6 +99,27 @@ pub enum SpawnRequest {
     ScheduledEvent {
         deadline: tokio::time::Instant,
         event: AppEvent,
+    },
+    /// Story 8.4 — Warm+Cold continuation of a profile switch.
+    /// Dispatch-arm pattern:
+    /// ```text
+    /// let event_bus_clone = Arc::clone(&event_bus);
+    /// tokio::spawn(async move {
+    ///     match handle_profile_swap_continuation(payload).await {
+    ///         Ok(event) | Err(event) => { let _ = event_bus_clone.emit_domain(event); }
+    ///     }
+    /// });
+    /// ```
+    ProfileSwap {
+        profile_name: String,
+        identity_color: crate::domain::models::ProfileIdentityColor,
+        warm_cold_diffs: Vec<crate::domain::services::swap_tier::PortDiff>,
+        agent_core: std::sync::Arc<crate::infrastructure::runtime::agent_core::AgentCore>,
+        compose_snapshot: std::sync::Arc<crate::infrastructure::composition::ComposeContext>,
+        profile_resolver: std::sync::Arc<arc_swap::ArcSwap<std::sync::Arc<dyn crate::domain::ports::ProfileResolver>>>,
+        app_config: std::sync::Arc<arc_swap::ArcSwap<crate::domain::models::AppConfig>>,
+        guard: Option<crate::adapters::tui::handlers::profile_switch::SwitchGuard>,
+        new_resolver: std::sync::Arc<dyn crate::domain::ports::ProfileResolver>,
     },
 }
 

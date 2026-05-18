@@ -414,6 +414,7 @@ fn test_tui_renders_with_theme_colors() {
                     None,
                     false,
                     None, // daily_budget (Story 7.5)
+                    None,
                 );
             }
         })

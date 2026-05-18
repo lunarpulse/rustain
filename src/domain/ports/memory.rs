@@ -5,12 +5,21 @@
 /// Conversation memory storage and retrieval.
 ///
 /// Claudian equivalent: `src/core/memory/memoryManager.ts`
+#[async_trait::async_trait]
 pub trait MemoryPort: Send + Sync {
-    // v1.0: async fn store(&self, entry: MemoryEntry) -> Result<(), MemoryError>;
-    // v1.0: async fn recent(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError>;
-    // v1.0: async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError>;
-    // Transition methods with defaults:
-    // async fn prepare_detach(&self) -> Result<TransitionState, TransitionError> { Ok(TransitionState::empty("memory")) }
-    // async fn receive_state(&self, state: TransitionState) -> Result<(), TransitionError> { Ok(()) }
-    // async fn post_transition_verify(&self) -> Result<(), TransitionError> { Ok(()) }
+    // v1.0 reserved methods (commented out):
+    // - store(&self, entry: MemoryEntry) -> Result<(), MemoryError>
+    // - recent(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError>
+    // - search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError>
+    // 2026-05-17 — Story 8.4 added prepare_detach/receive_state/post_transition_verify (warm tier)
+    // following the additive-with-defaults discipline. No existing adapters needed changes.
+    async fn prepare_detach(&self) -> Result<crate::domain::models::TransitionState, crate::domain::errors::TransitionError> {
+        Ok(crate::domain::models::TransitionState::empty("memory"))
+    }
+    async fn receive_state(&self, _state: crate::domain::models::TransitionState) -> Result<(), crate::domain::errors::TransitionError> {
+        Ok(())
+    }
+    async fn post_transition_verify(&self) -> Result<(), crate::domain::errors::TransitionError> {
+        Ok(())
+    }
 }

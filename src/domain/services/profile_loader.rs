@@ -120,6 +120,7 @@ impl<'a> ProfileLoader<'a> {
             name: child.name,
             description: child.description.or(parent.description),
             extends: None,
+            identity_color: child.identity_color.or(parent.identity_color),
             preview: child.preview || parent.preview,
             persona: child.persona.or(parent.persona),
             memory: child.memory.or(parent.memory),

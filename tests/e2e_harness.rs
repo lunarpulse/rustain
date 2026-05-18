@@ -292,6 +292,7 @@ impl TestHarness {
                         None,
                         false,
                         None, // daily_budget (Story 7.5)
+                        None,
                     );
 
                     input_box::render(

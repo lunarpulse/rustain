@@ -397,6 +397,7 @@ fn test_status_bar_renders_hint() {
                 None,
                 false,
                 None, // daily_budget (Story 7.5)
+                None,
             );
         })
         .unwrap();
@@ -453,6 +454,7 @@ fn test_status_bar_no_hint_when_none() {
                 None,
                 false,
                 None, // daily_budget (Story 7.5)
+                None,
             );
         })
         .unwrap();

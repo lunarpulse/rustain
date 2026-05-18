@@ -727,6 +727,8 @@ pub enum ChordAction {
     ShowHelp,
     /// Open the model/provider selector overlay (Story 7.2 AC1).
     OpenModelSelector,
+    /// Open the profile switcher overlay (Story 8.4 AC-1).
+    OpenProfileSwitcher,
     /// Open the usage/cost panel overlay (Story 7.5 AC3).
     OpenUsagePanel,
     /// Not yet implemented — show feedback.
@@ -933,6 +935,105 @@ impl ModelSelectorState {
 }
 
 impl Default for ModelSelectorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── ProfileSwitcher (Story 8.4 AC-1) ─────────────────────────────────────
+
+/// State for the profile switcher overlay (Ctrl+X, P).
+/// Modelled on `ModelSelectorState` (uses previous_focus + open/dismiss).
+#[derive(Debug, Clone)]
+pub struct ProfileSwitcherState {
+    pub active: bool,
+    pub profiles: Vec<crate::domain::models::ProfileDescriptor>,
+    pub selected: usize,
+    pub active_index: Option<usize>,
+    pub preview: Option<crate::domain::services::swap_tier::TransitionPlan>,
+    pub previous_focus: Option<FocusState>,
+    pub current_dimensions: std::collections::BTreeMap<
+        crate::domain::models::PortDimension,
+        crate::domain::models::AdapterRef,
+    >,
+}
+
+impl ProfileSwitcherState {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            profiles: Vec::new(),
+            selected: 0,
+            active_index: None,
+            preview: None,
+            previous_focus: None,
+            current_dimensions: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn open(
+        &mut self,
+        current_focus: FocusState,
+        profiles: Vec<crate::domain::models::ProfileDescriptor>,
+        active_name: &str,
+        current_dims: std::collections::BTreeMap<
+            crate::domain::models::PortDimension,
+            crate::domain::models::AdapterRef,
+        >,
+    ) {
+        self.active = true;
+        self.profiles = profiles;
+        self.active_index = self.profiles.iter().position(|p| p.name == active_name);
+        self.selected = self.active_index.unwrap_or(0);
+        self.previous_focus = Some(current_focus);
+        self.current_dimensions = current_dims;
+        self.preview = None;
+    }
+
+    pub fn dismiss(&mut self) -> Option<FocusState> {
+        self.active = false;
+        self.preview = None;
+        self.previous_focus.take()
+    }
+
+    pub fn navigate(&mut self, direction: i32) {
+        if self.profiles.is_empty() {
+            return;
+        }
+        let len = self.profiles.len();
+        self.selected = ((self.selected as i32 + direction).rem_euclid(len as i32)) as usize;
+    }
+
+    pub fn selected_profile(&self) -> Option<&crate::domain::models::ProfileDescriptor> {
+        self.profiles.get(self.selected)
+    }
+
+    pub fn enter_preview(&mut self, plan: crate::domain::services::swap_tier::TransitionPlan) {
+        self.preview = Some(plan);
+    }
+
+    pub fn exit_preview(&mut self) {
+        self.preview = None;
+    }
+
+    pub fn compute_diff_for_selected(
+        &self,
+        profile: &crate::domain::models::ProfileDescriptor,
+    ) -> Option<crate::domain::services::swap_tier::TransitionPlan> {
+        if self.current_dimensions.is_empty() {
+            return None;
+        }
+        let plan = crate::domain::services::swap_tier::TransitionPlan::from_selections(
+            &self.current_dimensions,
+            &profile.selection.dimensions,
+            &profile.name,
+            profile.identity_color.0,
+        );
+        Some(plan)
+    }
+}
+
+impl Default for ProfileSwitcherState {
     fn default() -> Self {
         Self::new()
     }
@@ -1196,7 +1297,7 @@ pub struct WhichKeyState {
 impl WhichKeyState {
     pub fn new() -> Self {
         let mut chord_map = HashMap::new();
-        chord_map.insert('p', ChordAction::Noop("Profile panel — Epic 8".to_string()));
+        chord_map.insert('p', ChordAction::OpenProfileSwitcher);
         chord_map.insert('m', ChordAction::OpenModelSelector);
         chord_map.insert('a', ChordAction::Noop("Adapter panel — Epic 8".to_string()));
         chord_map.insert(
@@ -1403,6 +1504,11 @@ pub struct TuiState {
     pub help_overlay: HelpOverlayState,
     /// Model/provider selector state (Ctrl+X, M) (Story 7.2).
     pub model_selector: ModelSelectorState,
+    /// Profile switcher state (Ctrl+X, P) (Story 8.4 AC-1).
+    pub profile_switcher: ProfileSwitcherState,
+    /// Active-profile snapshot — identity color + name for status bar.
+    /// Initialized at startup; updated on ProfileSwitched events.
+    pub active_profile: Option<crate::domain::models::ActiveProfileSnapshot>,
     /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
     pub usage_panel: UsagePanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
@@ -1582,6 +1688,8 @@ impl TuiState {
             which_key: WhichKeyState::new(),
             help_overlay: HelpOverlayState::new(),
             model_selector: ModelSelectorState::new(),
+            profile_switcher: ProfileSwitcherState::new(),
+            active_profile: None,
             usage_panel: UsagePanelState::new(),
             daily_budget: None,
             pending_resolved_model: None,

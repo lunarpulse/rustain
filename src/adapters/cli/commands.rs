@@ -79,10 +79,24 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Profile management commands (Story 8.4 — switch only; remaining commands ship in Story 8.6a)
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum ConfigAction {
     /// Reload configuration in the running TUI (cross-process reload stub — see AC-9)
     Reload,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileAction {
+    /// Switch the active profile (TUI must be running)
+    Switch {
+        /// Target profile name
+        name: String,
+    },
 }

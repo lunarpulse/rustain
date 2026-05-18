@@ -14,6 +14,64 @@ pub enum PortDimension {
     Context,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileIdentityColor(pub u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileSource {
+    Builtin,
+    User,
+    Community,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileDescriptor {
+    pub name: String,
+    pub description: Option<String>,
+    pub preview: bool,
+    pub identity_color: ProfileIdentityColor,
+    pub source: ProfileSource,
+    pub selection: ProfileSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProfileId(pub String);
+
+impl ProfileId {
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TransitionState {
+    pub port_type: &'static str,
+    pub adapter_id: String,
+    pub version: u32,
+    pub data: serde_json::Value,
+}
+
+impl TransitionState {
+    pub fn empty(port_type: &'static str) -> Self {
+        Self {
+            port_type,
+            adapter_id: String::new(),
+            version: 0,
+            data: serde_json::Value::Null,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveProfileSnapshot {
+    pub name: String,
+    pub identity_color: ProfileIdentityColor,
+    pub preview: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterRef {
     pub adapter: String,
@@ -41,6 +99,8 @@ pub struct ProfileDefinition {
     pub description: Option<String>,
     #[serde(default)]
     pub extends: Option<String>,
+    #[serde(default)]
+    pub identity_color: Option<u8>,
     #[serde(default)]
     pub preview: bool,
     #[serde(default)]

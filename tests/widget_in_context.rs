@@ -92,6 +92,7 @@ fn render_full_layout(
                 None,
                 false,
                 None, // daily_budget (Story 7.5)
+                None,
             );
             input_box::render(
                 frame,
@@ -293,6 +294,7 @@ fn test_permission_prompt_in_full_layout() {
                 None,
                 false,
                 None, // daily_budget (Story 7.5)
+                None,
             );
             input_box::render(
                 frame,
@@ -395,6 +397,7 @@ fn test_ask_user_question_in_full_layout() {
                 None,
                 false,
                 None, // daily_budget (Story 7.5)
+                None,
             );
             input_box::render(
                 frame,

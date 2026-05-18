@@ -337,6 +337,13 @@ pub enum InputAction {
     },
     /// Open the model/provider selector overlay (Story 7.2 AC1).
     OpenModelSelector,
+    /// Open the profile switcher overlay (Story 8.4 AC-1).
+    OpenProfileSwitcher,
+    /// Profile switch requested via palette or CLI — bypasses the modal list, goes
+    /// straight to preview card pre-selected on the target profile.
+    ProfileSwitchRequested(String),
+    /// User confirmed the transition preview — execute the swap.
+    ConfirmProfileSwitch(String),
     /// Apply a model/provider switch (Story 7.2 AC3).
     /// `provider_id: None` means resolve from the registry by `model_id` (`:` palette path).
     SwitchModelProvider {
@@ -562,6 +569,11 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return InputAction::Consumed;
     }
 
+    // Profile switcher overlay (Story 8.4 AC-1, AC-3): y/n/Enter/Esc handling
+    if state.focus == FocusState::Overlay(OverlayType::ProfileSwitcher) {
+        return handle_profile_switcher_char(state, c);
+    }
+
     // Which-key: single char lookup in chord map
     // Covers: UX-DR19
     if state.which_key.active {
@@ -592,6 +604,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 ChordAction::OpenModelSelector => {
                     state.which_key.dismiss();
                     return InputAction::OpenModelSelector;
+                }
+                ChordAction::OpenProfileSwitcher => {
+                    state.which_key.dismiss();
+                    return InputAction::OpenProfileSwitcher;
                 }
                 ChordAction::OpenUsagePanel => {
                     state.which_key.dismiss();
@@ -1562,6 +1578,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Usage panel overlay (Story 7.5 AC3): Esc / Ctrl+C dismisses, arrows cycle sections.
     if state.focus == FocusState::Overlay(OverlayType::UsagePanel) {
         return handle_usage_panel_key(state, key);
+    }
+
+    // Profile switcher overlay (Story 8.4 AC-1): Up/Down navigate, Esc dismisses
+    if state.focus == FocusState::Overlay(OverlayType::ProfileSwitcher) {
+        return handle_profile_switcher_key(state, key);
     }
 
     // Command palette overlay handling — intercept keys when palette is active
@@ -2738,7 +2759,6 @@ fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
     if state.model_selector.pending_context_warning.is_some() {
         return match c.to_ascii_lowercase() {
             'y' => {
-                // Story 7.4: the 7.2 advisory-warning seam is now wired to real compaction.
                 let warning = state.model_selector.pending_context_warning.take();
                 if let Some(w) = warning {
                     return InputAction::CompactThenSwitchModel {
@@ -2837,7 +2857,10 @@ fn dispatch_palette_action(
             provider_id: Some(provider_id),
             model_id,
         },
-        PaletteAction::SwitchProfile(_) | PaletteAction::OpenPanel(_) => InputAction::Consumed,
+        PaletteAction::SwitchProfile(name) => {
+            InputAction::ProfileSwitchRequested(name)
+        }
+        PaletteAction::OpenPanel(_) => InputAction::Consumed,
         PaletteAction::ShowVersion => {
             // Display version info as a FeedbackBlock in the chat pane
             // Covers: FR109
@@ -3150,6 +3173,96 @@ pub fn convert_crossterm_event(
         Event::FocusGained => Some(DomainInputEvent::FocusGained),
         Event::FocusLost => Some(DomainInputEvent::FocusLost),
     }
+}
+
+fn handle_profile_switcher_key(state: &mut TuiState, key: DomainKey) -> InputAction {
+    if state.profile_switcher.preview.is_some() {
+        match key {
+            DomainKey::Enter => {
+                let profile_name = state
+                    .profile_switcher
+                    .selected_profile()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                state.needs_redraw = true;
+                return InputAction::ConfirmProfileSwitch(profile_name);
+            }
+            DomainKey::Esc => {
+                state.profile_switcher.exit_preview();
+                state.needs_redraw = true;
+            }
+            _ => {}
+        }
+        return InputAction::Consumed;
+    }
+
+    match key {
+        DomainKey::Up => {
+            state.profile_switcher.navigate(-1);
+            state.needs_redraw = true;
+        }
+        DomainKey::Down => {
+            state.profile_switcher.navigate(1);
+            state.needs_redraw = true;
+        }
+        DomainKey::Enter => {
+            if let Some(selected) = state.profile_switcher.selected_profile().cloned() {
+                if let Some(plan) = state.profile_switcher.compute_diff_for_selected(&selected) {
+                    state.profile_switcher.enter_preview(plan);
+                    state.needs_redraw = true;
+                }
+            }
+        }
+        DomainKey::Esc => {
+            if let Some(prev) = state.profile_switcher.dismiss() {
+                state.focus = prev;
+            }
+            state.needs_redraw = true;
+        }
+        _ => {}
+    }
+    InputAction::Consumed
+}
+
+fn handle_profile_switcher_char(state: &mut TuiState, c: char) -> InputAction {
+    if state.profile_switcher.preview.is_some() {
+        match c.to_ascii_lowercase() {
+            'y' | '\n' => {
+                let profile_name = state
+                    .profile_switcher
+                    .selected_profile()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                state.needs_redraw = true;
+                return InputAction::ConfirmProfileSwitch(profile_name);
+            }
+            '\x1b' | 'n' => {
+                state.profile_switcher.exit_preview();
+                state.needs_redraw = true;
+            }
+            _ => {}
+        }
+        return InputAction::Consumed;
+    }
+
+    match c {
+        '\n' => {
+            if let Some(selected) = state.profile_switcher.selected_profile().cloned() {
+                if let Some(plan) = state.profile_switcher.compute_diff_for_selected(&selected) {
+                    state.profile_switcher.enter_preview(plan);
+                    state.needs_redraw = true;
+                }
+            }
+        }
+        '\x1b' => {
+            if let Some(prev) = state.profile_switcher.dismiss() {
+                state.focus = prev;
+            }
+            state.needs_redraw = true;
+        }
+        _ => {}
+    }
+    InputAction::Consumed
 }
 
 #[cfg(test)]

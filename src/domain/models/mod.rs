@@ -128,4 +128,4 @@ pub use view_state::{
 #[allow(unused_imports)]
 pub use visual::{BlockBorder, DensityMode, OverlayType, PanelType, symbols};
 #[allow(unused_imports)]
-pub use profile::{AdapterRef, PortDimension, ProfileDefinition, ProfileSelection, ResolvedProfile};
+pub use profile::{ActiveProfileSnapshot, AdapterRef, PortDimension, ProfileDefinition, ProfileDescriptor, ProfileId, ProfileIdentityColor, ProfileSelection, ProfileSource, ResolvedProfile, TransitionState};

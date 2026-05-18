@@ -1,4 +1,6 @@
 pub mod adapter_catalog;
+pub mod identity_color;
+pub mod swap_tier;
 pub mod approval_runtime;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;

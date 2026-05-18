@@ -5,7 +5,7 @@ use crate::adapters::tui::state::DailyBudgetState;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_index;
 use crate::adapters::tui::widgets::model_selector::humanize_ctx;
-use crate::domain::models::{PermissionMode, StatusState, UsageInfo};
+use crate::domain::models::{ActiveProfileSnapshot, PermissionMode, StatusState, UsageInfo};
 use crate::infrastructure::clock_util::now_unix;
 
 /// Render the status bar with model name, current status, scroll position, and permission mode.
@@ -34,6 +34,7 @@ pub fn render(
     drill_down_breadcrumb: Option<&str>,
     pinned_active: bool,
     daily_budget: Option<&DailyBudgetState>,
+    active_profile: Option<&ActiveProfileSnapshot>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -246,6 +247,23 @@ pub fn render(
         ));
     }
 
+    if let Some(profile) = active_profile {
+        let profile_label = if profile.preview {
+            format!("{} (preview)", profile.name)
+        } else {
+            profile.name.clone()
+        };
+        left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+        left_spans.push(Span::styled(
+            "█".to_string(),
+            Style::default().fg(Color::Indexed(profile.identity_color.0)),
+        ));
+        left_spans.push(Span::styled(
+            format!(" {}", profile_label),
+            Style::default().fg(fg),
+        ));
+    }
+
     // Contextual hint: right-aligned in remaining space (UX-DR93, UX-DR96)
     // The hint is the first thing truncated if the terminal is too narrow.
     if let Some(hint) = current_hint {
@@ -392,6 +410,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
             );
         })
         .unwrap();
@@ -443,6 +462,7 @@ mod tests {
                 None,
                 false,
                 Some(&db),
+                None,
             );
         })
         .unwrap();
@@ -497,6 +517,7 @@ mod tests {
                 None,
                 false,
                 Some(&db),
+                None,
             );
         })
         .unwrap();

@@ -45,6 +45,8 @@ pub enum DomainError {
 
     #[error(transparent)]
     Composition(#[from] AdapterCompositionError),
+    #[error(transparent)]
+    Transition(#[from] TransitionError),
 
     #[error(transparent)]
     ApprovalPersistence(#[from] ApprovalPersistenceError),
@@ -358,6 +360,46 @@ pub enum AdapterCompositionError {
     MissingDimension {
         port: crate::domain::models::PortDimension,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum TransitionError {
+    #[error(
+        "Adapter '{adapter_id}' for port '{port_type}' failed prepare_detach: {reason}"
+    )]
+    PrepareFailed {
+        port_type: &'static str,
+        adapter_id: String,
+        reason: String,
+    },
+    #[error(
+        "Adapter '{adapter_id}' for port '{port_type}' rejected receive_state \
+         (incompatible version {got} vs expected {expected})"
+    )]
+    IncompatibleState {
+        port_type: &'static str,
+        adapter_id: String,
+        got: u32,
+        expected: u32,
+    },
+    #[error(
+        "post_transition_verify failed for adapter '{adapter_id}' on port '{port_type}': {reason}"
+    )]
+    VerifyFailed {
+        port_type: &'static str,
+        adapter_id: String,
+        reason: String,
+    },
+    #[error(
+        "Cold-tier adapter '{adapter_id}' on port '{port_type}' loop restart failed: {reason}"
+    )]
+    RestartFailed {
+        port_type: &'static str,
+        adapter_id: String,
+        reason: String,
+    },
+    #[error("Profile '{name}' not found")]
+    ProfileNotFound { name: String },
 }
 
 #[allow(dead_code)]

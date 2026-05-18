@@ -6,15 +6,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::adapters::profile_resolver::embedded::EmbeddedProfileSource;
+use crate::adapters::profile_resolver::embedded::{embedded_names, EmbeddedProfileSource};
 use crate::domain::errors::ProfileError;
-use crate::domain::models::ResolvedProfile;
+use crate::domain::models::{ProfileDescriptor, ProfileIdentityColor, ProfileSelection, ProfileSource, ResolvedProfile};
 use crate::domain::ports::ProfileResolver;
 use crate::domain::services::adapter_catalog::AdapterCatalog;
-use crate::domain::services::profile_loader::{ProfileLoader, ProfileSource};
+use crate::domain::services::identity_color;
+use crate::domain::services::profile_loader::{ProfileLoader, ProfileSource as LoaderProfileSource};
 
 pub struct TomlProfileResolver {
     resolved: ResolvedProfile,
+    config_dir: PathBuf,
     preview_warning_emitted: OnceLock<()>,
 }
 
@@ -32,7 +34,7 @@ impl FileSystemProfileSource {
     }
 }
 
-impl ProfileSource for FileSystemProfileSource {
+impl LoaderProfileSource for FileSystemProfileSource {
     fn get(&self, name: &str) -> Option<String> {
         if name.contains(['/', '\\']) {
             return None;
@@ -69,13 +71,13 @@ impl ProfileSource for FileSystemProfileSource {
 
 impl TomlProfileResolver {
     pub fn new(active_name: &str, config_dir: PathBuf) -> Result<Self, ProfileError> {
-        let source = FileSystemProfileSource::new(config_dir);
-        // We need to own the source - so we create the loader locally and resolve
+        let source = FileSystemProfileSource::new(config_dir.clone());
         let catalog = AdapterCatalog;
         let loader = ProfileLoader::new(&catalog, &source);
         let resolved = loader.load(active_name)?;
         Ok(Self {
             resolved,
+            config_dir,
             preview_warning_emitted: OnceLock::new(),
         })
     }
@@ -94,7 +96,100 @@ impl ProfileResolver for TomlProfileResolver {
     fn resolve_active(&self) -> Option<ResolvedProfile> {
         Some(self.resolved.clone())
     }
+
+    fn list_profiles(&self) -> Vec<ProfileDescriptor> {
+        let mut profiles: Vec<ProfileDescriptor> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. Scan user profiles directory
+        if let Ok(entries) = std::fs::read_dir(&self.config_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "toml") {
+                    if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                        if name.contains(['/', '\\']) {
+                            continue;
+                        }
+                        let content = match std::fs::read_to_string(&path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        if let Ok(def) = toml::from_str::<crate::domain::models::ProfileDefinition>(&content) {
+                            if seen.insert(def.name.clone()) {
+                                profiles.push(build_descriptor(&def, ProfileSource::User));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Enumerate embedded profiles (only if not already seen from user override)
+        for &name in embedded_names() {
+            if !seen.contains(name) {
+                let source = EmbeddedProfileSource;
+                if let Some(content) = source.get(name) {
+                    if let Ok(def) = toml::from_str::<crate::domain::models::ProfileDefinition>(&content) {
+                        seen.insert(def.name.clone());
+                        profiles.push(build_descriptor(&def, ProfileSource::Builtin));
+                    }
+                }
+            }
+        }
+
+        // Sort: Builtin first, then User, then Community; alphabetical within source
+        profiles.sort_by(|a, b| {
+            fn source_ord(s: ProfileSource) -> u8 {
+                match s {
+                    ProfileSource::Builtin => 0,
+                    ProfileSource::User => 1,
+                    ProfileSource::Community => 2,
+                }
+            }
+            source_ord(a.source)
+                .cmp(&source_ord(b.source))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        profiles
+    }
     // resolve_active_profile_defaults uses the trait default
+}
+
+fn build_descriptor(def: &crate::domain::models::ProfileDefinition, source: ProfileSource) -> ProfileDescriptor {
+    use crate::domain::models::{AdapterRef, PortDimension};
+    let identity_color = identity_color::derive_identity_color(&def.name, def.identity_color);
+    let mut dimensions = std::collections::BTreeMap::new();
+    if let Some(ref r) = def.persona {
+        dimensions.insert(PortDimension::Persona, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    if let Some(ref r) = def.memory {
+        dimensions.insert(PortDimension::Memory, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    if let Some(ref r) = def.session {
+        dimensions.insert(PortDimension::Session, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    if let Some(ref r) = def.tools {
+        dimensions.insert(PortDimension::Tools, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    if let Some(ref r) = def.channels {
+        dimensions.insert(PortDimension::Channels, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    if let Some(ref r) = def.scheduler {
+        dimensions.insert(PortDimension::Scheduler, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    if let Some(ref r) = def.context {
+        dimensions.insert(PortDimension::Context, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+    }
+    let selection = ProfileSelection { dimensions };
+    ProfileDescriptor {
+        name: def.name.clone(),
+        description: def.description.clone(),
+        preview: def.preview,
+        identity_color,
+        source,
+        selection,
+    }
 }
 
 #[cfg(test)]

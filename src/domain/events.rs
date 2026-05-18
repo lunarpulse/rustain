@@ -1,7 +1,8 @@
 use crate::domain::models::tab::ConversationId;
 use crate::domain::models::view_state::ScrollDelta;
 use crate::domain::models::{
-    NoticeLevel, PermissionMode, SkillTrustResponse, StreamChunk, ToolResult,
+    NoticeLevel, PermissionMode, ProfileIdentityColor, SkillTrustResponse, StreamChunk,
+    ToolResult,
 };
 use crate::domain::services::cross_search::CrossSearchResult;
 
@@ -221,6 +222,23 @@ pub enum AppEvent {
     ConfigReloaded {
         success: bool,
         error: Option<String>,
+    },
+    /// Story 8.4 — emitted by handle_profile_switch_requested (sync) or its spawned
+    /// continuation (async) on success. The TUI dispatch arm updates state.active_profile
+    /// + emits a SystemNotice.
+    ProfileSwitched {
+        profile_name: String,
+        identity_color: ProfileIdentityColor,
+        summary: String,
+        warm_cold_pending: bool,
+    },
+    /// Story 8.4 — emitted on swap failure (hot-phase rejection or warm
+    /// post_transition_verify fail). Carries enough info for the dispatch arm to
+    /// render the rollback message.
+    ProfileSwitchFailed {
+        profile_name: String,
+        error: String,
+        rolled_back: bool,
     },
     /// Story 6.4: emitted when the executing plan deviates from the approved plan
     /// (auto-skip of blocked tasks; agent-proposed revision deferred to 6.4-FU1).

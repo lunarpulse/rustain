@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
-use crate::adapters::cli::commands::{Cli, Command, ConfigAction};
+use crate::adapters::cli::commands::{Cli, Command, ConfigAction, ProfileAction};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
 use crate::adapters::persona_adapter::PersonaAdapter;
@@ -221,6 +221,16 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("Config reload subcommand failed: {e}");
+                SubcommandExit.into()
+            });
+    }
+
+    // Story 8.4 AC-7 — Profile switch subcommand intercept
+    if let Some(Command::Profile { action: ProfileAction::Switch { name } }) = &cli.command {
+        return crate::adapters::cli::profile_cmd::run_profile_switch(name.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!("Profile switch subcommand failed: {e}");
                 SubcommandExit.into()
             });
     }
