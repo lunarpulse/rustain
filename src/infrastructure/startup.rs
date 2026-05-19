@@ -96,12 +96,7 @@ pub async fn run() -> Result<()> {
         .unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
     let profiles_dir = config_dir.join("profiles");
 
-    let effective_name = cli
-        .profile
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| crate::infrastructure::utils::env_var_trimmed("RUSTAIN_PROFILE"))
-        .unwrap_or_else(|| bootstrap_config.active_profile.clone());
+    let effective_name = crate::infrastructure::profile_resolution::effective_profile_name(&cli, &bootstrap_config);
 
     // Pass 2: construct TomlProfileResolver, load full config with profile overrides at layer 6
     let (toml_resolver, startup_notices): (
@@ -231,13 +226,116 @@ pub async fn run() -> Result<()> {
     }
 
     // Story 8.4 AC-7 — Profile switch subcommand intercept
-    if let Some(Command::Profile { action: ProfileAction::Switch { name } }) = &cli.command {
-        return crate::adapters::cli::profile_cmd::run_profile_switch(name.clone())
+    if let Some(Command::Profile { action: ProfileAction::Switch { name, start } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_switch(name.clone(), *start)
             .await
             .map_err(|e| {
                 tracing::error!("Profile switch subcommand failed: {e}");
                 SubcommandExit.into()
             });
+    }
+
+    // Profile subcommands (Story 8.6a) — terminate before terminal setup
+    if let Some(Command::Profile { action: ProfileAction::List { json } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_list(
+            *json,
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile list subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    if let Some(Command::Profile { action: ProfileAction::Show { name, json, toml_out } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_show(
+            name.clone(),
+            *json,
+            *toml_out,
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile show subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    if let Some(Command::Profile { action: ProfileAction::Create { name, extends, from } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_create(
+            name.clone(),
+            extends.clone(),
+            from.clone(),
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile create subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    if let Some(Command::Profile { action: ProfileAction::Edit { name, no_validate } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_edit(
+            name.clone(),
+            *no_validate,
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile edit subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    if let Some(Command::Profile { action: ProfileAction::Validate { name, all, json } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_validate(
+            name.clone(),
+            *all,
+            *json,
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile validate subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    if let Some(Command::Profile { action: ProfileAction::Export { name, output } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_export(
+            name.clone(),
+            output.clone(),
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile export subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    if let Some(Command::Profile { action: ProfileAction::Import { path, name, force } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_import(
+            path.clone(),
+            name.clone(),
+            *force,
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile import subcommand failed: {e}");
+            SubcommandExit.into()
+        });
     }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)

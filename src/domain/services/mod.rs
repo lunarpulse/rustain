@@ -22,6 +22,7 @@ pub mod plan_mode_injector;
 pub mod plan_parser;
 pub mod plan_runtime;
 pub mod profile_loader;
+pub mod profile_serializer;
 pub mod reducer;
 pub mod search;
 pub mod session_index;

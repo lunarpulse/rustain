@@ -290,7 +290,7 @@ fn merge_toml_values(
 }
 
 /// Find the closest string in `candidates` within Levenshtein distance `max_dist`.
-fn closest_match(target: &str, candidates: &[&str], max_dist: usize) -> Option<String> {
+pub fn closest_match(target: &str, candidates: &[&str], max_dist: usize) -> Option<String> {
     candidates
         .iter()
         .filter_map(|c| {

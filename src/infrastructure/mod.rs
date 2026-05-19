@@ -4,6 +4,7 @@ pub mod config;
 pub mod logging;
 pub mod paths;
 pub mod permission_rules;
+pub mod profile_resolution;
 pub mod provider_factory;
 pub mod runtime;
 pub mod signals;

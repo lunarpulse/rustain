@@ -118,9 +118,79 @@ pub enum ConfigAction {
 
 #[derive(Subcommand, Debug)]
 pub enum ProfileAction {
-    /// Switch the active profile (TUI must be running)
+    /// List all available profiles
+    List {
+        /// Output as JSON for scripting
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show full resolved profile configuration
+    Show {
+        /// Profile name
+        name: String,
+        /// Output as JSON
+        #[arg(long, conflicts_with = "toml_out")]
+        json: bool,
+        /// Output as flat shareable TOML
+        #[arg(long = "toml", conflicts_with = "json")]
+        toml_out: bool,
+    },
+    /// Interactive profile builder
+    Create {
+        /// Pre-populate name (skips name prompt)
+        #[arg(long)]
+        name: Option<String>,
+        /// Pre-populate extends parent
+        #[arg(long)]
+        extends: Option<String>,
+        /// Copy adapter selections from an existing profile
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Open profile TOML in $EDITOR
+    Edit {
+        /// Profile name
+        name: String,
+        /// Skip post-save validation
+        #[arg(long)]
+        no_validate: bool,
+    },
+    /// Switch the active profile (Story 8.4 — TUI must be running)
     Switch {
         /// Target profile name
         name: String,
+        /// Launch a new rustain TUI with this profile (instead of in-place switch)
+        #[arg(long)]
+        start: bool,
+    },
+    /// Validate profile configuration
+    Validate {
+        /// Profile name (omit with --all to validate all known profiles)
+        name: Option<String>,
+        /// Validate every profile in the registry
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+        /// Output as JSON for CI scripting
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export profile as shareable flat TOML
+    Export {
+        /// Profile name
+        name: String,
+        /// Output path (use `-` for stdout; default stdout)
+        #[arg(long, short)]
+        output: Option<String>,
+    },
+    /// Import profile TOML from a local path
+    Import {
+        /// Source path (use `-` to read TOML from stdin)
+        path: String,
+        /// Override the profile's destination name
+        #[arg(long)]
+        name: Option<String>,
+        /// Overwrite existing profile without prompting
+        #[arg(long)]
+        force: bool,
     },
 }

@@ -185,6 +185,21 @@ adapters not yet fully implemented.
 | Scheduler  | none, cron (feature-gated)                  |
 | Context    | default, daily                              |
 
+## CLI: Profile Management Commands
+
+Manage profiles without launching the TUI. All commands work in CI / non-TTY environments.
+
+| Command | Description |
+|---------|-------------|
+| `rustain profile list` | Enumerate all profiles (builtin, user, community) with source, preview, and active marker |
+| `rustain profile show <name>` | Display the fully resolved profile configuration (supports `--toml` and `--json`) |
+| `rustain profile create` | Interactive wizard to build a new profile (TTY-only) |
+| `rustain profile edit <name>` | Open the profile TOML in `$EDITOR` (TTY-only; `--no-validate` to skip post-save check) |
+| `rustain profile switch <name>` | CLI stub for switching profiles (IPC requires a running TUI) |
+| `rustain profile validate <name>` | Run all 5 validation passes (default `--all` checks every profile) |
+| `rustain profile export <name>` | Flatten extends chain into a shareable self-contained TOML |
+| `rustain profile import <path>` | Validate and install a profile TOML from a local path or stdin (`-`) |
+
 ## See Also
 
 - [Configuration](configuration.md) — the full 7-layer config system
