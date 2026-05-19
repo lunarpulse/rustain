@@ -27,6 +27,7 @@ pub async fn run_profile_list(
                 serde_json::json!({
                     "name": p.name,
                     "source": source_label(p.source),
+                    "source_origin": p.source_origin,
                     "preview": p.preview,
                     "description": p.description.as_deref().unwrap_or(""),
                     "identity_color": p.identity_color.0,
@@ -39,20 +40,31 @@ pub async fn run_profile_list(
     } else {
         // Print header
         println!(
-            "{:<2} {:<25} {:<10} {:<10} {:<60}",
+            "{:<2} {:<25} {:<40} {:<10} {:<60}",
             "", "NAME", "SOURCE", "PREVIEW", "DESCRIPTION"
         );
 
         for p in &profiles {
             let active_marker = if p.name == active_name { "*" } else { " " };
             let preview_str = if p.preview { "(preview)" } else { "" };
+            let source_str = match p.source {
+                ProfileSource::Community => {
+                    if let Some(ref origin) = p.source_origin {
+                        format!("community ({})", origin)
+                    } else {
+                        source_label(p.source).to_string()
+                    }
+                }
+                _ => source_label(p.source).to_string(),
+            };
+            let source_trunc = truncate_str(&source_str, 40);
             let desc = p.description.as_deref().unwrap_or("");
             let desc_trunc = truncate_str(desc, 60);
             println!(
-                "{:<2} {:<25} {:<10} {:<10} {:<60}",
+                "{:<2} {:<25} {:<40} {:<10} {:<60}",
                 active_marker,
                 p.name,
-                source_label(p.source),
+                source_trunc,
                 preview_str,
                 desc_trunc
             );

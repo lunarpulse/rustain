@@ -1,16 +1,13 @@
 //! Conformance ratchets for `rustain profile` CLI subcommands.
-//! Story 8.6a AC-12.
-//!
-//! These tests ensure the module structure, subcommand count, and help output
-//! remain correct and don't regress.
+//! Story 8.6a AC-12 (8.6b extends).
 
 use clap::CommandFactory;
 
-/// Ratchet 1: EXPECTED_PROFILE_SUBCOMMANDS = 8.
+/// Ratchet 1: EXPECTED_PROFILE_SUBCOMMANDS = 9.
 /// Guards against accidental removal or merge regression.
 #[test]
 fn test_profile_subcommand_count_is_eight() {
-    const EXPECTED_PROFILE_SUBCOMMANDS: usize = 8;
+    const EXPECTED_PROFILE_SUBCOMMANDS: usize = 9;
     let cmd = rustain::adapters::cli::commands::Cli::command();
     let profile_cmd = cmd
         .find_subcommand("profile")
@@ -44,6 +41,8 @@ fn test_profile_subcommands_live_in_module_directory() {
         "validate.rs",
         "export.rs",
         "import.rs",
+        "install.rs",
+        "source.rs",
         "prompt.rs",
     ];
     for file in expected_files {
@@ -60,7 +59,7 @@ fn test_profile_subcommands_live_in_module_directory() {
 #[test]
 fn test_each_profile_subcommand_valid() {
     let verbs = [
-        "list", "show", "create", "edit", "switch", "validate", "export", "import",
+        "list", "show", "create", "edit", "switch", "validate", "export", "import", "install",
     ];
     let cmd = rustain::adapters::cli::commands::Cli::command();
     let profile_cmd = cmd
@@ -71,13 +70,11 @@ fn test_each_profile_subcommand_valid() {
         let sub = profile_cmd
             .find_subcommand(verb)
             .unwrap_or_else(|| panic!("profile subcommand '{}' should exist", verb));
-        // Verify the subcommand has a non-empty name
         assert!(
             !sub.get_name().is_empty(),
             "profile {} should have a non-empty name",
             verb
         );
-        // Verify the subcommand has a non-empty about/description
         let has_description = sub
             .get_about()
             .map(|s| s.to_string())
@@ -93,5 +90,36 @@ fn test_each_profile_subcommand_valid() {
             "profile {} should have a help description",
             verb
         );
+    }
+}
+
+/// Ratchet 4: Network-import isolation. Only `install.rs` may import reqwest/hyper/tokio.
+/// Guards against accidental network coupling in non-install profile subcommands.
+#[test]
+fn test_no_network_call_in_other_profile_subcommands() {
+    let non_install_files = &[
+        "src/adapters/cli/profile/list.rs",
+        "src/adapters/cli/profile/show.rs",
+        "src/adapters/cli/profile/create.rs",
+        "src/adapters/cli/profile/edit.rs",
+        "src/adapters/cli/profile/switch.rs",
+        "src/adapters/cli/profile/validate.rs",
+        "src/adapters/cli/profile/export.rs",
+        "src/adapters/cli/profile/import.rs",
+        "src/adapters/cli/profile/source.rs",
+        "src/adapters/cli/profile/prompt.rs",
+    ];
+    let forbidden = &["reqwest", "hyper::", "tokio::net", "std::net::TcpStream"];
+    for file in non_install_files {
+        let content = std::fs::read_to_string(file)
+            .unwrap_or_else(|_| panic!("File {} should exist", file));
+        for &pattern in forbidden {
+            assert!(
+                !content.contains(pattern),
+                "File {} must not import or use '{}'. Network calls belong in install.rs only.",
+                file,
+                pattern
+            );
+        }
     }
 }

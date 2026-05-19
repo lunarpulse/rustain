@@ -193,4 +193,18 @@ pub enum ProfileAction {
         #[arg(long)]
         force: bool,
     },
+    /// Install a profile from a public git repository (gh:user/repo) (Story 8.6b)
+    Install {
+        /// Source spec (e.g., gh:user/profile-name; optionally with /path/to/profile.toml suffix)
+        spec: String,
+        /// Override the installed profile's name (rewrites name = field)
+        #[arg(long)]
+        name: Option<String>,
+        /// Overwrite existing community profile without prompting
+        #[arg(long)]
+        force: bool,
+        /// Fail on AdapterFeatureGated instead of auto-flipping to preview = true
+        #[arg(long)]
+        strict_features: bool,
+    },
 }

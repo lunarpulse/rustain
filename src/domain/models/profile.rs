@@ -31,6 +31,7 @@ pub struct ProfileDescriptor {
     pub preview: bool,
     pub identity_color: ProfileIdentityColor,
     pub source: ProfileSource,
+    pub source_origin: Option<String>,
     pub selection: ProfileSelection,
 }
 

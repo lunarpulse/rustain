@@ -337,6 +337,30 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
+    // Profile install (Story 8.6b) — public-repo HTTPS fetch + validate + community/ dir install.
+    // Network call inside; honours --strict-features.
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+    if let Some(Command::Profile { action: ProfileAction::Install { spec, name, force, strict_features } }) = &cli.command {
+        return crate::adapters::cli::profile::run_profile_install(
+            spec.clone(),
+            name.clone(),
+            *force,
+            *strict_features,
+            &profile_resolver_arc,
+            &cli,
+            &bootstrap_config,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Profile install subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+    #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
+    if let Some(Command::Profile { action: ProfileAction::Install { .. } }) = &cli.command {
+        eprintln!("Error: 'rustain profile install' requires HTTPS support. Rebuild with --features anthropic.");
+        return Err(SubcommandExit.into());
+    }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;

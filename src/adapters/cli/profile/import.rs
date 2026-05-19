@@ -7,13 +7,14 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use super::prompt::{fix_profile_error, validate_profile_name};
+use super::source::SinglePathSource;
 use crate::adapters::cli::commands::Cli;
 use crate::adapters::profile_resolver::embedded::EmbeddedProfileSource;
 use crate::domain::errors::ProfileError;
 use crate::domain::models::{AppConfig, ProfileDefinition};
 use crate::domain::ports::ProfileResolver;
 use crate::domain::services::adapter_catalog::AdapterCatalog;
-use crate::domain::services::profile_loader::{ProfileLoader, ProfileSource as LoaderProfileSource};
+use crate::domain::services::profile_loader::ProfileLoader;
 use crate::infrastructure::paths;
 
 /// Maximum profile size in bytes.
@@ -141,28 +142,12 @@ pub async fn run_profile_import(
     Ok(())
 }
 
-/// In-memory ProfileSource for import validation (Decision Gate 1.11).
-/// Resolves the target name from the imported content; falls back to
-/// EmbeddedProfileSource for `extends` resolution.
-struct SinglePathSource {
-    name: String,
-    content: String,
-    fallback: EmbeddedProfileSource,
-}
-
-impl LoaderProfileSource for SinglePathSource {
-    fn get(&self, name: &str) -> Option<String> {
-        if name == self.name {
-            Some(self.content.clone())
-        } else {
-            self.fallback.get(name)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::source::SinglePathSource;
+    use crate::adapters::profile_resolver::embedded::EmbeddedProfileSource;
+    use crate::domain::services::profile_loader::ProfileSource as LoaderProfileSource;
 
     #[test]
     fn test_max_profile_size_constant() {
