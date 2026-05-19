@@ -34,6 +34,13 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         config_file: None,
         model: None,
         profile: None,
+        persona: None,
+        memory: None,
+        session_adapter: None,
+        tools: None,
+        channels: None,
+        scheduler: None,
+        context: None,
     }
 }
 

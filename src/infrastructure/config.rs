@@ -144,6 +144,13 @@ pub fn load_default() -> AppConfig {
         config_file: None,
         model: None,
         profile: None,
+        persona: None,
+        memory: None,
+        session_adapter: None,
+        tools: None,
+        channels: None,
+        scheduler: None,
+        context: None,
     };
     load(&cli, &crate::adapters::profile_resolver::noop::NoopProfileResolver)
 }
@@ -235,6 +242,13 @@ mod tests {
             config_file: None,
             model: None,
             profile: None,
+            persona: None,
+            memory: None,
+            session_adapter: None,
+            tools: None,
+            channels: None,
+            scheduler: None,
+            context: None,
         }
     }
 

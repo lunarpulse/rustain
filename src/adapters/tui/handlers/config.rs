@@ -198,6 +198,13 @@ mod tests {
             model: None,
             config_file: None,
             profile: None,
+            persona: None,
+            memory: None,
+            session_adapter: None,
+            tools: None,
+            channels: None,
+            scheduler: None,
+            context: None,
         }
     }
 

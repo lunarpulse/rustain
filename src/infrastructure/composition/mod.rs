@@ -261,6 +261,55 @@ pub fn build_context(
     }
 }
 
+// ── BuiltAdapter — typed dispatch enum for per-port adapter construction ──
+
+pub enum BuiltAdapter {
+    Persona(Arc<dyn PersonaPort>),
+    Memory(Arc<dyn MemoryPort>),
+    Session(Arc<dyn SessionPort>),
+    Tools(Arc<dyn ToolSetPort>),
+    Channels(Arc<dyn ChannelPort>),
+    Scheduler(Arc<dyn SchedulerPort>),
+    Context(Arc<dyn ContextPort>),
+}
+
+pub fn build_for_port(
+    port: PortDimension,
+    adapter_ref: &AdapterRef,
+    ctx: &ComposeContext,
+) -> Result<BuiltAdapter, AdapterCompositionError> {
+    match port {
+        PortDimension::Persona => {
+            build_persona(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Persona)
+        }
+        PortDimension::Memory => {
+            build_memory(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Memory)
+        }
+        PortDimension::Session => {
+            build_session(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Session)
+        }
+        PortDimension::Tools => {
+            build_tools(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Tools)
+        }
+        PortDimension::Channels => {
+            build_channels(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Channels)
+        }
+        PortDimension::Scheduler => {
+            build_scheduler(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Scheduler)
+        }
+        PortDimension::Context => {
+            build_context(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
+                .map(BuiltAdapter::Context)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

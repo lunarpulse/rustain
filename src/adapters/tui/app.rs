@@ -47,6 +47,15 @@ pub enum InputAction {
     FeedbackDismiss,
     /// Feedback block: user pressed n to start fresh (Ctrl+K n).
     FeedbackStartFresh,
+    /// Story 8.5 AC-6 — apply a session-scoped adapter override.
+    ApplyAdapterOverride {
+        port: crate::domain::models::PortDimension,
+        adapter: String,
+    },
+    /// Story 8.5 AC-7 — clear a session-scoped adapter override.
+    ClearAdapterOverride {
+        port: crate::domain::models::PortDimension,
+    },
     /// AskUserQuestion: user submitted their answer.
     SubmitQuestionAnswer(String),
     /// Execute a built-in command (e.g., "/new", "/export").
@@ -2886,6 +2895,9 @@ fn dispatch_palette_action(
         PaletteAction::ToggleSidebar => InputAction::ToggleSidebar,
         PaletteAction::DeleteAllConversations => InputAction::DeleteAllConversations,
         PaletteAction::PasteImageFromClipboard => InputAction::RequestClipboardPaste,
+        PaletteAction::ApplyAdapterOverride { port, adapter } => {
+            InputAction::ApplyAdapterOverride { port, adapter }
+        }
         PaletteAction::Noop => {
             // Show "Not yet available" feedback
             let block = crate::domain::models::FeedbackBlock {

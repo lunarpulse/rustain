@@ -69,13 +69,20 @@ pub async fn run() -> Result<()> {
     // Story 8.1 AC-10 — capture CLI snapshot for config reload handler
     let cli_snapshot = Cli {
         log_level: cli.log_level.clone(),
-        command: None, // subcommand consumed at startup; irrelevant for reload
+        command: None,
         new: cli.new,
         session: cli.session.clone(),
         snapshot_retention: cli.snapshot_retention,
         config_file: cli.config_file.clone(),
         model: cli.model.clone(),
         profile: cli.profile.clone(),
+        persona: cli.persona.clone(),
+        memory: cli.memory.clone(),
+        session_adapter: cli.session_adapter.clone(),
+        tools: cli.tools.clone(),
+        channels: cli.channels.clone(),
+        scheduler: cli.scheduler.clone(),
+        context: cli.context.clone(),
     };
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
@@ -175,10 +182,8 @@ pub async fn run() -> Result<()> {
     if let Some(Command::Init) = cli.command {
         return crate::adapters::cli::init::run_init().await;
     }
-    if let Some(Command::Doctor { terminal }) = cli.command {
-        // Doctor already prints its own summary via display_results().
-        // Suppress anyhow error display to avoid duplicate output (DF-045).
-        return crate::adapters::cli::doctor::run_doctor(terminal)
+    if let Some(Command::Doctor { terminal, adapters }) = cli.command {
+        return crate::adapters::cli::doctor::run_doctor(terminal, adapters)
             .await
             .map_err(|e| {
                 tracing::error!("Doctor subcommand failed: {e}");
@@ -626,6 +631,35 @@ pub async fn run() -> Result<()> {
     };
     let compose_snapshot = Arc::new(compose_ctx);
 
+    // Story 8.5 AC-8 — apply startup-time adapter overrides from CLI flags
+    {
+        use crate::domain::models::profile::{AdapterRef, PortDimension};
+        let cli_overrides: [(PortDimension, Option<&str>); 7] = [
+            (PortDimension::Persona, cli.persona.as_deref()),
+            (PortDimension::Memory, cli.memory.as_deref()),
+            (PortDimension::Session, cli.session_adapter.as_deref()),
+            (PortDimension::Tools, cli.tools.as_deref()),
+            (PortDimension::Channels, cli.channels.as_deref()),
+            (PortDimension::Scheduler, cli.scheduler.as_deref()),
+            (PortDimension::Context, cli.context.as_deref()),
+        ];
+        for (port, name_opt) in &cli_overrides {
+            if let Some(name) = name_opt {
+                let adapter_ref = AdapterRef { adapter: name.to_string(), _config: None };
+                match crate::infrastructure::composition::build_for_port(*port, &adapter_ref, &compose_snapshot) {
+                    Ok(built) => {
+                        agent_core_inner.store_for_port(built);
+                        tracing::info!(port = ?port, adapter = %name, source = "cli", "Startup CLI adapter override applied");
+                    }
+                    Err(e) => {
+                        eprintln!("Adapter override failed: --{}='{}' ({})", crate::domain::services::adapter_overlay::port_label(*port), name, e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
+
     // Story 8.3 AC-9 — replace legacy direct port extraction with agent_core-sourced
     let persona: Arc<dyn PersonaPort> =
         Arc::clone(&*agent_core_inner.persona.load());
@@ -841,7 +875,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let unsupported_discovery: Vec<(String, String)> = Vec::new();
+    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
 
     #[cfg(feature = "openai")]
     let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =

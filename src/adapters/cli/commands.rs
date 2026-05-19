@@ -35,6 +35,27 @@ pub struct Cli {
     /// Active profile name. Overrides RUSTAIN_PROFILE env var and active_profile config field. Default: coding.
     #[arg(long, short = 'p', global = true)]
     pub profile: Option<String>,
+    /// Override persona adapter for this session. NOT persisted to profile.
+    #[arg(long, global = true)]
+    pub persona: Option<String>,
+    /// Override memory adapter for this session.
+    #[arg(long, global = true)]
+    pub memory: Option<String>,
+    /// Override session adapter for this session (named --session-adapter to avoid collision with --session resume flag).
+    #[arg(long, global = true)]
+    pub session_adapter: Option<String>,
+    /// Override tools adapter for this session.
+    #[arg(long, global = true)]
+    pub tools: Option<String>,
+    /// Override channels adapter for this session.
+    #[arg(long, global = true)]
+    pub channels: Option<String>,
+    /// Override scheduler adapter for this session.
+    #[arg(long, global = true)]
+    pub scheduler: Option<String>,
+    /// Override context adapter for this session.
+    #[arg(long, global = true)]
+    pub context: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -46,6 +67,9 @@ pub enum Command {
         /// Show detailed terminal diagnostics
         #[arg(long)]
         terminal: bool,
+        /// Run adapter conformance smoke-checks (NFR44)
+        #[arg(long)]
+        adapters: bool,
     },
     /// Import conversation history from another tool
     Migrate {

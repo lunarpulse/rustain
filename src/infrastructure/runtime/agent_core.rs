@@ -46,6 +46,19 @@ impl AgentCore {
     pub(crate) fn wrap<T: ?Sized>(arc: Arc<T>) -> Arc<ArcSwap<Arc<T>>> {
         Arc::new(ArcSwap::from_pointee(arc))
     }
+
+    pub fn store_for_port(&self, built: crate::infrastructure::composition::BuiltAdapter) {
+        use crate::infrastructure::composition::BuiltAdapter;
+        match built {
+            BuiltAdapter::Persona(arc) => self.persona.store(Arc::new(arc)),
+            BuiltAdapter::Memory(arc) => self.memory.store(Arc::new(arc)),
+            BuiltAdapter::Session(arc) => self.session.store(Arc::new(arc)),
+            BuiltAdapter::Tools(arc) => self.tools.store(Arc::new(arc)),
+            BuiltAdapter::Channels(arc) => self.channels.store(Arc::new(arc)),
+            BuiltAdapter::Scheduler(arc) => self.scheduler.store(Arc::new(arc)),
+            BuiltAdapter::Context(arc) => self.context.store(Arc::new(arc)),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -19,11 +19,15 @@ use crate::domain::events::{AppEvent, CompactionPurpose};
 use crate::domain::ports::StreamingProvider;
 
 // By-feature submodules (Task 2 scaffolding — empty stubs until Phase 2/4).
+pub mod adapter_override;
 pub mod bookmark;
 pub mod budget;
+pub mod compact_slash;
 pub mod compaction;
 pub mod config;
+pub mod config_slash;
 pub mod context_warning;
+pub mod export;
 pub mod model_switch;
 pub mod notice;
 pub mod profile_switch;

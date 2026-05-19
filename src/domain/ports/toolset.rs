@@ -14,9 +14,16 @@ use crate::domain::models::{ToolDefinition, ToolResult};
 /// Tool discovery and execution.
 ///
 /// Claudian equivalent: `src/core/tools/toolManager.ts`
+// 2026-05-19 — Story 8.5 added health_snapshot() with default HealthSummary::unknown() impl
+// following additive-with-defaults discipline. No existing adapters needed changes.
+// Real metrics ship with real adapters in Epic 12.
 #[async_trait]
 pub trait ToolSetPort: Send + Sync {
     fn available_tools(&self) -> Vec<ToolDefinition>;
+
+    fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
+        crate::domain::models::HealthSummary::unknown()
+    }
     async fn execute(
         &self,
         tool_name: &str,

@@ -515,6 +515,7 @@ pub async fn run(
         Some(&tab_manager),
         &session_index,
         _ctx_window,
+        &app_state.agent_core,
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
@@ -776,6 +777,36 @@ pub async fn run(
                                 }
                             }
 
+                            if state.active_feedback_id.as_deref().is_some_and(|id| id.starts_with("override-status-")) {
+                                use crate::domain::events::DomainInputEvent;
+                                match &domain_event {
+                                    DomainInputEvent::KeyPress('c') | DomainInputEvent::KeyPress('C') => {
+                                        if let Some(fb_id) = state.active_feedback_id.take() {
+                                            state.feedback_blocks.remove(&fb_id);
+                                        }
+                                        if let Some(port) = state.session_overrides.keys().next().copied() {
+                                            let outcome = handlers::adapter_override::handle_clear_adapter_override(
+                                                &mut state, &app_state.agent_core, &app_state.compose_snapshot,
+                                                &app_state.profile_resolver, port,
+                                            ).await;
+                                            if let HandlerOutcome::Notify(event) = outcome {
+                                                app_state.event_bus.emit_domain(event);
+                                            }
+                                        }
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
+                                        if let Some(fb_id) = state.active_feedback_id.take() {
+                                            state.feedback_blocks.remove(&fb_id);
+                                        }
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    _ => continue,
+                                }
+                            }
+
                             let action = handle_input(&mut state, &domain_event);
 
                             // Update contextual hint whenever focus may have changed (UX-DR93)
@@ -897,7 +928,7 @@ pub async fn run(
                                           app_state.usage_ledger.clone()).await;
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
@@ -1379,6 +1410,30 @@ pub async fn run(
                                     state.focus = FocusState::Chat;
                                     state.needs_redraw = true;
                                 }
+                                InputAction::ApplyAdapterOverride { port, adapter } => {
+                                    let outcome = handlers::adapter_override::handle_apply_adapter_override(
+                                        &mut state, &app_state.agent_core, &app_state.compose_snapshot,
+                                        port, crate::domain::models::AdapterRef { adapter, _config: None },
+                                    ).await;
+                                    match outcome {
+                                        HandlerOutcome::Notify(event) => {
+                                            app_state.event_bus.emit_domain(event);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                InputAction::ClearAdapterOverride { port } => {
+                                    let outcome = handlers::adapter_override::handle_clear_adapter_override(
+                                        &mut state, &app_state.agent_core, &app_state.compose_snapshot,
+                                        &app_state.profile_resolver, port,
+                                    ).await;
+                                    match outcome {
+                                        HandlerOutcome::Notify(event) => {
+                                            app_state.event_bus.emit_domain(event);
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 InputAction::SubmitQuestionAnswer(answer) => {
                                     // Send answer back via oneshot channel
                                     if let Some(tx) = state.question_response_tx.take() {
@@ -1487,17 +1542,9 @@ pub async fn run(
                                             }
                                         }
                                     } else if cmd_name == "compact" {
-                                        // Story 7.4 AC4: /compact slash command
                                         let app_context = AppContext::new(&app_state, &router);
-                                        match handlers::compaction::handle_trigger_compaction(
-                                            &conversation,
-                                            &streaming,
-                                            &mut state,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            CompactionPurpose::Inline,
-                                            &app_context,
+                                        match handlers::compact_slash::handle_compact_slash(
+                                            &conversation, &streaming, &mut state, &provider, config, &domain_tx, &app_context,
                                         ) {
                                             HandlerOutcome::Quiet => {}
                                             HandlerOutcome::RequestCompaction(payload) => {
@@ -1593,19 +1640,53 @@ pub async fn run(
                                             });
                                         }
                                     } else if cmd_name == "config" {
-                                        // /config reload — Story 8.1 AC-9
-                                        if cmd_arg.is_some_and(|a| a.eq_ignore_ascii_case("reload")) {
-                                            app_state.event_bus.emit_domain(AppEvent::ConfigReload);
-                                        } else {
-                                            if !matches!(state.status, StatusState::Flash { .. }) {
-                                                state.status_before_flash = Some(state.status.clone());
+                                        handlers::config_slash::handle_config_slash(&mut state, cmd_arg, &app_state.event_bus);
+                                    } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
+                                        // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
+                                        let cmd_arg = cmd_arg;
+                                        match cmd_arg.as_deref().map(str::trim).filter(|s: &&str| !s.is_empty()) {
+                                            Some(adapter_name) => {
+                                                let outcome = handlers::adapter_override::handle_apply_adapter_override(
+                                                    &mut state, &app_state.agent_core, &app_state.compose_snapshot,
+                                                    port, crate::domain::models::AdapterRef { adapter: adapter_name.to_string(), _config: None },
+                                                ).await;
+                                                if let HandlerOutcome::Notify(event) = outcome {
+                                                    app_state.event_bus.emit_domain(event);
+                                                }
                                             }
-                                            state.status = StatusState::Flash {
-                                                message: "/config reload — reload configuration from disk"
-                                                    .to_string(),
-                                                remaining_ms: state.theme.timing.status_flash_ms,
-                                            };
-                                            state.needs_redraw = true;
+                                            None => {
+                                                let label = crate::domain::services::adapter_overlay::port_label(port);
+                                                let current = if let Some(ov) = state.session_overrides.get(&port) {
+                                                    ov.adapter.clone()
+                                                } else {
+                                                    crate::domain::services::adapter_overlay::port_label(port).to_string()
+                                                };
+                                                let suffix = if state.session_overrides.contains_key(&port) {
+                                                    " [override]"
+                                                } else {
+                                                    " (profile default)"
+                                                };
+                                                state.status = StatusState::Flash {
+                                                    message: format!("{}: {}{}", label, current, suffix),
+                                                    remaining_ms: state.theme.timing.status_flash_ms,
+                                                };
+                                                if state.session_overrides.contains_key(&port) {
+                                                    let fb = crate::domain::models::FeedbackBlock {
+                                                        id: format!("override-status-{}", std::time::SystemTime::now()
+                                                            .duration_since(std::time::UNIX_EPOCH)
+                                                            .unwrap_or_default()
+                                                            .as_nanos()),
+                                                        level: crate::domain::models::FeedbackLevel::Info,
+                                                        message: format!("{}: {}{}\nPress [c] to clear override, [Esc] to dismiss", label, current, suffix),
+                                                        actions: vec![
+                                                            crate::domain::models::FeedbackAction::Custom("clear-override".into()),
+                                                            crate::domain::models::FeedbackAction::Dismiss,
+                                                        ],
+                                                    };
+                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
+                                                }
+                                                state.needs_redraw = true;
+                                            }
                                         }
                                     } else {
                                         // Check if command matches a discovered skill name (Story 5-2 AC8)
@@ -1723,7 +1804,7 @@ pub async fn run(
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         app_state.usage_ledger.clone()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
@@ -2962,21 +3043,33 @@ pub async fn run(
                                     } else if state.sidebar_visible && state.sidebar_panel == Some(panel_type) {
                                         state.sidebar_visible = false;
                                         state.sidebar_panel = None;
+                                        state.sidebar_entry_count = 0;
                                         state.focus = FocusState::Chat;
                                         state.needs_redraw = true;
                                     } else if state.terminal_width >= layout::SIDEBAR_MIN_WIDTH {
                                         state.sidebar_visible = true;
                                         state.sidebar_panel = Some(panel_type);
+                                        if panel_type == PanelType::Adapters {
+                                            state.sidebar_entry_count = crate::adapters::tui::widgets::adapter_status_panel::port_count();
+                                            if state.sidebar_selected >= state.sidebar_entry_count {
+                                                state.sidebar_selected = 0;
+                                            }
+                                        }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
                                             selected: state.sidebar_selected,
                                         };
                                         state.needs_redraw = true;
                                     } else {
+                                        let narrow_msg = if panel_type == PanelType::Adapters {
+                                            "Adapter Status: terminal too narrow for sidebar — widen to ≥120 cols or use /memory|/persona|... slash commands".to_string()
+                                        } else {
+                                            "Panel requires terminal width >= 120 cols.".to_string()
+                                        };
                                         app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Warning,
-                                            message: "Panel requires terminal width >= 120 cols.".to_string(),
+                                            message: narrow_msg,
                                         });
                                     }
                                 }
@@ -4908,7 +5001,7 @@ pub async fn run(
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         app_state.usage_ledger.clone()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
@@ -5725,7 +5818,7 @@ pub async fn run(
                                                               tab_manager.reset_and_clone_turn_cancel(),
                         app_state.usage_ledger.clone()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                         }
@@ -6579,6 +6672,11 @@ pub async fn run(
                             identity_color,
                             preview,
                         });
+                        if !state.session_overrides.is_empty() {
+                            let cleared_count = state.session_overrides.len();
+                            state.session_overrides.clear();
+                            tracing::info!(cleared_count, "Session adapter overrides cleared on profile switch");
+                        }
                         if state.focus
                             == crate::domain::models::FocusState::Overlay(
                                 crate::domain::models::visual::OverlayType::ProfileSwitcher,
@@ -6635,6 +6733,42 @@ pub async fn run(
                                 profile_name, error, rollback_note
                             ),
                         });
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SessionAdapterOverridden {
+                        port,
+                        adapter_name,
+                        ..
+                    } => {
+                        let label = crate::domain::services::adapter_overlay::port_label(port);
+                        state.status = crate::domain::models::StatusState::Flash {
+                            message: format!(
+                                "{}: {} [override]",
+                                label, adapter_name
+                            ),
+                            remaining_ms: state.theme.timing.status_flash_ms,
+                        };
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SessionAdapterOverrideFailed {
+                        port,
+                        requested_adapter,
+                        error,
+                    } => {
+                        let label = crate::domain::services::adapter_overlay::port_label(port);
+                        let fb = crate::domain::models::FeedbackBlock {
+                            id: format!("override-fail-{}", std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos()),
+                            level: crate::domain::models::FeedbackLevel::Error,
+                            message: format!(
+                                "Override /{} {} failed: {}",
+                                label, requested_adapter, error
+                            ),
+                            actions: vec![],
+                        };
+                        state.feedback_blocks.insert(fb.id.clone(), fb);
                         state.needs_redraw = true;
                     }
                     _ => {
@@ -6809,7 +6943,7 @@ pub async fn run(
 
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
                                         }
@@ -6935,409 +7069,16 @@ pub async fn run(
 // `apply_search_rescan` extracted to `crate::adapters::tui::handlers::search`
 // per Story 8.0a Phase 4 Task 9 (search sub-task).
 
-/// Action returned by `apply_cross_search_query_change` so the event loop
-/// knows whether to spawn an async scan task or skip scanning entirely
-/// (Story 4-4 AC5 + third-audit Fix R4).
-#[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CrossSearchScanAction {
-    /// Query is ≥ 2 chars — the event loop should spawn `run_cross_search`
-    /// with the carried query string.
-    Spawn { query: String },
-    /// Query is < 2 chars — `state.cross_search.results` has already been
-    /// cleared in-place by this helper. No scan should be spawned.
-    Cleared,
-}
+// Cross-search query change guard, results guard, export confirm/cancel/apply,
+// and find_available_numbered_path extracted to
+// `crate::adapters::tui::handlers::export` per Story 8.5 line-budget
+// reduction (D-4 continuation).
+pub use crate::adapters::tui::handlers::export::{
+    apply_confirm_export_overwrite, apply_cancel_export_overwrite,
+    apply_cross_search_query_change, apply_cross_search_results, apply_export_command,
+    CrossSearchResultsOutcome, CrossSearchScanAction,
+};
 
-/// Guard helper for the `CrossSearchQueryChanged` input action. Encapsulates
-/// the "≥ 2 chars → scan, else clear" decision so the event loop and the
-/// tests call the SAME logic — no more tautological copies of the guard
-/// (third-audit Fix R4).
-#[doc(hidden)]
-pub fn apply_cross_search_query_change(state: &mut TuiState) -> CrossSearchScanAction {
-    if state.cross_search.query.chars().count() >= 2 {
-        state.cross_search.running = true;
-        CrossSearchScanAction::Spawn {
-            query: state.cross_search.query.clone(),
-        }
-    } else {
-        state.cross_search.results.clear();
-        state.cross_search.selected = 0;
-        state.cross_search.truncated_by_count = false;
-        state.cross_search.truncated_by_time = false;
-        state.cross_search.running = false;
-        CrossSearchScanAction::Cleared
-    }
-}
-
-/// Story 4-4 AC12 + third-audit Fix R6 — commit the pre-staged export
-/// content when the user confirms the overwrite overlay with `y`.
-///
-/// Atomic write: tmp → fsync → rename, all routed through
-/// `tokio::task::spawn_blocking` so the event loop is never held on disk
-/// latency. Takes `state.pending_export` and clears it regardless of
-/// success/failure. Sets a success or error flash and returns focus to Chat.
-///
-/// Extracted as `pub` so integration tests can exercise the full
-/// confirmation path against a real tempdir workspace.
-#[doc(hidden)]
-pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
-    if let Some((target_path, content)) = state.pending_export.take() {
-        let target_for_msg = target_path.clone();
-        let write_result = tokio::task::spawn_blocking(move || {
-            use std::io::Write as _;
-            let tmp_path = target_path.with_extension("md.tmp");
-            let res: std::io::Result<()> = (|| {
-                let mut f = std::fs::File::create(&tmp_path)?;
-                f.write_all(content.as_bytes())?;
-                f.sync_all()?;
-                drop(f);
-                std::fs::rename(&tmp_path, &target_path)?;
-                Ok(())
-            })();
-            if res.is_err() {
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-            res
-        })
-        .await;
-        match write_result {
-            Ok(Ok(())) => {
-                state.status = StatusState::Flash {
-                    message: format!("Overwrote {}", target_for_msg.display()),
-                    remaining_ms: 3000,
-                };
-            }
-            Ok(Err(e)) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: {}", e),
-                    remaining_ms: 3000,
-                };
-            }
-            Err(join_err) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: {}", join_err),
-                    remaining_ms: 3000,
-                };
-            }
-        }
-    }
-    state.focus = FocusState::Chat;
-    state.needs_redraw = true;
-}
-
-/// Story 4-4 AC12 + third-audit Fix R6 — drop the pre-staged export content
-/// when the user dismisses the overwrite overlay with `n` or `Esc`.
-///
-/// Clears `state.pending_export`, sets a "cancelled" flash, and returns
-/// focus to Chat. The original file on disk is never touched by this path.
-#[doc(hidden)]
-pub fn apply_cancel_export_overwrite(state: &mut TuiState) {
-    state.pending_export = None;
-    state.status = StatusState::Flash {
-        message: "Export cancelled".to_string(),
-        remaining_ms: 2000,
-    };
-    state.focus = FocusState::Chat;
-    state.needs_redraw = true;
-}
-
-/// Outcome returned by `apply_cross_search_results` so callers know whether
-/// the incoming scan results were applied or dropped as stale (Story 4-4 AC5
-/// stale-result guard + third-audit Fix R4).
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrossSearchResultsOutcome {
-    /// Results matched the current query and were written into state.
-    Applied,
-    /// Results were for an older query; discarded silently.
-    DiscardedStale,
-}
-
-/// Handler helper for the `AppEvent::CrossSearchResultsReady` event.
-/// Applies the stale-result guard: if the incoming `query` still matches
-/// `state.cross_search.query`, the results are written into state;
-/// otherwise they're dropped.
-#[doc(hidden)]
-pub fn apply_cross_search_results(
-    state: &mut TuiState,
-    query: String,
-    results: Vec<crate::domain::services::cross_search::CrossSearchResult>,
-    truncated_by_count: bool,
-    truncated_by_time: bool,
-) -> CrossSearchResultsOutcome {
-    if state.cross_search.query != query {
-        return CrossSearchResultsOutcome::DiscardedStale;
-    }
-    state.cross_search.results = results;
-    state.cross_search.truncated_by_count = truncated_by_count;
-    state.cross_search.truncated_by_time = truncated_by_time;
-    state.cross_search.running = false;
-    if state.cross_search.results.is_empty() {
-        state.cross_search.selected = 0;
-    } else {
-        state.cross_search.selected = state
-            .cross_search
-            .selected
-            .min(state.cross_search.results.len() - 1);
-    }
-    CrossSearchResultsOutcome::Applied
-}
-
-// `apply_search_navigate` extracted to `crate::adapters::tui::handlers::search`
-// per Story 8.0a Phase 4 Task 9 (search sub-task).
-// `apply_open_cross_search_result` DEFERRED — see DF-NNN follow-up in
-// `_bmad-output/implementation-artifacts/deferred-work.md`.
-
-// Bookmark handlers extracted to `crate::adapters::tui::handlers::bookmark`
-// per Story 8.0a Phase 4 Task 9 (bookmark sub-task).
-// Old functions: apply_bookmark_toggle, apply_open_bookmark_list, apply_jump_bookmark,
-// apply_delete_bookmark, apply_undo_bookmark_delete.
-
-/// Story 4-4 AC11/AC12: export the active conversation to markdown.
-///
-/// Dual-mode semantics:
-/// - `/export` (no arg) → **auto-number mode**: write to
-///   `.rustain/exports/<slug>.md`, incrementing a `-N` suffix until a free
-///   name is found. Never prompts, never overwrites.
-/// - `/export <filename>` → **explicit-path mode**: write to the named path
-///   relative to `.rustain/exports/`. On collision, opens the Tier-1
-///   `ExportOverwrite` confirmation overlay with the pre-rendered content
-///   stashed in `state.pending_export` for a stable snapshot at confirm time.
-///
-/// Runs async. All blocking filesystem I/O is routed through
-/// `tokio::task::spawn_blocking` so the TUI event loop is never held up by
-/// disk latency.
-///
-/// Path-traversal hardening (second-audit Fix 27): `/export <name>` rejects
-/// absolute paths and any relative path that contains `..` components, and
-/// additionally verifies the canonicalized parent stays within the
-/// `.rustain/exports/` directory. Supersedes the original Dev Notes wording
-/// that allowed absolute paths.
-///
-/// Atomic write: `.tmp` → `fsync` → `rename` per Dev Notes § Atomic Write
-/// Pattern. Keeps crash-safety guarantees for exported files.
-///
-/// **Visibility:** marked `pub` for integration test access — the tests in
-/// `tests/e2e_export_filesystem.rs` need to exercise the full flow with a
-/// real tempdir workspace. Not intended for external callers.
-#[doc(hidden)]
-pub async fn apply_export_command(
-    arg: Option<&str>,
-    conversation: &Conversation,
-    meta: &crate::domain::models::SessionMeta,
-    workspace_path: &std::path::Path,
-    state: &mut TuiState,
-) {
-    use crate::domain::services::export::{render_conversation_markdown, slugify};
-
-    let exports_dir = workspace_path.join(".rustain").join("exports");
-    // Create the exports dir on a blocking task.
-    {
-        let exports_dir = exports_dir.clone();
-        let create_result =
-            tokio::task::spawn_blocking(move || std::fs::create_dir_all(&exports_dir)).await;
-        match create_result {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: cannot create exports dir: {}", e),
-                    remaining_ms: 3000,
-                };
-                state.needs_redraw = true;
-                return;
-            }
-            Err(join_err) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: {}", join_err),
-                    remaining_ms: 3000,
-                };
-                state.needs_redraw = true;
-                return;
-            }
-        }
-    }
-
-    // Canonicalize the exports_dir for the path-traversal check.
-    let canonical_exports = match tokio::task::spawn_blocking({
-        let exports_dir = exports_dir.clone();
-        move || std::fs::canonicalize(&exports_dir)
-    })
-    .await
-    {
-        Ok(Ok(p)) => p,
-        _ => exports_dir.clone(),
-    };
-
-    // Resolve the target path.
-    let target_path: std::path::PathBuf = match arg {
-        None => {
-            // Auto-number mode — browser-style. Loop unbounded; if the user
-            // has 1000+ exports they hit them in practice, that's their
-            // problem per Story 4-4 Dev Notes § Export Invocation Modes.
-            let base_slug = if conversation.title.is_empty() {
-                format!(
-                    "conversation-{}",
-                    &conversation.id[..8.min(conversation.id.len())]
-                )
-            } else {
-                slugify(&conversation.title)
-            };
-            let candidate = exports_dir.join(format!("{}.md", base_slug));
-            find_available_numbered_path(candidate, &exports_dir, &base_slug).await
-        }
-        Some(name) => {
-            // Explicit-path mode — Phase 3 security: reject absolute paths
-            // and path-traversal attempts that escape the exports dir.
-            let raw = std::path::PathBuf::from(name);
-            if raw.is_absolute() {
-                state.status = StatusState::Flash {
-                    message:
-                        "Export failed: absolute paths are not allowed (use a name relative to .rustain/exports/)"
-                            .to_string(),
-                    remaining_ms: 3500,
-                };
-                state.needs_redraw = true;
-                return;
-            }
-            // Reject paths containing `..` components outright — simpler and
-            // stronger than canonicalize-then-compare because non-existent
-            // files cannot be canonicalized.
-            if raw
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                state.status = StatusState::Flash {
-                    message: "Export failed: path contains '..' — not allowed".to_string(),
-                    remaining_ms: 3500,
-                };
-                state.needs_redraw = true;
-                return;
-            }
-            let candidate = exports_dir.join(&raw);
-            // Defense-in-depth: canonicalize the parent and verify containment.
-            // If the parent doesn't exist yet, that's acceptable — we rejected
-            // `..` above, so the candidate cannot escape.
-            if let Some(parent) = candidate.parent() {
-                if let Ok(Ok(canonical_parent)) = tokio::task::spawn_blocking({
-                    let parent = parent.to_path_buf();
-                    move || std::fs::canonicalize(&parent)
-                })
-                .await
-                {
-                    if !canonical_parent.starts_with(&canonical_exports) {
-                        state.status = StatusState::Flash {
-                            message: "Export failed: target escapes .rustain/exports/".to_string(),
-                            remaining_ms: 3500,
-                        };
-                        state.needs_redraw = true;
-                        return;
-                    }
-                }
-            }
-            candidate
-        }
-    };
-
-    // Render content before checking for collisions so the overlay captures a
-    // stable snapshot (avoids races with the conversation mutating between
-    // the `y` press and the write).
-    let now = crate::domain::models::session_meta::now_unix();
-    let content = render_conversation_markdown(conversation, meta, now);
-
-    // Check collision for explicit-path mode (arg = Some) — open the Tier-1
-    // ExportOverwrite confirmation overlay instead of flashing an error.
-    let target_exists = tokio::task::spawn_blocking({
-        let target_path = target_path.clone();
-        move || target_path.exists()
-    })
-    .await
-    .unwrap_or(false);
-    if arg.is_some() && target_exists {
-        state.pending_export = Some((target_path.clone(), content));
-        state.focus =
-            FocusState::Overlay(crate::domain::models::visual::OverlayType::Confirmation(
-                crate::domain::models::visual::ConfirmationType::ExportOverwrite(target_path),
-            ));
-        state.needs_redraw = true;
-        return;
-    }
-
-    // Atomic write on a blocking thread.
-    let workspace_path_owned = workspace_path.to_path_buf();
-    let target_path_owned = target_path.clone();
-    let write_result = tokio::task::spawn_blocking(move || {
-        use std::io::Write as _;
-        let tmp_path = target_path_owned.with_extension("md.tmp");
-        let write: std::io::Result<()> = (|| {
-            let mut f = std::fs::File::create(&tmp_path)?;
-            f.write_all(content.as_bytes())?;
-            f.sync_all()?;
-            drop(f);
-            std::fs::rename(&tmp_path, &target_path_owned)?;
-            Ok(())
-        })();
-        if write.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        write
-    })
-    .await;
-
-    match write_result {
-        Ok(Ok(())) => {
-            let display_path = target_path
-                .strip_prefix(&workspace_path_owned)
-                .unwrap_or(&target_path);
-            state.status = StatusState::Flash {
-                message: format!("Exported to {}", display_path.display()),
-                remaining_ms: 3000,
-            };
-        }
-        Ok(Err(e)) => {
-            state.status = StatusState::Flash {
-                message: format!("Export failed: {}", e),
-                remaining_ms: 3000,
-            };
-        }
-        Err(join_err) => {
-            state.status = StatusState::Flash {
-                message: format!("Export failed: {}", join_err),
-                remaining_ms: 3000,
-            };
-        }
-    }
-    state.needs_redraw = true;
-}
-
-/// Auto-number helper: walk `<slug>.md`, `<slug>-2.md`, ... until we find a
-/// filename that doesn't exist. Unbounded per spec — in the absurd case of
-/// 10000+ exports the user will notice before we do.
-///
-/// Second-audit Fix 5: the existence probe loop is wrapped in a single
-/// `spawn_blocking` call so the entire walk runs off the async event loop.
-/// For the common case of 0–2 collisions this is a <100 µs round trip.
-async fn find_available_numbered_path(
-    initial: std::path::PathBuf,
-    exports_dir: &std::path::Path,
-    base_slug: &str,
-) -> std::path::PathBuf {
-    let exports_dir_owned = exports_dir.to_path_buf();
-    let exports_dir_fallback = exports_dir_owned.clone();
-    let base_slug_owned = base_slug.to_string();
-    let base_slug_fallback = base_slug_owned.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut path = initial;
-        let mut n: u64 = 2;
-        while path.exists() {
-            path = exports_dir_owned.join(format!("{}-{}.md", base_slug_owned, n));
-            n = n.saturating_add(1);
-        }
-        path
-    })
-    .await
-    .unwrap_or_else(|_| exports_dir_fallback.join(format!("{}.md", base_slug_fallback)))
-}
 
 /// Story 4-4 AC6 (amended): open the selected cross-search result in a new
 /// tab (or switch to its existing tab), scroll to the target message, and
@@ -8166,6 +7907,7 @@ fn render(
     tab_manager_for_bar: Option<&crate::domain::models::tab::TabManager>,
     session_index: &SessionIndex,
     context_window: u32,
+    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Result<()> {
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
@@ -8298,8 +8040,7 @@ fn render(
                                 theme,
                             );
                         }
-                        Some(crate::domain::models::visual::PanelType::Agents)
-                        | Some(crate::domain::models::visual::PanelType::Adapters) => {
+                        Some(crate::domain::models::visual::PanelType::Agents) => {
                             use ratatui::widgets::Widget;
                             let block = ratatui::widgets::Block::default()
                                 .title(" (panel deferred) ")
@@ -8308,6 +8049,25 @@ fn render(
                                     ratatui::style::Style::default().fg(theme.colors.fg_muted),
                                 );
                             block.render(sidebar_area, frame.buffer_mut());
+                        }
+                        Some(crate::domain::models::visual::PanelType::Adapters) => {
+                            use crate::adapters::tui::widgets::adapter_status_panel;
+                            let is_focused = matches!(
+                                state.focus,
+                                FocusState::Sidebar {
+                                    panel: crate::domain::models::visual::PanelType::Adapters,
+                                    ..
+                                }
+                            );
+                            adapter_status_panel::render(
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                agent_core,
+                                &state.session_overrides,
+                                is_focused,
+                                state.sidebar_selected,
+                                theme,
+                            );
                         }
                     }
                 }
@@ -8358,6 +8118,25 @@ fn render(
                                     ratatui::style::Style::default().fg(theme.colors.fg_muted),
                                 );
                             block.render(panel_area, frame.buffer_mut());
+                        }
+                        Some(crate::domain::models::visual::PanelType::Adapters) => {
+                            use crate::adapters::tui::widgets::adapter_status_panel;
+                            let is_focused = matches!(
+                                state.focus,
+                                FocusState::Sidebar {
+                                    panel: crate::domain::models::visual::PanelType::Adapters,
+                                    ..
+                                }
+                            );
+                            adapter_status_panel::render(
+                                panel_area,
+                                frame.buffer_mut(),
+                                agent_core,
+                                &state.session_overrides,
+                                is_focused,
+                                state.sidebar_selected,
+                                theme,
+                            );
                         }
                         _ => {
                             use ratatui::widgets::Widget;

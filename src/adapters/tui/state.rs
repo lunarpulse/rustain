@@ -1317,7 +1317,7 @@ impl WhichKeyState {
         let mut chord_map = HashMap::new();
         chord_map.insert('p', ChordAction::OpenProfileSwitcher);
         chord_map.insert('m', ChordAction::OpenModelSelector);
-        chord_map.insert('a', ChordAction::Noop("Adapter panel — Epic 8".to_string()));
+        chord_map.insert('a', ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Adapters));
         chord_map.insert(
             's',
             ChordAction::Noop("Subagent panel — Epic 10".to_string()),
@@ -1537,6 +1537,10 @@ pub struct TuiState {
     /// Active-profile snapshot — identity color + name for status bar.
     /// Initialized at startup; updated on ProfileSwitched events.
     pub active_profile: Option<crate::domain::models::ActiveProfileSnapshot>,
+    /// Session-scoped adapter overrides (Story 8.5 AC-5). BTreeMap for
+    /// deterministic iteration in panel + tests. Single-writer rule: only
+    /// the override handler and startup hook mutate this.
+    pub session_overrides: std::collections::BTreeMap<crate::domain::models::PortDimension, crate::domain::models::AdapterRef>,
     /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
     pub usage_panel: UsagePanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
@@ -1737,6 +1741,7 @@ impl TuiState {
             session_count: 0,
             current_hint: None,
             density_mode: Default::default(),
+            session_overrides: std::collections::BTreeMap::new(),
             density_user_overridden: false,
             queued_notifications: VecDeque::new(),
             sidebar_visible: false,

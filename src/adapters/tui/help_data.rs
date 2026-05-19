@@ -263,7 +263,7 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Ctrl+X, A",
-                    description: "Adapter panel",
+                    description: "Adapter Status panel (sidebar)",
                     available: true,
                 },
                 HelpBinding {

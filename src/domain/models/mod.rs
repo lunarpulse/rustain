@@ -1,3 +1,4 @@
+pub mod adapter_health;
 pub mod agent;
 pub mod approval;
 pub mod autocomplete;
@@ -97,6 +98,7 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
+pub use adapter_health::{HealthLevel, HealthSummary};
 #[allow(unused_imports)]
 pub use budget::BudgetConfig;
 pub use launch_spec::AgentLaunchSpec;

@@ -56,6 +56,11 @@ pub enum PaletteAction {
     /// Toggle the conversation history sidebar (Ctrl+H).
     // Covers: FR107, UX-DR20
     ToggleSidebar,
+    /// Apply a session-scoped adapter override (Story 8.5 AC-11).
+    ApplyAdapterOverride {
+        port: super::profile::PortDimension,
+        adapter: String,
+    },
     /// No-op — target feature not yet implemented.
     Noop,
 }

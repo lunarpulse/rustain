@@ -184,6 +184,7 @@ pub mod symbols {
     pub const ERROR: char = '✗';
     pub const WARNING: char = '⚠';
     pub const INFO: char = 'ℹ';
+    pub const UNKNOWN: char = '·';
     pub const OWNED: char = '♦';
     pub const PEER: char = '◇';
 }

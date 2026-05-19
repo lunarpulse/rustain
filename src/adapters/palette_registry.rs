@@ -152,6 +152,27 @@ impl PaletteRegistry {
             action: PaletteAction::ExecuteCommand("resume-all-tasks".into(), None),
         });
 
+        for (port_label, port_dim) in [
+            ("persona", crate::domain::models::profile::PortDimension::Persona),
+            ("memory", crate::domain::models::profile::PortDimension::Memory),
+            ("session", crate::domain::models::profile::PortDimension::Session),
+            ("tools", crate::domain::models::profile::PortDimension::Tools),
+            ("channels", crate::domain::models::profile::PortDimension::Channels),
+            ("scheduler", crate::domain::models::profile::PortDimension::Scheduler),
+            ("context", crate::domain::models::profile::PortDimension::Context),
+        ] {
+            self.slash_entries.push(PaletteEntry {
+                name: format!("!{port_label}"),
+                description: format!("Override {port_label} adapter for this session"),
+                shortcut: None,
+                scope: PaletteScope::Adapter,
+                action: PaletteAction::ApplyAdapterOverride {
+                    port: port_dim,
+                    adapter: String::new(),
+                },
+            });
+        }
+
         self.populated_from_discovered = cr_discovered;
     }
 
@@ -433,7 +454,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 20);
+        assert_eq!(reg.all_entries().len(), 34); // 20 base + 7 port slash commands + 7 adapter palette entries (Story 8.5)
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/deactivate"));
@@ -450,7 +471,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 20);
+        assert_eq!(reg.all_entries().len(), 34); // 20 base + 7 port slash + 7 adapter palette
     }
 
     #[test]
@@ -466,19 +487,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 20);
+        assert_eq!(reg.slash_entries.len(), 34); // 20 base + 7 port slash + 7 adapter palette
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 21);
+        assert_eq!(reg.all_entries().len(), 35);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 21);
+        assert_eq!(reg.all_entries().len(), 35);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 22);
+        assert_eq!(reg.all_entries().len(), 36);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 22);
+        assert_eq!(reg.all_entries().len(), 36);
     }
 }

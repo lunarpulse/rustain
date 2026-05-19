@@ -1,4 +1,5 @@
 pub mod adapter_catalog;
+pub mod adapter_overlay;
 pub mod identity_color;
 pub mod swap_tier;
 pub mod approval_runtime;

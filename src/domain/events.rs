@@ -240,6 +240,18 @@ pub enum AppEvent {
         error: String,
         rolled_back: bool,
     },
+    /// Story 8.5 — emitted by handle_apply_adapter_override on success.
+    SessionAdapterOverridden {
+        port: crate::domain::models::PortDimension,
+        adapter_name: String,
+        previous_adapter_name: String,
+    },
+    /// Story 8.5 — emitted on factory error during override application.
+    SessionAdapterOverrideFailed {
+        port: crate::domain::models::PortDimension,
+        requested_adapter: String,
+        error: String,
+    },
     /// Story 6.4: emitted when the executing plan deviates from the approved plan
     /// (auto-skip of blocked tasks; agent-proposed revision deferred to 6.4-FU1).
     /// TUI renders a PlanDeviationCard requiring reapproval in Normal/Plan modes;

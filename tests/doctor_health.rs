@@ -19,7 +19,7 @@ fn test_cli_doctor_subcommand() {
     let cli = Cli::parse_from(["rustain", "doctor"]);
     assert!(matches!(
         cli.command,
-        Some(Command::Doctor { terminal: false })
+        Some(Command::Doctor { terminal: false, adapters: false })
     ));
     assert!(!cli.new);
     assert!(cli.session.is_none());
@@ -33,7 +33,7 @@ fn test_cli_doctor_terminal_flag() {
     let cli = Cli::parse_from(["rustain", "doctor", "--terminal"]);
     assert!(matches!(
         cli.command,
-        Some(Command::Doctor { terminal: true })
+        Some(Command::Doctor { terminal: true, adapters: false })
     ));
 }
 
@@ -78,7 +78,7 @@ fn test_cli_log_level_with_doctor() {
     let cli = Cli::parse_from(["rustain", "--log-level", "debug", "doctor"]);
     assert!(matches!(
         cli.command,
-        Some(Command::Doctor { terminal: false })
+        Some(Command::Doctor { terminal: false, adapters: false })
     ));
     assert_eq!(cli.log_level.as_deref(), Some("debug"));
 }

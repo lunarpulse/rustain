@@ -280,6 +280,13 @@ async fn ac4_signal_cancel_before_shutdown() {
             config_file: None,
             model: None,
             profile: None,
+            persona: None,
+            memory: None,
+            session_adapter: None,
+            tools: None,
+            channels: None,
+            scheduler: None,
+            context: None,
         },
     );
 

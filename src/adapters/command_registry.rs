@@ -92,6 +92,55 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "persona".to_string(),
+                description: "Override persona adapter for this session (e.g. /persona coding). No-arg shows current."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "memory".to_string(),
+                description: "Override memory adapter for this session (e.g. /memory daily-log). No-arg shows current."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "session".to_string(),
+                description: "Override session adapter for this session."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "tools".to_string(),
+                description: "Override tools adapter for this session."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "channels".to_string(),
+                description: "Override channels adapter for this session."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "scheduler".to_string(),
+                description: "Override scheduler adapter for this session."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "context".to_string(),
+                description: "Override context adapter for this session."
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,
