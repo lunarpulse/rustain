@@ -35,6 +35,7 @@ pub fn render(
     pinned_active: bool,
     daily_budget: Option<&DailyBudgetState>,
     active_profile: Option<&ActiveProfileSnapshot>,
+    density_mode: crate::domain::models::visual::DensityMode,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -72,6 +73,23 @@ pub fn render(
     }
 
     left_spans.push(Span::styled(model_label, Style::default().fg(fg)));
+
+    // Story 8.4b AC-5: Density mode indicator chip [F]/[M]/[D]
+    {
+        use crate::domain::models::visual::DensityMode;
+        let indicator = density_mode.indicator_char();
+        let indicator_style = match density_mode {
+            DensityMode::Focus => Style::default().fg(theme.colors.fg_muted),
+            DensityMode::Monitor => Style::default().fg(theme.colors.accent),
+            DensityMode::Dashboard => Style::default()
+                .fg(theme.colors.accent)
+                .add_modifier(Modifier::BOLD),
+        };
+        left_spans.push(Span::styled(
+            format!(" [{}]", indicator),
+            indicator_style,
+        ));
+    }
 
     if let Some(breadcrumb) = drill_down_breadcrumb {
         left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
@@ -319,6 +337,7 @@ pub fn format_token_usage(usage: &UsageInfo) -> String {
 mod tests {
     use super::*;
     use crate::domain::models::StatusState;
+    use crate::domain::models::visual::DensityMode;
 
     #[test]
     fn test_format_token_count_small() {
@@ -411,6 +430,7 @@ mod tests {
                 false,
                 None,
                 None,
+                DensityMode::Focus,
             );
         })
         .unwrap();
@@ -463,6 +483,7 @@ mod tests {
                 false,
                 Some(&db),
                 None,
+                DensityMode::Focus,
             );
         })
         .unwrap();
@@ -518,6 +539,7 @@ mod tests {
                 false,
                 Some(&db),
                 None,
+                DensityMode::Focus,
             );
         })
         .unwrap();

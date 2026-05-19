@@ -330,6 +330,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
     use rustain::domain::models::{PermissionMode, StatusState};
+    use rustain::domain::models::visual::DensityMode;
 
     // Render status bar directly with hint
     let backend = TestBackend::new(120, 1);
@@ -363,6 +364,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
+                DensityMode::Focus,
             );
         })
         .unwrap();

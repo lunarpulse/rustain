@@ -14,6 +14,7 @@ const CHORD_LABELS: &[(char, &str)] = &[
     ('L', "og"),
     ('T', "ask"),
     ('U', "sage"),
+    ('F', "ocus"),
     ('W', "atch"),
     ('D', "ashboard"),
     ('?', "all"),

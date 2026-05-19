@@ -193,6 +193,8 @@ pub async fn run(
     }
     state.skill_registry = skill_activator.registry_arc();
     state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
+    // Story 8.4b AC-9: seed initial density mode from config
+    state.density_mode = config.layout.density_mode;
 
     // P-23: Initialize active_profile snapshot from resolved profile
     {
@@ -2920,6 +2922,18 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     }
                                 }
+                                InputAction::SetDensityMode(mode) => {
+                                    if state.density_mode == mode {
+                                        state.status_before_flash = Some(state.status.clone());
+                                        state.status = crate::domain::models::StatusState::Flash {
+                                            message: format!("Already in {} mode", mode.display_label()),
+                                            remaining_ms: state.theme.timing.status_flash_ms,
+                                        };
+                                    } else {
+                                        handlers::notice::apply_density_transition(&mut state, mode, &app_state.event_bus);
+                                    }
+                                    state.needs_redraw = true;
+                                }
                                 InputAction::OpenPanel(panel_type) => {
                                     use crate::domain::models::visual::PanelType;
                                     if panel_type == PanelType::Tasks {
@@ -5101,16 +5115,21 @@ pub async fn run(
                                     state.active_feedback_id = Some(fb_id);
                                     state.status = StatusState::Idle;
                                     state.focus = FocusState::Chat;
+                                    handlers::notice::auto_switch_to_monitor_on_error(&mut state, &app_state.event_bus);
                                 }
                                 crate::domain::models::NoticeLevel::Warning => {
                                     handlers::notice::apply_warning_notice(&mut state, msg);
                                 }
                                 _ => {
-                                    state.status_before_flash = Some(state.status.clone());
-                                    state.status = StatusState::Flash {
-                                        message: msg,
-                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                    };
+                                    let flash_duration = state.theme.timing.status_flash_ms;
+                                    crate::adapters::tui::handlers::notice::notify_or_queue(
+                                        &mut state,
+                                        crate::adapters::tui::state::QueuedNotification::StatusFlash {
+                                            level,
+                                            message: msg,
+                                            duration_ms: flash_duration,
+                                        },
+                                    );
                                 }
                             }
                             state.needs_redraw = true;
@@ -8194,6 +8213,7 @@ fn render(
         ref selected_model,
         ref image_indicator,
         ref current_hint,
+        density_mode,
         sidebar_visible,
         ref pending_fork_index,
         ref pending_rewind_index,
@@ -8206,7 +8226,7 @@ fn render(
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area, theme, input_buffer, tab_count, sidebar_visible) {
+        match layout::compute_layout(area, theme, input_buffer, tab_count, sidebar_visible, density_mode) {
             Some(mut app_layout) => {
                 let _is_compact = area.width < 80 || area.height < 24;
 
@@ -8240,9 +8260,9 @@ fn render(
                 }
 
                 // P1/AC1: Render sidebar when visible
+                let active_conv_id =
+                    tab_manager_for_bar.map(|tm| tm.active_tab().conversation.id.as_str());
                 if let Some(sidebar_area) = app_layout.sidebar {
-                    let active_conv_id =
-                        tab_manager_for_bar.map(|tm| tm.active_tab().conversation.id.as_str());
                     match state.sidebar_panel {
                         Some(crate::domain::models::visual::PanelType::Tasks) => {
                             use crate::adapters::tui::widgets::task_panel;
@@ -8288,6 +8308,66 @@ fn render(
                                     ratatui::style::Style::default().fg(theme.colors.fg_muted),
                                 );
                             block.render(sidebar_area, frame.buffer_mut());
+                        }
+                    }
+                }
+
+                // Story 8.4b AC-4: Render dashboard panel when in Dashboard mode
+                if let Some(panel_area) = app_layout.dashboard_panel {
+                    match state.sidebar_panel {
+                        Some(crate::domain::models::visual::PanelType::Tasks) => {
+                            use crate::adapters::tui::widgets::task_panel;
+                            let plan_to_render = task_panel::resolve_panel_plan(
+                                conversation,
+                                state.task_panel_state.last_executed_plan_id.as_deref(),
+                            );
+                            state.task_panel_state.task_count =
+                                plan_to_render.map(|p| p.tasks.len()).unwrap_or(0);
+                            let is_focused = matches!(
+                                state.focus,
+                                FocusState::Sidebar {
+                                    panel: crate::domain::models::visual::PanelType::Tasks,
+                                    ..
+                                }
+                            );
+                            task_panel::render_task_panel(
+                                panel_area,
+                                frame.buffer_mut(),
+                                plan_to_render,
+                                state.task_panel_state.selected_index,
+                                is_focused,
+                                theme,
+                            );
+                        }
+                        Some(crate::domain::models::visual::PanelType::History) => {
+                            sidebar::render_history_panel(
+                                panel_area,
+                                frame.buffer_mut(),
+                                session_index.entries(),
+                                state.sidebar_selected,
+                                active_conv_id,
+                                theme,
+                            );
+                        }
+                        None => {
+                            use ratatui::widgets::Widget;
+                            let block = ratatui::widgets::Block::default()
+                                .title(" No panel selected — Ctrl+X, T for Tasks ")
+                                .borders(ratatui::widgets::Borders::ALL)
+                                .border_style(
+                                    ratatui::style::Style::default().fg(theme.colors.fg_muted),
+                                );
+                            block.render(panel_area, frame.buffer_mut());
+                        }
+                        _ => {
+                            use ratatui::widgets::Widget;
+                            let block = ratatui::widgets::Block::default()
+                                .title(" (panel deferred) ")
+                                .borders(ratatui::widgets::Borders::ALL)
+                                .border_style(
+                                    ratatui::style::Style::default().fg(theme.colors.fg_muted),
+                                );
+                            block.render(panel_area, frame.buffer_mut());
                         }
                     }
                 }
@@ -8816,6 +8896,7 @@ fn render(
                     }),
                     state.daily_budget.as_ref(),
                     state.active_profile.as_ref(),
+                    density_mode,
                 );
                 input_box::render(
                     frame,

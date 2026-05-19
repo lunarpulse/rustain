@@ -218,10 +218,24 @@ impl Default for ToolProgressConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutConfig {
     #[serde(default)]
     pub auto_panels: AutoPanelsConfig,
+    /// Story 8.4b — initial density mode at startup. Default: Focus.
+    /// Overridable at runtime via Ctrl+X, F/W/D chords; the runtime change
+    /// does NOT persist back to the profile TOML.
+    #[serde(default)]
+    pub density_mode: crate::domain::models::visual::DensityMode,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            auto_panels: AutoPanelsConfig::default(),
+            density_mode: crate::domain::models::visual::DensityMode::default(),
+        }
+    }
 }
 
 /// Application configuration loaded from file + env.

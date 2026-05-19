@@ -365,6 +365,7 @@ fn test_status_bar_renders_hint() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
     use rustain::domain::models::{PermissionMode, StatusState};
+    use rustain::domain::models::visual::DensityMode;
 
     let backend = TestBackend::new(120, 1);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -398,6 +399,7 @@ fn test_status_bar_renders_hint() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
+                DensityMode::Focus,
             );
         })
         .unwrap();
@@ -422,6 +424,7 @@ fn test_status_bar_no_hint_when_none() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
     use rustain::domain::models::{PermissionMode, StatusState};
+    use rustain::domain::models::visual::DensityMode;
 
     let backend = TestBackend::new(120, 1);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -455,6 +458,7 @@ fn test_status_bar_no_hint_when_none() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
+                DensityMode::Focus,
             );
         })
         .unwrap();

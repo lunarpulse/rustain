@@ -28,6 +28,10 @@ pub struct AppLayout {
     /// need to re-touch `compute_layout`.
     #[allow(dead_code)]
     pub bookmark_panel: Option<Rect>,
+    /// Dashboard-mode panel area (Story 8.4b AC-4). When in Dashboard mode,
+    /// 70% of the content area is reserved for panel widgets; the bottom 30%
+    /// is compact chat. `None` in Focus/Monitor modes.
+    pub dashboard_panel: Option<Rect>,
 }
 
 impl AppLayout {
@@ -108,6 +112,7 @@ pub fn compute_layout(
     input: &str,
     tab_count: usize,
     sidebar_visible: bool,
+    density_mode: crate::domain::models::visual::DensityMode,
 ) -> Option<AppLayout> {
     if area.width < 60 || area.height < 16 {
         return None;
@@ -118,8 +123,52 @@ pub fn compute_layout(
     // Show tab bar when multiple tabs are open and terminal is wide enough
     let show_tab_bar = tab_count > 1 && area.width >= 80;
 
+    // Dashboard mode: full-width panel (70%) + compact chat (30%), no sidebar
+    if density_mode == crate::domain::models::visual::DensityMode::Dashboard {
+        let tab_bar_height: u16 = if show_tab_bar { 1 } else { 0 };
+        let content_height = area.height.saturating_sub(input_height + 1 + tab_bar_height); // 1 status bar
+        let panel_height = content_height * 7 / 10;
+        let chat_height = content_height - panel_height;
+
+        let mut y = area.y;
+        let tab_bar = if show_tab_bar {
+            let r = Rect::new(area.x, y, area.width, 1);
+            y += 1;
+            Some(r)
+        } else {
+            None
+        };
+        let dashboard_panel = Some(Rect::new(area.x, y, area.width, panel_height));
+        y += panel_height;
+        let chat_pane = Rect::new(area.x, y, area.width, chat_height);
+        y += chat_height;
+        let status_bar = Rect::new(area.x, y, area.width, 1);
+        y += 1;
+        let input_area = Rect::new(area.x, y, area.width, input_height);
+
+        return Some(AppLayout {
+            tab_bar,
+            chat_pane,
+            status_bar,
+            input_area,
+            sidebar: None,
+            search_bar: None,
+            bookmark_panel: None,
+            dashboard_panel,
+        });
+    }
+
+    // Focus mode forces sidebar hidden regardless of the sidebar_visible argument
+    let effective_sidebar_visible = if density_mode == crate::domain::models::visual::DensityMode::Focus {
+        false
+    } else if density_mode == crate::domain::models::visual::DensityMode::Monitor {
+        sidebar_visible
+    } else {
+        sidebar_visible
+    };
+
     // Calculate sidebar width: min(50, terminal_width * 0.3) with minimum of 30
-    let show_sidebar = sidebar_visible && area.width >= SIDEBAR_MIN_WIDTH;
+    let show_sidebar = effective_sidebar_visible && area.width >= SIDEBAR_MIN_WIDTH;
     let sidebar_width = if show_sidebar {
         ((area.width as f32) * 0.3).clamp(30.0, 50.0) as u16
     } else {
@@ -155,6 +204,7 @@ pub fn compute_layout(
                 sidebar: Some(sidebar_rect),
                 search_bar: None,
                 bookmark_panel: None,
+                dashboard_panel: None,
             })
         } else {
             let vertical_chunks = Layout::vertical([
@@ -172,6 +222,7 @@ pub fn compute_layout(
                 sidebar: Some(sidebar_rect),
                 search_bar: None,
                 bookmark_panel: None,
+                dashboard_panel: None,
             })
         }
     } else if show_tab_bar {
@@ -191,6 +242,7 @@ pub fn compute_layout(
             sidebar: None,
             search_bar: None,
             bookmark_panel: None,
+            dashboard_panel: None,
         })
     } else {
         let chunks = Layout::vertical([
@@ -208,6 +260,7 @@ pub fn compute_layout(
             sidebar: None,
             search_bar: None,
             bookmark_panel: None,
+            dashboard_panel: None,
         })
     }
 }
@@ -240,6 +293,7 @@ mod tests {
             sidebar: None,
             search_bar: None,
             bookmark_panel: None,
+            dashboard_panel: None,
         }
     }
 
@@ -312,5 +366,62 @@ mod tests {
         // Top row = search bar, bottom 4 rows = bookmark panel, middle = chat
         assert_eq!(l.chat_pane.y, 1);
         assert_eq!(l.chat_pane.height, 20 - 1 - 4);
+    }
+
+    // Story 8.4b layout tests
+
+    fn test_theme() -> Theme {
+        Theme::for_capability(crate::adapters::tui::color_detect::ColorCapability::TrueColor)
+    }
+
+    #[test]
+    fn dashboard_layout_splits_70_30() {
+        let area = Rect::new(0, 0, 120, 30);
+        let theme = test_theme();
+        let layout = compute_layout(
+            area, &theme, "", 1, false,
+            crate::domain::models::visual::DensityMode::Dashboard,
+        )
+        .unwrap();
+        assert!(layout.dashboard_panel.is_some(), "Dashboard mode must populate dashboard_panel");
+        let panel = layout.dashboard_panel.unwrap();
+        let chat = layout.chat_pane;
+        // Content area = 30 - 1 status - 3 input = 26
+        // Panel = 26 * 7/10 = 18, Chat = 8
+        assert!(layout.sidebar.is_none(), "Dashboard: no sidebar");
+        assert_eq!(panel.height, 18);
+        assert_eq!(chat.height, 8);
+        assert_eq!(panel.y + panel.height, chat.y);
+    }
+
+    #[test]
+    fn focus_forces_sidebar_hidden() {
+        let area = Rect::new(0, 0, 120, 30);
+        let theme = test_theme();
+        let layout = compute_layout(
+            area, &theme, "", 1, true, // sidebar_visible=true
+            crate::domain::models::visual::DensityMode::Focus,
+        )
+        .unwrap();
+        assert!(layout.sidebar.is_none(), "Focus mode must hide sidebar regardless of flag");
+    }
+
+    #[test]
+    fn monitor_preserves_sidebar_behavior() {
+        let area = Rect::new(0, 0, 120, 30);
+        let theme = test_theme();
+        let with_sidebar = compute_layout(
+            area, &theme, "", 1, true,
+            crate::domain::models::visual::DensityMode::Monitor,
+        )
+        .unwrap();
+        assert!(with_sidebar.sidebar.is_some(), "Monitor with visible flag: sidebar shown");
+
+        let without_sidebar = compute_layout(
+            area, &theme, "", 1, false,
+            crate::domain::models::visual::DensityMode::Monitor,
+        )
+        .unwrap();
+        assert!(without_sidebar.sidebar.is_none(), "Monitor with hidden flag: sidebar hidden");
     }
 }

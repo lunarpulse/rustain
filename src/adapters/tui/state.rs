@@ -731,8 +731,26 @@ pub enum ChordAction {
     OpenProfileSwitcher,
     /// Open the usage/cost panel overlay (Story 7.5 AC3).
     OpenUsagePanel,
+    /// Set the information density mode (Story 8.4b AC-1).
+    SetDensityMode(crate::domain::models::visual::DensityMode),
     /// Not yet implemented — show feedback.
     Noop(String),
+}
+
+/// Queued notification for Focus-mode buffering (Story 8.4b AC-8).
+/// Lives in adapters/tui/ — a render-buffer concern, not a domain concept.
+#[derive(Debug, Clone)]
+pub enum QueuedNotification {
+    StatusFlash {
+        level: crate::domain::models::NoticeLevel,
+        message: String,
+        duration_ms: u64,
+    },
+    FeedbackBlock {
+        id: String,
+        level: crate::domain::models::FeedbackLevel,
+        message: String,
+    },
 }
 
 /// A provider column in the model selector dialog (Story 7.2 AC2).
@@ -1310,8 +1328,18 @@ impl WhichKeyState {
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks),
         );
         chord_map.insert('u', ChordAction::OpenUsagePanel);
-        chord_map.insert('w', ChordAction::Noop("Watch/monitor — future".to_string()));
-        chord_map.insert('d', ChordAction::Noop("Dashboard — future".to_string()));
+        chord_map.insert(
+            'w',
+            ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Monitor),
+        );
+        chord_map.insert(
+            'f',
+            ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Focus),
+        );
+        chord_map.insert(
+            'd',
+            ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Dashboard),
+        );
         chord_map.insert('?', ChordAction::ShowHelp);
 
         Self {
@@ -1534,6 +1562,16 @@ pub struct TuiState {
     /// `None` once session_count > theme.timing.status_hint_fade_sessions.
     // Covers: UX-DR93
     pub current_hint: Option<String>,
+    /// Current information density mode (Story 8.4b).
+    /// Controls layout density, sidebar visibility policy, and notification routing.
+    pub density_mode: crate::domain::models::visual::DensityMode,
+    /// Epic-10 hook: auto-trigger logic (e.g., InteractionState::Executing → Monitor)
+    /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
+    /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
+    pub density_user_overridden: bool,
+    /// Notification queue for Focus-mode buffering (Story 8.4b AC-8).
+    /// Bounded at 32; oldest dropped on overflow. Drains FIFO on transition out of Focus.
+    pub queued_notifications: VecDeque<QueuedNotification>,
     /// Whether the history sidebar is visible.
     // Covers: FR107, UX-DR20
     pub sidebar_visible: bool,
@@ -1698,6 +1736,9 @@ impl TuiState {
             is_vscode: false,
             session_count: 0,
             current_hint: None,
+            density_mode: Default::default(),
+            density_user_overridden: false,
+            queued_notifications: VecDeque::new(),
             sidebar_visible: false,
             sidebar_panel: None,
             sidebar_selected: 0,

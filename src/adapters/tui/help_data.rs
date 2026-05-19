@@ -287,13 +287,18 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
+                    key: "Ctrl+X, F",
+                    description: "Focus mode (chat + input only)",
+                    available: true,
+                },
+                HelpBinding {
                     key: "Ctrl+X, W",
-                    description: "Watch / monitor",
+                    description: "Monitor mode (sidebar + banners)",
                     available: true,
                 },
                 HelpBinding {
                     key: "Ctrl+X, D",
-                    description: "Dashboard",
+                    description: "Dashboard mode (panels + compact chat)",
                     available: true,
                 },
                 HelpBinding {

@@ -388,7 +388,7 @@ fn test_tui_renders_with_theme_colors() {
         .draw(|frame| {
             let area = frame.area();
             if let Some(app_layout) =
-                layout::compute_layout(area, &state.theme, &state.input_buffer, 1, false)
+                layout::compute_layout(area, &state.theme, &state.input_buffer, 1, false, rustain::domain::models::visual::DensityMode::Focus)
             {
                 status_bar::render(
                     frame,
@@ -415,6 +415,7 @@ fn test_tui_renders_with_theme_colors() {
                     false,
                     None, // daily_budget (Story 7.5)
                     None,
+                    rustain::domain::models::visual::DensityMode::Focus,
                 );
             }
         })

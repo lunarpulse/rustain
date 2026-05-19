@@ -106,6 +106,8 @@ pub enum InputAction {
     /// Toggle the history sidebar (Ctrl+H).
     // Covers: FR107, UX-DR20
     ToggleSidebar,
+    /// Set the information density mode (Ctrl+X, F/W/D). Story 8.4b AC-1.
+    SetDensityMode(crate::domain::models::visual::DensityMode),
     /// Open or toggle a sidebar panel (Ctrl+X, T for Tasks).
     OpenPanel(crate::domain::models::visual::PanelType),
     /// Copy task result/error from drill-down detail view (Story 6-3 AC8).
@@ -612,6 +614,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 ChordAction::OpenUsagePanel => {
                     state.which_key.dismiss();
                     return InputAction::OpenUsagePanel;
+                }
+                ChordAction::SetDensityMode(mode) => {
+                    state.which_key.dismiss();
+                    return InputAction::SetDensityMode(mode);
                 }
             }
             state.needs_redraw = true;

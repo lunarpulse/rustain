@@ -22,6 +22,7 @@ use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, FocusState, MessageRole,
     PermissionMode, StatusState, StopReason, StreamingState, ToolCallInfo,
 };
+use rustain::domain::models::visual::DensityMode;
 
 fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
     Conversation {
@@ -54,7 +55,7 @@ fn render_full_layout(
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let app_layout = layout::compute_layout(area, &theme, "", 1, false)
+            let app_layout = layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus)
                 .expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
@@ -93,6 +94,7 @@ fn render_full_layout(
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
+                DensityMode::Focus,
             );
             input_box::render(
                 frame,
@@ -235,7 +237,7 @@ fn test_permission_prompt_in_full_layout() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let app_layout = layout::compute_layout(area, &theme, "", 1, false)
+            let app_layout = layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus)
                 .expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
@@ -295,6 +297,7 @@ fn test_permission_prompt_in_full_layout() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
+                DensityMode::Focus,
             );
             input_box::render(
                 frame,
@@ -341,7 +344,7 @@ fn test_ask_user_question_in_full_layout() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let app_layout = layout::compute_layout(area, &theme, "", 1, false)
+            let app_layout = layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus)
                 .expect("layout must compute for 80x24");
             chat_pane::render(
                 frame,
@@ -398,6 +401,7 @@ fn test_ask_user_question_in_full_layout() {
                 false,
                 None, // daily_budget (Story 7.5)
                 None,
+                DensityMode::Focus,
             );
             input_box::render(
                 frame,

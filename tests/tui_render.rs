@@ -8,6 +8,7 @@ use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::models::{Conversation, StreamingState};
+use rustain::domain::models::visual::DensityMode;
 
 fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     let backend = TestBackend::new(width, height);
@@ -33,7 +34,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) = layout::compute_layout(area, &state.theme, &state.input_buffer, 1, false) {
+            if let Some(app_layout) =                 layout::compute_layout(area, &state.theme, &state.input_buffer, 1, false, DensityMode::Focus) {
                 chat_pane::render(
                     frame,
                     app_layout.chat_pane,
@@ -70,6 +71,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     None, false,
                     None, // daily_budget (Story 7.5)
                     None,
+                    DensityMode::Focus,
                 );
                 input_box::render(
                     frame,
@@ -146,7 +148,7 @@ fn test_tui_too_small_terminal() {
     let theme = rustain::adapters::tui::theme::Theme::dark();
     let area = ratatui::prelude::Rect::new(0, 0, 50, 12);
     assert!(
-        layout::compute_layout(area, &theme, "", 1, false).is_none(),
+        layout::compute_layout(area, &theme, "", 1, false, DensityMode::Focus).is_none(),
         "Expected None for terminal too small"
     );
 }

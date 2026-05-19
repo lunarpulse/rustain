@@ -27,6 +27,7 @@ use rustain::domain::models::{
     PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
     ToolCallInfo, generate_conversation_id,
 };
+use rustain::domain::models::visual::DensityMode;
 use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::message_builder;
 use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
@@ -253,7 +254,7 @@ impl TestHarness {
             .draw(|frame| {
                 let area = frame.area();
                 if let Some(app_layout) =
-                    layout::compute_layout(area, theme, input_buffer, 1, false)
+                    layout::compute_layout(area, theme, input_buffer, 1, false, DensityMode::Focus)
                 {
                     chat_pane::render(
                         frame,
@@ -293,6 +294,7 @@ impl TestHarness {
                         false,
                         None, // daily_budget (Story 7.5)
                         None,
+                        DensityMode::Focus,
                     );
 
                     input_box::render(
