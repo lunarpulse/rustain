@@ -33,22 +33,50 @@ fn test_swap_tier_total_mapping() {
             tier
         );
     }
-    assert_eq!(all_ports.len(), 7, "PortDimension should have exactly 7 variants");
+    assert_eq!(
+        all_ports.len(),
+        7,
+        "PortDimension should have exactly 7 variants"
+    );
 }
 
 #[test]
 fn test_transition_plan_pure() {
     let current = BTreeMap::from([
-        (PortDimension::Persona, AdapterRef { adapter: "coding".into(), _config: None }),
-        (PortDimension::Memory, AdapterRef { adapter: "project-scoped".into(), _config: None }),
+        (
+            PortDimension::Persona,
+            AdapterRef {
+                adapter: "coding".into(),
+                _config: None,
+            },
+        ),
+        (
+            PortDimension::Memory,
+            AdapterRef {
+                adapter: "project-scoped".into(),
+                _config: None,
+            },
+        ),
     ]);
     let target = BTreeMap::from([
-        (PortDimension::Persona, AdapterRef { adapter: "personal-assistant".into(), _config: None }),
-        (PortDimension::Memory, AdapterRef { adapter: "daily-log".into(), _config: None }),
+        (
+            PortDimension::Persona,
+            AdapterRef {
+                adapter: "personal-assistant".into(),
+                _config: None,
+            },
+        ),
+        (
+            PortDimension::Memory,
+            AdapterRef {
+                adapter: "daily-log".into(),
+                _config: None,
+            },
+        ),
     ]);
-    let first = TransitionPlan::from_selections(&current, &target, "test", 5);
+    let first = TransitionPlan::from_selections(&current, &target, "test", 5, None);
     for _ in 0..100 {
-        let next = TransitionPlan::from_selections(&current, &target, "test", 5);
+        let next = TransitionPlan::from_selections(&current, &target, "test", 5, None);
         assert_eq!(next.diffs.len(), first.diffs.len());
         for (a, b) in next.diffs.iter().zip(first.diffs.iter()) {
             assert_eq!(a.port, b.port);

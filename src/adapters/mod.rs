@@ -22,6 +22,12 @@ pub mod skill_registry;
 pub mod toolset_adapter;
 pub mod tui;
 
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
+#[cfg(feature = "mcp")]
+pub mod composite_toolset_adapter;
+
 #[cfg(feature = "anthropic")]
 pub mod anthropic;
 

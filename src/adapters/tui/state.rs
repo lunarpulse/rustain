@@ -1046,6 +1046,7 @@ impl ProfileSwitcherState {
             &profile.selection.dimensions,
             &profile.name,
             profile.identity_color.0,
+            None,
         );
         Some(plan)
     }
@@ -1317,7 +1318,10 @@ impl WhichKeyState {
         let mut chord_map = HashMap::new();
         chord_map.insert('p', ChordAction::OpenProfileSwitcher);
         chord_map.insert('m', ChordAction::OpenModelSelector);
-        chord_map.insert('a', ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Adapters));
+        chord_map.insert(
+            'a',
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Adapters),
+        );
         chord_map.insert(
             's',
             ChordAction::Noop("Subagent panel — Epic 10".to_string()),
@@ -1540,7 +1544,10 @@ pub struct TuiState {
     /// Session-scoped adapter overrides (Story 8.5 AC-5). BTreeMap for
     /// deterministic iteration in panel + tests. Single-writer rule: only
     /// the override handler and startup hook mutate this.
-    pub session_overrides: std::collections::BTreeMap<crate::domain::models::PortDimension, crate::domain::models::AdapterRef>,
+    pub session_overrides: std::collections::BTreeMap<
+        crate::domain::models::PortDimension,
+        crate::domain::models::AdapterRef,
+    >,
     /// Usage/cost panel state (Ctrl+X, U) (Story 7.5 AC3).
     pub usage_panel: UsagePanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.

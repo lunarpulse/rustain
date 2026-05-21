@@ -10,6 +10,8 @@ mod content;
 pub mod conversation;
 mod focus;
 pub mod launch_spec;
+pub mod mcp_server_spec;
+pub mod mcp_server_state;
 mod message;
 mod notice;
 pub mod palette;
@@ -98,12 +100,20 @@ pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
-pub use adapter_health::{HealthLevel, HealthSummary};
+pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
 #[allow(unused_imports)]
 pub use budget::BudgetConfig;
 pub use launch_spec::AgentLaunchSpec;
+pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
+pub use mcp_server_state::McpConnectionState;
 #[allow(unused_imports)]
 pub use pricing::PricingConfig;
+#[allow(unused_imports)]
+pub use profile::{
+    ActiveProfileSnapshot, AdapterRef, PortDimension, ProfileDefinition, ProfileDescriptor,
+    ProfileId, ProfileIdentityColor, ProfileSelection, ProfileSource, ResolvedProfile,
+    TransitionState,
+};
 #[allow(unused_imports)]
 pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 #[allow(unused_imports)]
@@ -129,5 +139,3 @@ pub use view_state::{
 };
 #[allow(unused_imports)]
 pub use visual::{BlockBorder, DensityMode, OverlayType, PanelType, symbols};
-#[allow(unused_imports)]
-pub use profile::{ActiveProfileSnapshot, AdapterRef, PortDimension, ProfileDefinition, ProfileDescriptor, ProfileId, ProfileIdentityColor, ProfileSelection, ProfileSource, ResolvedProfile, TransitionState};

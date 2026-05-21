@@ -63,6 +63,15 @@ impl HealthSummary {
     }
 }
 
+/// Sub-row for MCP server health in the Adapter Status panel (Story 9.1).
+#[derive(Debug, Clone)]
+pub struct McpHealthRow {
+    pub server_name: String,
+    pub transport: String,
+    pub level: HealthLevel,
+    pub metric: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,11 +100,17 @@ mod tests {
 
     #[test]
     fn test_symbol_uniqueness() {
-        assert_ne!(HealthLevel::Healthy.symbol(), HealthLevel::Degraded.symbol());
+        assert_ne!(
+            HealthLevel::Healthy.symbol(),
+            HealthLevel::Degraded.symbol()
+        );
         assert_ne!(HealthLevel::Healthy.symbol(), HealthLevel::Error.symbol());
         assert_ne!(HealthLevel::Healthy.symbol(), HealthLevel::Unknown.symbol());
         assert_ne!(HealthLevel::Degraded.symbol(), HealthLevel::Error.symbol());
-        assert_ne!(HealthLevel::Degraded.symbol(), HealthLevel::Unknown.symbol());
+        assert_ne!(
+            HealthLevel::Degraded.symbol(),
+            HealthLevel::Unknown.symbol()
+        );
         assert_ne!(HealthLevel::Error.symbol(), HealthLevel::Unknown.symbol());
     }
 }

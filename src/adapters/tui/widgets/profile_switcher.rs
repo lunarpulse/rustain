@@ -104,8 +104,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, them
             height: 2,
             ..area
         };
-        let footer_para =
-            Paragraph::new(footer).style(Style::default().fg(theme.colors.fg_muted));
+        let footer_para = Paragraph::new(footer).style(Style::default().fg(theme.colors.fg_muted));
         frame.render_widget(footer_para, footer_area);
     }
 }
@@ -128,7 +127,11 @@ fn render_preview(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, t
     let mut lines: Vec<Line> = Vec::new();
 
     // Section 1: Hot swaps
-    let hot: Vec<_> = plan.diffs.iter().filter(|d| d.tier == SwapTier::Hot).collect();
+    let hot: Vec<_> = plan
+        .diffs
+        .iter()
+        .filter(|d| d.tier == SwapTier::Hot)
+        .collect();
     if !hot.is_empty() {
         lines.push(Line::from(Span::styled(
             "▸ Hot swaps (< 10ms — imperceptible):",
@@ -205,9 +208,7 @@ fn render_preview(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, t
         Style::default().fg(theme.colors.fg_muted),
     )));
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: true });
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
 
     frame.render_widget(paragraph, area);
 }

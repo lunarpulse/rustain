@@ -70,14 +70,12 @@ impl TransitionPlan {
         target: &BTreeMap<PortDimension, crate::domain::models::AdapterRef>,
         profile_name: &str,
         identity_color: u8,
+        tools_tier_override: Option<SwapTier>,
     ) -> Self {
         let mut diffs = Vec::new();
 
-        let all_keys: std::collections::BTreeSet<PortDimension> = current
-            .keys()
-            .chain(target.keys())
-            .copied()
-            .collect();
+        let all_keys: std::collections::BTreeSet<PortDimension> =
+            current.keys().chain(target.keys()).copied().collect();
 
         for &port in &all_keys {
             let from_adapter = current
@@ -90,9 +88,13 @@ impl TransitionPlan {
                 .unwrap_or_else(|| "none".to_string());
 
             if from_adapter != to_adapter {
+                let tier = match port {
+                    PortDimension::Tools => tools_tier_override.unwrap_or_else(|| swap_tier(port)),
+                    _ => swap_tier(port),
+                };
                 diffs.push(PortDiff {
                     port,
-                    tier: swap_tier(port),
+                    tier,
                     from_adapter,
                     to_adapter,
                     policy: SwapPolicy::default_for(port),
@@ -159,10 +161,22 @@ mod tests {
     #[test]
     fn test_transition_plan_no_diffs_when_selections_equal() {
         let dims_a = BTreeMap::from([
-            (PortDimension::Persona, crate::domain::models::AdapterRef { adapter: "coding".into(), _config: None }),
-            (PortDimension::Memory, crate::domain::models::AdapterRef { adapter: "project-scoped".into(), _config: None }),
+            (
+                PortDimension::Persona,
+                crate::domain::models::AdapterRef {
+                    adapter: "coding".into(),
+                    _config: None,
+                },
+            ),
+            (
+                PortDimension::Memory,
+                crate::domain::models::AdapterRef {
+                    adapter: "project-scoped".into(),
+                    _config: None,
+                },
+            ),
         ]);
-        let plan = TransitionPlan::from_selections(&dims_a, &dims_a, "test", 5);
+        let plan = TransitionPlan::from_selections(&dims_a, &dims_a, "test", 5, None);
         assert!(plan.diffs.is_empty());
         assert_eq!(plan.estimated_ms, 0);
     }
@@ -170,21 +184,75 @@ mod tests {
     #[test]
     fn test_transition_plan_diff_classification() {
         let current = BTreeMap::from([
-            (PortDimension::Persona, crate::domain::models::AdapterRef { adapter: "old".into(), _config: None }),
-            (PortDimension::Memory, crate::domain::models::AdapterRef { adapter: "old".into(), _config: None }),
-            (PortDimension::Channels, crate::domain::models::AdapterRef { adapter: "old".into(), _config: None }),
-            (PortDimension::Scheduler, crate::domain::models::AdapterRef { adapter: "cron".into(), _config: None }),
+            (
+                PortDimension::Persona,
+                crate::domain::models::AdapterRef {
+                    adapter: "old".into(),
+                    _config: None,
+                },
+            ),
+            (
+                PortDimension::Memory,
+                crate::domain::models::AdapterRef {
+                    adapter: "old".into(),
+                    _config: None,
+                },
+            ),
+            (
+                PortDimension::Channels,
+                crate::domain::models::AdapterRef {
+                    adapter: "old".into(),
+                    _config: None,
+                },
+            ),
+            (
+                PortDimension::Scheduler,
+                crate::domain::models::AdapterRef {
+                    adapter: "cron".into(),
+                    _config: None,
+                },
+            ),
         ]);
         let target = BTreeMap::from([
-            (PortDimension::Persona, crate::domain::models::AdapterRef { adapter: "new".into(), _config: None }),
-            (PortDimension::Memory, crate::domain::models::AdapterRef { adapter: "new".into(), _config: None }),
-            (PortDimension::Channels, crate::domain::models::AdapterRef { adapter: "new".into(), _config: None }),
+            (
+                PortDimension::Persona,
+                crate::domain::models::AdapterRef {
+                    adapter: "new".into(),
+                    _config: None,
+                },
+            ),
+            (
+                PortDimension::Memory,
+                crate::domain::models::AdapterRef {
+                    adapter: "new".into(),
+                    _config: None,
+                },
+            ),
+            (
+                PortDimension::Channels,
+                crate::domain::models::AdapterRef {
+                    adapter: "new".into(),
+                    _config: None,
+                },
+            ),
         ]);
-        let plan = TransitionPlan::from_selections(&current, &target, "profile", 6);
+        let plan = TransitionPlan::from_selections(&current, &target, "profile", 6, None);
         assert_eq!(plan.diffs.len(), 4);
-        assert!(plan.diffs.iter().any(|d| d.port == PortDimension::Persona && d.tier == SwapTier::Hot));
-        assert!(plan.diffs.iter().any(|d| d.port == PortDimension::Memory && d.tier == SwapTier::Warm));
-        assert!(plan.diffs.iter().any(|d| d.port == PortDimension::Channels && d.tier == SwapTier::Cold));
+        assert!(
+            plan.diffs
+                .iter()
+                .any(|d| d.port == PortDimension::Persona && d.tier == SwapTier::Hot)
+        );
+        assert!(
+            plan.diffs
+                .iter()
+                .any(|d| d.port == PortDimension::Memory && d.tier == SwapTier::Warm)
+        );
+        assert!(
+            plan.diffs
+                .iter()
+                .any(|d| d.port == PortDimension::Channels && d.tier == SwapTier::Cold)
+        );
         assert!(plan.diffs.iter().any(|d| d.port == PortDimension::Scheduler
             && d.from_adapter == "cron"
             && d.to_adapter == "none"));
@@ -192,8 +260,17 @@ mod tests {
 
     #[test]
     fn test_swap_policy_default_for_returns_carryover() {
-        assert_eq!(SwapPolicy::default_for(PortDimension::Persona), SwapPolicy::CarryOver);
-        assert_eq!(SwapPolicy::default_for(PortDimension::Memory), SwapPolicy::CarryOver);
-        assert_eq!(SwapPolicy::default_for(PortDimension::Channels), SwapPolicy::CarryOver);
+        assert_eq!(
+            SwapPolicy::default_for(PortDimension::Persona),
+            SwapPolicy::CarryOver
+        );
+        assert_eq!(
+            SwapPolicy::default_for(PortDimension::Memory),
+            SwapPolicy::CarryOver
+        );
+        assert_eq!(
+            SwapPolicy::default_for(PortDimension::Channels),
+            SwapPolicy::CarryOver
+        );
     }
 }

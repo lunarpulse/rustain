@@ -86,6 +86,12 @@ pub struct ResolvedProfile {
     pub selection: ProfileSelection,
     pub overrides: Option<figment::value::Value>,
     pub preview: bool,
+    /// MCP servers parsed from workspace `.claude/mcp.json` + profile `[tools.config.mcp.*]`.
+    /// Populated by `TomlProfileResolver` after the 7-layer figment merge (Story 9.1).
+    pub mcp_servers: Vec<crate::domain::models::mcp_server_spec::McpServerSpec>,
+    /// Whether composite tools adapter includes builtin tools (default true).
+    /// Parsed from `[tools.config] include_builtin` in profile TOML (Story 9.1 AC-4).
+    pub include_builtin_tools: bool,
 }
 
 #[derive(Debug, Clone)]

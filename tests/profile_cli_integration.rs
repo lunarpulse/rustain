@@ -65,7 +65,10 @@ fn test_profile_list_json() {
         serde_json::from_str(&stdout).expect("--json output should be valid JSON");
     assert!(parsed.is_array(), "--json output should be an array");
     let arr = parsed.as_array().unwrap();
-    assert!(!arr.is_empty(), "should contain at least the 3 built-in profiles");
+    assert!(
+        !arr.is_empty(),
+        "should contain at least the 3 built-in profiles"
+    );
 }
 
 /// Test 3: `profile show nonexistent` exits 2 with error message.
@@ -81,7 +84,10 @@ fn test_profile_show_nonexistent_exits_two() {
         .arg("show")
         .arg("nonexistent-profile-xyz");
     let output = cmd.output().unwrap();
-    assert!(!output.status.success(), "expected non-zero exit for nonexistent profile");
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for nonexistent profile"
+    );
     assert_eq!(output.status.code(), Some(2), "expected exit code 2");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -131,8 +137,13 @@ fn test_profile_show_coding_toml() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Should contain TOML sections for all 7 ports
     for section in &[
-        "[persona]", "[memory]", "[session]", "[tools]",
-        "[channels]", "[scheduler]", "[context]",
+        "[persona]",
+        "[memory]",
+        "[session]",
+        "[tools]",
+        "[channels]",
+        "[scheduler]",
+        "[context]",
     ] {
         assert!(
             stdout.contains(section),
@@ -156,7 +167,10 @@ fn test_profile_import_nonexistent_file_exits_two() {
         .arg("import")
         .arg("/tmp/nonexistent-profile-12345-bogus.toml");
     let output = cmd.output().unwrap();
-    assert!(!output.status.success(), "expected non-zero exit for nonexistent file");
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for nonexistent file"
+    );
 }
 
 /// Test 7: `profile --help` lists all 8 verb names.
@@ -206,10 +220,15 @@ fn test_profile_show_clap_parsing() {
 #[test]
 fn test_profile_create_clap_parsing() {
     let cli = Cli::parse_from([
-        "rustain", "profile", "create",
-        "--name", "my-profile",
-        "--extends", "base",
-        "--from", "coding",
+        "rustain",
+        "profile",
+        "create",
+        "--name",
+        "my-profile",
+        "--extends",
+        "base",
+        "--from",
+        "coding",
     ]);
     assert!(matches!(
         cli.command,
@@ -249,14 +268,20 @@ fn test_profile_validate_clap_parsing() {
     assert!(matches!(
         cli.command,
         Some(rustain::adapters::cli::commands::Command::Profile {
-            action: ProfileAction::Validate { all: true, json: true, name: None },
+            action: ProfileAction::Validate {
+                all: true,
+                json: true,
+                name: None
+            },
         })
     ));
 }
 
 #[test]
 fn test_profile_export_clap_parsing() {
-    let cli = Cli::parse_from(["rustain", "profile", "export", "coding", "--output", "out.toml"]);
+    let cli = Cli::parse_from([
+        "rustain", "profile", "export", "coding", "--output", "out.toml",
+    ]);
     assert!(matches!(
         cli.command,
         Some(rustain::adapters::cli::commands::Command::Profile {
@@ -268,7 +293,13 @@ fn test_profile_export_clap_parsing() {
 #[test]
 fn test_profile_import_clap_parsing() {
     let cli = Cli::parse_from([
-        "rustain", "profile", "import", "some.toml", "--name", "renamed", "--force",
+        "rustain",
+        "profile",
+        "import",
+        "some.toml",
+        "--name",
+        "renamed",
+        "--force",
     ]);
     assert!(matches!(
         cli.command,

@@ -68,7 +68,9 @@ mod tests {
         // Save original
         let orig = std::env::var("RUSTAIN_PROFILE").ok();
         // CONFORMANCE_EXCEPTION: test env manipulation
-        unsafe { std::env::set_var("RUSTAIN_PROFILE", "env-profile"); }
+        unsafe {
+            std::env::set_var("RUSTAIN_PROFILE", "env-profile");
+        }
         let result = effective_profile_name(&cli, &config);
         match orig {
             Some(v) => unsafe { std::env::set_var("RUSTAIN_PROFILE", v) },
@@ -82,7 +84,7 @@ mod tests {
         let cli = make_cli(None);
         let config = make_config("coding");
         // Remove env var if set
-        let orig = std::env::var("RUSTAIN_PROFILE").ok();
+        let orig = std::env::var("RUSTAIN_PROFILE").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
         unsafe { std::env::remove_var("RUSTAIN_PROFILE") };
         let result = effective_profile_name(&cli, &config);
         match orig {
@@ -97,7 +99,7 @@ mod tests {
         let cli = make_cli(Some(""));
         let config = make_config("coding");
         // Remove env var if set
-        let orig = std::env::var("RUSTAIN_PROFILE").ok();
+        let orig = std::env::var("RUSTAIN_PROFILE").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
         unsafe { std::env::remove_var("RUSTAIN_PROFILE") };
         let result = effective_profile_name(&cli, &config);
         match orig {

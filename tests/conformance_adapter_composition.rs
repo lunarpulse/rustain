@@ -12,8 +12,8 @@ use std::sync::Arc;
 use rustain::domain::models::PortDimension;
 use rustain::domain::services::adapter_catalog::AdapterCatalog;
 use rustain::infrastructure::composition::{
-    build_channels, build_context, build_memory, build_persona, build_scheduler, build_session,
-    build_tools, ComposeContext,
+    ComposeContext, build_channels, build_context, build_memory, build_persona, build_scheduler,
+    build_session, build_tools,
 };
 use rustain::infrastructure::runtime::agent_core::AgentCore;
 
@@ -21,8 +21,11 @@ fn test_compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-conformance"),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     }
 }
 
@@ -46,7 +49,23 @@ fn test_all_catalog_names_dispatched() {
                 PortDimension::Persona => build_persona(name, None, &ctx).is_ok(),
                 PortDimension::Memory => build_memory(name, None, &ctx).is_ok(),
                 PortDimension::Session => build_session(name, None, &ctx).is_ok(),
-                PortDimension::Tools => build_tools(name, None, &ctx).is_ok(),
+                PortDimension::Tools => match &name[..] {
+                    "composite" => {
+                        let mut ctx_with_mcp = ctx.clone();
+                        ctx_with_mcp.mcp_servers = vec![rustain::domain::models::McpServerSpec {
+                            id: "test".into(),
+                            transport: rustain::domain::models::McpTransport::Stdio,
+                            command: Some("echo".into()),
+                            args: vec![],
+                            env: std::collections::BTreeMap::new(),
+                            url: None,
+                            persistent: false,
+                            source: rustain::domain::models::McpServerSource::Workspace,
+                        }];
+                        build_tools(name, None, &ctx_with_mcp).is_ok()
+                    }
+                    _ => build_tools(name, None, &ctx).is_ok(),
+                },
                 PortDimension::Channels => match build_channels(name, None, &ctx) {
                     Ok(_) => true,
                     Err(e) => e.to_string().contains("feature not compiled"),

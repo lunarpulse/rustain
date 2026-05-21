@@ -143,6 +143,8 @@ mod tests {
             selection: ProfileSelection { dimensions },
             overrides,
             preview: false,
+            mcp_servers: Vec::new(),
+            include_builtin_tools: true,
         }
     }
 
@@ -150,8 +152,8 @@ mod tests {
     fn test_coding_round_trips_through_loader() {
         use crate::domain::services::adapter_catalog::AdapterCatalog;
         use crate::domain::services::profile_loader::ProfileLoader;
-        use std::collections::HashMap;
         use std::cell::RefCell;
+        use std::collections::HashMap;
 
         struct TestSource {
             profiles: RefCell<HashMap<String, String>>,
@@ -193,8 +195,7 @@ adapter = "default"
         assert!(flat.contains("[persona]"));
         assert!(flat.contains("adapter = \"coding\""));
         // Round-trip: parse back to ProfileDefinition
-        let reparse: crate::domain::models::ProfileDefinition =
-            toml::from_str(&flat).unwrap();
+        let reparse: crate::domain::models::ProfileDefinition = toml::from_str(&flat).unwrap();
         assert_eq!(reparse.name, "coding");
         assert!(reparse.persona.is_some());
         assert_eq!(reparse.persona.unwrap().adapter, "coding");
@@ -211,10 +212,7 @@ adapter = "default"
     fn test_overrides_section_emitted_with_default_plan_mode() {
         // Create a simple override using figment's serialize mechanism
         let mut overrides_toml = toml::Table::new();
-        overrides_toml.insert(
-            "default_plan_mode".to_string(),
-            toml::Value::Boolean(false),
-        );
+        overrides_toml.insert("default_plan_mode".to_string(), toml::Value::Boolean(false));
         let override_val =
             figment::value::Value::serialize(&toml::Value::Table(overrides_toml)).ok();
 

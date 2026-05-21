@@ -62,11 +62,7 @@ pub async fn run_profile_list(
             let desc_trunc = truncate_str(desc, 60);
             println!(
                 "{:<2} {:<25} {:<40} {:<10} {:<60}",
-                active_marker,
-                p.name,
-                source_trunc,
-                preview_str,
-                desc_trunc
+                active_marker, p.name, source_trunc, preview_str, desc_trunc
             );
         }
     }

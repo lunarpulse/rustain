@@ -1,7 +1,7 @@
 //! `/compact` slash command handler — extracted from event_loop.rs (Story 8.5 Option A).
 
-use crate::adapters::tui::handlers::compaction;
 use crate::adapters::tui::handlers::HandlerOutcome;
+use crate::adapters::tui::handlers::compaction;
 use crate::domain::events::CompactionPurpose;
 use crate::infrastructure::runtime::app_context::AppContext;
 

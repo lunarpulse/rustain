@@ -7,8 +7,8 @@ use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
-use rustain::domain::models::{Conversation, StreamingState};
 use rustain::domain::models::visual::DensityMode;
+use rustain::domain::models::{Conversation, StreamingState};
 
 fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
     let backend = TestBackend::new(width, height);

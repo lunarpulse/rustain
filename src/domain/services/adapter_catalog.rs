@@ -15,8 +15,16 @@ pub struct AdapterDescriptor {
 }
 
 impl AdapterDescriptor {
-    pub const fn new(name: &'static str, feature_gate: Option<&'static str>, fallback: Option<&'static str>) -> Self {
-        Self { name, feature_gate, fallback }
+    pub const fn new(
+        name: &'static str,
+        feature_gate: Option<&'static str>,
+        fallback: Option<&'static str>,
+    ) -> Self {
+        Self {
+            name,
+            feature_gate,
+            fallback,
+        }
     }
 }
 
@@ -26,18 +34,12 @@ pub struct AdapterCatalog;
 impl AdapterCatalog {
     /// Returns the list of known adapter names for a given port dimension.
     pub fn known_for(port: PortDimension) -> Vec<&'static str> {
-        catalog_for(port)
-            .iter()
-            .map(|d| d.name)
-            .collect()
+        catalog_for(port).iter().map(|d| d.name).collect()
     }
 
     /// Look up an adapter descriptor by port and name.
     pub fn lookup(port: PortDimension, name: &str) -> Option<&'static AdapterDescriptor> {
-        catalog_for(port)
-            .iter()
-            .find(|d| d.name == name)
-            .copied()
+        catalog_for(port).iter().find(|d| d.name == name).copied()
     }
 
     /// Returns the fallback adapter name for a feature-gated adapter, or None.
@@ -58,6 +60,7 @@ impl AdapterCatalog {
             "telegram" => cfg!(feature = "telegram"),
             "cron" => cfg!(feature = "cron"),
             "gmail" => cfg!(feature = "gmail"),
+            "mcp" => cfg!(feature = "mcp"),
             _ => false,
         }
     }
@@ -138,6 +141,11 @@ static TOOLS_ADAPTERS: &[&AdapterDescriptor] = &[
         name: "builtin-full",
         feature_gate: None,
         fallback: None,
+    },
+    &AdapterDescriptor {
+        name: "composite",
+        feature_gate: Some("mcp"),
+        fallback: Some("builtin-full"),
     },
 ];
 

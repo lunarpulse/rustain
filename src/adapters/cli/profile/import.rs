@@ -98,7 +98,7 @@ pub async fn run_profile_import(
 
     // Overwrite check
     if dest.exists() && !force {
-        use std::io::{Write, BufRead};
+        use std::io::{BufRead, Write};
         let mut input = String::new();
         print!(
             "Profile '{}' already exists at {}. Overwrite? [y/n] ",
@@ -144,8 +144,8 @@ pub async fn run_profile_import(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::source::SinglePathSource;
+    use super::*;
     use crate::adapters::profile_resolver::embedded::EmbeddedProfileSource;
     use crate::domain::services::profile_loader::ProfileSource as LoaderProfileSource;
 

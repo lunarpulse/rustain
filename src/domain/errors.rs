@@ -194,15 +194,19 @@ pub enum OwnershipError {
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ProfileError {
-    #[error("Profile '{name}' not found in any search path: {search_paths:?}. \
-             Available built-ins: base, coding, personal-assistant.")]
+    #[error(
+        "Profile '{name}' not found in any search path: {search_paths:?}. \
+             Available built-ins: base, coding, personal-assistant."
+    )]
     ProfileNotFound {
         name: String,
         search_paths: Vec<std::path::PathBuf>,
     },
 
-    #[error("Profile '{child}' extends parent '{parent}' which does not exist. \
-             Searched: {search_paths:?}.")]
+    #[error(
+        "Profile '{child}' extends parent '{parent}' which does not exist. \
+             Searched: {search_paths:?}."
+    )]
     ParentNotFound {
         child: String,
         parent: String,
@@ -364,9 +368,7 @@ pub enum AdapterCompositionError {
 
 #[derive(Debug, Error)]
 pub enum TransitionError {
-    #[error(
-        "Adapter '{adapter_id}' for port '{port_type}' failed prepare_detach: {reason}"
-    )]
+    #[error("Adapter '{adapter_id}' for port '{port_type}' failed prepare_detach: {reason}")]
     PrepareFailed {
         port_type: &'static str,
         adapter_id: String,
@@ -390,9 +392,7 @@ pub enum TransitionError {
         adapter_id: String,
         reason: String,
     },
-    #[error(
-        "Cold-tier adapter '{adapter_id}' on port '{port_type}' loop restart failed: {reason}"
-    )]
+    #[error("Cold-tier adapter '{adapter_id}' on port '{port_type}' loop restart failed: {reason}")]
     RestartFailed {
         port_type: &'static str,
         adapter_id: String,

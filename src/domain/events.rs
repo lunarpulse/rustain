@@ -1,8 +1,7 @@
 use crate::domain::models::tab::ConversationId;
 use crate::domain::models::view_state::ScrollDelta;
 use crate::domain::models::{
-    NoticeLevel, PermissionMode, ProfileIdentityColor, SkillTrustResponse, StreamChunk,
-    ToolResult,
+    NoticeLevel, PermissionMode, ProfileIdentityColor, SkillTrustResponse, StreamChunk, ToolResult,
 };
 use crate::domain::services::cross_search::CrossSearchResult;
 
@@ -264,6 +263,15 @@ pub enum AppEvent {
         current_step_count: u32,
         changed_steps: Vec<u32>,
         summary: String,
+    },
+    /// Story 9.1 — MCP server connection state changed.
+    /// Emitted by `McpClientAdapter::connect`, `disconnect`, and reconnect tasks.
+    /// The event loop sets `needs_redraw = true` so the Adapter Status panel
+    /// picks up the new state on the next render tick (pull-based model).
+    McpConnectionStateChanged {
+        server_id: String,
+        state: crate::domain::models::McpConnectionState,
+        source_profile: Option<String>,
     },
 }
 

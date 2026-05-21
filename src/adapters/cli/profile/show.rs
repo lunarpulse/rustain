@@ -43,11 +43,13 @@ pub async fn run_profile_show(
 
     let source = determine_source(&name, &profiles_dir);
     let descriptor = {
-        let list_resolver = crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
-            &name, profiles_dir.clone(),
-        ).ok();
-        list_resolver
-            .and_then(|r| r.list_profiles().into_iter().find(|p| p.name == name))
+        let list_resolver =
+            crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
+                &name,
+                profiles_dir.clone(),
+            )
+            .ok();
+        list_resolver.and_then(|r| r.list_profiles().into_iter().find(|p| p.name == name))
     };
 
     // Check output format
@@ -114,7 +116,11 @@ fn determine_source(name: &str, profiles_dir: &std::path::Path) -> ProfileSource
     }
 }
 
-fn resolved_to_json(resolved: &crate::domain::models::ResolvedProfile, source: ProfileSource, descriptor: Option<&crate::domain::models::ProfileDescriptor>) -> serde_json::Value {
+fn resolved_to_json(
+    resolved: &crate::domain::models::ResolvedProfile,
+    source: ProfileSource,
+    descriptor: Option<&crate::domain::models::ProfileDescriptor>,
+) -> serde_json::Value {
     use crate::domain::services::identity_color;
 
     let mut selection_map = serde_json::Map::new();
@@ -129,7 +135,10 @@ fn resolved_to_json(resolved: &crate::domain::models::ResolvedProfile, source: P
     ];
     for (label, dim) in &port_order {
         if let Some(ar) = resolved.selection.dimensions.get(dim) {
-            selection_map.insert(label.to_string(), serde_json::Value::String(ar.adapter.clone()));
+            selection_map.insert(
+                label.to_string(),
+                serde_json::Value::String(ar.adapter.clone()),
+            );
         }
     }
 
@@ -159,9 +168,22 @@ fn color_name(_name: &str) -> &'static str {
     // Match on the identity color value; for now return descriptive string
     // The color->ANSI name mapping (0-15):
     const NAMES: &[&str] = &[
-        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
-        "bright black", "bright red", "bright green", "bright yellow",
-        "bright blue", "bright magenta", "bright cyan", "bright white",
+        "black",
+        "red",
+        "green",
+        "yellow",
+        "blue",
+        "magenta",
+        "cyan",
+        "white",
+        "bright black",
+        "bright red",
+        "bright green",
+        "bright yellow",
+        "bright blue",
+        "bright magenta",
+        "bright cyan",
+        "bright white",
     ];
     let idx = identity_color_value(_name) as usize;
     if idx < NAMES.len() {
@@ -214,7 +236,10 @@ mod tests {
         let profiles_dir = tmp.path().join("profiles");
         std::fs::create_dir_all(&profiles_dir).unwrap();
         // No user file → builtin
-        assert_eq!(determine_source("coding", &profiles_dir), ProfileSource::Builtin);
+        assert_eq!(
+            determine_source("coding", &profiles_dir),
+            ProfileSource::Builtin
+        );
     }
 
     #[test]
@@ -222,11 +247,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let profiles_dir = tmp.path().join("profiles");
         std::fs::create_dir_all(&profiles_dir).unwrap();
-        std::fs::write(
-            profiles_dir.join("coding.toml"),
-            "name = \"coding\"\n",
-        )
-        .unwrap();
-        assert_eq!(determine_source("coding", &profiles_dir), ProfileSource::User);
+        std::fs::write(profiles_dir.join("coding.toml"), "name = \"coding\"\n").unwrap();
+        assert_eq!(
+            determine_source("coding", &profiles_dir),
+            ProfileSource::User
+        );
     }
 }

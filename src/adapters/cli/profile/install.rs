@@ -13,7 +13,7 @@ use regex::Regex;
 use super::prompt::{fix_profile_error, validate_profile_name};
 use super::source::SinglePathSource;
 use crate::adapters::cli::commands::Cli;
-use crate::adapters::profile_resolver::embedded::{embedded_names, EmbeddedProfileSource};
+use crate::adapters::profile_resolver::embedded::{EmbeddedProfileSource, embedded_names};
 use crate::domain::errors::ProfileError;
 use crate::domain::models::{AppConfig, PortDimension, ProfileDefinition};
 use crate::domain::ports::ProfileResolver;
@@ -21,13 +21,14 @@ use crate::domain::services::adapter_catalog::AdapterCatalog;
 use crate::domain::services::profile_loader::ProfileLoader;
 use crate::infrastructure::{
     paths,
-    profile_install::{parse_gh_spec, raw_base_url, write_source_sidecar, ParsedGhSpec},
+    profile_install::{ParsedGhSpec, parse_gh_spec, raw_base_url, write_source_sidecar},
 };
 
 const MAX_PROFILE_SIZE: usize = 1024 * 1024; // 1 MB
 
-static PREVIEW_LINE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^preview\s*=\s*(true|false)\s*$").expect("PREVIEW_LINE_RE compile"));
+static PREVIEW_LINE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^preview\s*=\s*(true|false)\s*$").expect("PREVIEW_LINE_RE compile")
+});
 
 static NAME_LINE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?m)^name\s*=\s*"[^"]*""#).expect("NAME_LINE_RE compile"));
@@ -49,10 +50,12 @@ pub async fn run_profile_install(
         }
     };
 
-    let (content, _actual_url) = fetch_profile_toml(&parsed, &spec).await.unwrap_or_else(|e| {
-        eprintln!("Error: {}", e);
-        std::process::exit(2);
-    });
+    let (content, _actual_url) = fetch_profile_toml(&parsed, &spec)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(2);
+        });
 
     // Parse TOML
     let mut def: ProfileDefinition = match toml::from_str(&content) {
@@ -85,11 +88,8 @@ pub async fn run_profile_install(
     }
 
     // Validate and handle feature gating
-    let (def, content_to_write, feature_warnings) = validate_or_flip(
-        &content,
-        def,
-        strict_features,
-    );
+    let (def, content_to_write, feature_warnings) =
+        validate_or_flip(&content, def, strict_features);
 
     // Collision check
     let target_name = name_override.as_deref().unwrap_or(&def.name);
@@ -100,8 +100,7 @@ pub async fn run_profile_install(
     }
 
     // Determine destination
-    let config_dir = paths::config_dir()
-        .context("Failed to determine rustain config directory")?;
+    let config_dir = paths::config_dir().context("Failed to determine rustain config directory")?;
     let profiles_dir = config_dir.join("profiles");
     let community_dir = profiles_dir.join("community");
     std::fs::create_dir_all(&community_dir)?;
@@ -135,7 +134,9 @@ pub async fn run_profile_install(
 
     // Rewrite name field if name_override was set
     let final_content = if name_override.is_some() {
-        NAME_LINE_RE.replace(&content_to_write, format!("name = \"{}\"", target_name)).to_string()
+        NAME_LINE_RE
+            .replace(&content_to_write, format!("name = \"{}\"", target_name))
+            .to_string()
     } else {
         content_to_write
     };
@@ -201,13 +202,21 @@ struct FeatureGateInfo {
 
 /// Scan a ProfileDefinition for all adapters whose cargo features aren't compiled.
 fn scan_features(def: &ProfileDefinition) -> Vec<FeatureGateInfo> {
-    let dims: &[(&str, Option<&crate::domain::models::AdapterRef>, PortDimension)] = &[
+    let dims: &[(
+        &str,
+        Option<&crate::domain::models::AdapterRef>,
+        PortDimension,
+    )] = &[
         ("persona", def.persona.as_ref(), PortDimension::Persona),
         ("memory", def.memory.as_ref(), PortDimension::Memory),
         ("session", def.session.as_ref(), PortDimension::Session),
         ("tools", def.tools.as_ref(), PortDimension::Tools),
         ("channels", def.channels.as_ref(), PortDimension::Channels),
-        ("scheduler", def.scheduler.as_ref(), PortDimension::Scheduler),
+        (
+            "scheduler",
+            def.scheduler.as_ref(),
+            PortDimension::Scheduler,
+        ),
         ("context", def.context.as_ref(), PortDimension::Context),
     ];
     let mut features = Vec::new();
@@ -235,8 +244,8 @@ fn validate_or_flip(
     strict_features: bool,
 ) -> (ProfileDefinition, String, Vec<FeatureGateInfo>) {
     let validate = |content: &str| -> Result<ProfileDefinition, ProfileError> {
-        let def: ProfileDefinition = toml::from_str(content)
-            .map_err(|_| ProfileError::ProfileNotFound {
+        let def: ProfileDefinition =
+            toml::from_str(content).map_err(|_| ProfileError::ProfileNotFound {
                 name: "in-memory".into(),
                 search_paths: vec![],
             })?;
@@ -254,9 +263,11 @@ fn validate_or_flip(
         Ok(parsed_def) => (parsed_def, content.to_string(), Vec::new()),
         Err(ProfileError::AdapterFeatureGated { .. }) if !strict_features => {
             // Check if already preview
-            let already_preview = def.preview || PREVIEW_LINE_RE.captures(content)
-                .and_then(|c| c.get(1).map(|m| m.as_str() == "true"))
-                .unwrap_or(false);
+            let already_preview = def.preview
+                || PREVIEW_LINE_RE
+                    .captures(content)
+                    .and_then(|c| c.get(1).map(|m| m.as_str() == "true"))
+                    .unwrap_or(false);
 
             if already_preview {
                 // No warning needed — upstream already declared preview.
@@ -269,9 +280,7 @@ fn validate_or_flip(
                 let all_features = scan_features(&def);
                 let rewritten = apply_preview_flip(content);
                 match validate(&rewritten) {
-                    Ok(parsed_def) => {
-                        (parsed_def, rewritten, all_features)
-                    }
+                    Ok(parsed_def) => (parsed_def, rewritten, all_features),
                     Err(e) => {
                         eprintln!("Validation still failed after preview flip: {}", e);
                         eprintln!("{}", fix_profile_error(&e));
@@ -290,7 +299,9 @@ fn validate_or_flip(
 
 fn apply_preview_flip(content: &str) -> String {
     if PREVIEW_LINE_RE.is_match(content) {
-        PREVIEW_LINE_RE.replace(content, "preview = true").to_string()
+        PREVIEW_LINE_RE
+            .replace(content, "preview = true")
+            .to_string()
     } else {
         format!("{}\npreview = true\n", content)
     }
@@ -313,7 +324,9 @@ fn check_name_collision(
 
     // Check user profiles
     let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
-    let user_dest = config_dir.join("profiles").join(format!("{}.toml", target_name));
+    let user_dest = config_dir
+        .join("profiles")
+        .join(format!("{}.toml", target_name));
     if user_dest.exists() {
         if !(force && name_override_provided) {
             return Err(format!(
@@ -351,21 +364,24 @@ async fn fetch_profile_toml(parsed: &ParsedGhSpec, spec: &str) -> Result<(String
 
     // Build URL(s) per AC-1 fallback order
     let urls: Vec<String> = if let Some(ref path) = parsed.path {
-        vec![format!("{base}/{}/{}/HEAD/{path}", parsed.user, parsed.repo)]
+        vec![format!(
+            "{base}/{}/{}/HEAD/{path}",
+            parsed.user, parsed.repo
+        )]
     } else {
         vec![
             format!("{base}/{}/{}/HEAD/profile.toml", parsed.user, parsed.repo),
-            format!("{base}/{}/{}/HEAD/{}.toml", parsed.user, parsed.repo, parsed.repo),
+            format!(
+                "{base}/{}/{}/HEAD/{}.toml",
+                parsed.user, parsed.repo, parsed.repo
+            ),
         ]
     };
 
     let mut tried_paths: Vec<String> = Vec::new();
 
     for url in &urls {
-        let short_path = url
-            .strip_prefix(&base)
-            .unwrap_or(url)
-            .to_string();
+        let short_path = url.strip_prefix(&base).unwrap_or(url).to_string();
         tried_paths.push(short_path.clone());
 
         match client.get(url).send().await {
@@ -376,25 +392,21 @@ async fn fetch_profile_toml(parsed: &ParsedGhSpec, spec: &str) -> Result<(String
                     let mut body = Vec::new();
                     while let Ok(Some(chunk)) = response.chunk().await {
                         if body.len() + chunk.len() > MAX_PROFILE_SIZE {
-                            return Err(anyhow::anyhow!(
-                                "profile at gh:{spec} exceeds 1 MB limit"
-                            ));
+                            return Err(anyhow::anyhow!("profile at gh:{spec} exceeds 1 MB limit"));
                         }
                         body.extend_from_slice(&chunk);
                     }
 
-                    let content = String::from_utf8(body)
-                        .map_err(|e| anyhow::anyhow!("Profile content is not valid UTF-8: {}", e))?;
+                    let content = String::from_utf8(body).map_err(|e| {
+                        anyhow::anyhow!("Profile content is not valid UTF-8: {}", e)
+                    })?;
 
                     return Ok((content, url.clone()));
                 } else if status.as_u16() == 404 {
                     continue;
                 } else {
                     // Non-200, non-404 → error
-                    let body_preview = response
-                        .text()
-                        .await
-                        .unwrap_or_default();
+                    let body_preview = response.text().await.unwrap_or_default();
                     let preview = safe_truncate(&body_preview, 200);
                     return Err(anyhow::anyhow!(
                         "HTTP {} from raw.githubusercontent.com for gh:{spec}. {}",
@@ -536,11 +548,17 @@ mod network_tests {
 /// Build the list of fetch URLs (extracted for testability).
 fn build_fetch_urls_for_test(base: &str, parsed: &ParsedGhSpec) -> Vec<String> {
     if let Some(ref path) = parsed.path {
-        vec![format!("{base}/{}/{}/HEAD/{path}", parsed.user, parsed.repo)]
+        vec![format!(
+            "{base}/{}/{}/HEAD/{path}",
+            parsed.user, parsed.repo
+        )]
     } else {
         vec![
             format!("{base}/{}/{}/HEAD/profile.toml", parsed.user, parsed.repo),
-            format!("{base}/{}/{}/HEAD/{}.toml", parsed.user, parsed.repo, parsed.repo),
+            format!(
+                "{base}/{}/{}/HEAD/{}.toml",
+                parsed.user, parsed.repo, parsed.repo
+            ),
         ]
     }
 }

@@ -34,20 +34,23 @@ impl<'a> ProfileLoader<'a> {
         let merged = self.resolve_extends(name, &mut visited, 1)?;
         let validated = self.validate(&merged, name)?;
         let selection = self.build_selection(&validated);
-        let overrides = validated
-            .overrides
-            .and_then(|tv| toml_value_to_figment(tv));
+        let overrides = validated.overrides.and_then(|tv| toml_value_to_figment(tv));
 
         Ok(ResolvedProfile {
             name: name.to_string(),
             selection,
             overrides,
             preview: validated.preview,
+            mcp_servers: Vec::new(),
+            include_builtin_tools: true,
         })
     }
 
     /// Parse a raw TOML string into a `ProfileDefinition`.
-    fn parse(toml_str: &str, source_path: std::path::PathBuf) -> Result<ProfileDefinition, ProfileError> {
+    fn parse(
+        toml_str: &str,
+        source_path: std::path::PathBuf,
+    ) -> Result<ProfileDefinition, ProfileError> {
         toml::from_str::<ProfileDefinition>(toml_str).map_err(|e| ProfileError::Parse {
             path: source_path,
             reason: e.to_string(),
@@ -171,13 +174,48 @@ impl<'a> ProfileLoader<'a> {
         }
 
         // Validate each adapter reference against the catalog
-        self.validate_adapter(def, PortDimension::Persona, def.persona.as_ref().unwrap(), profile_name)?;
-        self.validate_adapter(def, PortDimension::Memory, def.memory.as_ref().unwrap(), profile_name)?;
-        self.validate_adapter(def, PortDimension::Session, def.session.as_ref().unwrap(), profile_name)?;
-        self.validate_adapter(def, PortDimension::Tools, def.tools.as_ref().unwrap(), profile_name)?;
-        self.validate_adapter(def, PortDimension::Channels, def.channels.as_ref().unwrap(), profile_name)?;
-        self.validate_adapter(def, PortDimension::Scheduler, def.scheduler.as_ref().unwrap(), profile_name)?;
-        self.validate_adapter(def, PortDimension::Context, def.context.as_ref().unwrap(), profile_name)?;
+        self.validate_adapter(
+            def,
+            PortDimension::Persona,
+            def.persona.as_ref().unwrap(),
+            profile_name,
+        )?;
+        self.validate_adapter(
+            def,
+            PortDimension::Memory,
+            def.memory.as_ref().unwrap(),
+            profile_name,
+        )?;
+        self.validate_adapter(
+            def,
+            PortDimension::Session,
+            def.session.as_ref().unwrap(),
+            profile_name,
+        )?;
+        self.validate_adapter(
+            def,
+            PortDimension::Tools,
+            def.tools.as_ref().unwrap(),
+            profile_name,
+        )?;
+        self.validate_adapter(
+            def,
+            PortDimension::Channels,
+            def.channels.as_ref().unwrap(),
+            profile_name,
+        )?;
+        self.validate_adapter(
+            def,
+            PortDimension::Scheduler,
+            def.scheduler.as_ref().unwrap(),
+            profile_name,
+        )?;
+        self.validate_adapter(
+            def,
+            PortDimension::Context,
+            def.context.as_ref().unwrap(),
+            profile_name,
+        )?;
 
         Ok(def.clone())
     }
@@ -241,9 +279,7 @@ impl<'a> ProfileLoader<'a> {
                 let mut final_adapter = adapter.clone();
                 // Apply feature-gate fallback for preview profiles
                 if def.preview {
-                    if let Some(fallback) =
-                        AdapterCatalog::fallback_for(*port, &adapter.adapter)
-                    {
+                    if let Some(fallback) = AdapterCatalog::fallback_for(*port, &adapter.adapter) {
                         final_adapter.adapter = fallback.to_string();
                     }
                 }
@@ -271,8 +307,7 @@ fn merge_toml_values(
             for (k, v) in c {
                 match p.get_mut(&k) {
                     Some(existing) if existing.is_table() && v.is_table() => {
-                        let parent_sub =
-                            std::mem::replace(existing, toml::Value::Boolean(false));
+                        let parent_sub = std::mem::replace(existing, toml::Value::Boolean(false));
                         let merged_table = merge_toml_values(Some(parent_sub), Some(v));
                         if let Some(merged) = merged_table {
                             *existing = merged;
@@ -324,10 +359,12 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for i in 1..=alen {
         curr[0] = i;
         for j in 1..=blen {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -338,8 +375,8 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::cell::RefCell;
+    use std::collections::HashMap;
 
     /// In-memory profile source for testing.
     struct TestProfileSource {
@@ -418,10 +455,7 @@ adapter = "workspace"
 [tools]
 adapter = "builtin-full"
 "#;
-        let source = TestProfileSource::new(vec![
-            ("base", &base_toml()),
-            ("coding", coding_toml),
-        ]);
+        let source = TestProfileSource::new(vec![("base", &base_toml()), ("coding", coding_toml)]);
         let loader = make_loader(&source);
         let resolved = loader.load("coding").unwrap();
         // Child overrides
@@ -507,11 +541,7 @@ extends = "l3"
         let a_toml = "name = \"a\"\nextends = \"b\"\n";
         let b_toml = "name = \"b\"\nextends = \"c\"\n";
         let c_toml = "name = \"c\"\nextends = \"a\"\n";
-        let source = TestProfileSource::new(vec![
-            ("a", a_toml),
-            ("b", b_toml),
-            ("c", c_toml),
-        ]);
+        let source = TestProfileSource::new(vec![("a", a_toml), ("b", b_toml), ("c", c_toml)]);
         let loader = make_loader(&source);
         let err = loader.load("a").unwrap_err();
         assert!(matches!(err, ProfileError::CircularExtends { .. }));
@@ -632,10 +662,7 @@ adapter = "default"
         let loader = make_loader(&source);
         if !cfg!(feature = "telegram") {
             let err = loader.load("no-preview").unwrap_err();
-            assert!(matches!(
-                err,
-                ProfileError::AdapterFeatureGated { .. }
-            ));
+            assert!(matches!(err, ProfileError::AdapterFeatureGated { .. }));
         }
     }
 
@@ -666,10 +693,7 @@ extends = "parent"
 model = "child-model"
 log_level = "debug"
 "#;
-        let source = TestProfileSource::new(vec![
-            ("parent", parent_toml),
-            ("child", child_toml),
-        ]);
+        let source = TestProfileSource::new(vec![("parent", parent_toml), ("child", child_toml)]);
         let loader = make_loader(&source);
         let resolved = loader.load("child").unwrap();
         let ov = resolved.overrides.unwrap();

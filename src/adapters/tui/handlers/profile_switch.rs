@@ -6,19 +6,17 @@
 //! `tokio::spawn` body and returns `Result<AppEvent, AppEvent>` for emission.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 
 use crate::adapters::tui::handlers::HandlerOutcome;
 use crate::adapters::tui::state::TuiState;
-use crate::domain::events::AppEvent;
 use crate::domain::errors::TransitionError;
+use crate::domain::events::AppEvent;
 use crate::domain::models::{PortDimension, ProfileIdentityColor, TransitionState};
-use crate::domain::ports::{
-    ChannelPort, MemoryPort, ProfileResolver, SchedulerPort, SessionPort,
-};
+use crate::domain::ports::{ChannelPort, MemoryPort, ProfileResolver, SchedulerPort, SessionPort};
 use crate::domain::services::swap_tier::{PortDiff, SwapPolicy, SwapTier, TransitionPlan};
 use crate::infrastructure::composition::ComposeContext;
 use crate::infrastructure::runtime::agent_core::AgentCore;
@@ -150,16 +148,30 @@ pub async fn handle_profile_switch_requested(
             crate::domain::services::identity_color::derive_identity_color(&target_name, None)
         });
 
+    let tools_tier = agent_core.tools.load_full().swap_tier();
     let plan = TransitionPlan::from_selections(
         &current_selection.dimensions,
         &target_resolved.selection.dimensions,
         &target_name,
         identity_color.0,
+        Some(tools_tier),
     );
 
-    let hot_count = plan.diffs.iter().filter(|d| d.tier == SwapTier::Hot).count();
-    let warm_count = plan.diffs.iter().filter(|d| d.tier == SwapTier::Warm).count();
-    let cold_count = plan.diffs.iter().filter(|d| d.tier == SwapTier::Cold).count();
+    let hot_count = plan
+        .diffs
+        .iter()
+        .filter(|d| d.tier == SwapTier::Hot)
+        .count();
+    let warm_count = plan
+        .diffs
+        .iter()
+        .filter(|d| d.tier == SwapTier::Warm)
+        .count();
+    let cold_count = plan
+        .diffs
+        .iter()
+        .filter(|d| d.tier == SwapTier::Cold)
+        .count();
     tracing::info!(
         profile = %target_name,
         hot_count, warm_count, cold_count,
@@ -192,8 +204,14 @@ pub async fn handle_profile_switch_requested(
     let summary = format!(
         "{} hot, {} warm, {} cold",
         hot_diffs.len(),
-        warm_cold_diffs.iter().filter(|d| d.tier == SwapTier::Warm).count(),
-        warm_cold_diffs.iter().filter(|d| d.tier == SwapTier::Cold).count(),
+        warm_cold_diffs
+            .iter()
+            .filter(|d| d.tier == SwapTier::Warm)
+            .count(),
+        warm_cold_diffs
+            .iter()
+            .filter(|d| d.tier == SwapTier::Cold)
+            .count(),
     );
 
     let _prev_persona = agent_core.persona.load_full();
@@ -205,11 +223,22 @@ pub async fn handle_profile_switch_requested(
     let mut new_tools: Option<Arc<dyn crate::domain::ports::ToolSetPort>> = None;
     let mut new_context: Option<Arc<dyn crate::domain::ports::ContextPort>> = None;
 
+    // P-1: Create a compose context with target profile's MCP servers
+    // (compose_snapshot.mcp_servers holds startup profile's servers, which is stale)
+    let target_compose_ctx = {
+        let mut ctx = (**compose_snapshot).clone();
+        ctx.mcp_servers = target_resolved.mcp_servers.clone();
+        ctx
+    };
+    let target_compose_snapshot = Arc::new(target_compose_ctx);
+
     for diff in &hot_diffs {
         match diff.port {
             PortDimension::Persona => {
                 match crate::infrastructure::composition::build_persona(
-                    &diff.to_adapter, None, compose_snapshot,
+                    &diff.to_adapter,
+                    None,
+                    &target_compose_snapshot,
                 ) {
                     Ok(a) => new_persona = Some(a),
                     Err(e) => {
@@ -223,7 +252,9 @@ pub async fn handle_profile_switch_requested(
             }
             PortDimension::Tools => {
                 match crate::infrastructure::composition::build_tools(
-                    &diff.to_adapter, None, compose_snapshot,
+                    &diff.to_adapter,
+                    None,
+                    &target_compose_snapshot,
                 ) {
                     Ok(a) => new_tools = Some(a),
                     Err(e) => {
@@ -237,7 +268,9 @@ pub async fn handle_profile_switch_requested(
             }
             PortDimension::Context => {
                 match crate::infrastructure::composition::build_context(
-                    &diff.to_adapter, None, compose_snapshot,
+                    &diff.to_adapter,
+                    None,
+                    &target_compose_snapshot,
                 ) {
                     Ok(a) => new_context = Some(a),
                     Err(e) => {
@@ -287,7 +320,7 @@ pub async fn handle_profile_switch_requested(
             identity_color,
             warm_cold_diffs,
             agent_core: Arc::clone(agent_core),
-            compose_snapshot: Arc::clone(compose_snapshot),
+            compose_snapshot: target_compose_snapshot,
             profile_resolver: Arc::clone(profile_resolver),
             app_config: Arc::clone(app_config),
             guard: Some(_guard),
@@ -306,8 +339,16 @@ pub async fn handle_profile_swap_continuation(
     profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     new_resolver: Arc<dyn ProfileResolver>,
 ) -> Result<AppEvent, AppEvent> {
-    let warm_diffs: Vec<_> = diffs.iter().filter(|d| d.tier == SwapTier::Warm).cloned().collect();
-    let cold_diffs: Vec<_> = diffs.iter().filter(|d| d.tier == SwapTier::Cold).cloned().collect();
+    let warm_diffs: Vec<_> = diffs
+        .iter()
+        .filter(|d| d.tier == SwapTier::Warm)
+        .cloned()
+        .collect();
+    let cold_diffs: Vec<_> = diffs
+        .iter()
+        .filter(|d| d.tier == SwapTier::Cold)
+        .cloned()
+        .collect();
 
     let warm_count = warm_diffs.len();
     let cold_count = cold_diffs.len();
@@ -411,13 +452,16 @@ async fn execute_warm_swap(
             let old_arc = agent_core.memory.load_full();
             let state = old_arc.prepare_detach().await?;
 
-            let new_adapter =
-                crate::infrastructure::composition::build_memory(&diff.to_adapter, None, compose_snapshot)
-                    .map_err(|e| TransitionError::PrepareFailed {
-                        port_type: "memory",
-                        adapter_id: diff.to_adapter.clone(),
-                        reason: e.to_string(),
-                    })?;
+            let new_adapter = crate::infrastructure::composition::build_memory(
+                &diff.to_adapter,
+                None,
+                compose_snapshot,
+            )
+            .map_err(|e| TransitionError::PrepareFailed {
+                port_type: "memory",
+                adapter_id: diff.to_adapter.clone(),
+                reason: e.to_string(),
+            })?;
 
             // TODO Story 8.4-FU1: Merge and Selective policies currently fall through to CarryOver
             // until real (non-NoOp) memory/session adapters land in Epic 12+.
@@ -434,13 +478,16 @@ async fn execute_warm_swap(
             let old_arc = agent_core.session.load_full();
             let state = old_arc.prepare_detach().await?;
 
-            let new_adapter =
-                crate::infrastructure::composition::build_session(&diff.to_adapter, None, compose_snapshot)
-                    .map_err(|e| TransitionError::PrepareFailed {
-                        port_type: "session",
-                        adapter_id: diff.to_adapter.clone(),
-                        reason: e.to_string(),
-                    })?;
+            let new_adapter = crate::infrastructure::composition::build_session(
+                &diff.to_adapter,
+                None,
+                compose_snapshot,
+            )
+            .map_err(|e| TransitionError::PrepareFailed {
+                port_type: "session",
+                adapter_id: diff.to_adapter.clone(),
+                reason: e.to_string(),
+            })?;
 
             // TODO Story 8.4-FU1: Merge and Selective policies currently fall through to CarryOver
             // until real (non-NoOp) memory/session adapters land in Epic 12+.
@@ -452,6 +499,40 @@ async fn execute_warm_swap(
             agent_core.session.store(Arc::new(new_adapter));
             let current = agent_core.session.load_full();
             current.post_transition_verify().await?;
+        }
+        PortDimension::Tools => {
+            let old_arc = agent_core.tools.load_full();
+            let state = old_arc.prepare_detach().await?;
+
+            let new_adapter = crate::infrastructure::composition::build_tools(
+                &diff.to_adapter,
+                None,
+                compose_snapshot,
+            )
+            .map_err(|e| TransitionError::PrepareFailed {
+                port_type: "tools",
+                adapter_id: diff.to_adapter.clone(),
+                reason: e.to_string(),
+            })?;
+
+            let effective_state = match diff.policy {
+                SwapPolicy::CarryOver | SwapPolicy::Merge | SwapPolicy::Selective => state,
+                SwapPolicy::FreshStart => TransitionState::empty("tools"),
+            };
+            new_adapter.receive_state(effective_state).await?;
+            agent_core.tools.store(Arc::new(new_adapter));
+            let current = agent_core.tools.load_full();
+            current.post_transition_verify().await?;
+
+            // P-8: Start MCP connections on the new composite adapter after profile switch
+            #[cfg(feature = "mcp")]
+            {
+                use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+                if let Some(composite) = current.as_any().downcast_ref::<CompositeToolsetAdapter>()
+                {
+                    composite.start_mcp_connections();
+                }
+            }
         }
         _ => {
             return Err(TransitionError::PrepareFailed {
@@ -474,13 +555,16 @@ async fn execute_cold_swap(
             let old_arc = agent_core.channels.load_full();
             old_arc.shutdown_loop().await?;
 
-            let new_adapter =
-                crate::infrastructure::composition::build_channels(&diff.to_adapter, None, compose_snapshot)
-                    .map_err(|e| TransitionError::RestartFailed {
-                        port_type: "channels",
-                        adapter_id: diff.to_adapter.clone(),
-                        reason: e.to_string(),
-                    })?;
+            let new_adapter = crate::infrastructure::composition::build_channels(
+                &diff.to_adapter,
+                None,
+                compose_snapshot,
+            )
+            .map_err(|e| TransitionError::RestartFailed {
+                port_type: "channels",
+                adapter_id: diff.to_adapter.clone(),
+                reason: e.to_string(),
+            })?;
 
             agent_core.channels.store(Arc::new(new_adapter));
             let current = agent_core.channels.load_full();
@@ -490,13 +574,16 @@ async fn execute_cold_swap(
             let old_arc = agent_core.scheduler.load_full();
             old_arc.shutdown_loop().await?;
 
-            let new_adapter =
-                crate::infrastructure::composition::build_scheduler(&diff.to_adapter, None, compose_snapshot)
-                    .map_err(|e| TransitionError::RestartFailed {
-                        port_type: "scheduler",
-                        adapter_id: diff.to_adapter.clone(),
-                        reason: e.to_string(),
-                    })?;
+            let new_adapter = crate::infrastructure::composition::build_scheduler(
+                &diff.to_adapter,
+                None,
+                compose_snapshot,
+            )
+            .map_err(|e| TransitionError::RestartFailed {
+                port_type: "scheduler",
+                adapter_id: diff.to_adapter.clone(),
+                reason: e.to_string(),
+            })?;
 
             agent_core.scheduler.store(Arc::new(new_adapter));
             let current = agent_core.scheduler.load_full();

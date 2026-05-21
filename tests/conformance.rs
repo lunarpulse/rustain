@@ -178,17 +178,28 @@ fn test_hexagonal_directory_structure() {
 fn test_no_cross_adapter_imports() {
     let adapter_groups = [("src/adapters/tui", "tui"), ("src/adapters/cli", "cli")];
 
+    let allowed_imports: &[(&str, &str)] = &[(
+        "src/adapters/tui/handlers/config.rs",
+        "crate::adapters::cli::commands::Cli",
+    )];
+
     let mut violations = Vec::new();
 
     for (dir, group_name) in &adapter_groups {
         let files = collect_rs_files(Path::new(dir));
         for file in &files {
             for (line_num, import) in get_imports(file) {
-                // Check for imports from other adapter groups
                 for (_, other_group) in &adapter_groups {
                     if other_group != group_name
                         && import.contains(&format!("crate::adapters::{}", other_group))
                     {
+                        let file_str = file.display().to_string();
+                        if allowed_imports
+                            .iter()
+                            .any(|(path, imp)| file_str.contains(path) && import.contains(imp))
+                        {
+                            continue;
+                        }
                         violations.push(format!(
                             "{}:{} — adapter `{}` imports from adapter `{}`: {}",
                             file.display(),
@@ -269,6 +280,25 @@ fn test_no_raw_env_var_outside_utils() {
         violations.is_empty(),
         "Raw env::var() found outside allowed locations:\n{}",
         violations.join("\n")
+    );
+}
+
+// Covers: Story 9.1 — McpConnectionStateChanged must be projected through emit_domain.
+// The event_bus.rs `from_app_event` match arm must handle this variant so raw
+// subscribers (telemetry, daemon) see MCP connection state changes.
+#[test]
+fn test_mcp_connection_state_changed_routed_through_emit_domain() {
+    let event_bus_source = std::fs::read_to_string("src/infrastructure/runtime/event_bus.rs")
+        .expect("read event_bus.rs");
+
+    assert!(
+        event_bus_source.contains("AppEvent::McpConnectionStateChanged"),
+        "event_bus.rs must handle AppEvent::McpConnectionStateChanged in from_app_event()"
+    );
+
+    assert!(
+        event_bus_source.contains("RawEventKind::McpConnectionStateChanged"),
+        "event_bus.rs must project McpConnectionStateChanged to RawEventKind"
     );
 }
 
@@ -708,7 +738,8 @@ fn test_handler_naming_reflection() {
     // EXCEPT the documented Phase 4 deferral: `apply_open_cross_search_result`
     // calls save_active_tab/load_active_tab (30+ call sites). Full extraction
     // needs a tab_persistence port — filed as DF follow-up.
-    const ALLOWED_EVENT_LOOP_HANDLER_EXCEPTIONS: &[&str] = &["apply_open_cross_search_result", "apply_export_command"];
+    const ALLOWED_EVENT_LOOP_HANDLER_EXCEPTIONS: &[&str] =
+        &["apply_open_cross_search_result", "apply_export_command"];
     let el = std::fs::read_to_string("src/infrastructure/runtime/event_loop.rs")
         .expect("read event_loop.rs");
     let handler_re = regex::Regex::new(
@@ -753,7 +784,7 @@ fn test_handler_naming_reflection() {
     }
     assert_eq!(
         total_handles, EXPECTED_HANDLE_COUNT,
-         "AC-3 violation: expected {} `pub fn handle_*` under src/adapters/tui/handlers/, found {}.",
+        "AC-3 violation: expected {} `pub fn handle_*` under src/adapters/tui/handlers/, found {}.",
         EXPECTED_HANDLE_COUNT, total_handles,
     );
 

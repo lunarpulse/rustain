@@ -249,9 +249,10 @@ async fn ac4_signal_cancel_before_shutdown() {
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(NoOpStorage::default())
-            as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -264,13 +265,15 @@ async fn ac4_signal_cancel_before_shutdown() {
         provider_registry,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
-        Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        Arc::new(ArcSwap::from_pointee(
+            rustain::domain::models::AppConfig::default(),
+        )),
         agent_core,
         compose_snapshot,
-        Arc::new(ArcSwap::from_pointee(
-            Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
-                as Arc<dyn rustain::domain::ports::ProfileResolver>,
-        )),
+        Arc::new(ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::profile_resolver::noop::NoopProfileResolver,
+        )
+            as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         rustain::adapters::cli::commands::Cli {
             log_level: Some("info".to_string()),
             command: None,

@@ -364,8 +364,8 @@ fn test_status_bar_renders_hint() {
     use ratatui::backend::TestBackend;
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
-    use rustain::domain::models::{PermissionMode, StatusState};
     use rustain::domain::models::visual::DensityMode;
+    use rustain::domain::models::{PermissionMode, StatusState};
 
     let backend = TestBackend::new(120, 1);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -423,8 +423,8 @@ fn test_status_bar_no_hint_when_none() {
     use ratatui::backend::TestBackend;
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::status_bar;
-    use rustain::domain::models::{PermissionMode, StatusState};
     use rustain::domain::models::visual::DensityMode;
+    use rustain::domain::models::{PermissionMode, StatusState};
 
     let backend = TestBackend::new(120, 1);
     let mut terminal = Terminal::new(backend).unwrap();

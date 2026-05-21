@@ -92,11 +92,11 @@ pub async fn run() -> Result<()> {
     let bootstrap_config = config::load(&cli, &noop);
 
     // Resolve effective active profile name (CLI > env > config > default "coding")
-    let config_dir = paths::config_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
+    let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
     let profiles_dir = config_dir.join("profiles");
 
-    let effective_name = crate::infrastructure::profile_resolution::effective_profile_name(&cli, &bootstrap_config);
+    let effective_name =
+        crate::infrastructure::profile_resolution::effective_profile_name(&cli, &bootstrap_config);
 
     // Pass 2: construct TomlProfileResolver, load full config with profile overrides at layer 6
     let (toml_resolver, startup_notices): (
@@ -107,23 +107,30 @@ pub async fn run() -> Result<()> {
         profiles_dir.clone(),
     ) {
         Ok(r) => (r, Vec::new()),
-        Err(crate::domain::errors::ProfileError::ProfileNotFound { name, search_paths: _ }) => {
+        Err(crate::domain::errors::ProfileError::ProfileNotFound {
+            name,
+            search_paths: _,
+        }) => {
             // AC-6 fallback: profile not found -> fall back to coding + emit warning
-            tracing::warn!(
-                "Profile '{}' not found; falling back to 'coding'",
-                name
-            );
-            let fallback = match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
-                "coding",
-                profiles_dir.clone(),
-            ) {
-                Ok(r) => r,
-                Err(fallback_err) => {
-                    tracing::error!("Critical: coding profile fallback failed: {}", fallback_err);
-                    eprintln!("Critical: built-in 'coding' profile failed to load: {}", fallback_err);
-                    std::process::exit(2);
-                }
-            };
+            tracing::warn!("Profile '{}' not found; falling back to 'coding'", name);
+            let fallback =
+                match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
+                    "coding",
+                    profiles_dir.clone(),
+                ) {
+                    Ok(r) => r,
+                    Err(fallback_err) => {
+                        tracing::error!(
+                            "Critical: coding profile fallback failed: {}",
+                            fallback_err
+                        );
+                        eprintln!(
+                            "Critical: built-in 'coding' profile failed to load: {}",
+                            fallback_err
+                        );
+                        std::process::exit(2);
+                    }
+                };
             let notices = vec![format!(
                 "Profile '{}' not found in any search path; falling back to 'coding'",
                 name
@@ -154,7 +161,10 @@ pub async fn run() -> Result<()> {
     {
         use crate::domain::ports::ProfileResolver;
         if let Some(resolved) = toml_resolver.resolve_active() {
-            if resolved.preview && !crate::adapters::profile_resolver::embedded::embedded_names().contains(&resolved.name.as_str()) {
+            if resolved.preview
+                && !crate::adapters::profile_resolver::embedded::embedded_names()
+                    .contains(&resolved.name.as_str())
+            {
                 accumulated_notices.push(format!(
                     "Profile '{}' sets preview=true but is not a built-in profile. The preview flag is intended for built-in profiles only.",
                     resolved.name
@@ -164,9 +174,13 @@ pub async fn run() -> Result<()> {
     }
 
     // Wrap resolver for hot-swap (Story 8.4 — profile switching) per Gate 1.5
-    let profile_resolver_arc: Arc<dyn crate::domain::ports::ProfileResolver> = Arc::new(toml_resolver);
-    let profile_resolver_swap: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ProfileResolver>>> =
-        Arc::new(arc_swap::ArcSwap::from_pointee(profile_resolver_arc.clone()));
+    let profile_resolver_arc: Arc<dyn crate::domain::ports::ProfileResolver> =
+        Arc::new(toml_resolver);
+    let profile_resolver_swap: Arc<
+        arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ProfileResolver>>,
+    > = Arc::new(arc_swap::ArcSwap::from_pointee(
+        profile_resolver_arc.clone(),
+    ));
 
     // Replace line: let app_config = config::load(&cli, &NoopProfileResolver);
 
@@ -216,7 +230,10 @@ pub async fn run() -> Result<()> {
         );
     }
     // Story 8.1 AC-9 — Config subcommand intercept
-    if let Some(Command::Config { action: ConfigAction::Reload }) = cli.command {
+    if let Some(Command::Config {
+        action: ConfigAction::Reload,
+    }) = cli.command
+    {
         return crate::adapters::cli::config_cmd::run_config_reload()
             .await
             .map_err(|e| {
@@ -226,7 +243,10 @@ pub async fn run() -> Result<()> {
     }
 
     // Story 8.4 AC-7 — Profile switch subcommand intercept
-    if let Some(Command::Profile { action: ProfileAction::Switch { name, start } }) = &cli.command {
+    if let Some(Command::Profile {
+        action: ProfileAction::Switch { name, start },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_switch(name.clone(), *start)
             .await
             .map_err(|e| {
@@ -236,7 +256,10 @@ pub async fn run() -> Result<()> {
     }
 
     // Profile subcommands (Story 8.6a) — terminate before terminal setup
-    if let Some(Command::Profile { action: ProfileAction::List { json } }) = &cli.command {
+    if let Some(Command::Profile {
+        action: ProfileAction::List { json },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_list(
             *json,
             &profile_resolver_arc,
@@ -249,7 +272,15 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    if let Some(Command::Profile { action: ProfileAction::Show { name, json, toml_out } }) = &cli.command {
+    if let Some(Command::Profile {
+        action:
+            ProfileAction::Show {
+                name,
+                json,
+                toml_out,
+            },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_show(
             name.clone(),
             *json,
@@ -264,7 +295,15 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    if let Some(Command::Profile { action: ProfileAction::Create { name, extends, from } }) = &cli.command {
+    if let Some(Command::Profile {
+        action:
+            ProfileAction::Create {
+                name,
+                extends,
+                from,
+            },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_create(
             name.clone(),
             extends.clone(),
@@ -279,7 +318,10 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    if let Some(Command::Profile { action: ProfileAction::Edit { name, no_validate } }) = &cli.command {
+    if let Some(Command::Profile {
+        action: ProfileAction::Edit { name, no_validate },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_edit(
             name.clone(),
             *no_validate,
@@ -293,7 +335,10 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    if let Some(Command::Profile { action: ProfileAction::Validate { name, all, json } }) = &cli.command {
+    if let Some(Command::Profile {
+        action: ProfileAction::Validate { name, all, json },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_validate(
             name.clone(),
             *all,
@@ -308,7 +353,10 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    if let Some(Command::Profile { action: ProfileAction::Export { name, output } }) = &cli.command {
+    if let Some(Command::Profile {
+        action: ProfileAction::Export { name, output },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_export(
             name.clone(),
             output.clone(),
@@ -322,7 +370,10 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    if let Some(Command::Profile { action: ProfileAction::Import { path, name, force } }) = &cli.command {
+    if let Some(Command::Profile {
+        action: ProfileAction::Import { path, name, force },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_import(
             path.clone(),
             name.clone(),
@@ -340,7 +391,16 @@ pub async fn run() -> Result<()> {
     // Profile install (Story 8.6b) — public-repo HTTPS fetch + validate + community/ dir install.
     // Network call inside; honours --strict-features.
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-    if let Some(Command::Profile { action: ProfileAction::Install { spec, name, force, strict_features } }) = &cli.command {
+    if let Some(Command::Profile {
+        action:
+            ProfileAction::Install {
+                spec,
+                name,
+                force,
+                strict_features,
+            },
+    }) = &cli.command
+    {
         return crate::adapters::cli::profile::run_profile_install(
             spec.clone(),
             name.clone(),
@@ -357,8 +417,13 @@ pub async fn run() -> Result<()> {
         });
     }
     #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
-    if let Some(Command::Profile { action: ProfileAction::Install { .. } }) = &cli.command {
-        eprintln!("Error: 'rustain profile install' requires HTTPS support. Rebuild with --features anthropic.");
+    if let Some(Command::Profile {
+        action: ProfileAction::Install { .. },
+    }) = &cli.command
+    {
+        eprintln!(
+            "Error: 'rustain profile install' requires HTTPS support. Rebuild with --features anthropic."
+        );
         return Err(SubcommandExit.into());
     }
 
@@ -475,9 +540,7 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "openai")]
     {
         // Story 7.7 AC1/AC6 — Tier-0 JSON seed from embedded models_variants.json (zero I/O)
-        if let Some(seed_catalog) =
-            crate::adapters::model_catalog_cache::load_embedded_seed()
-        {
+        if let Some(seed_catalog) = crate::adapters::model_catalog_cache::load_embedded_seed() {
             for target in &discovery_targets {
                 if let Some(entry) = seed_catalog.providers.get(&target.provider_id) {
                     target.adapter.set_discovered_models(entry.models.clone());
@@ -739,6 +802,8 @@ pub async fn run() -> Result<()> {
         project_context: project_context.clone(),
         storage: Arc::clone(&tools_storage) as Arc<dyn StoragePort>,
         skill_activator: Arc::clone(&skill_activator),
+        mcp_servers: resolved.mcp_servers.clone(),
+        include_builtin_tools: resolved.include_builtin_tools,
     };
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
@@ -767,14 +832,26 @@ pub async fn run() -> Result<()> {
         ];
         for (port, name_opt) in &cli_overrides {
             if let Some(name) = name_opt {
-                let adapter_ref = AdapterRef { adapter: name.to_string(), _config: None };
-                match crate::infrastructure::composition::build_for_port(*port, &adapter_ref, &compose_snapshot) {
+                let adapter_ref = AdapterRef {
+                    adapter: name.to_string(),
+                    _config: None,
+                };
+                match crate::infrastructure::composition::build_for_port(
+                    *port,
+                    &adapter_ref,
+                    &compose_snapshot,
+                ) {
                     Ok(built) => {
                         agent_core_inner.store_for_port(built);
                         tracing::info!(port = ?port, adapter = %name, source = "cli", "Startup CLI adapter override applied");
                     }
                     Err(e) => {
-                        eprintln!("Adapter override failed: --{}='{}' ({})", crate::domain::services::adapter_overlay::port_label(*port), name, e);
+                        eprintln!(
+                            "Adapter override failed: --{}='{}' ({})",
+                            crate::domain::services::adapter_overlay::port_label(*port),
+                            name,
+                            e
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -783,10 +860,8 @@ pub async fn run() -> Result<()> {
     }
 
     // Story 8.3 AC-9 — replace legacy direct port extraction with agent_core-sourced
-    let persona: Arc<dyn PersonaPort> =
-        Arc::clone(&*agent_core_inner.persona.load());
-    let tools: Arc<dyn ToolSetPort> =
-        Arc::clone(&*agent_core_inner.tools.load());
+    let persona: Arc<dyn PersonaPort> = Arc::clone(&*agent_core_inner.persona.load());
+    let tools: Arc<dyn ToolSetPort> = Arc::clone(&*agent_core_inner.tools.load());
 
     // Deferred AppState::new — now that AgentCore is composed, create the runtime state
     let (app_state, domain_rx) = AppState::new(
@@ -936,6 +1011,15 @@ pub async fn run() -> Result<()> {
             level: NoticeLevel::Info,
             message: "Mouse scroll enabled. Hold Shift to select text for copy.".to_string(),
         });
+    }
+
+    // Story 9.1 — MCP lazy-connect: spawn after terminal setup, before event loop (NFR10).
+    #[cfg(feature = "mcp")]
+    {
+        use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+        if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+            composite.start_mcp_connections();
+        }
     }
 
     let result = event_loop::run(

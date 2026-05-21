@@ -18,11 +18,15 @@ fn test_embedded_profiles_parse_cleanly() {
     let loader = ProfileLoader::new(&catalog, &source);
 
     for name in &["base", "coding", "personal-assistant"] {
-        let resolved = loader.load(name).unwrap_or_else(|e| {
-            panic!("Built-in profile '{}' failed to load: {}", name, e)
-        });
-        assert_eq!(resolved.selection.dimensions.len(), 7,
-            "Profile '{}' should have all 7 dimensions", name);
+        let resolved = loader
+            .load(name)
+            .unwrap_or_else(|e| panic!("Built-in profile '{}' failed to load: {}", name, e));
+        assert_eq!(
+            resolved.selection.dimensions.len(),
+            7,
+            "Profile '{}' should have all 7 dimensions",
+            name
+        );
     }
 }
 
@@ -80,9 +84,9 @@ fn test_all_referenced_adapters_in_catalog() {
     let loader = ProfileLoader::new(&catalog, &source);
 
     for name in &["base", "coding", "personal-assistant"] {
-        let resolved = loader.load(name).unwrap_or_else(|e| {
-            panic!("Built-in profile '{}' failed to load: {}", name, e)
-        });
+        let resolved = loader
+            .load(name)
+            .unwrap_or_else(|e| panic!("Built-in profile '{}' failed to load: {}", name, e));
 
         for (port, adapter_ref) in &resolved.selection.dimensions {
             assert!(

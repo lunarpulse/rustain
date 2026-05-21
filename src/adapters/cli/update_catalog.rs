@@ -135,7 +135,10 @@ pub async fn run_update_catalog(
     let mut value = serde_json::to_value(&catalog)?;
     if let Some(providers) = value.get_mut("providers").and_then(|p| p.as_object_mut()) {
         for (_key, provider_val) in providers.iter_mut() {
-            if let Some(models) = provider_val.get_mut("models").and_then(|m| m.as_array_mut()) {
+            if let Some(models) = provider_val
+                .get_mut("models")
+                .and_then(|m| m.as_array_mut())
+            {
                 models.sort_by(|a, b| {
                     let a_id = a.get("modelId").and_then(|v| v.as_str()).unwrap_or("");
                     let b_id = b.get("modelId").and_then(|v| v.as_str()).unwrap_or("");

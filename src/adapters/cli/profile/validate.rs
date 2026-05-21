@@ -8,7 +8,7 @@ use anyhow::Result;
 use super::prompt::fix_profile_error;
 use crate::adapters::cli::commands::Cli;
 use crate::domain::errors::ProfileError;
-use crate::domain::models::{AppConfig};
+use crate::domain::models::AppConfig;
 use crate::domain::ports::ProfileResolver;
 use crate::domain::services::identity_color;
 use crate::infrastructure::paths;
@@ -75,7 +75,9 @@ pub async fn run_profile_validate(
                         }));
                     } else {
                         eprintln!("Profile '{}' could not be resolved.", profile_name);
-                        eprintln!("Fix: check that the profile TOML is well-formed and all extends references exist.");
+                        eprintln!(
+                            "Fix: check that the profile TOML is well-formed and all extends references exist."
+                        );
                         eprintln!();
                     }
                 }
@@ -105,13 +107,14 @@ pub async fn run_profile_validate(
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else if do_all && !any_failed {
-        println!(
-            "\nAll {} profile(s) validated successfully.",
-            targets.len()
-        );
+        println!("\nAll {} profile(s) validated successfully.", targets.len());
     }
 
-    tracing::info!(subcommand = "profile-validate", profile_count = targets.len(), any_failed);
+    tracing::info!(
+        subcommand = "profile-validate",
+        profile_count = targets.len(),
+        any_failed
+    );
 
     if any_failed {
         let exit_code = if do_all { 1 } else { 2 };

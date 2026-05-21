@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::adapters::cli::commands::Cli;
+use crate::adapters::cli::commands::Cli; // CONFORMANCE_EXCEPTION: config-reload handler needs CLI struct for re-parsing flags (Story 8-1)
 use crate::domain::errors::DomainError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::AppConfig;
@@ -58,34 +58,36 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
         Err(_) => std::path::PathBuf::from(".rustain/profiles"),
     };
 
-    let new_resolver = match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
-        &effective_name,
-        profiles_dir.clone(),
-    ) {
-        Ok(r) => Some(Arc::new(r) as Arc<dyn ProfileResolver>),
-        Err(crate::domain::errors::ProfileError::ProfileNotFound { name, .. }) => {
-            tracing::warn!("Profile '{}' not found on reload; falling back to 'coding'", name);
-            match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
-                "coding", profiles_dir,
-            ) {
-                Ok(fallback) => Some(Arc::new(fallback) as Arc<dyn ProfileResolver>),
-                Err(e) => {
-                    tracing::error!("Coding fallback failed on reload: {}", e);
-                    None
+    let new_resolver =
+        match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
+            &effective_name,
+            profiles_dir.clone(),
+        ) {
+            Ok(r) => Some(Arc::new(r) as Arc<dyn ProfileResolver>),
+            Err(crate::domain::errors::ProfileError::ProfileNotFound { name, .. }) => {
+                tracing::warn!(
+                    "Profile '{}' not found on reload; falling back to 'coding'",
+                    name
+                );
+                match crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver::new(
+                    "coding",
+                    profiles_dir,
+                ) {
+                    Ok(fallback) => Some(Arc::new(fallback) as Arc<dyn ProfileResolver>),
+                    Err(e) => {
+                        tracing::error!("Coding fallback failed on reload: {}", e);
+                        None
+                    }
                 }
             }
-        }
-        Err(e) => {
-            tracing::warn!("Profile reload failed, keeping previous: {}", e);
-            None
-        }
-    };
+            Err(e) => {
+                tracing::warn!("Profile reload failed, keeping previous: {}", e);
+                None
+            }
+        };
 
     let resolver_ref = new_resolver.as_deref();
-    let result = crate::infrastructure::config::try_load(
-        ctx.cli,
-        resolver_ref.unwrap_or(&noop),
-    );
+    let result = crate::infrastructure::config::try_load(ctx.cli, resolver_ref.unwrap_or(&noop));
 
     match result {
         Ok(new_config) => {
@@ -102,28 +104,40 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
             if let Some(resolver_arc) = new_resolver.as_ref() {
                 if let Some(new_resolved) = resolver_arc.resolve_active() {
                     let snapshot: &ComposeContext = ctx.compose_snapshot;
-                    match AgentCore::compose(&new_resolved.name, &new_resolved.selection, snapshot) {
+                    match AgentCore::compose(&new_resolved.name, &new_resolved.selection, snapshot)
+                    {
                         Ok(new_core) => {
                             // ArcSwap each port individually — per spec AC-8,
                             // no inter-port ordering invariant exists (Story 8.4
                             // introduces hot/warm/cold tier transitions).
-                            ctx.agent_core.persona.store(Arc::clone(&*new_core.persona.load()));
-                            ctx.agent_core.memory.store(Arc::clone(&*new_core.memory.load()));
-                            ctx.agent_core.session.store(Arc::clone(&*new_core.session.load()));
-                            ctx.agent_core.tools.store(Arc::clone(&*new_core.tools.load()));
-                            ctx.agent_core.channels.store(Arc::clone(&*new_core.channels.load()));
-                            ctx.agent_core.scheduler.store(Arc::clone(&*new_core.scheduler.load()));
-                            ctx.agent_core.context.store(Arc::clone(&*new_core.context.load()));
+                            ctx.agent_core
+                                .persona
+                                .store(Arc::clone(&*new_core.persona.load()));
+                            ctx.agent_core
+                                .memory
+                                .store(Arc::clone(&*new_core.memory.load()));
+                            ctx.agent_core
+                                .session
+                                .store(Arc::clone(&*new_core.session.load()));
+                            ctx.agent_core
+                                .tools
+                                .store(Arc::clone(&*new_core.tools.load()));
+                            ctx.agent_core
+                                .channels
+                                .store(Arc::clone(&*new_core.channels.load()));
+                            ctx.agent_core
+                                .scheduler
+                                .store(Arc::clone(&*new_core.scheduler.load()));
+                            ctx.agent_core
+                                .context
+                                .store(Arc::clone(&*new_core.context.load()));
                             tracing::info!(
                                 profile = %new_resolved.name,
                                 "AgentCore re-composed on reload"
                             );
                         }
                         Err(e) => {
-                            tracing::error!(
-                                "AgentCore re-composition failed on reload: {}",
-                                e
-                            );
+                            tracing::error!("AgentCore re-composition failed on reload: {}", e);
                             return HandlerOutcome::Notify(AppEvent::ConfigReloaded {
                                 success: false,
                                 error: Some(format!(
@@ -213,23 +227,19 @@ mod tests {
         let store = TestConfigStore {
             inner: std::sync::Mutex::new(Arc::new(test_config())),
         };
-        let profile_swap = Arc::new(ArcSwap::from_pointee(
-            Arc::new(crate::adapters::profile_resolver::noop::NoopProfileResolver)
-                as Arc<dyn ProfileResolver>,
-        ));
+        let profile_swap = Arc::new(ArcSwap::from_pointee(Arc::new(
+            crate::adapters::profile_resolver::noop::NoopProfileResolver,
+        ) as Arc<dyn ProfileResolver>));
         let agent_core_arc = Arc::new(AgentCore::test_noop());
-        let compose_snapshot_arc = Arc::new(
-            crate::infrastructure::composition::ComposeContext {
-                workspace_path: std::path::PathBuf::from("."),
-                project_context:
-                    crate::domain::models::project_context::ProjectContext::empty(),
-                storage: Arc::new(crate::adapters::noop::NoOpStorage::default())
-                    as Arc<dyn crate::domain::ports::StoragePort>,
-                skill_activator: Arc::new(
-                    crate::adapters::skill_activation::SkillActivator::new(),
-                ),
-            },
-        );
+        let compose_snapshot_arc = Arc::new(crate::infrastructure::composition::ComposeContext {
+            workspace_path: std::path::PathBuf::from("."),
+            project_context: crate::domain::models::project_context::ProjectContext::empty(),
+            storage: Arc::new(crate::adapters::noop::NoOpStorage::default())
+                as Arc<dyn crate::domain::ports::StoragePort>,
+            skill_activator: Arc::new(crate::adapters::skill_activation::SkillActivator::new()),
+            mcp_servers: Vec::new(),
+            include_builtin_tools: true,
+        });
         let ctx = ReloadContext {
             cli: &test_cli(),
             config_store: &store,

@@ -2868,13 +2868,14 @@ fn dispatch_palette_action(
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        PaletteAction::SwitchModel { provider_id, model_id } => InputAction::SwitchModelProvider {
+        PaletteAction::SwitchModel {
+            provider_id,
+            model_id,
+        } => InputAction::SwitchModelProvider {
             provider_id: Some(provider_id),
             model_id,
         },
-        PaletteAction::SwitchProfile(name) => {
-            InputAction::ProfileSwitchRequested(name)
-        }
+        PaletteAction::SwitchProfile(name) => InputAction::ProfileSwitchRequested(name),
         PaletteAction::OpenPanel(_) => InputAction::Consumed,
         PaletteAction::ShowVersion => {
             // Display version info as a FeedbackBlock in the chat pane

@@ -71,7 +71,10 @@ pub fn load(cli: &Cli, profile_resolver: &dyn ProfileResolver) -> AppConfig {
 /// Fallible version of `load()` that returns a `DomainError` instead of
 /// silently falling back to defaults. Used by the reload path so failures
 /// don't silently swap defaults — they preserve the prior config per AC-11.
-pub fn try_load(cli: &Cli, profile_resolver: &dyn ProfileResolver) -> Result<AppConfig, DomainError> {
+pub fn try_load(
+    cli: &Cli,
+    profile_resolver: &dyn ProfileResolver,
+) -> Result<AppConfig, DomainError> {
     let figment = build_figment(cli, profile_resolver);
 
     let mut config: AppConfig = figment.extract().map_err(|e| {
@@ -152,7 +155,10 @@ pub fn load_default() -> AppConfig {
         scheduler: None,
         context: None,
     };
-    load(&cli, &crate::adapters::profile_resolver::noop::NoopProfileResolver)
+    load(
+        &cli,
+        &crate::adapters::profile_resolver::noop::NoopProfileResolver,
+    )
 }
 
 /// Merge a TOML file into the figment if it exists AND parses.
@@ -229,8 +235,8 @@ fn merge_json_if_valid(figment: Figment, path: &Path, label: &str) -> Figment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use figment::providers::Toml;
     use crate::adapters::profile_resolver::noop::NoopProfileResolver;
+    use figment::providers::Toml;
 
     fn test_cli() -> Cli {
         Cli {
@@ -474,9 +480,9 @@ mod tests {
             [budget]
             daily_limit_usd = 10.00
         "#;
-        let config: AppConfig = figment_with_user_layer(user_toml).extract().expect(
-            "merging defaults + user budget MUST NOT produce duplicate field",
-        );
+        let config: AppConfig = figment_with_user_layer(user_toml)
+            .extract()
+            .expect("merging defaults + user budget MUST NOT produce duplicate field");
         assert_eq!(config.budget.daily_limit_usd, Some(10.00));
     }
 
@@ -495,7 +501,8 @@ mod tests {
     fn try_load_no_files_returns_defaults() {
         let cli = test_cli();
         let resolver = NoopProfileResolver;
-        let config = try_load(&cli, &resolver).expect("try_load with no files should return defaults");
+        let config =
+            try_load(&cli, &resolver).expect("try_load with no files should return defaults");
         assert!(!config.model.is_empty());
         assert!(config.pricing.contains_key("claude-sonnet-4-6"));
     }
@@ -547,8 +554,8 @@ mod tests {
     #[test]
     fn json_layer_parses_camelcase_keys() {
         let json_str = r#"{"model": "json-model"}"#;
-        let figment = Figment::from(Serialized::defaults(AppConfig::default()))
-            .merge(Json::string(json_str));
+        let figment =
+            Figment::from(Serialized::defaults(AppConfig::default())).merge(Json::string(json_str));
 
         let config: AppConfig = figment.extract().expect("extract JSON");
         assert_eq!(config.model, "json-model");
@@ -558,7 +565,9 @@ mod tests {
     #[test]
     fn env_nesting_with_double_underscore_figment() {
         // SAFETY: cargo test runs single-threaded; no other test touches RUSTAIN_LOG_LEVEL.
-        unsafe { std::env::set_var("RUSTAIN_LOG_LEVEL", "trace"); }
+        unsafe {
+            std::env::set_var("RUSTAIN_LOG_LEVEL", "trace");
+        }
 
         let figment = Figment::from(Serialized::defaults(AppConfig::default()))
             .merge(Env::prefixed("RUSTAIN_").split("__"));
@@ -567,7 +576,9 @@ mod tests {
         // Env layer overrides the default log_level
         assert_eq!(config.log_level, "trace");
 
-        unsafe { std::env::remove_var("RUSTAIN_LOG_LEVEL"); }
+        unsafe {
+            std::env::remove_var("RUSTAIN_LOG_LEVEL");
+        }
     }
 
     /// Story 8.1 AC-1 — full 7-layer priority chain: sets model in all layers,
@@ -589,7 +600,9 @@ mod tests {
         // Layer 3: JSON local override
         figment = figment.merge(Json::string(r#"{"model": "json-override-model"}"#));
         // Layer 2: env vars
-        unsafe { std::env::set_var("RUSTAIN_MODEL", "env-model"); }
+        unsafe {
+            std::env::set_var("RUSTAIN_MODEL", "env-model");
+        }
         figment = figment.merge(Env::prefixed("RUSTAIN_").split("__"));
         // Layer 1: CLI flags (TOP)
         let cli = Cli {
@@ -603,7 +616,9 @@ mod tests {
         let config: AppConfig = figment.extract().expect("full chain extract");
         assert_eq!(config.model, "cli-model", "CLI layer (highest) must win");
 
-        unsafe { std::env::remove_var("RUSTAIN_MODEL"); }
+        unsafe {
+            std::env::remove_var("RUSTAIN_MODEL");
+        }
     }
 
     /// Story 8.1 AC-6 — multi-layer merge for provider: defaults + 2 TOML
@@ -653,7 +668,10 @@ mod tests {
 
         let config: AppConfig = figment.extract().expect("step_tiers multi-layer extract");
         // User override: codegen → Flagship
-        assert_eq!(config.router.step_tiers.get(&StepKind::Codegen), Some(&ModelTier::Flagship));
+        assert_eq!(
+            config.router.step_tiers.get(&StepKind::Codegen),
+            Some(&ModelTier::Flagship)
+        );
         // Default entries survive
         assert!(config.router.step_tiers.contains_key(&StepKind::Plan));
         assert!(config.router.step_tiers.contains_key(&StepKind::Edit));
@@ -680,8 +698,22 @@ mod tests {
         let config: AppConfig = figment.extract().expect("tier_models multi-layer extract");
         // Layer2 overrides cheap_agentic? No — cheap_agentic is in layer1 only.
         // Both entries from different layers survive field-level merge.
-        assert_eq!(config.router.tier_models.get(&ModelTier::CheapAgentic).map(|s| s.as_str()), Some("gpt-4o"));
+        assert_eq!(
+            config
+                .router
+                .tier_models
+                .get(&ModelTier::CheapAgentic)
+                .map(|s| s.as_str()),
+            Some("gpt-4o")
+        );
         // Layer2 adds flagship
-        assert_eq!(config.router.tier_models.get(&ModelTier::Flagship).map(|s| s.as_str()), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            config
+                .router
+                .tier_models
+                .get(&ModelTier::Flagship)
+                .map(|s| s.as_str()),
+            Some("claude-sonnet-4-6")
+        );
     }
 }

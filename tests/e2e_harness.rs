@@ -22,12 +22,12 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::{ChunkAction, DomainInputEvent, DomainKey};
+use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, FeedbackBlock, FocusState, Message, MessageRole,
     PermissionMode, StatusState, StopReason, StreamChunk, StreamingPhase, StreamingState,
     ToolCallInfo, generate_conversation_id,
 };
-use rustain::domain::models::visual::DensityMode;
 use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::message_builder;
 use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};

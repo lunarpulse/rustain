@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::prompt::{prompt_yes_no, validate_profile_name};
 use crate::adapters::cli::commands::Cli;
-use crate::adapters::profile_resolver::embedded::{embedded_names, EmbeddedProfileSource};
+use crate::adapters::profile_resolver::embedded::{EmbeddedProfileSource, embedded_names};
 use crate::domain::models::AppConfig;
 use crate::domain::ports::ProfileResolver;
 use crate::domain::services::profile_loader::ProfileSource;
@@ -41,9 +41,7 @@ pub async fn run_profile_edit(
             name,
             dest.display()
         ))? {
-            println!(
-                "Use a different name (e.g. `rustain profile create`) to start fresh."
-            );
+            println!("Use a different name (e.g. `rustain profile create`) to start fresh.");
             return Ok(());
         }
         // Write embedded content to user path
@@ -63,10 +61,7 @@ pub async fn run_profile_edit(
 
         if !status.success() {
             let code = status.code().unwrap_or(1);
-            eprintln!(
-                "Editor exited with status {}. Profile not modified.",
-                code
-            );
+            eprintln!("Editor exited with status {}. Profile not modified.", code);
             tracing::info!(subcommand = "profile-edit", profile = %name, editor_exit = code);
             std::process::exit(code);
         }
@@ -124,9 +119,7 @@ fn resolve_editor() -> Result<String> {
     }
     #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
-        anyhow::bail!(
-            "No editor configured. Set $EDITOR or $VISUAL (e.g., export EDITOR=nano)"
-        );
+        anyhow::bail!("No editor configured. Set $EDITOR or $VISUAL (e.g., export EDITOR=nano)");
     }
 }
 
@@ -141,7 +134,9 @@ fn run_editor(editor: &str, path: &std::path::Path) -> Result<std::process::Exit
         command.arg(arg);
     }
     command.arg(path);
-    command.status().map_err(|e| anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e))
+    command
+        .status()
+        .map_err(|e| anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e))
 }
 
 #[cfg(test)]
@@ -152,8 +147,8 @@ mod tests {
     /// due to env-var manipulation (standard for env-dependent tests in this repo).
     #[test]
     fn test_resolve_editor_precedence() {
-        let orig_visual = std::env::var("VISUAL").ok();
-        let orig_editor = std::env::var("EDITOR").ok();
+        let orig_visual = std::env::var("VISUAL").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
+        let orig_editor = std::env::var("EDITOR").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
 
         // CONFORMANCE_EXCEPTION: test env manipulation
         // VISUAL wins when set

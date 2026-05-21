@@ -61,7 +61,10 @@ pub(super) fn validate_profile_name(name: &str) -> Result<(), String> {
             "Profile name must not contain '..', '/', or '\\' (path traversal attempt).".into(),
         );
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(
             "Profile name must contain only letters, digits, hyphens, and underscores.".into(),
         );
@@ -134,7 +137,11 @@ pub(super) fn format_toml_value(key: &str, value: &str) -> String {
     } else if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
         format!("{} = {}", key, value)
     } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
-        format!("{} = \"{}\"", key, escape_toml_string(&value[1..value.len() - 1]))
+        format!(
+            "{} = \"{}\"",
+            key,
+            escape_toml_string(&value[1..value.len() - 1])
+        )
     } else {
         format!("{} = \"{}\"", key, escape_toml_string(value))
     }

@@ -9,7 +9,9 @@ use crate::domain::events::AppEvent;
 use crate::infrastructure::paths;
 
 static SHUTDOWN_TX: OnceLock<mpsc::UnboundedSender<AppEvent>> = OnceLock::new();
-static EVENT_BUS_REF: OnceLock<std::sync::Arc<crate::infrastructure::runtime::event_bus::EventBus>> = OnceLock::new();
+static EVENT_BUS_REF: OnceLock<
+    std::sync::Arc<crate::infrastructure::runtime::event_bus::EventBus>,
+> = OnceLock::new();
 static SESSION_CANCEL: OnceLock<CancellationToken> = OnceLock::new();
 
 /// Install the panic hook that restores the terminal, writes a crash log,
@@ -67,9 +69,8 @@ pub async fn install_signal_handlers() {
             .expect("Failed to install SIGTERM handler");
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
             .expect("Failed to install SIGINT handler");
-        let mut sighup =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-                .expect("Failed to install SIGHUP handler");
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .expect("Failed to install SIGHUP handler");
 
         loop {
             tokio::select! {

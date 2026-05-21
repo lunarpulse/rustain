@@ -127,12 +127,9 @@ fn test_set_event_bus_wires_reference() {
     let bus_arc = Arc::new(bus);
     // set_event_bus does not panic; the OnceLock accepts the Arc.
     signals::set_event_bus(bus_arc.clone());
-    // Verify the bus is still alive (not dropped).
-    let domain_rx_count = bus_arc.domain_tx.receiver_count();
-    // The domain channel has at least the test's _domain_rx (dropped by EventBus::new
-    // returning the receiver to the caller, which we hold in _domain_rx).
-    // Note: receiver_count() may be 0 or 1 depending on whether the domain_rx has
-    // been consumed by another subscriber. The key invariant is that set_event_bus
-    // successfully stores the Arc.
-    let _ = domain_rx_count;
+    // Verify the bus is still alive (not dropped) by confirming we can send.
+    bus_arc
+        .domain_tx
+        .send(rustain::domain::events::AppEvent::Shutdown)
+        .unwrap();
 }

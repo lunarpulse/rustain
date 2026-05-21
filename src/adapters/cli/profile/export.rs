@@ -38,7 +38,8 @@ pub async fn run_profile_export(
         .expect("TomlProfileResolver always has resolve_active");
 
     let source = {
-        let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
+        let config_dir =
+            paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
         let user_profiles_dir = config_dir.join("profiles");
         if embedded_names().contains(&name.as_str()) {
             let user_path = user_profiles_dir.join(format!("{}.toml", name));

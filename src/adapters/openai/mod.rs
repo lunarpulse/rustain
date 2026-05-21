@@ -292,12 +292,7 @@ impl StreamingProvider for OpenAiAdapter {
         let guard = self.discovered_models.load();
         if let Some(ref entries) = **guard {
             if !entries.is_empty() {
-                return entries
-                    .iter()
-                    .map(|e| {
-                        e.descriptor.clone()
-                    })
-                    .collect();
+                return entries.iter().map(|e| e.descriptor.clone()).collect();
             }
         }
         self.variant.known_models(&self.model)

@@ -85,10 +85,7 @@ pub fn render(
                 .fg(theme.colors.accent)
                 .add_modifier(Modifier::BOLD),
         };
-        left_spans.push(Span::styled(
-            format!(" [{}]", indicator),
-            indicator_style,
-        ));
+        left_spans.push(Span::styled(format!(" [{}]", indicator), indicator_style));
     }
 
     if let Some(breadcrumb) = drill_down_breadcrumb {

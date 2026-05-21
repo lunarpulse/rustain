@@ -62,10 +62,18 @@ mod tests {
         for i in 0..1000u32 {
             let name = format!("profile_{i}");
             let color = derive_identity_color(&name, None).0;
-            assert!(color >= 1 && color <= 14, "color {} for '{}' out of range", color, name);
+            assert!(
+                color >= 1 && color <= 14,
+                "color {} for '{}' out of range",
+                color,
+                name
+            );
             seen.insert(color);
         }
-        assert!(seen.len() >= 3, "hash should produce at least a few different colors");
+        assert!(
+            seen.len() >= 3,
+            "hash should produce at least a few different colors"
+        );
     }
 
     #[test]

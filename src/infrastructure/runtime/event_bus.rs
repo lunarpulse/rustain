@@ -42,11 +42,23 @@ pub struct RawEvent {
 pub enum RawEventKind {
     Provider(StreamChunk),
     ModeChanged(PermissionMode),
-    SystemNotice { level: NoticeLevel, message: String },
+    SystemNotice {
+        level: NoticeLevel,
+        message: String,
+    },
     Tool(ToolCallTransition),
     Approval(crate::domain::services::approval_runtime::ApprovalRuntimeEvent),
     /// Story 8.1 AC-10 — config reload result for daemon/telemetry subscribers.
-    ConfigReloaded { success: bool, error: Option<String> },
+    ConfigReloaded {
+        success: bool,
+        error: Option<String>,
+    },
+    /// Story 9.1 — MCP server connection state changed.
+    McpConnectionStateChanged {
+        server_id: String,
+        state: crate::domain::models::McpConnectionState,
+        source_profile: Option<String>,
+    },
 }
 
 pub struct EventBus {
@@ -137,6 +149,19 @@ impl RawEvent {
                 kind: RawEventKind::ConfigReloaded {
                     success: *success,
                     error: error.clone(),
+                },
+            },
+            AppEvent::McpConnectionStateChanged {
+                server_id,
+                state,
+                source_profile,
+            } => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::McpConnectionStateChanged {
+                    server_id: server_id.clone(),
+                    state: state.clone(),
+                    source_profile: source_profile.clone(),
                 },
             },
             AppEvent::Tick

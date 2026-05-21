@@ -14,32 +14,119 @@ fn compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-memory"),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     }
 }
 
 fn coding_selection() -> ProfileSelection {
     let mut dims = BTreeMap::new();
-    dims.insert(PortDimension::Persona, AdapterRef { adapter: "coding".into(), _config: None });
-    dims.insert(PortDimension::Memory, AdapterRef { adapter: "noop".into(), _config: None });
-    dims.insert(PortDimension::Session, AdapterRef { adapter: "basic".into(), _config: None });
-    dims.insert(PortDimension::Tools, AdapterRef { adapter: "builtin-full".into(), _config: None });
-    dims.insert(PortDimension::Channels, AdapterRef { adapter: "terminal".into(), _config: None });
-    dims.insert(PortDimension::Scheduler, AdapterRef { adapter: "none".into(), _config: None });
-    dims.insert(PortDimension::Context, AdapterRef { adapter: "default".into(), _config: None });
+    dims.insert(
+        PortDimension::Persona,
+        AdapterRef {
+            adapter: "coding".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Memory,
+        AdapterRef {
+            adapter: "noop".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Session,
+        AdapterRef {
+            adapter: "basic".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Tools,
+        AdapterRef {
+            adapter: "builtin-full".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Channels,
+        AdapterRef {
+            adapter: "terminal".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Scheduler,
+        AdapterRef {
+            adapter: "none".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Context,
+        AdapterRef {
+            adapter: "default".into(),
+            _config: None,
+        },
+    );
     ProfileSelection { dimensions: dims }
 }
 
 fn base_selection() -> ProfileSelection {
     let mut dims = BTreeMap::new();
-    dims.insert(PortDimension::Persona, AdapterRef { adapter: "minimal".into(), _config: None });
-    dims.insert(PortDimension::Memory, AdapterRef { adapter: "noop".into(), _config: None });
-    dims.insert(PortDimension::Session, AdapterRef { adapter: "basic".into(), _config: None });
-    dims.insert(PortDimension::Tools, AdapterRef { adapter: "builtin-only".into(), _config: None });
-    dims.insert(PortDimension::Channels, AdapterRef { adapter: "terminal".into(), _config: None });
-    dims.insert(PortDimension::Scheduler, AdapterRef { adapter: "none".into(), _config: None });
-    dims.insert(PortDimension::Context, AdapterRef { adapter: "default".into(), _config: None });
+    dims.insert(
+        PortDimension::Persona,
+        AdapterRef {
+            adapter: "minimal".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Memory,
+        AdapterRef {
+            adapter: "noop".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Session,
+        AdapterRef {
+            adapter: "basic".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Tools,
+        AdapterRef {
+            adapter: "builtin-only".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Channels,
+        AdapterRef {
+            adapter: "terminal".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Scheduler,
+        AdapterRef {
+            adapter: "none".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Context,
+        AdapterRef {
+            adapter: "default".into(),
+            _config: None,
+        },
+    );
     ProfileSelection { dimensions: dims }
 }
 
@@ -80,7 +167,13 @@ fn read_rss_kb() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let n: u64 = rest.trim().split_whitespace().next().unwrap().parse().unwrap();
+            let n: u64 = rest
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
             return n;
         }
     }

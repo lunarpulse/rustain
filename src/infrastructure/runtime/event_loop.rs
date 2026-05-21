@@ -41,7 +41,8 @@ use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar, usage_panel, which_key_bar,
+    input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar, usage_panel,
+    which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
 
@@ -201,7 +202,8 @@ pub async fn run(
         let active_profile_snapshot = {
             let resolver = app_state.profile_resolver.load_full();
             resolver.resolve_active().map(|r| {
-                let ic = crate::domain::services::identity_color::derive_identity_color(&r.name, None);
+                let ic =
+                    crate::domain::services::identity_color::derive_identity_color(&r.name, None);
                 crate::domain::models::ActiveProfileSnapshot {
                     name: r.name.clone(),
                     identity_color: ic,
@@ -237,8 +239,13 @@ pub async fn run(
     if config.budget.daily_limit_usd.is_some() {
         let initial_bs = app_state.budget_state_store.load().await;
         let app_context = AppContext::new(&app_state, &router);
-        if let Some(b) =
-            handlers::budget::recompute_daily_budget(&*app_state.usage_ledger, config, initial_bs.dismissed_until_unix, &app_context).await
+        if let Some(b) = handlers::budget::recompute_daily_budget(
+            &*app_state.usage_ledger,
+            config,
+            initial_bs.dismissed_until_unix,
+            &app_context,
+        )
+        .await
         {
             handlers::budget::handle_upsert_daily_budget_warning(&mut state, &b, &app_context);
             state.daily_budget = Some(b);
@@ -423,10 +430,19 @@ pub async fn run(
             let is_active = profile.name == config.active_profile;
             palette_registry.register(crate::domain::models::palette::PaletteEntry {
                 name: format!("> {}", profile.name),
-                description: profile.description.clone().unwrap_or_else(|| format!("Switch to '{}'", profile.name)),
-                shortcut: if is_active { Some("(active)".into()) } else { None },
+                description: profile
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("Switch to '{}'", profile.name)),
+                shortcut: if is_active {
+                    Some("(active)".into())
+                } else {
+                    None
+                },
                 scope: crate::domain::models::palette::PaletteScope::Profile,
-                action: crate::domain::models::palette::PaletteAction::SwitchProfile(profile.name.clone()),
+                action: crate::domain::models::palette::PaletteAction::SwitchProfile(
+                    profile.name.clone(),
+                ),
             });
         }
     }
@@ -519,7 +535,13 @@ pub async fn run(
     ) {
         Ok(()) => state.needs_redraw = false,
         Err(e) => {
-            handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal);
+            handlers::render_error::handle_render_error(
+                e,
+                &mut _active_turn,
+                &mut streaming,
+                &mut state,
+                terminal,
+            );
             if state.should_quit {
                 return Ok(());
             }
@@ -632,7 +654,12 @@ pub async fn run(
     // Story 7.3 AC9: one-shot startup provider fallback (Phase 2 Task 4 extraction)
     {
         let app_context = AppContext::new(&app_state, &router);
-        match handlers::model_switch::handle_apply_startup_provider_fallback(&mut state, &app_context).await {
+        match handlers::model_switch::handle_apply_startup_provider_fallback(
+            &mut state,
+            &app_context,
+        )
+        .await
+        {
             HandlerOutcome::Quiet => {}
             HandlerOutcome::Notify(ev) => {
                 app_state.event_bus.emit_domain(ev);
@@ -6735,6 +6762,10 @@ pub async fn run(
                         });
                         state.needs_redraw = true;
                     }
+                    #[cfg(feature = "mcp")]
+                    AppEvent::McpConnectionStateChanged { .. } => {
+                        state.needs_redraw = true;
+                    }
                     AppEvent::SessionAdapterOverridden {
                         port,
                         adapter_name,
@@ -7053,6 +7084,15 @@ pub async fn run(
         }
     }
 
+    // Story 9.1 P-2: Shutdown MCP child processes before terminal teardown
+    #[cfg(feature = "mcp")]
+    {
+        use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+        if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+            crate::adapters::mcp::lifecycle::shutdown_all_clients(composite.mcp_clients()).await;
+        }
+    }
+
     Ok(())
 }
 
@@ -7074,11 +7114,10 @@ pub async fn run(
 // `crate::adapters::tui::handlers::export` per Story 8.5 line-budget
 // reduction (D-4 continuation).
 pub use crate::adapters::tui::handlers::export::{
-    apply_confirm_export_overwrite, apply_cancel_export_overwrite,
-    apply_cross_search_query_change, apply_cross_search_results, apply_export_command,
-    CrossSearchResultsOutcome, CrossSearchScanAction,
+    CrossSearchResultsOutcome, CrossSearchScanAction, apply_cancel_export_overwrite,
+    apply_confirm_export_overwrite, apply_cross_search_query_change, apply_cross_search_results,
+    apply_export_command,
 };
-
 
 /// Story 4-4 AC6 (amended): open the selected cross-search result in a new
 /// tab (or switch to its existing tab), scroll to the target message, and
@@ -7968,7 +8007,14 @@ fn render(
     terminal.draw(|frame| {
         let area = frame.area();
 
-        match layout::compute_layout(area, theme, input_buffer, tab_count, sidebar_visible, density_mode) {
+        match layout::compute_layout(
+            area,
+            theme,
+            input_buffer,
+            tab_count,
+            sidebar_visible,
+            density_mode,
+        ) {
             Some(mut app_layout) => {
                 let _is_compact = area.width < 80 || area.height < 24;
 
@@ -9863,13 +9909,7 @@ mod tests {
 
         let mut state = TuiState::new(80, 24);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-        reconcile_startup_selected_model(
-            &mut state,
-            "empty",
-            &registry,
-            "claude-sonnet-4-6",
-            &tx,
-        );
+        reconcile_startup_selected_model(&mut state, "empty", &registry, "claude-sonnet-4-6", &tx);
 
         assert!(state.selected_model.is_none());
     }

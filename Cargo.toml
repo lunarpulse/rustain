@@ -15,6 +15,13 @@ path = "src/lib.rs"
 name = "rustain"
 path = "src/main.rs"
 
+[[bin]]
+name = "fake-mcp-server"
+path = "tests/common/fake_mcp_server.rs"
+test = true
+bench = false
+required-features = ["mcp"]
+
 [dependencies]
 # ── Async runtime ────────────────────────────────────────────────
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal"] }
@@ -77,6 +84,9 @@ shell-words = "1"
 # adapters = { path = "../rustycode/adapters" }
 # llm-provider = { path = "../rustycode/llm-provider", features = ["config"] }
 
+# ── MCP SDK (Epic 9) ─────────────────────────────────────────────
+rmcp = { version = "1.0", default-features = false, features = ["client", "transport-child-process"], optional = true }
+
 tempfile = "3.0"
 
 [dev-dependencies]
@@ -95,13 +105,14 @@ assert_cmd = "2.0"
 predicates = "3"
 
 [features]
-default = ["anthropic", "clipboard"]
+default = ["anthropic", "clipboard", "mcp"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses
 # SseLineBuffer from crate::adapters::anthropic::sse (Story 7.1b).
 openai = ["anthropic", "dep:reqwest"]
 ollama = ["dep:reqwest"]
+mcp = ["dep:rmcp"]
 skills-validation = []
 
 [profile.release]

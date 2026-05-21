@@ -120,7 +120,9 @@ pub enum SpawnRequest {
         warm_cold_diffs: Vec<crate::domain::services::swap_tier::PortDiff>,
         agent_core: std::sync::Arc<crate::infrastructure::runtime::agent_core::AgentCore>,
         compose_snapshot: std::sync::Arc<crate::infrastructure::composition::ComposeContext>,
-        profile_resolver: std::sync::Arc<arc_swap::ArcSwap<std::sync::Arc<dyn crate::domain::ports::ProfileResolver>>>,
+        profile_resolver: std::sync::Arc<
+            arc_swap::ArcSwap<std::sync::Arc<dyn crate::domain::ports::ProfileResolver>>,
+        >,
         app_config: std::sync::Arc<arc_swap::ArcSwap<crate::domain::models::AppConfig>>,
         guard: Option<crate::adapters::tui::handlers::profile_switch::SwitchGuard>,
         new_resolver: std::sync::Arc<dyn crate::domain::ports::ProfileResolver>,

@@ -24,7 +24,10 @@ fn test_port_dimension_from_command_name_total() {
         assert_eq!(parsed, Some(*port), "round-trip failed for {:?}", port);
     }
     // Unknown name returns None
-    assert_eq!(adapter_overlay::port_dimension_from_command_name("bogus"), None);
+    assert_eq!(
+        adapter_overlay::port_dimension_from_command_name("bogus"),
+        None
+    );
     assert_eq!(adapter_overlay::port_dimension_from_command_name(""), None);
 }
 
@@ -57,8 +60,8 @@ fn test_health_summary_constructors() {
 
 #[test]
 fn test_active_adapter_for_returns_override_when_present() {
-    use std::collections::BTreeMap;
     use rustain::domain::models::AdapterRef;
+    use std::collections::BTreeMap;
 
     let mut overrides = BTreeMap::new();
     overrides.insert(
@@ -68,27 +71,18 @@ fn test_active_adapter_for_returns_override_when_present() {
             _config: None,
         },
     );
-    let got = adapter_overlay::active_adapter_for(
-        PortDimension::Memory,
-        "noop",
-        &overrides,
-    );
+    let got = adapter_overlay::active_adapter_for(PortDimension::Memory, "noop", &overrides);
     assert_eq!(got, "daily-log");
 
     // Without override, returns the core name
-    let got = adapter_overlay::active_adapter_for(
-        PortDimension::Memory,
-        "noop",
-        &BTreeMap::new(),
-    );
+    let got = adapter_overlay::active_adapter_for(PortDimension::Memory, "noop", &BTreeMap::new());
     assert_eq!(got, "noop");
 }
 
 #[test]
 fn test_adapter_overlay_domain_isolation() {
     // The adapter_overlay services module MUST NOT import from adapters/ or infrastructure/
-    let overlay_src =
-        include_str!("../src/domain/services/adapter_overlay.rs");
+    let overlay_src = include_str!("../src/domain/services/adapter_overlay.rs");
     assert!(
         !overlay_src.contains("use crate::adapters"),
         "adapter_overlay.rs must not import from adapters/"
@@ -98,8 +92,7 @@ fn test_adapter_overlay_domain_isolation() {
         "adapter_overlay.rs must not import from infrastructure/"
     );
 
-    let health_src =
-        include_str!("../src/domain/models/adapter_health.rs");
+    let health_src = include_str!("../src/domain/models/adapter_health.rs");
     assert!(
         !health_src.contains("use crate::adapters"),
         "adapter_health.rs must not import from adapters/"

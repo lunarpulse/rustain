@@ -16,10 +16,16 @@ pub trait SessionPort: Send + Sync {
     fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
         crate::domain::models::HealthSummary::unknown()
     }
-    async fn prepare_detach(&self) -> Result<crate::domain::models::TransitionState, crate::domain::errors::TransitionError> {
+    async fn prepare_detach(
+        &self,
+    ) -> Result<crate::domain::models::TransitionState, crate::domain::errors::TransitionError>
+    {
         Ok(crate::domain::models::TransitionState::empty("session"))
     }
-    async fn receive_state(&self, _state: crate::domain::models::TransitionState) -> Result<(), crate::domain::errors::TransitionError> {
+    async fn receive_state(
+        &self,
+        _state: crate::domain::models::TransitionState,
+    ) -> Result<(), crate::domain::errors::TransitionError> {
         Ok(())
     }
     async fn post_transition_verify(&self) -> Result<(), crate::domain::errors::TransitionError> {

@@ -18,11 +18,11 @@ use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, permission_prompt, status_bar};
 use rustain::domain::models::tool_call::ApprovalSource;
+use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, FocusState, MessageRole,
     PermissionMode, StatusState, StopReason, StreamingState, ToolCallInfo,
 };
-use rustain::domain::models::visual::DensityMode;
 
 fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
     Conversation {

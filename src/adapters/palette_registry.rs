@@ -153,13 +153,34 @@ impl PaletteRegistry {
         });
 
         for (port_label, port_dim) in [
-            ("persona", crate::domain::models::profile::PortDimension::Persona),
-            ("memory", crate::domain::models::profile::PortDimension::Memory),
-            ("session", crate::domain::models::profile::PortDimension::Session),
-            ("tools", crate::domain::models::profile::PortDimension::Tools),
-            ("channels", crate::domain::models::profile::PortDimension::Channels),
-            ("scheduler", crate::domain::models::profile::PortDimension::Scheduler),
-            ("context", crate::domain::models::profile::PortDimension::Context),
+            (
+                "persona",
+                crate::domain::models::profile::PortDimension::Persona,
+            ),
+            (
+                "memory",
+                crate::domain::models::profile::PortDimension::Memory,
+            ),
+            (
+                "session",
+                crate::domain::models::profile::PortDimension::Session,
+            ),
+            (
+                "tools",
+                crate::domain::models::profile::PortDimension::Tools,
+            ),
+            (
+                "channels",
+                crate::domain::models::profile::PortDimension::Channels,
+            ),
+            (
+                "scheduler",
+                crate::domain::models::profile::PortDimension::Scheduler,
+            ),
+            (
+                "context",
+                crate::domain::models::profile::PortDimension::Context,
+            ),
         ] {
             self.slash_entries.push(PaletteEntry {
                 name: format!("!{port_label}"),

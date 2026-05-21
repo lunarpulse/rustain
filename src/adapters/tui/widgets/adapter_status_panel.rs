@@ -15,7 +15,7 @@ use ratatui::{
 };
 
 use crate::adapters::tui::theme::Theme;
-use crate::domain::models::{PortDimension, AdapterRef, HealthLevel, HealthSummary};
+use crate::domain::models::{AdapterRef, HealthLevel, HealthSummary, McpHealthRow, PortDimension};
 use crate::domain::services::adapter_overlay;
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
@@ -90,6 +90,7 @@ pub fn render(
     }
 
     let mut lines: Vec<Line> = Vec::new();
+    let mcp_rows = get_mcp_health_rows(agent_core);
 
     for (i, (port, label)) in PORTS.iter().enumerate() {
         let health = get_health_summary(agent_core, *port);
@@ -97,11 +98,7 @@ pub fn render(
         let sym_color = health_color(health.level, theme);
 
         let core_name = get_adapter_name_from_core(agent_core, *port);
-        let adapter_name = adapter_overlay::active_adapter_for(
-            *port,
-            &core_name,
-            overrides,
-        );
+        let adapter_name = adapter_overlay::active_adapter_for(*port, &core_name, overrides);
 
         let has_override = overrides.contains_key(port);
         let mut spans = Vec::new();
@@ -146,10 +143,7 @@ pub fn render(
             HealthLevel::Error => theme.colors.error,
             _ => theme.colors.fg_muted,
         };
-        spans.push(Span::styled(
-            metric,
-            Style::default().fg(metric_color),
-        ));
+        spans.push(Span::styled(metric, Style::default().fg(metric_color)));
 
         if i == selected_row {
             lines.push(Line::from(spans).style(Style::default().add_modifier(Modifier::REVERSED)));
@@ -163,6 +157,31 @@ pub fn render(
                     format!("  → {}", action),
                     Style::default().fg(theme.colors.fg_muted),
                 )));
+            }
+        }
+
+        // Insert MCP sub-rows after the tools row (Story 9.1 AC-5)
+        if *port == PortDimension::Tools && !mcp_rows.is_empty() {
+            for row in &mcp_rows {
+                let sym = row.level.symbol();
+                let sym_color = health_color(row.level, theme);
+                let mut spans = Vec::new();
+                spans.push(Span::styled(
+                    format!("   └─ {} {} {}", sym, row.server_name, row.transport),
+                    Style::default().fg(sym_color),
+                ));
+                let metric = &row.metric;
+                let used_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                let available = inner.width.saturating_sub(3) as usize;
+                if available > used_width + 2 {
+                    let pad = available.saturating_sub(used_width + metric.chars().count());
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+                spans.push(Span::styled(
+                    metric.clone(),
+                    Style::default().fg(theme.colors.fg_muted),
+                ));
+                lines.push(Line::from(spans));
             }
         }
     }
@@ -195,4 +214,20 @@ fn get_health_summary(agent_core: &AgentCore, port: PortDimension) -> HealthSumm
         PortDimension::Scheduler => agent_core.scheduler.load_full().health_snapshot(),
         PortDimension::Context => agent_core.context.load_full().health_snapshot(),
     }
+}
+
+#[cfg(feature = "mcp")]
+fn get_mcp_health_rows(agent_core: &AgentCore) -> Vec<McpHealthRow> {
+    use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    let tools = agent_core.tools.load_full();
+    if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+        composite.mcp_health_rows()
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(not(feature = "mcp"))]
+fn get_mcp_health_rows(_agent_core: &AgentCore) -> Vec<McpHealthRow> {
+    Vec::new()
 }

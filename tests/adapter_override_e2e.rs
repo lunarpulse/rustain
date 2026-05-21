@@ -11,10 +11,10 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use rustain::adapters::tui::handlers::HandlerOutcome;
 use rustain::adapters::tui::handlers::adapter_override::{
     handle_apply_adapter_override, handle_clear_adapter_override,
 };
-use rustain::adapters::tui::handlers::HandlerOutcome;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::profile::{AdapterRef, PortDimension};
@@ -28,14 +28,16 @@ fn test_compose_ctx() -> ComposeContext {
         storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     }
 }
 
 fn noop_profile_resolver() -> Arc<ArcSwap<Arc<dyn rustain::domain::ports::ProfileResolver>>> {
-    Arc::new(ArcSwap::from_pointee(
-        Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
-            as Arc<dyn rustain::domain::ports::ProfileResolver>,
-    ))
+    Arc::new(ArcSwap::from_pointee(Arc::new(
+        rustain::adapters::profile_resolver::noop::NoopProfileResolver,
+    )
+        as Arc<dyn rustain::domain::ports::ProfileResolver>))
 }
 
 fn make_ref(name: &str) -> AdapterRef {
@@ -69,9 +71,7 @@ async fn test_apply_override_stores_and_emits() {
 
     match outcome {
         HandlerOutcome::Notify(AppEvent::SessionAdapterOverridden {
-            port,
-            adapter_name,
-            ..
+            port, adapter_name, ..
         }) => {
             assert_eq!(port, PortDimension::Memory);
             assert_eq!(adapter_name, "noop");
@@ -99,21 +99,13 @@ async fn test_apply_override_all_seven_ports() {
     ];
 
     for (port, adapter_name) in &cases {
-        let outcome = handle_apply_adapter_override(
-            &mut state,
-            &core,
-            &ctx,
-            *port,
-            make_ref(adapter_name),
-        )
-        .await;
+        let outcome =
+            handle_apply_adapter_override(&mut state, &core, &ctx, *port, make_ref(adapter_name))
+                .await;
 
         match outcome {
             HandlerOutcome::Notify(AppEvent::SessionAdapterOverridden { .. }) => {}
-            _ => panic!(
-                "expected Notify(SessionAdapterOverridden) for {:?}",
-                port
-            ),
+            _ => panic!("expected Notify(SessionAdapterOverridden) for {:?}", port),
         }
     }
 
@@ -146,9 +138,7 @@ async fn test_apply_override_unknown_adapter_emits_failure() {
             assert_eq!(port, PortDimension::Memory);
             assert_eq!(requested_adapter, "nonexistent-adapter-xyz");
         }
-        _ => panic!(
-            "expected Notify(SessionAdapterOverrideFailed)"
-        ),
+        _ => panic!("expected Notify(SessionAdapterOverrideFailed)"),
     }
 
     assert!(
@@ -178,14 +168,9 @@ async fn test_clear_override_removes_and_emits() {
     assert!(state.session_overrides.contains_key(&PortDimension::Memory));
 
     // Now clear
-    let outcome = handle_clear_adapter_override(
-        &mut state,
-        &core,
-        &ctx,
-        &resolver,
-        PortDimension::Memory,
-    )
-    .await;
+    let outcome =
+        handle_clear_adapter_override(&mut state, &core, &ctx, &resolver, PortDimension::Memory)
+            .await;
 
     assert!(
         !state.session_overrides.contains_key(&PortDimension::Memory),
@@ -194,9 +179,7 @@ async fn test_clear_override_removes_and_emits() {
 
     match outcome {
         HandlerOutcome::Notify(AppEvent::SessionAdapterOverridden {
-            port,
-            adapter_name,
-            ..
+            port, adapter_name, ..
         }) => {
             assert_eq!(port, PortDimension::Memory);
             assert_eq!(adapter_name, "noop");
@@ -216,14 +199,9 @@ async fn test_clear_override_noop_when_no_override() {
 
     assert!(state.session_overrides.is_empty());
 
-    let outcome = handle_clear_adapter_override(
-        &mut state,
-        &core,
-        &ctx,
-        &resolver,
-        PortDimension::Persona,
-    )
-    .await;
+    let outcome =
+        handle_clear_adapter_override(&mut state, &core, &ctx, &resolver, PortDimension::Persona)
+            .await;
 
     match outcome {
         HandlerOutcome::Notify(AppEvent::SessionAdapterOverridden { port, .. }) => {
@@ -267,14 +245,7 @@ async fn test_multi_port_overrides_independent() {
     assert_eq!(state.session_overrides.len(), 2);
 
     // Clear only Memory
-    handle_clear_adapter_override(
-        &mut state,
-        &core,
-        &ctx,
-        &resolver,
-        PortDimension::Memory,
-    )
-    .await;
+    handle_clear_adapter_override(&mut state, &core, &ctx, &resolver, PortDimension::Memory).await;
 
     assert_eq!(state.session_overrides.len(), 1);
     assert!(state.session_overrides.contains_key(&PortDimension::Tools));
@@ -342,13 +313,20 @@ fn test_active_adapter_for_integration() {
     use rustain::domain::services::adapter_overlay;
 
     let mut state = TuiState::new(120, 40);
-    let got = adapter_overlay::active_adapter_for(PortDimension::Memory, "noop", &state.session_overrides);
+    let got = adapter_overlay::active_adapter_for(
+        PortDimension::Memory,
+        "noop",
+        &state.session_overrides,
+    );
     assert_eq!(got, "noop");
 
-    state.session_overrides.insert(
+    state
+        .session_overrides
+        .insert(PortDimension::Memory, make_ref("custom-mem"));
+    let got = adapter_overlay::active_adapter_for(
         PortDimension::Memory,
-        make_ref("custom-mem"),
+        "noop",
+        &state.session_overrides,
     );
-    let got = adapter_overlay::active_adapter_for(PortDimension::Memory, "noop", &state.session_overrides);
     assert_eq!(got, "custom-mem");
 }

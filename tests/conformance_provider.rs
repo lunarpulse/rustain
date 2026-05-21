@@ -798,8 +798,5 @@ fn test_get_model_provider_returns_none_when_absent() {
         registry.get_model_provider("does-not-exist", Some("anthropic")),
         None
     );
-    assert_eq!(
-        registry.get_model_provider("does-not-exist", None),
-        None
-    );
+    assert_eq!(registry.get_model_provider("does-not-exist", None), None);
 }

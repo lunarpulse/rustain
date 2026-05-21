@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::prompt::{prompt_line, prompt_required_line, prompt_yes_no, validate_profile_name, format_toml_value, escape_toml_string};
+use super::prompt::{
+    escape_toml_string, format_toml_value, prompt_line, prompt_required_line, prompt_yes_no,
+    validate_profile_name,
+};
 use crate::adapters::cli::commands::Cli;
 use crate::domain::models::{AppConfig, PortDimension};
 use crate::domain::ports::ProfileResolver;
@@ -46,7 +49,10 @@ pub async fn run_profile_create(
         ) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("Warning: could not load source profile '{}': {}", from_name, e);
+                eprintln!(
+                    "Warning: could not load source profile '{}': {}",
+                    from_name, e
+                );
                 None
             }
         }
@@ -72,7 +78,10 @@ pub async fn run_profile_create(
         None
     } else {
         if description.chars().count() > 200 {
-            eprintln!("Description too long ({} chars). Truncated to 200.", description.chars().count());
+            eprintln!(
+                "Description too long ({} chars). Truncated to 200.",
+                description.chars().count()
+            );
         }
         Some(description.chars().take(200).collect())
     };
@@ -97,11 +106,7 @@ pub async fn run_profile_create(
         Some(e)
     } else {
         let input = prompt_line("Extends (optional, leave blank for none): ")?;
-        if input.is_empty() {
-            None
-        } else {
-            Some(input)
-        }
+        if input.is_empty() { None } else { Some(input) }
     };
 
     // ── Phase 2: Per-port adapter selection ──
@@ -133,14 +138,13 @@ pub async fn run_profile_create(
 
         // Default from --from flag
         let default_adapter = from_resolved.as_ref().and_then(|r| {
-            r.resolve_active()
-                .and_then(|resolved| {
-                    resolved
-                        .selection
-                        .dimensions
-                        .get(&port_dim)
-                        .map(|ar| ar.adapter.clone())
-                })
+            r.resolve_active().and_then(|resolved| {
+                resolved
+                    .selection
+                    .dimensions
+                    .get(&port_dim)
+                    .map(|ar| ar.adapter.clone())
+            })
         });
         let default_hint = default_adapter
             .as_deref()
@@ -172,7 +176,10 @@ pub async fn run_profile_create(
                     1,
                 );
                 if let Some(sug) = suggestion {
-                    eprintln!("Unknown adapter '{}'. Did you mean: '{}'?", adapter_name, sug);
+                    eprintln!(
+                        "Unknown adapter '{}'. Did you mean: '{}'?",
+                        adapter_name, sug
+                    );
                 } else {
                     eprintln!(
                         "Unknown adapter '{}'. Available: {}",
@@ -388,7 +395,11 @@ fn build_profile_toml(
 
     for (port_name, adapter) in ports {
         if let Some(adapter_name) = adapter {
-            out.push_str(&format!("\n[{0}]\nadapter = \"{1}\"\n", port_name, escape_toml_string(adapter_name)));
+            out.push_str(&format!(
+                "\n[{0}]\nadapter = \"{1}\"\n",
+                port_name,
+                escape_toml_string(adapter_name)
+            ));
         }
     }
 

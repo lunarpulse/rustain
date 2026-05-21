@@ -36,8 +36,16 @@ fn load_coding_from_embedded() {
     let resolver = TomlProfileResolver::new("coding", tmpdir.path().to_path_buf()).unwrap();
     let profile = resolver.resolve_active().unwrap();
     assert_eq!(profile.name, "coding");
-    assert!(profile.selection.dimensions.contains_key(&PortDimension::Persona));
-    assert_eq!(profile.selection.dimensions[&PortDimension::Persona].adapter, "coding");
+    assert!(
+        profile
+            .selection
+            .dimensions
+            .contains_key(&PortDimension::Persona)
+    );
+    assert_eq!(
+        profile.selection.dimensions[&PortDimension::Persona].adapter,
+        "coding"
+    );
 }
 
 #[test]
@@ -114,9 +122,10 @@ fn nonexistent_profile_returns_error() {
 fn reload_swaps_profile_resolver() {
     let tmpdir = tempfile::tempdir().unwrap();
     let resolver1 = TomlProfileResolver::new("coding", tmpdir.path().to_path_buf()).unwrap();
-    let swap: Arc<ArcSwap<Arc<dyn ProfileResolver>>> = Arc::new(ArcSwap::from_pointee(
-        Arc::new(resolver1) as Arc<dyn ProfileResolver>,
-    ));
+    let swap: Arc<ArcSwap<Arc<dyn ProfileResolver>>> = Arc::new(ArcSwap::from_pointee(Arc::new(
+        resolver1,
+    )
+        as Arc<dyn ProfileResolver>));
 
     let profile1 = swap.load_full().resolve_active().unwrap();
     assert_eq!(profile1.name, "coding");
@@ -148,15 +157,19 @@ fn test_coding_profile_composes_seven_ports() {
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
         &profile.name,
         &profile.selection,
         &ctx,
-    ).expect("coding profile composition should succeed");
+    )
+    .expect("coding profile composition should succeed");
 
     let _p = core.persona.load_full();
     let _m = core.memory.load_full();
@@ -173,21 +186,31 @@ fn test_base_profile_composes_all_noop() {
     let resolver = TomlProfileResolver::new("base", tmpdir.path().to_path_buf()).unwrap();
     let profile = resolver.resolve_active().unwrap();
 
-    assert_eq!(profile.selection.dimensions[&PortDimension::Persona].adapter, "minimal");
-    assert_eq!(profile.selection.dimensions[&PortDimension::Tools].adapter, "builtin-only");
+    assert_eq!(
+        profile.selection.dimensions[&PortDimension::Persona].adapter,
+        "minimal"
+    );
+    assert_eq!(
+        profile.selection.dimensions[&PortDimension::Tools].adapter,
+        "builtin-only"
+    );
 
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
         &profile.name,
         &profile.selection,
         &ctx,
-    ).expect("base profile composition should succeed");
+    )
+    .expect("base profile composition should succeed");
 
     let _ = core.persona.load_full();
     let _ = core.tools.load_full();
@@ -196,25 +219,36 @@ fn test_base_profile_composes_all_noop() {
 #[test]
 fn test_personal_assistant_preview_composes_with_fallback() {
     let tmpdir = tempfile::tempdir().unwrap();
-    let resolver = TomlProfileResolver::new("personal-assistant", tmpdir.path().to_path_buf()).unwrap();
+    let resolver =
+        TomlProfileResolver::new("personal-assistant", tmpdir.path().to_path_buf()).unwrap();
     let profile = resolver.resolve_active().unwrap();
 
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
         &profile.name,
         &profile.selection,
         &ctx,
-    ).expect("personal-assistant composition should succeed (with fallbacks)");
+    )
+    .expect("personal-assistant composition should succeed (with fallbacks)");
 
     // channels and scheduler should have fallen back to terminal/none
-    assert_eq!(profile.selection.dimensions[&PortDimension::Channels].adapter, "terminal");
-    assert_eq!(profile.selection.dimensions[&PortDimension::Scheduler].adapter, "none");
+    assert_eq!(
+        profile.selection.dimensions[&PortDimension::Channels].adapter,
+        "terminal"
+    );
+    assert_eq!(
+        profile.selection.dimensions[&PortDimension::Scheduler].adapter,
+        "none"
+    );
     let _ch = core.channels.load_full();
     let _sc = core.scheduler.load_full();
 }
@@ -230,8 +264,11 @@ fn test_reload_recomposes_agent_core() {
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+            as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     };
     let ctx_arc = Arc::new(ctx);
 
@@ -240,7 +277,8 @@ fn test_reload_recomposes_agent_core() {
             &profile1.name,
             &profile1.selection,
             &ctx_arc,
-        ).unwrap()
+        )
+        .unwrap(),
     );
 
     let old_persona_ptr = Arc::as_ptr(&core1.persona.load_full()) as usize;
@@ -253,11 +291,15 @@ fn test_reload_recomposes_agent_core() {
         &profile2.name,
         &profile2.selection,
         &ctx_arc,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Swap persona port
     core1.persona.store(Arc::clone(&*core2.persona.load()));
 
     let new_persona_ptr = Arc::as_ptr(&core1.persona.load_full()) as usize;
-    assert_ne!(old_persona_ptr, new_persona_ptr, "persona pointer should change after reload re-composition");
+    assert_ne!(
+        old_persona_ptr, new_persona_ptr,
+        "persona pointer should change after reload re-composition"
+    );
 }

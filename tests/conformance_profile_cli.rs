@@ -111,8 +111,8 @@ fn test_no_network_call_in_other_profile_subcommands() {
     ];
     let forbidden = &["reqwest", "hyper::", "tokio::net", "std::net::TcpStream"];
     for file in non_install_files {
-        let content = std::fs::read_to_string(file)
-            .unwrap_or_else(|_| panic!("File {} should exist", file));
+        let content =
+            std::fs::read_to_string(file).unwrap_or_else(|_| panic!("File {} should exist", file));
         for &pattern in forbidden {
             assert!(
                 !content.contains(pattern),

@@ -22,7 +22,8 @@ pub struct ParsedGhSpec {
 
 /// Return the raw.githubusercontent.com base URL, respecting RUSTAIN_GH_RAW_BASE env var.
 pub fn raw_base_url() -> String {
-    std::env::var("RUSTAIN_GH_RAW_BASE").unwrap_or_else(|_| "https://raw.githubusercontent.com".to_string())
+    std::env::var("RUSTAIN_GH_RAW_BASE") // CONFORMANCE_EXCEPTION: infra utility for GitHub raw URL override
+        .unwrap_or_else(|_| "https://raw.githubusercontent.com".to_string())
 }
 
 /// Parse a `gh:` spec like `gh:owner/repo` or `gh:owner/repo/path/to.toml`.

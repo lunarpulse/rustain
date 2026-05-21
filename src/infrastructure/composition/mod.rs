@@ -24,6 +24,13 @@ pub struct ComposeContext {
     pub project_context: ProjectContext,
     pub storage: Arc<dyn StoragePort>,
     pub skill_activator: Arc<SkillActivator>,
+    /// MCP server specs resolved from workspace `.claude/mcp.json` + profile TOML.
+    /// Populated by startup.rs after profile resolution (Story 9.1).
+    pub mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    /// Whether composite adapter includes builtin tools (default true).
+    /// `[tools.config] include_builtin = false` disables builtin tools
+    /// so only MCP tools are available (Story 9.1 AC-4, used by 9.2).
+    pub include_builtin_tools: bool,
 }
 
 impl AgentCore {
@@ -84,15 +91,18 @@ fn compose_one<T: ?Sized, F>(
 where
     F: FnOnce(&str, Option<&toml::Value>) -> Result<Arc<T>, AdapterCompositionError>,
 {
-    let adapter_ref = selection.dimensions.get(&port).ok_or_else(|| {
-        AdapterCompositionError::MissingDimension {
-            port,
-        }
-    })?;
+    let adapter_ref = selection
+        .dimensions
+        .get(&port)
+        .ok_or_else(|| AdapterCompositionError::MissingDimension { port })?;
     let result = build(adapter_ref.adapter.as_str(), adapter_ref._config.as_ref());
     match &result {
-        Ok(_) => tracing::debug!(port = ?port, adapter = %adapter_ref.adapter, "Composed port adapter"),
-        Err(e) => tracing::error!(port = ?port, adapter = %adapter_ref.adapter, error = %e, "Adapter composition failed"),
+        Ok(_) => {
+            tracing::debug!(port = ?port, adapter = %adapter_ref.adapter, "Composed port adapter")
+        }
+        Err(e) => {
+            tracing::error!(port = ?port, adapter = %adapter_ref.adapter, error = %e, "Adapter composition failed")
+        }
     }
     result
 }
@@ -118,7 +128,11 @@ pub fn build_persona(
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Persona,
             name: other.to_string(),
-            available: vec!["minimal".into(), "coding".into(), "personal-assistant".into()],
+            available: vec![
+                "minimal".into(),
+                "coding".into(),
+                "personal-assistant".into(),
+            ],
         }),
     }
 }
@@ -181,13 +195,48 @@ pub fn build_tools(
             Ok(Arc::new(adapter))
         }
         "builtin-full" => {
-            let mut adapter = ToolSetAdapter::new(ctx.workspace_path.clone(), Arc::clone(&ctx.storage));
+            let mut adapter =
+                ToolSetAdapter::new(ctx.workspace_path.clone(), Arc::clone(&ctx.storage));
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
+            Ok(Arc::new(adapter))
+        }
+        #[cfg(feature = "mcp")]
+        "composite" => {
+            if ctx.mcp_servers.is_empty() {
+                return Err(AdapterCompositionError::MissingComposeContext {
+                    port: PortDimension::Tools,
+                    name: name.to_string(),
+                    missing_field: "mcp_servers (empty Vec) — composite requires at least one server; profile should use 'builtin-full' instead".into(),
+                });
+            }
+            let builtin = build_tools("builtin-full", None, ctx)?;
+            let mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>> = ctx
+                .mcp_servers
+                .iter()
+                .map(|spec| {
+                    Arc::new(crate::adapters::mcp::client::McpClientAdapter::new(
+                        spec.clone(),
+                    ))
+                })
+                .collect();
+            let adapter = crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
+                builtin,
+                mcp_clients,
+                ctx.mcp_servers.clone(),
+                ctx.include_builtin_tools,
+            );
             Ok(Arc::new(adapter))
         }
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Tools,
             name: other.to_string(),
+            #[cfg(feature = "mcp")]
+            available: vec![
+                "builtin-only".into(),
+                "builtin-full".into(),
+                "composite".into(),
+            ],
+            #[cfg(not(feature = "mcp"))]
             available: vec!["builtin-only".into(), "builtin-full".into()],
         }),
     }
@@ -322,6 +371,8 @@ mod tests {
             project_context: ProjectContext::empty(),
             storage: Arc::new(NoOpStorage::default()) as Arc<dyn StoragePort>,
             skill_activator: Arc::new(SkillActivator::new()),
+            mcp_servers: Vec::new(),
+            include_builtin_tools: true,
         }
     }
 
@@ -346,7 +397,9 @@ mod tests {
         let ctx = test_compose_ctx();
         let result = build_persona("bogus", None, &ctx);
         match result {
-            Err(AdapterCompositionError::UnknownAdapter { port, available, .. }) => {
+            Err(AdapterCompositionError::UnknownAdapter {
+                port, available, ..
+            }) => {
                 assert_eq!(port, PortDimension::Persona);
                 assert!(!available.is_empty());
             }
@@ -430,6 +483,36 @@ mod tests {
             }
             other => panic!("expected UnknownAdapter"),
         }
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn test_build_tools_composite_empty_fails() {
+        let ctx = test_compose_ctx();
+        let result = build_tools("composite", None, &ctx);
+        match result {
+            Err(AdapterCompositionError::MissingComposeContext { port, .. }) => {
+                assert_eq!(port, PortDimension::Tools);
+            }
+            other => panic!("expected MissingComposeContext for composite with empty mcp_servers"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "mcp")]
+    fn test_build_tools_composite_with_servers() {
+        let mut ctx = test_compose_ctx();
+        ctx.mcp_servers = vec![crate::domain::models::McpServerSpec {
+            id: "test-server".into(),
+            transport: crate::domain::models::McpTransport::Stdio,
+            command: Some("echo".into()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        }];
+        assert!(build_tools("composite", None, &ctx).is_ok());
     }
 
     // ── Channels tests ──

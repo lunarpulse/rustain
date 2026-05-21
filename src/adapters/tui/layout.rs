@@ -126,7 +126,9 @@ pub fn compute_layout(
     // Dashboard mode: full-width panel (70%) + compact chat (30%), no sidebar
     if density_mode == crate::domain::models::visual::DensityMode::Dashboard {
         let tab_bar_height: u16 = if show_tab_bar { 1 } else { 0 };
-        let content_height = area.height.saturating_sub(input_height + 1 + tab_bar_height); // 1 status bar
+        let content_height = area
+            .height
+            .saturating_sub(input_height + 1 + tab_bar_height); // 1 status bar
         let panel_height = content_height * 7 / 10;
         let chat_height = content_height - panel_height;
 
@@ -159,13 +161,14 @@ pub fn compute_layout(
     }
 
     // Focus mode forces sidebar hidden regardless of the sidebar_visible argument
-    let effective_sidebar_visible = if density_mode == crate::domain::models::visual::DensityMode::Focus {
-        false
-    } else if density_mode == crate::domain::models::visual::DensityMode::Monitor {
-        sidebar_visible
-    } else {
-        sidebar_visible
-    };
+    let effective_sidebar_visible =
+        if density_mode == crate::domain::models::visual::DensityMode::Focus {
+            false
+        } else if density_mode == crate::domain::models::visual::DensityMode::Monitor {
+            sidebar_visible
+        } else {
+            sidebar_visible
+        };
 
     // Calculate sidebar width: min(50, terminal_width * 0.3) with minimum of 30
     let show_sidebar = effective_sidebar_visible && area.width >= SIDEBAR_MIN_WIDTH;
@@ -379,11 +382,18 @@ mod tests {
         let area = Rect::new(0, 0, 120, 30);
         let theme = test_theme();
         let layout = compute_layout(
-            area, &theme, "", 1, false,
+            area,
+            &theme,
+            "",
+            1,
+            false,
             crate::domain::models::visual::DensityMode::Dashboard,
         )
         .unwrap();
-        assert!(layout.dashboard_panel.is_some(), "Dashboard mode must populate dashboard_panel");
+        assert!(
+            layout.dashboard_panel.is_some(),
+            "Dashboard mode must populate dashboard_panel"
+        );
         let panel = layout.dashboard_panel.unwrap();
         let chat = layout.chat_pane;
         // Content area = 30 - 1 status - 3 input = 26
@@ -399,11 +409,18 @@ mod tests {
         let area = Rect::new(0, 0, 120, 30);
         let theme = test_theme();
         let layout = compute_layout(
-            area, &theme, "", 1, true, // sidebar_visible=true
+            area,
+            &theme,
+            "",
+            1,
+            true, // sidebar_visible=true
             crate::domain::models::visual::DensityMode::Focus,
         )
         .unwrap();
-        assert!(layout.sidebar.is_none(), "Focus mode must hide sidebar regardless of flag");
+        assert!(
+            layout.sidebar.is_none(),
+            "Focus mode must hide sidebar regardless of flag"
+        );
     }
 
     #[test]
@@ -411,17 +428,31 @@ mod tests {
         let area = Rect::new(0, 0, 120, 30);
         let theme = test_theme();
         let with_sidebar = compute_layout(
-            area, &theme, "", 1, true,
+            area,
+            &theme,
+            "",
+            1,
+            true,
             crate::domain::models::visual::DensityMode::Monitor,
         )
         .unwrap();
-        assert!(with_sidebar.sidebar.is_some(), "Monitor with visible flag: sidebar shown");
+        assert!(
+            with_sidebar.sidebar.is_some(),
+            "Monitor with visible flag: sidebar shown"
+        );
 
         let without_sidebar = compute_layout(
-            area, &theme, "", 1, false,
+            area,
+            &theme,
+            "",
+            1,
+            false,
             crate::domain::models::visual::DensityMode::Monitor,
         )
         .unwrap();
-        assert!(without_sidebar.sidebar.is_none(), "Monitor with hidden flag: sidebar hidden");
+        assert!(
+            without_sidebar.sidebar.is_none(),
+            "Monitor with hidden flag: sidebar hidden"
+        );
     }
 }

@@ -17,7 +17,10 @@ fn test_cli_init_subcommand() {
     // Default flags preserved
     assert!(!cli.new);
     assert!(cli.session.is_none());
-    assert!(cli.log_level.is_none(), "no --log-level => None (Story 8.1 D5)");
+    assert!(
+        cli.log_level.is_none(),
+        "no --log-level => None (Story 8.1 D5)"
+    );
 }
 
 /// Bare `rustain` sets command = None.

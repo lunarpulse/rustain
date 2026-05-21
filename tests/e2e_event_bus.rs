@@ -65,6 +65,8 @@ fn test_app_state_honors_raw_capacity() {
         storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -77,13 +79,15 @@ fn test_app_state_honors_raw_capacity() {
         provider_registry,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
-        Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        Arc::new(ArcSwap::from_pointee(
+            rustain::domain::models::AppConfig::default(),
+        )),
         agent_core,
         compose_snapshot,
-        Arc::new(ArcSwap::from_pointee(
-            Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
-                as Arc<dyn rustain::domain::ports::ProfileResolver>,
-        )),
+        Arc::new(ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::profile_resolver::noop::NoopProfileResolver,
+        )
+            as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
     );
     // AppState should own an EventBus with the requested capacity.
@@ -110,6 +114,8 @@ fn test_app_state_session_cancel_is_root_token() {
         storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,
@@ -122,13 +128,15 @@ fn test_app_state_session_cancel_is_root_token() {
         provider_registry2,
         Arc::new(rustain::adapters::noop::NoOpUsageLedger),
         Arc::new(rustain::adapters::budget::BudgetStateStore::new()),
-        Arc::new(ArcSwap::from_pointee(rustain::domain::models::AppConfig::default())),
+        Arc::new(ArcSwap::from_pointee(
+            rustain::domain::models::AppConfig::default(),
+        )),
         agent_core2,
         compose_snapshot2,
-        Arc::new(ArcSwap::from_pointee(
-            Arc::new(rustain::adapters::profile_resolver::noop::NoopProfileResolver)
-                as Arc<dyn rustain::domain::ports::ProfileResolver>,
-        )),
+        Arc::new(ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::profile_resolver::noop::NoopProfileResolver,
+        )
+            as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
     );
     // The session_cancel should be a root token (no parent)

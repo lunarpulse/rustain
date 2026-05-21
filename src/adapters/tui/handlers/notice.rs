@@ -105,10 +105,18 @@ pub(crate) fn apply_density_transition(
         state.status_before_flash = Some(state.status.clone());
         while let Some(q) = state.queued_notifications.pop_front() {
             match q {
-                QueuedNotification::StatusFlash { level: _, message, duration_ms: _ } => {
+                QueuedNotification::StatusFlash {
+                    level: _,
+                    message,
+                    duration_ms: _,
+                } => {
                     let fb_id = {
-                        static DRAIN_FB_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-                        format!("drain-fb-{}", DRAIN_FB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                        static DRAIN_FB_COUNTER: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        format!(
+                            "drain-fb-{}",
+                            DRAIN_FB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        )
                     };
                     let fb = crate::domain::models::FeedbackBlock {
                         id: fb_id.clone(),
@@ -159,9 +167,7 @@ pub(crate) fn auto_switch_to_monitor_on_error(
 
 /// Story 8.4b: drain the queued-notifications VecDeque (test helper).
 #[cfg(test)]
-pub(crate) fn drain_queued_notifications_for_test(
-    state: &mut TuiState,
-) -> Vec<QueuedNotification> {
+pub(crate) fn drain_queued_notifications_for_test(state: &mut TuiState) -> Vec<QueuedNotification> {
     std::mem::take(&mut state.queued_notifications)
         .into_iter()
         .collect()
@@ -174,7 +180,11 @@ mod tests {
 
     #[test]
     fn warning_notice_does_not_transfer_focus() {
-        let mut state = TuiState::with_capability(80, 24, crate::adapters::tui::color_detect::ColorCapability::TrueColor);
+        let mut state = TuiState::with_capability(
+            80,
+            24,
+            crate::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
         state.focus = FocusState::Input;
         // Set to Monitor so apply_warning_notice inserts directly (not queued)
         state.density_mode = crate::domain::models::visual::DensityMode::Monitor;
@@ -199,7 +209,11 @@ mod tests {
 
     #[test]
     fn notify_or_queue_queues_in_focus_mode() {
-        let mut state = TuiState::with_capability(80, 24, crate::adapters::tui::color_detect::ColorCapability::TrueColor);
+        let mut state = TuiState::with_capability(
+            80,
+            24,
+            crate::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
         state.density_mode = crate::domain::models::visual::DensityMode::Focus;
         let n = QueuedNotification::FeedbackBlock {
             id: "test-1".to_string(),
@@ -207,13 +221,20 @@ mod tests {
             message: "queued message".to_string(),
         };
         notify_or_queue(&mut state, n);
-        assert!(state.feedback_blocks.is_empty(), "Focus mode: no direct insert");
+        assert!(
+            state.feedback_blocks.is_empty(),
+            "Focus mode: no direct insert"
+        );
         assert_eq!(state.queued_notifications.len(), 1);
     }
 
     #[test]
     fn notify_or_queue_inserts_directly_in_monitor() {
-        let mut state = TuiState::with_capability(80, 24, crate::adapters::tui::color_detect::ColorCapability::TrueColor);
+        let mut state = TuiState::with_capability(
+            80,
+            24,
+            crate::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
         state.density_mode = crate::domain::models::visual::DensityMode::Monitor;
         let n = QueuedNotification::FeedbackBlock {
             id: "test-2".to_string(),
@@ -221,13 +242,20 @@ mod tests {
             message: "direct message".to_string(),
         };
         notify_or_queue(&mut state, n);
-        assert!(state.feedback_blocks.contains_key("test-2"), "Monitor mode: direct insert");
+        assert!(
+            state.feedback_blocks.contains_key("test-2"),
+            "Monitor mode: direct insert"
+        );
         assert!(state.queued_notifications.is_empty());
     }
 
     #[test]
     fn notify_or_queue_drops_oldest_on_overflow() {
-        let mut state = TuiState::with_capability(80, 24, crate::adapters::tui::color_detect::ColorCapability::TrueColor);
+        let mut state = TuiState::with_capability(
+            80,
+            24,
+            crate::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
         state.density_mode = crate::domain::models::visual::DensityMode::Focus;
         for i in 0..33 {
             let n = QueuedNotification::FeedbackBlock {
@@ -250,7 +278,11 @@ mod tests {
 
     #[test]
     fn queued_notifications_drain_in_fifo_order() {
-        let mut state = TuiState::with_capability(80, 24, crate::adapters::tui::color_detect::ColorCapability::TrueColor);
+        let mut state = TuiState::with_capability(
+            80,
+            24,
+            crate::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
         state.density_mode = crate::domain::models::visual::DensityMode::Focus;
         for i in 0..3 {
             let n = QueuedNotification::FeedbackBlock {

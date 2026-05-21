@@ -28,7 +28,10 @@ fn test_cli_default_flags() {
     let cli = Cli::parse_from(["rustain"]);
     assert!(!cli.new);
     assert!(cli.session.is_none());
-    assert!(cli.log_level.is_none(), "no --log-level flag => None (Story 8.1 D5)");
+    assert!(
+        cli.log_level.is_none(),
+        "no --log-level flag => None (Story 8.1 D5)"
+    );
 }
 
 /// --log-level still works alongside new flags.

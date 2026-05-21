@@ -53,7 +53,10 @@ adapter = "coding"
     let resolver = TomlProfileResolver::new("coding", tmpdir.path().to_path_buf()).unwrap();
     let profiles = resolver.list_profiles();
     let custom = profiles.iter().find(|p| p.name == "my-custom");
-    assert!(custom.is_some(), "list_profiles should include user profile 'my-custom'");
+    assert!(
+        custom.is_some(),
+        "list_profiles should include user profile 'my-custom'"
+    );
     let custom = custom.unwrap();
     assert_eq!(custom.description.as_deref(), Some("My custom profile"));
 }
@@ -70,7 +73,10 @@ fn test_list_profiles_dimensions_populated() {
         coding.selection.dimensions
     );
     assert!(
-        coding.selection.dimensions.contains_key(&PortDimension::Persona),
+        coding
+            .selection
+            .dimensions
+            .contains_key(&PortDimension::Persona),
         "coding profile should have persona dimension"
     );
 }
@@ -89,7 +95,8 @@ fn test_transition_plan_between_profiles() {
         .dimensions;
     let pa_dims = pa_resolver.resolve_active().unwrap().selection.dimensions;
 
-    let plan = TransitionPlan::from_selections(&coding_dims, &pa_dims, "personal-assistant", 5);
+    let plan =
+        TransitionPlan::from_selections(&coding_dims, &pa_dims, "personal-assistant", 5, None);
     assert!(
         !plan.diffs.is_empty(),
         "Transition from coding to personal-assistant should produce diffs"
@@ -119,7 +126,7 @@ fn test_switch_same_profile_no_op() {
         .dimensions
         .clone();
 
-    let plan = TransitionPlan::from_selections(&coding_dims, &coding_dims, "coding", 6);
+    let plan = TransitionPlan::from_selections(&coding_dims, &coding_dims, "coding", 6, None);
     assert!(
         plan.diffs.is_empty(),
         "Switching from coding to coding should produce no diffs"

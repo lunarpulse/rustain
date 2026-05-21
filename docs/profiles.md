@@ -180,10 +180,14 @@ adapters not yet fully implemented.
 | Persona    | minimal, coding, personal-assistant         |
 | Memory     | noop, project-scoped, daily-log             |
 | Session    | basic, workspace                            |
-| Tools      | builtin-only, builtin-full                  |
+| Tools      | builtin-only, builtin-full, composite        |
 | Channels   | terminal, telegram (feature-gated)          |
 | Scheduler  | none, cron (feature-gated)                  |
 | Context    | default, daily                              |
+
+### MCP Servers
+
+MCP servers can be configured per-profile via `[tools.config.mcp.<server-name>]` or workspace-wide via `.claude/mcp.json`. See [Adapter Composition](adapter-composition.md#composite-tools-adapter) for full details.
 
 ## CLI: Profile Management Commands
 

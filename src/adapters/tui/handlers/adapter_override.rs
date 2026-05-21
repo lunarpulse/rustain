@@ -32,17 +32,13 @@ pub async fn handle_apply_adapter_override(
         .session_overrides
         .get(&port)
         .map(|r| r.adapter.clone())
-        .unwrap_or_else(|| {
-            adapter_overlay::port_label(port).to_string()
-        });
+        .unwrap_or_else(|| adapter_overlay::port_label(port).to_string());
 
     match composition::build_for_port(port, &adapter_ref, compose_snapshot) {
         Ok(built) => {
             let adapter_name = adapter_ref.adapter.clone();
             agent_core.store_for_port(built);
-            state
-                .session_overrides
-                .insert(port, adapter_ref.clone());
+            state.session_overrides.insert(port, adapter_ref.clone());
 
             tracing::info!(
                 port = ?port,

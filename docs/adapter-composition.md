@@ -95,3 +95,64 @@ When a profile change triggers `/config reload`:
 4. On failure: config + profile remain swapped; previous adapters remain active; a `ConfigReloaded { success: false, error: "..." }` notice is emitted.
 
 The `ComposeContext` snapshot is NOT re-built at reload time — profile changes do NOT re-scan project files (that is a separate "context refresh" concern).
+
+## Composite Tools Adapter
+
+The `composite` adapter (Story 9.1) delegates tool execution to the builtin adapter while managing MCP server lifecycle (connect, reconnect, shutdown, profile-switch migration).
+
+### Configuration
+
+```toml
+[tools]
+adapter = "composite"
+
+[tools.config]
+include_builtin = true    # default true; if false, only MCP tools are available
+
+[tools.config.mcp.postgres]
+transport = "stdio"
+command = "mcp-server-postgres"
+args = ["--connection-string", "$DATABASE_URL"]
+persistent = false
+
+[tools.config.mcp.git]
+transport = "stdio"
+command = "mcp-server-git"
+```
+
+### Worked Example: `coding` profile
+
+```toml
+# ~/.config/rustain/coding.toml
+[tools]
+adapter = "composite"
+
+[tools.config.mcp.postgres]
+command = "mcp-server-postgres"
+args = ["--connection-string", "$DATABASE_URL"]
+
+[tools.config.mcp.git]
+command = "mcp-server-git"
+```
+
+### Worked Example: `personal-assistant` profile
+
+```toml
+# ~/.config/rustain/personal-assistant.toml
+[tools]
+adapter = "composite"
+
+[tools.config.mcp.calendar]
+command = "mcp-server-calendar"
+```
+
+### Feature Gate
+
+The `composite` adapter requires the `mcp` cargo feature (enabled by default in v0.5). Building without it falls back to `builtin-full`.
+
+### Lifecycle
+
+- **Startup**: MCP servers are lazy-connected after the first frame renders
+- **Reconnect**: Exponential backoff (1s→32s, max 5 attempts) on disconnect
+- **Profile switch**: Warm-tier migration preserves `persistent = true` servers
+- **Shutdown**: Parallel shutdown with 5s ceiling; EOF → 2s grace → SIGKILL

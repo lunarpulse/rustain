@@ -6,13 +6,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::adapters::profile_resolver::embedded::{embedded_names, EmbeddedProfileSource};
+use crate::adapters::profile_resolver::embedded::{EmbeddedProfileSource, embedded_names};
 use crate::domain::errors::ProfileError;
-use crate::domain::models::{ProfileDescriptor, ProfileIdentityColor, ProfileSelection, ProfileSource, ResolvedProfile};
+use crate::domain::models::{
+    McpServerSpec, ProfileDescriptor, ProfileIdentityColor, ProfileSelection, ProfileSource,
+    ResolvedProfile,
+};
 use crate::domain::ports::ProfileResolver;
 use crate::domain::services::adapter_catalog::AdapterCatalog;
 use crate::domain::services::identity_color;
-use crate::domain::services::profile_loader::{ProfileLoader, ProfileSource as LoaderProfileSource};
+use crate::domain::services::profile_loader::{
+    ProfileLoader, ProfileSource as LoaderProfileSource,
+};
 
 pub struct TomlProfileResolver {
     resolved: ResolvedProfile,
@@ -67,7 +72,10 @@ impl LoaderProfileSource for FileSystemProfileSource {
         }
 
         // 2. Community dir fallback (Story 8.6b)
-        let community_path = self.config_dir.join("community").join(format!("{name}.toml"));
+        let community_path = self
+            .config_dir
+            .join("community")
+            .join(format!("{name}.toml"));
         if community_path.exists() {
             match std::fs::read_to_string(&community_path) {
                 Ok(content) => {
@@ -100,7 +108,62 @@ impl TomlProfileResolver {
         let source = FileSystemProfileSource::new(config_dir.clone());
         let catalog = AdapterCatalog;
         let loader = ProfileLoader::new(&catalog, &source);
-        let resolved = loader.load(active_name)?;
+        let mut resolved = loader.load(active_name)?;
+
+        // Story 9.1: Parse MCP server configs from workspace + profile
+        #[cfg(feature = "mcp")]
+        {
+            let workspace_specs =
+                crate::adapters::mcp::workspace_config::parse_workspace_mcp_config(
+                    &std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(".claude")
+                        .join("mcp.json"),
+                )
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to parse workspace MCP config: {e}");
+                    Vec::new()
+                });
+
+            let profile_specs = crate::adapters::mcp::profile_config::extract_profile_mcp_servers(
+                resolved
+                    .selection
+                    .dimensions
+                    .get(&crate::domain::models::PortDimension::Tools)
+                    .and_then(|r| r._config.as_ref()),
+                active_name,
+            );
+
+            resolved.mcp_servers =
+                crate::adapters::mcp::merge_mcp_specs(workspace_specs, profile_specs);
+
+            crate::adapters::mcp::emit_transport_warnings(&resolved.mcp_servers);
+
+            resolved.include_builtin_tools = resolved
+                .selection
+                .dimensions
+                .get(&crate::domain::models::PortDimension::Tools)
+                .and_then(|r| r._config.as_ref())
+                .and_then(|c| c.get("include_builtin"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            // Auto-rewrite "composite" to "builtin-full" if no MCP servers configured
+            if let Some(tools_ref) = resolved
+                .selection
+                .dimensions
+                .get_mut(&crate::domain::models::PortDimension::Tools)
+            {
+                if tools_ref.adapter == "composite" && resolved.mcp_servers.is_empty() {
+                    tracing::warn!(
+                        "Profile '{}' selects composite tools adapter but defines no MCP servers and workspace has no .claude/mcp.json. Falling back to 'builtin-full'.",
+                        active_name
+                    );
+                    tools_ref.adapter = "builtin-full".to_string();
+                }
+            }
+        }
+
         Ok(Self {
             resolved,
             config_dir,
@@ -140,7 +203,9 @@ impl ProfileResolver for TomlProfileResolver {
                             Ok(c) => c,
                             Err(_) => continue,
                         };
-                        if let Ok(def) = toml::from_str::<crate::domain::models::ProfileDefinition>(&content) {
+                        if let Ok(def) =
+                            toml::from_str::<crate::domain::models::ProfileDefinition>(&content)
+                        {
                             if seen.insert(def.name.clone()) {
                                 profiles.push(build_descriptor(&def, ProfileSource::User));
                             }
@@ -174,10 +239,15 @@ impl ProfileResolver for TomlProfileResolver {
                             }
                             Err(_) => continue,
                         };
-                        if let Ok(def) = toml::from_str::<crate::domain::models::ProfileDefinition>(&content) {
+                        if let Ok(def) =
+                            toml::from_str::<crate::domain::models::ProfileDefinition>(&content)
+                        {
                             if seen.insert(def.name.clone()) {
                                 let mut desc = build_descriptor(&def, ProfileSource::Community);
-                                desc.source_origin = crate::infrastructure::profile_install::read_source_sidecar(&path);
+                                desc.source_origin =
+                                    crate::infrastructure::profile_install::read_source_sidecar(
+                                        &path,
+                                    );
                                 profiles.push(desc);
                             }
                         }
@@ -191,7 +261,9 @@ impl ProfileResolver for TomlProfileResolver {
             if !seen.contains(name) {
                 let source = EmbeddedProfileSource;
                 if let Some(content) = source.get(name) {
-                    if let Ok(def) = toml::from_str::<crate::domain::models::ProfileDefinition>(&content) {
+                    if let Ok(def) =
+                        toml::from_str::<crate::domain::models::ProfileDefinition>(&content)
+                    {
                         seen.insert(def.name.clone());
                         profiles.push(build_descriptor(&def, ProfileSource::Builtin));
                     }
@@ -218,30 +290,75 @@ impl ProfileResolver for TomlProfileResolver {
     // resolve_active_profile_defaults uses the trait default
 }
 
-fn build_descriptor(def: &crate::domain::models::ProfileDefinition, source: ProfileSource) -> ProfileDescriptor {
+fn build_descriptor(
+    def: &crate::domain::models::ProfileDefinition,
+    source: ProfileSource,
+) -> ProfileDescriptor {
     use crate::domain::models::{AdapterRef, PortDimension};
     let identity_color = identity_color::derive_identity_color(&def.name, def.identity_color);
     let mut dimensions = std::collections::BTreeMap::new();
     if let Some(ref r) = def.persona {
-        dimensions.insert(PortDimension::Persona, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Persona,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     if let Some(ref r) = def.memory {
-        dimensions.insert(PortDimension::Memory, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Memory,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     if let Some(ref r) = def.session {
-        dimensions.insert(PortDimension::Session, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Session,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     if let Some(ref r) = def.tools {
-        dimensions.insert(PortDimension::Tools, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Tools,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     if let Some(ref r) = def.channels {
-        dimensions.insert(PortDimension::Channels, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Channels,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     if let Some(ref r) = def.scheduler {
-        dimensions.insert(PortDimension::Scheduler, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Scheduler,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     if let Some(ref r) = def.context {
-        dimensions.insert(PortDimension::Context, AdapterRef { adapter: r.adapter.clone(), _config: r._config.clone() });
+        dimensions.insert(
+            PortDimension::Context,
+            AdapterRef {
+                adapter: r.adapter.clone(),
+                _config: r._config.clone(),
+            },
+        );
     }
     let selection = ProfileSelection { dimensions };
     ProfileDescriptor {
@@ -258,8 +375,8 @@ fn build_descriptor(def: &crate::domain::models::ProfileDefinition, source: Prof
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use crate::domain::models::PortDimension;
+    use std::collections::BTreeMap;
 
     fn make_tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temp dir")
@@ -308,10 +425,17 @@ adapter = "workspace"
 adapter = "builtin-full"
 "#;
         std::fs::write(tmpdir.path().join("custom-coding.toml"), custom_coding).unwrap();
-        let resolver = TomlProfileResolver::new("custom-coding", tmpdir.path().to_path_buf()).unwrap();
+        let resolver =
+            TomlProfileResolver::new("custom-coding", tmpdir.path().to_path_buf()).unwrap();
         let profile = resolver.resolve_active().unwrap();
-        assert_eq!(profile.selection.dimensions[&PortDimension::Persona].adapter, "personal-assistant");
-        assert_eq!(profile.selection.dimensions[&PortDimension::Memory].adapter, "daily-log");
+        assert_eq!(
+            profile.selection.dimensions[&PortDimension::Persona].adapter,
+            "personal-assistant"
+        );
+        assert_eq!(
+            profile.selection.dimensions[&PortDimension::Memory].adapter,
+            "daily-log"
+        );
     }
 
     #[test]
@@ -437,7 +561,10 @@ adapter = "minimal"
         let resolver = TomlProfileResolver::new("coding", tmpdir.path().to_path_buf()).unwrap();
         let profiles = resolver.list_profiles();
         let community = profiles.iter().find(|p| p.name == "list-test");
-        assert!(community.is_some(), "community profile should appear in list");
+        assert!(
+            community.is_some(),
+            "community profile should appear in list"
+        );
         assert_eq!(community.unwrap().source, ProfileSource::Community);
     }
 
@@ -453,7 +580,9 @@ adapter = "minimal"
 "#;
         std::fs::write(community_dir.join("sidecar-test.toml"), toml_content).unwrap();
         // Write sidecar with origin
-        let sidecar_path = community_dir.join("sidecar-test.toml").with_extension("toml.source");
+        let sidecar_path = community_dir
+            .join("sidecar-test.toml")
+            .with_extension("toml.source");
         std::fs::write(&sidecar_path, "gh:owner/repo").unwrap();
         let resolver = TomlProfileResolver::new("coding", tmpdir.path().to_path_buf()).unwrap();
         let profiles = resolver.list_profiles();

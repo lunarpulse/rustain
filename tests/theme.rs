@@ -387,9 +387,14 @@ fn test_tui_renders_with_theme_colors() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            if let Some(app_layout) =
-                layout::compute_layout(area, &state.theme, &state.input_buffer, 1, false, rustain::domain::models::visual::DensityMode::Focus)
-            {
+            if let Some(app_layout) = layout::compute_layout(
+                area,
+                &state.theme,
+                &state.input_buffer,
+                1,
+                false,
+                rustain::domain::models::visual::DensityMode::Focus,
+            ) {
                 status_bar::render(
                     frame,
                     app_layout.status_bar,

@@ -7,9 +7,7 @@
 //! - Export confirm/cancel/apply (Story 4-4 AC11/AC12)
 
 use crate::adapters::tui::state::TuiState;
-use crate::domain::models::{
-    Conversation, FocusState, StatusState,
-};
+use crate::domain::models::{Conversation, FocusState, StatusState};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
