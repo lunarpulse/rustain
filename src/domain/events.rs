@@ -277,6 +277,34 @@ pub enum AppEvent {
         server_id: String,
         tool_count: usize,
     },
+    /// Story 9.3a — capability lifecycle events from the CapabilityRegistry.
+    /// Wraps the three sub-variants (Registered, Deregistered, Updated) in one
+    /// nested enum to keep the top-level surface lean and group related events
+    /// for the event_loop dispatcher.
+    CapabilityEvent(CapabilityEvent),
+}
+
+/// Capability lifecycle events emitted by the CapabilityRegistry.
+///
+/// Flows through the existing `AppEvent` bus (NO new EventBus channel —
+/// the registry's `event_tx` is injected from `ComposeContext.domain_tx`
+/// per Epic 9 Flag 1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum CapabilityEvent {
+    /// A new capability has been registered.
+    Registered {
+        capability: crate::domain::models::capability_registry::RegisteredCapability,
+    },
+    /// A capability has been deregistered.
+    Deregistered {
+        capability: crate::domain::models::capability_registry::RegisteredCapability,
+    },
+    /// An existing capability has been updated (same id, new data).
+    Updated {
+        id: crate::domain::models::capability_id::CapabilityId,
+        old: crate::domain::models::capability_registry::RegisteredCapability,
+        new: Box<crate::domain::models::capability_registry::RegisteredCapability>,
+    },
 }
 
 /// Event wrapping a tool execution result.

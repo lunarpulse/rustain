@@ -59,31 +59,44 @@ rustain/src/
 
 ## Capability Provider Architecture (CPA)
 
-The core extensibility pattern. All interop protocols implement `CapabilityProvider`:
+The core extensibility pattern. All interop protocols implement `CapabilityProvider` (4 methods per Decision Gate 3.1):
 
 ```
-DISCOVER → ACTIVATE → EXECUTE → RENDER → GOVERN
+DISCOVER → REGISTER → INVOKE → RENDER
 ```
 
 ```rust
 #[async_trait]
 pub trait CapabilityProvider: Send + Sync {
+    /// Stable protocol identifier — used by `CapabilityId` namespace.
     fn protocol(&self) -> &str;
-    fn mention_category(&self) -> MentionCategory;
-    async fn discover(&self, config: &WorkspaceConfig) -> Result<Vec<Capability>>;
-    async fn activate(&self, cap: &Capability, session: &SessionContext) -> Result<ActivatedCapability>;
-    async fn execute(&self, activated: &ActivatedCapability, input: CapabilityInput,
-                     tx: &mpsc::UnboundedSender<CapabilityEvent>) -> Result<()>;
-    fn permission_scope(&self, cap: &Capability) -> PermissionScope;
+    /// Provider's static feature support, pattern-matched by ToolExposurePort (9.4).
+    fn capabilities(&self) -> ProviderCapabilities;
+    /// Discover capabilities. For McpProvider: reads cached_tools, no I/O on hot path.
+    async fn discover(&self) -> Result<Vec<Capability>, CapabilityError>;
+    /// Invoke a capability with input + cancel token.
+    async fn invoke(&self, id: &CapabilityId, input: serde_json::Value,
+                    cancel: CancellationToken) -> Result<ToolResult, CapabilityError>;
 }
 ```
 
-**Adding a new protocol:** Implement `CapabilityProvider`, call `registry.register()`. Done — @mentions, permissions, TUI rendering work automatically.
+**Adding a new protocol:** Implement `CapabilityProvider`, call `registry.register()`. Done — the autocomplete and TUI status panel pick up capabilities automatically.
 
 **Current providers (shipped and upcoming):**
-- `AgentSkillsProvider` — `.agents/skills/`, `.claude/skills/` (Knowledge) — Story 5.x shipped
-- `McpProvider` — `.claude/mcp.json` (Tools) — Story 9.1 + 9.2 ship the full discovery + invocation lifecycle (`mcp__<server>__<tool>` naming, `CompositeToolsetAdapter` projection, `McpClientAdapter::call_tool`, `@MCP/` autocomplete, `permission_chain` annotation-aware gating, `display_tool_name` render projection). The formal `CapabilityProvider` trait lands in Story 9.3a.
-- `A2aProvider` — `.claude/a2a.json` + spawn/despawn (Agents)
+
+| Provider | Implementation | Story |
+|----------|---------------|-------|
+| `McpProvider` | Wraps `McpClientAdapter` (9.1+9.2) behind the trait | **Story 9.3a** (this story) |
+| `BuiltinProvider` | Refactor of `ToolSetAdapter` behind the trait | Story 9.3b |
+| `SkillsProvider` | Refactor of skill executor behind the trait | Story 9.3b |
+| `A2aProvider` | Implements `CapabilityProvider` when A2A lands | Epic 14 |
+| `SubagentProvider` | Implements `CapabilityProvider` for subagent dispatch | Epic 10 |
+
+**CapabilityRegistry** is internal to `CompositeToolsetAdapter` — NO top-level `AppState.capability_registry`. Conformance test `tests/conformance_capability_registry.rs::test_no_capability_registry_on_app_state` enforces this.
+
+**Namespace:** Registry ids use `::` (double-colon) separator: `mcp::postgres::query`, `builtin::bash`, `skill::review`. The LLM-wire `mcp__<server>__<tool>` shape (Story 9.2) is a SEPARATE namespace — bridge methods `CapabilityId::from_mcp_wire_name` / `to_mcp_wire_name` convert between them.
+
+**`CapabilityEvent` stream:** `Registered` / `Deregistered` / `Updated` flow through the existing `AppEvent` bus (same `event_tx` channel as 9.1+9.2), surfacing reactively to autocomplete + adapter-status panel.
 
 ## ToolCall FSM (Story 6-0b)
 

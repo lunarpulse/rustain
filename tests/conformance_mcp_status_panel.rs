@@ -46,6 +46,7 @@ fn test_mcp_sub_rows_appear_in_health_output() {
         vec![client_a, client_b],
         vec![spec_a, spec_b],
         true,
+        None,
     );
 
     let rows = composite.mcp_health_rows();

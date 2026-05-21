@@ -11,8 +11,8 @@
 //!   after N ms and switch to a different tool list (Story 9.2)
 
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 fn main() {
@@ -144,7 +144,10 @@ fn main() {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
 
                 if tool_error {
                     serde_json::json!({
@@ -160,10 +163,7 @@ fn main() {
                 } else {
                     let echo = match tool_name {
                         "echo" => {
-                            let txt = arguments
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let txt = arguments.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             format!("echo: {}", txt)
                         }
                         "add" => {

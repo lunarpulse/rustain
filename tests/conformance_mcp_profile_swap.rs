@@ -46,6 +46,7 @@ async fn test_no_zombie_mcp_processes_after_swap() {
         vec![client_a.clone(), client_b.clone()],
         vec![spec_a, spec_b],
         true,
+        None,
     );
 
     let result = composite.prepare_detach().await;
@@ -72,16 +73,15 @@ async fn test_persistent_server_survives_profile_swap() {
     let (tx_p, _rx_p) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (tx_e, _rx_e) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
-    let client_persistent =
-        Arc::new(McpClientAdapter::new(spec_persistent.clone(), Some(tx_p)));
-    let client_ephemeral =
-        Arc::new(McpClientAdapter::new(spec_ephemeral.clone(), Some(tx_e)));
+    let client_persistent = Arc::new(McpClientAdapter::new(spec_persistent.clone(), Some(tx_p)));
+    let client_ephemeral = Arc::new(McpClientAdapter::new(spec_ephemeral.clone(), Some(tx_e)));
 
     let composite = CompositeToolsetAdapter::new(
         builtin,
         vec![client_persistent.clone(), client_ephemeral.clone()],
         vec![spec_persistent, spec_ephemeral],
         true,
+        None,
     );
 
     let result = composite.prepare_detach().await;

@@ -183,6 +183,13 @@ pub fn render(
                 ));
                 lines.push(Line::from(spans));
             }
+            // Story 9.3a — registry summary line
+            if let Some(summary) = get_registry_summary(agent_core) {
+                lines.push(Line::from(Span::styled(
+                    format!("   └─ {}", summary),
+                    Style::default().fg(theme.colors.fg_muted),
+                )));
+            }
         }
     }
 
@@ -230,4 +237,40 @@ fn get_mcp_health_rows(agent_core: &AgentCore) -> Vec<McpHealthRow> {
 #[cfg(not(feature = "mcp"))]
 fn get_mcp_health_rows(_agent_core: &AgentCore) -> Vec<McpHealthRow> {
     Vec::new()
+}
+
+/// Story 9.3a — format a registry summary from a snapshot of capabilities.
+/// Returns `None` when the snapshot is empty.
+///
+/// Extracted as a pure function so tests can verify the formatting
+/// without constructing an `AgentCore`.
+pub fn format_registry_summary(snap: &[crate::domain::models::capability_registry::RegisteredCapability]) -> Option<String> {
+    if snap.is_empty() {
+        return None;
+    }
+    let mcp_count = snap.iter().filter(|c| c.protocol == "mcp").count();
+    Some(format!(
+        "Registry: {} capabilities ({} MCP)",
+        snap.len(),
+        mcp_count
+    ))
+}
+
+/// Story 9.3a — registry summary line for the adapter status panel.
+/// Returns `None` when the registry is empty (no registered capabilities).
+#[cfg(feature = "mcp")]
+fn get_registry_summary(agent_core: &AgentCore) -> Option<String> {
+    use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    let tools = agent_core.tools.load_full();
+    if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+        let snap = composite.capability_registry().snapshot();
+        format_registry_summary(&snap)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "mcp"))]
+fn get_registry_summary(_agent_core: &AgentCore) -> Option<String> {
+    None
 }

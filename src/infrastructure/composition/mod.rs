@@ -229,6 +229,7 @@ pub fn build_tools(
                 mcp_clients,
                 ctx.mcp_servers.clone(),
                 ctx.include_builtin_tools,
+                ctx.domain_tx.clone(),
             );
             Ok(Arc::new(adapter))
         }

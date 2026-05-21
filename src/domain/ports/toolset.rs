@@ -63,11 +63,17 @@ pub trait ToolSetPort: Send + Sync {
     /// Support downcasting from `dyn ToolSetPort` to concrete types.
     /// Used by infrastructure code that needs adapter-specific methods
     /// (e.g., status panel MCP sub-rows, startup MCP connect).
+    ///
+    /// # Default behaviour
+    ///
+    /// Returns a private sentinel type.  Concrete adapters that wish to be
+    /// downcastable (e.g. `CompositeToolsetAdapter`) MUST override this.
+    /// Callers should always use `downcast_ref()` and handle `None` — never
+    /// call `as_any()` directly without a fallback.
     fn as_any(&self) -> &dyn std::any::Any {
-        // Default returns a type-erased reference; concrete adapters override.
-        // Since we can't provide a useful default, callers should handle None.
-        // Each implementor that needs downcast support must override this.
-        unreachable!("as_any must be overridden by concrete adapters that support downcasting")
+        struct Sentinel;
+        static SENTINEL: Sentinel = Sentinel;
+        &SENTINEL
     }
 
     async fn execute(

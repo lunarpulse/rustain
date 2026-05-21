@@ -3,6 +3,10 @@ pub mod agent;
 pub mod approval;
 pub mod autocomplete;
 pub mod budget;
+pub mod capability;
+pub mod capability_id;
+pub mod capability_registry;
+pub mod catalog_delta;
 pub mod checkpoint;
 mod completion;
 mod config;
@@ -21,6 +25,7 @@ pub mod pricing;
 pub mod profile;
 pub mod project_context;
 pub mod provider;
+pub mod provider_capabilities;
 pub mod router;
 pub mod sandbox;
 mod session;
@@ -103,6 +108,12 @@ pub use crate::domain::services::reducer::{
 pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
 #[allow(unused_imports)]
 pub use budget::BudgetConfig;
+pub use capability::{Capability, CapabilityError};
+pub use capability_id::CapabilityId;
+pub use capability_registry::{
+    CapabilityRegistry, ProviderId, RegisterHandle, RegisteredCapability, RegistryError,
+};
+pub use catalog_delta::CatalogDelta;
 pub use launch_spec::AgentLaunchSpec;
 pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
 pub use mcp_server_state::McpConnectionState;
@@ -116,6 +127,7 @@ pub use profile::{
 };
 #[allow(unused_imports)]
 pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
+pub use provider_capabilities::{NativeRetrievalKind, ProviderCapabilities, TransportKind};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 #[allow(unused_imports)]

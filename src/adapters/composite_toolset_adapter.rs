@@ -4,22 +4,27 @@
 //! `available_tools()` projects MCP `cached_tools` into canonical
 //! `mcp__<server>__<tool>` names per ADR-06-08. `execute()` routes
 //! `mcp__`-prefixed names to the appropriate `McpClientAdapter::call_tool`.
+//!
+//! Story 9.3a adds the `CapabilityRegistry` as an internal field (Flag 1)
+//! with an `McpProvider` wrapping each `McpClientAdapter` behind the
+//! `CapabilityProvider` trait.
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// Global counter for synthetic tool_use_id generation.
-/// Combines with timestamp to avoid collisions under parallel calls.
-static MCP_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Global counter for synthetic tool_use_id generation in the composite adapter.
+static COMPOSITE_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::domain::errors::{ToolError, TransitionError};
-use crate::domain::events::ToolProgressEvent;
+use crate::domain::events::{AppEvent, ToolProgressEvent};
 use crate::domain::models::{
     CheckpointId, HealthSummary, McpConnectionState, McpHealthRow, McpServerSpec, ToolDefinition,
-    ToolResult, TransitionState,
+    ToolResult, TransitionState, capability_registry::CapabilityRegistry,
+    capability_registry::RegisterHandle, capability_registry::RegistryError,
 };
 use crate::domain::ports::ToolSetPort;
 use crate::domain::services::swap_tier::SwapTier;
@@ -30,6 +35,12 @@ pub struct CompositeToolsetAdapter {
     mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>>,
     server_specs: Vec<McpServerSpec>,
     include_builtin: bool,
+    /// Story 9.3a — internal registry of all capabilities (Flag 1).
+    /// Stored as `Arc` so `RegisterHandle` Weak refs remain valid across
+    /// repopulations (fixes review finding: temporary Arc invalidated Weak refs).
+    capability_registry: Arc<CapabilityRegistry>,
+    /// Handles keeping discovered capabilities alive.
+    subscription_handles: TokioMutex<Vec<RegisterHandle>>,
 }
 
 impl CompositeToolsetAdapter {
@@ -38,7 +49,9 @@ impl CompositeToolsetAdapter {
         mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>>,
         server_specs: Vec<McpServerSpec>,
         include_builtin: bool,
+        event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
     ) -> Self {
+        let capability_registry = Arc::new(CapabilityRegistry::new(event_tx));
         // P-15: Validate no duplicate server IDs
         let mut seen = std::collections::HashSet::new();
         for client in &mcp_clients {
@@ -52,7 +65,38 @@ impl CompositeToolsetAdapter {
             mcp_clients,
             server_specs,
             include_builtin,
+            capability_registry,
+            subscription_handles: TokioMutex::new(Vec::new()),
         }
+    }
+
+    /// Story 9.3a — access the capability registry.
+    pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
+        &self.capability_registry
+    }
+
+    /// Discover and register all MCP capabilities into the registry.
+    ///
+    /// Called post-construction from startup or after MCP catalog changes.
+    /// Idempotent — re-registration of the same id emits
+    /// `CapabilityEvent::Updated`, not duplicates.
+    pub async fn populate_registry(&self) -> Result<(), RegistryError> {
+        let mut handles = Vec::new();
+
+        for client in &self.mcp_clients {
+            let provider = crate::adapters::mcp::mcp_provider::McpProvider::new(client.clone());
+            let provider_id = format!("mcp:{}", client.server_id());
+            let new_handles = self
+                .capability_registry
+                .discover_and_register_all(&provider, &provider_id)
+                .await?;
+            handles.extend(new_handles);
+        }
+
+        // Replace the stored handles
+        let mut guard = self.subscription_handles.lock().await;
+        *guard = handles;
+        Ok(())
     }
 
     pub fn mcp_clients(&self) -> &[Arc<crate::adapters::mcp::client::McpClientAdapter>] {
@@ -275,7 +319,7 @@ impl ToolSetPort for CompositeToolsetAdapter {
                     "MCP server '{server_id}' is not connected (state: {state:?})"
                 )));
             }
-            let seq = MCP_TOOL_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let seq = COMPOSITE_TOOL_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
             let synthetic_id = format!("mcp-{}-{}", chrono::Utc::now().timestamp_millis(), seq);
             return self
                 .dispatch_mcp_call(client, tool_name_inner, input, cancel, synthetic_id, None)

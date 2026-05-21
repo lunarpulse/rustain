@@ -5,6 +5,7 @@ pub mod client;
 pub mod error;
 pub mod lazy_connect;
 pub mod lifecycle;
+pub mod mcp_provider;
 pub mod profile_config;
 pub mod reconnect;
 pub mod tool_projection;

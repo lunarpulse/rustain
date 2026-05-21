@@ -156,3 +156,15 @@ The `composite` adapter requires the `mcp` cargo feature (enabled by default in 
 - **Reconnect**: Exponential backoff (1s→32s, max 5 attempts) on disconnect
 - **Profile switch**: Warm-tier migration preserves `persistent = true` servers
 - **Shutdown**: Parallel shutdown with 5s ceiling; EOF → 2s grace → SIGKILL
+
+### Capability Registry
+
+The `CompositeToolsetAdapter` holds an internal `CapabilityRegistry` (Story 9.3a, Flag 1) that serves as the single source of truth for "what capabilities exist right now".
+
+**Lifecycle:** `discover` (read provider capabilities from in-memory caches) → `register` (insert into the registry) → `invoke` (execute via `CapabilityProvider::invoke`).
+
+**Namespace bridge:** The registry uses `::` (double-colon) ids — `mcp::postgres::query`, `builtin::bash`, `skill::review`. These are distinct from the LLM-wire `mcp__<server>__<tool>` shape (Story 9.2, ADR-06-08). Bridge methods `CapabilityId::from_mcp_wire_name` / `to_mcp_wire_name` convert between the two.
+
+**Reactive surface:** Every `register` / `deregister` / `update` emits a `CapabilityEvent` through the existing `AppEvent` bus (same `event_tx` channel as `McpConnectionStateChanged` and `McpCatalogChanged` from 9.1 + 9.2). The event loop sets `needs_redraw = true`, so the adapter-status panel automatically picks up the registry snapshot on the next render tick.
+
+**Observer subscription:** The `CatalogObserver` trait + `CapabilityRegistry::subscribe(observer)` seam is shipped in 9.3a. The fan-out implementation (`CatalogObserverRegistry` at `src/infrastructure/composition/catalog_observer_registry.rs`) lands in Story 9.4b Phase B (per ADR-09-01 v2.2 §Phased Implementation).

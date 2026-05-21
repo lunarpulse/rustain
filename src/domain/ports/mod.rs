@@ -2,6 +2,10 @@
 // Suppress unused warnings: traits are consumed by adapter impls, not by domain code.
 #[allow(unused_imports)]
 mod approval_persistence;
+#[allow(unused_imports)]
+mod capability_provider;
+#[allow(unused_imports)]
+mod catalog_observer;
 mod channel;
 #[allow(unused_imports)]
 mod clipboard;
@@ -34,6 +38,9 @@ mod toolset;
 mod usage_ledger;
 
 pub use approval_persistence::ApprovalPersistencePort;
+pub use capability_provider::CapabilityProvider;
+pub use catalog_observer::CatalogObserver;
+pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};
 pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use config_store::ConfigStorePort;

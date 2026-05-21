@@ -64,6 +64,8 @@ pub enum RawEventKind {
         server_id: String,
         tool_count: usize,
     },
+    /// Story 9.3a — Capability lifecycle event from the CapabilityRegistry.
+    Capability(crate::domain::events::CapabilityEvent),
 }
 
 pub struct EventBus {
@@ -179,6 +181,11 @@ impl RawEvent {
                     server_id: server_id.clone(),
                     tool_count: *tool_count,
                 },
+            },
+            AppEvent::CapabilityEvent(event) => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::Capability(event.clone()),
             },
             AppEvent::Tick
             | AppEvent::ConfigReload

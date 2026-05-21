@@ -103,3 +103,7 @@ For servers that don't emit the notification, tool lists are cached at connectio
 - **"connection failed after 5 attempts"** — Check the server command is in `$PATH` and the server binary is executable.
 - **"unsupported transport"** — SSE is not supported. Use `mcp-proxy` or update the server to stdio/Streamable HTTP.
 - **"composite adapter but no MCP servers"** — The profile was auto-rewritten to `builtin-full`. Add `[tools.config.mcp.*]` tables or create `.claude/mcp.json`.
+
+## Related
+
+- [Adapter Composition](adapter-composition.md#capability-registry) — Capability Registry and CPA trait integration (Story 9.3a)

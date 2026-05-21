@@ -6780,6 +6780,10 @@ pub async fn run(
                             tool_count,
                         ).await;
                     }
+                    #[cfg(feature = "mcp")]
+                    AppEvent::CapabilityEvent(_) => {
+                        state.needs_redraw = true;
+                    }
                     AppEvent::SessionAdapterOverridden {
                         port,
                         adapter_name,
@@ -8973,26 +8977,25 @@ pub(crate) async fn populate_autocomplete_suggestions(
             use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
             use crate::adapters::mcp::tool_projection::collect_mcp_autocomplete;
 
-            let suggestions = if let Some(composite) =
-                tools.as_any().downcast_ref::<CompositeToolsetAdapter>()
-            {
-                let filter = if state.autocomplete.filter_text.is_empty() {
-                    None
+            let suggestions =
+                if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+                    let filter = if state.autocomplete.filter_text.is_empty() {
+                        None
+                    } else {
+                        Some(state.autocomplete.filter_text.as_str())
+                    };
+                    let mcp_tools = collect_mcp_autocomplete(composite.mcp_clients(), filter);
+                    mcp_tools
+                        .into_iter()
+                        .map(|info| AutocompleteSuggestion::McpTool {
+                            server: info.server,
+                            name: info.name,
+                            description: info.description,
+                        })
+                        .collect()
                 } else {
-                    Some(state.autocomplete.filter_text.as_str())
+                    Vec::new()
                 };
-                let mcp_tools = collect_mcp_autocomplete(composite.mcp_clients(), filter);
-                mcp_tools
-                    .into_iter()
-                    .map(|info| AutocompleteSuggestion::McpTool {
-                        server: info.server,
-                        name: info.name,
-                        description: info.description,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
             state.autocomplete.suggestions = suggestions;
             if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
                 state.autocomplete.selected_index = 0;

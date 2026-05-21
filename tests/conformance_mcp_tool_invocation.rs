@@ -51,7 +51,11 @@ fn fake_spec(id: &str, env: BTreeMap<String, String>) -> McpServerSpec {
     }
 }
 
-fn fake_spec_connected(id: &str, env: BTreeMap<String, String>, tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) -> Arc<McpClientAdapter> {
+fn fake_spec_connected(
+    id: &str,
+    env: BTreeMap<String, String>,
+    tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+) -> Arc<McpClientAdapter> {
     let client = Arc::new(McpClientAdapter::new(fake_spec(id, env), Some(tx)));
     client
 }
@@ -60,7 +64,10 @@ async fn wait_connected(client: &McpClientAdapter, timeout_ms: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
         let state = client.state();
-        if matches!(state, McpConnectionState::Connected { .. } | McpConnectionState::Degraded { .. }) {
+        if matches!(
+            state,
+            McpConnectionState::Connected { .. } | McpConnectionState::Degraded { .. }
+        ) {
             return true;
         }
         if std::time::Instant::now() > deadline {
@@ -94,8 +101,16 @@ async fn test_available_tools_projects_mcp_with_prefix() {
         .collect();
 
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains(&"mcp__test-svr__echo"), "should contain echo, got: {:?}", names);
-    assert!(names.contains(&"mcp__test-svr__add"), "should contain add, got: {:?}", names);
+    assert!(
+        names.contains(&"mcp__test-svr__echo"),
+        "should contain echo, got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"mcp__test-svr__add"),
+        "should contain add, got: {:?}",
+        names
+    );
 }
 
 // ── AC-2: execute routes mcp__ prefix to client ─────────────────────────────
@@ -118,8 +133,16 @@ async fn test_execute_routes_mcp_prefix_to_client() {
         .expect("should succeed");
 
     assert!(!result.is_error, "echo should not error");
-    assert!(result.content.contains("echo:"), "should contain prefix: {}", result.content);
-    assert!(result.content.contains("hello"), "should echo input: {}", result.content);
+    assert!(
+        result.content.contains("echo:"),
+        "should contain prefix: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("hello"),
+        "should echo input: {}",
+        result.content
+    );
 }
 
 // ── AC-8: include_builtin = false yields MCP-only catalog ───────────────────
@@ -184,13 +207,10 @@ fn test_risk_for_tool_unknown_mcp_is_elevated() {
 
 #[test]
 fn test_derive_server_id_mcp_pattern() {
-    
-
     // Access derive_server_id via the check function's output
     // Since derive_server_id is private, we test the rendering path via display_tool_name
-    let display = rustain::adapters::tui::widgets::tool_block::display_tool_name(
-        "mcp__postgres__query",
-    );
+    let display =
+        rustain::adapters::tui::widgets::tool_block::display_tool_name("mcp__postgres__query");
     assert_eq!(display, "[postgres] query");
 }
 
@@ -220,14 +240,12 @@ fn test_tool_block_display_tool_name_projects_mcp_prefix() {
 fn test_display_tool_name_handles_edge_cases() {
     // No second __ separator
     assert_eq!(
-        rustain::adapters::tui::widgets::tool_block::display_tool_name("mcp__postgres")
-            .as_ref(),
+        rustain::adapters::tui::widgets::tool_block::display_tool_name("mcp__postgres").as_ref(),
         "mcp__postgres"
     );
     // Not mcp__ prefixed
     assert_eq!(
-        rustain::adapters::tui::widgets::tool_block::display_tool_name("Bash")
-            .as_ref(),
+        rustain::adapters::tui::widgets::tool_block::display_tool_name("Bash").as_ref(),
         "Bash"
     );
 }
@@ -245,20 +263,14 @@ async fn test_plan_mode_allows_read_only_mcp_tool() {
     // For Plan mode, we need a security adapter set to Plan
 
     // Test via mode_risk_outcome directly (pure function)
-    let outcome =
-        permission_chain::mode_risk_outcome(PermissionMode::Plan, ToolRisk::Safe);
+    let outcome = permission_chain::mode_risk_outcome(PermissionMode::Plan, ToolRisk::Safe);
     assert_eq!(outcome, Some(true), "Safe tools allow in Plan mode");
 }
 
 #[test]
 fn test_plan_mode_denies_elevated_tool() {
-    let outcome =
-        permission_chain::mode_risk_outcome(PermissionMode::Plan, ToolRisk::Elevated);
-    assert_eq!(
-        outcome,
-        Some(false),
-        "Elevated tools deny in Plan mode"
-    );
+    let outcome = permission_chain::mode_risk_outcome(PermissionMode::Plan, ToolRisk::Elevated);
+    assert_eq!(outcome, Some(false), "Elevated tools deny in Plan mode");
 }
 
 // ── AC-5: McpToolInfo domain model ──────────────────────────────────────────
@@ -302,11 +314,7 @@ fn test_project_tool_parallel_safe_from_read_only_hint() {
     assert!(!def2.parallel_safe);
 }
 
-fn make_test_tool(
-    name: &str,
-    desc: Option<&str>,
-    read_only: Option<bool>,
-) -> rmcp::model::Tool {
+fn make_test_tool(name: &str, desc: Option<&str>, read_only: Option<bool>) -> rmcp::model::Tool {
     use rmcp::model::ToolAnnotations;
     use std::sync::Arc;
 
@@ -355,7 +363,8 @@ fn test_parse_mcp_tool_name_rejects_double_empty() {
 
 #[test]
 fn test_parse_mcp_tool_name_accepts_valid() {
-    let result = rustain::adapters::mcp::tool_projection::parse_mcp_tool_name("mcp__postgres__query");
+    let result =
+        rustain::adapters::mcp::tool_projection::parse_mcp_tool_name("mcp__postgres__query");
     assert_eq!(result, Some(("postgres", "query")));
 }
 
@@ -373,7 +382,10 @@ fn test_mcp_server_spec_rejects_double_underscore_id() {
         persistent: false,
         source: McpServerSource::Workspace,
     };
-    assert!(spec.validate_id().is_err(), "id with __ should fail validation");
+    assert!(
+        spec.validate_id().is_err(),
+        "id with __ should fail validation"
+    );
 }
 
 #[test]
@@ -388,7 +400,10 @@ fn test_mcp_server_spec_accepts_valid_id() {
         persistent: false,
         source: McpServerSource::Workspace,
     };
-    assert!(spec.validate_id().is_ok(), "id without __ should pass validation");
+    assert!(
+        spec.validate_id().is_ok(),
+        "id without __ should pass validation"
+    );
 }
 
 #[test]
@@ -423,11 +438,12 @@ fn test_collect_mcp_autocomplete_returns_empty_for_disconnected() {
     };
     let client = Arc::new(McpClientAdapter::new(spec, Some(tx)));
 
-    let results = rustain::adapters::mcp::tool_projection::collect_mcp_autocomplete(
-        &[client],
-        None,
+    let results =
+        rustain::adapters::mcp::tool_projection::collect_mcp_autocomplete(&[client], None);
+    assert!(
+        results.is_empty(),
+        "disconnected client should yield no tools"
     );
-    assert!(results.is_empty(), "disconnected client should yield no tools");
 }
 
 // ── AC-6: cache refresh — cached_tools returns None before connect ──────────
@@ -446,7 +462,10 @@ fn test_cached_tools_none_before_connect() {
         source: McpServerSource::Workspace,
     };
     let client = McpClientAdapter::new(spec, Some(tx));
-    assert!(client.cached_tools().is_none(), "should be None before connect");
+    assert!(
+        client.cached_tools().is_none(),
+        "should be None before connect"
+    );
 }
 
 // ── P-19: Missing conformance tests ────────────────────────────────────────
@@ -561,6 +580,7 @@ fn test_include_builtin_false_yields_mcp_only_catalog() {
         vec![],
         vec![],
         false, // include_builtin = false
+        None,
     );
 
     let tools = composite.available_tools();
@@ -571,32 +591,28 @@ fn test_include_builtin_false_yields_mcp_only_catalog() {
 
 #[test]
 fn test_plan_mode_denies_unknown_elevated_mcp() {
-    let outcome = permission_chain::mode_risk_outcome(
-        PermissionMode::Plan,
-        ToolRisk::Elevated,
+    let outcome = permission_chain::mode_risk_outcome(PermissionMode::Plan, ToolRisk::Elevated);
+    assert_eq!(
+        outcome,
+        Some(false),
+        "elevated MCP tools denied in Plan mode"
     );
-    assert_eq!(outcome, Some(false), "elevated MCP tools denied in Plan mode");
 }
 
 #[test]
 fn test_normal_mode_prompts_elevated() {
-    let outcome = permission_chain::mode_risk_outcome(
-        PermissionMode::Normal,
-        ToolRisk::Elevated,
+    let outcome = permission_chain::mode_risk_outcome(PermissionMode::Normal, ToolRisk::Elevated);
+    assert_eq!(
+        outcome, None,
+        "Normal+Elevated → prompt (None means ask user)"
     );
-    assert_eq!(outcome, None, "Normal+Elevated → prompt (None means ask user)");
 }
 
 #[test]
 fn test_yolo_mode_allows_all() {
-    let outcome_safe = permission_chain::mode_risk_outcome(
-        PermissionMode::Yolo,
-        ToolRisk::Safe,
-    );
-    let outcome_elevated = permission_chain::mode_risk_outcome(
-        PermissionMode::Yolo,
-        ToolRisk::Elevated,
-    );
+    let outcome_safe = permission_chain::mode_risk_outcome(PermissionMode::Yolo, ToolRisk::Safe);
+    let outcome_elevated =
+        permission_chain::mode_risk_outcome(PermissionMode::Yolo, ToolRisk::Elevated);
     assert_eq!(outcome_safe, Some(true));
     assert_eq!(outcome_elevated, Some(true));
 }

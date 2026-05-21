@@ -1020,6 +1020,11 @@ pub async fn run() -> Result<()> {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
         if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
             composite.start_mcp_connections();
+            // Story 9.3a — populate the capability registry (best-effort at startup;
+            // the registry will also populate via McpCatalogChanged events post-connect).
+            if let Err(e) = composite.populate_registry().await {
+                tracing::warn!(error = %e, "Capability registry population failed at startup; will retry on MCP catalog changes");
+            }
         }
     }
 
@@ -1082,7 +1087,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let unsupported_discovery: Vec<(String, String)> = Vec::new();
+    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
 
     #[cfg(feature = "openai")]
     let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =
