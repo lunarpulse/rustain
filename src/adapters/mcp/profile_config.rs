@@ -94,7 +94,7 @@ pub fn extract_profile_mcp_servers(
             })
             .collect();
 
-        specs.push(McpServerSpec {
+        let spec = McpServerSpec {
             id: server_name.clone(),
             transport,
             command,
@@ -105,7 +105,12 @@ pub fn extract_profile_mcp_servers(
             source: McpServerSource::Profile {
                 profile_name: profile_name.to_string(),
             },
-        });
+        };
+        if let Err(e) = spec.validate_id() {
+            tracing::error!("{e} — skipping server");
+            continue;
+        }
+        specs.push(spec);
     }
 
     specs

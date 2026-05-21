@@ -59,6 +59,11 @@ pub enum RawEventKind {
         state: crate::domain::models::McpConnectionState,
         source_profile: Option<String>,
     },
+    /// Story 9.2 — MCP tool catalog changed for a server.
+    McpCatalogChanged {
+        server_id: String,
+        tool_count: usize,
+    },
 }
 
 pub struct EventBus {
@@ -162,6 +167,17 @@ impl RawEvent {
                     server_id: server_id.clone(),
                     state: state.clone(),
                     source_profile: source_profile.clone(),
+                },
+            },
+            AppEvent::McpCatalogChanged {
+                server_id,
+                tool_count,
+            } => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::McpCatalogChanged {
+                    server_id: server_id.clone(),
+                    tool_count: *tool_count,
                 },
             },
             AppEvent::Tick

@@ -61,7 +61,7 @@ async fn test_reconnect_exponential_backoff_capped_at_5() {
     spec.command = Some("/nonexistent-binary-that-does-not-exist".into());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let client = Arc::new(McpClientAdapter::new(spec).with_event_tx(tx));
+    let client = Arc::new(McpClientAdapter::new(spec, Some(tx)));
 
     let state_changes: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
     let state_changes_clone = state_changes.clone();
@@ -112,7 +112,7 @@ async fn test_no_zombie_processes_after_shutdown() {
     for i in 0..3 {
         let spec = fake_spec(&format!("zombie-test-{i}"), BTreeMap::new());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-        let client = Arc::new(McpClientAdapter::new(spec).with_event_tx(tx));
+        let client = Arc::new(McpClientAdapter::new(spec, Some(tx)));
         let _ = client.connect().await;
         clients.push(client);
     }

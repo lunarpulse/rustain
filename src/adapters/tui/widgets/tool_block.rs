@@ -81,6 +81,28 @@ fn elapsed_str(tc: &ToolCallInfo, clock: &dyn Clock) -> String {
     format!("{:.1}s", elapsed_secs)
 }
 
+/// Project a tool name for display at the render boundary.
+///
+/// MCP tools (`mcp__<server>__<tool>`) render as `[server] tool`.
+/// Built-in tool names are returned unchanged (zero-allocation `Cow::Borrowed`).
+pub fn display_tool_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        if let Some((server, tool)) = rest.split_once("__") {
+            return std::borrow::Cow::Owned(format!("[{server}] {tool}"));
+        }
+    }
+    std::borrow::Cow::Borrowed(name)
+}
+
+/// Cached display name for reuse across render ticks.
+/// Use this when the same name is rendered multiple times in one frame.
+pub fn display_tool_name_cached(name: &str, cache: &mut Option<String>) -> String {
+    if cache.is_none() {
+        *cache = Some(display_tool_name(name).into_owned());
+    }
+    cache.as_ref().unwrap().clone()
+}
+
 /// Compute the rendered height of a tool block.
 pub fn tool_block_height(tc: &ToolCallInfo, state: &ToolBlockState) -> usize {
     if let Some(ref result) = tc.result {
@@ -128,7 +150,7 @@ pub fn render_tool_block_lines<'a>(
             }
             spans.extend(vec![
                 Span::styled(
-                    tc.name.clone(),
+                    display_tool_name(&tc.name).into_owned(),
                     Style::default()
                         .fg(theme.colors.tool_name)
                         .add_modifier(Modifier::BOLD),
@@ -172,7 +194,7 @@ pub fn render_tool_block_lines<'a>(
             }
             header.extend(vec![
                 Span::styled(
-                    tc.name.clone(),
+                    display_tool_name(&tc.name).into_owned(),
                     Style::default()
                         .fg(theme.colors.tool_name)
                         .add_modifier(Modifier::BOLD),
@@ -219,7 +241,7 @@ pub fn render_tool_block_lines<'a>(
                 }
                 spans.extend(vec![
                     Span::styled(
-                        tc.name.clone(),
+                        display_tool_name(&tc.name).into_owned(),
                         Style::default()
                             .fg(theme.colors.tool_name)
                             .add_modifier(Modifier::BOLD),
@@ -249,7 +271,7 @@ pub fn render_tool_block_lines<'a>(
                 // Expanded success
                 let w = width as usize;
                 let border_char = "─";
-                let header = format!("─ {} ", tc.name);
+                let header = format!("─ {} ", display_tool_name(&tc.name));
                 let trailer = format!(" ✓ ({}) ", elapsed);
                 let fill_len = w.saturating_sub(header.len() + trailer.len() + 2);
                 let fill = border_char.repeat(fill_len);
@@ -350,7 +372,7 @@ pub fn render_peek_overlay<'a>(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.info_border))
         .title(Span::styled(
-            format!(" {} ", tc.name),
+            format!(" {} ", display_tool_name(&tc.name)),
             Style::default()
                 .fg(theme.colors.tool_name)
                 .add_modifier(Modifier::BOLD),

@@ -186,6 +186,7 @@ impl ToolScheduler {
             &req.input,
             active_skills.as_deref(),
             plan_file.as_deref(),
+            self.tools.as_ref(),
         );
         let decision = tokio::select! {
             d = decision_fut => d,

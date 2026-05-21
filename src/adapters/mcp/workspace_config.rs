@@ -80,16 +80,21 @@ pub fn parse_workspace_mcp_config(path: &std::path::Path) -> Result<Vec<McpServe
             })
             .collect();
 
-        specs.push(McpServerSpec {
+        let spec = McpServerSpec {
             id: name,
             transport,
             command: Some(command),
             args,
             env,
             url: None,
-            persistent: false, // workspace entries default to non-persistent
+            persistent: false,
             source: McpServerSource::Workspace,
-        });
+        };
+        if let Err(e) = spec.validate_id() {
+            warnings.push(e);
+            continue;
+        }
+        specs.push(spec);
     }
 
     for w in warnings {

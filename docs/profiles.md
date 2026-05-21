@@ -187,7 +187,7 @@ adapters not yet fully implemented.
 
 ### MCP Servers
 
-MCP servers can be configured per-profile via `[tools.config.mcp.<server-name>]` or workspace-wide via `.claude/mcp.json`. See [Adapter Composition](adapter-composition.md#composite-tools-adapter) for full details.
+MCP servers can be configured per-profile via `[tools.config.mcp.<server-name>]` or workspace-wide via `.claude/mcp.json`. See [Adapter Composition](adapter-composition.md#composite-tools-adapter) for full details. For MCP tool invocation and discovery, see [Invoking MCP tools](mcp.md#invoking-mcp-tools).
 
 ## CLI: Profile Management Commands
 

@@ -1,4 +1,4 @@
-use rustain::adapters::noop::NoOpSecurity;
+use rustain::adapters::noop::{NoOpSecurity, NoOpToolSet};
 use rustain::domain::models::ActiveSkill;
 use rustain::domain::services::permission_chain;
 use rustain::domain::services::permission_chain::PermissionDecision;
@@ -29,6 +29,7 @@ async fn test_step1_active_skill_allowed_tools_denies_non_listed() {
         &serde_json::json!({"command": "ls"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
 
@@ -61,6 +62,7 @@ async fn test_step1_activate_skill_tool_always_allowed() {
         &serde_json::json!({"name": "other"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
 
@@ -81,6 +83,7 @@ async fn test_step1_none_is_pass_through() {
         &serde_json::json!({"command": "ls"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
 
@@ -102,6 +105,7 @@ async fn test_step1_empty_allowed_tools_denies_everything() {
         &serde_json::json!({"file_path": "/workspace/test.rs"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(decision, PermissionDecision::Deny(_)));
@@ -123,6 +127,7 @@ async fn test_step1_multi_skill_intersection_enforced() {
         &serde_json::json!({"file_path": "/workspace/test.rs"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(!matches!(read_ok, PermissionDecision::Deny(_)));
@@ -133,6 +138,7 @@ async fn test_step1_multi_skill_intersection_enforced() {
         &serde_json::json!({"pattern": "test", "path": "/workspace/src"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(grep_deny, PermissionDecision::Deny(_)));

@@ -857,6 +857,7 @@ pub async fn run(
                                     &mut state,
                                     &mut command_registry,
                                     &workspace_path,
+                                    &tools,
                                 )
                                 .await;
                             } else if !state.autocomplete.active {
@@ -6190,6 +6191,7 @@ pub async fn run(
                                 &mut state,
                                 &mut command_registry,
                                 &workspace_path,
+                                &tools,
                             )
                             .await;
                         }
@@ -6226,6 +6228,7 @@ pub async fn run(
                                 &mut state,
                                 &mut command_registry,
                                 &workspace_path,
+                                &tools,
                             )
                             .await;
                         }
@@ -6765,6 +6768,17 @@ pub async fn run(
                     #[cfg(feature = "mcp")]
                     AppEvent::McpConnectionStateChanged { .. } => {
                         state.needs_redraw = true;
+                    }
+                    #[cfg(feature = "mcp")]
+                    AppEvent::McpCatalogChanged { server_id, tool_count } => {
+                        crate::adapters::tui::handlers::mcp_catalog::handle_mcp_catalog_changed(
+                            &mut state,
+                            &mut command_registry,
+                            &workspace_path,
+                            &tools,
+                            &server_id,
+                            tool_count,
+                        ).await;
                     }
                     AppEvent::SessionAdapterOverridden {
                         port,
@@ -8897,10 +8911,11 @@ pub fn post_process_title(raw: &str) -> String {
 
 /// Populate autocomplete suggestions based on current state.
 /// Called after handle_input when autocomplete is active.
-async fn populate_autocomplete_suggestions(
+pub(crate) async fn populate_autocomplete_suggestions(
     state: &mut TuiState,
     command_registry: &mut CommandRegistry,
     workspace_path: &std::path::Path,
+    tools: &std::sync::Arc<dyn crate::domain::ports::ToolSetPort>,
 ) {
     use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 
@@ -8948,6 +8963,36 @@ async fn populate_autocomplete_suggestions(
         AutocompleteKind::AgentMention => {
             state.refresh_agent_suggestions();
             let suggestions = state.agent_suggestions.clone();
+            state.autocomplete.suggestions = suggestions;
+            if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
+                state.autocomplete.selected_index = 0;
+                state.autocomplete.scroll_offset = 0;
+            }
+        }
+        AutocompleteKind::McpMention => {
+            use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+            use crate::adapters::mcp::tool_projection::collect_mcp_autocomplete;
+
+            let suggestions = if let Some(composite) =
+                tools.as_any().downcast_ref::<CompositeToolsetAdapter>()
+            {
+                let filter = if state.autocomplete.filter_text.is_empty() {
+                    None
+                } else {
+                    Some(state.autocomplete.filter_text.as_str())
+                };
+                let mcp_tools = collect_mcp_autocomplete(composite.mcp_clients(), filter);
+                mcp_tools
+                    .into_iter()
+                    .map(|info| AutocompleteSuggestion::McpTool {
+                        server: info.server,
+                        name: info.name,
+                        description: info.description,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             state.autocomplete.suggestions = suggestions;
             if state.autocomplete.selected_index >= state.autocomplete.suggestions.len() {
                 state.autocomplete.selected_index = 0;

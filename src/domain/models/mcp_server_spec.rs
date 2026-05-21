@@ -55,6 +55,21 @@ pub enum McpServerSource {
 
 /// Expand `$VAR` and `${VAR}` in a string using the current process environment.
 /// Unknown variables are left as literal tokens and a warning flag is returned.
+impl McpServerSpec {
+    pub fn validate_id(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("MCP server id must not be empty or whitespace".to_string());
+        }
+        if self.id.contains("__") {
+            return Err(format!(
+                "MCP server id {:?} must not contain double-underscore (__); it conflicts with the mcp__<server>__<tool> naming convention",
+                self.id
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn expand_env_vars(input: &str) -> (String, Vec<String>) {
     let mut output = String::with_capacity(input.len());
     let mut warnings = Vec::new();

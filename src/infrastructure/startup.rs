@@ -804,6 +804,7 @@ pub async fn run() -> Result<()> {
         skill_activator: Arc::clone(&skill_activator),
         mcp_servers: resolved.mcp_servers.clone(),
         include_builtin_tools: resolved.include_builtin_tools,
+        domain_tx: Some(domain_tx.clone()),
     };
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
@@ -1081,7 +1082,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
+    let unsupported_discovery: Vec<(String, String)> = Vec::new();
 
     #[cfg(feature = "openai")]
     let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =

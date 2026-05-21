@@ -28,6 +28,7 @@ pub mod config;
 pub mod config_slash;
 pub mod context_warning;
 pub mod export;
+pub mod mcp_catalog;
 pub mod model_switch;
 pub mod notice;
 pub mod profile_switch;

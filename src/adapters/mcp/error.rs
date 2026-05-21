@@ -18,6 +18,10 @@ pub enum McpError {
     Timeout(u64),
     #[error("Unsupported transport: {0}")]
     Unsupported(String),
+    #[error("MCP tool call failed: {0}")]
+    CallToolFailed(String),
+    #[error("MCP tool call cancelled")]
+    Cancelled,
     #[error("Internal error: {0}")]
     Internal(String),
 }

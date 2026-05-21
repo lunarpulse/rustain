@@ -7,6 +7,7 @@ pub mod lazy_connect;
 pub mod lifecycle;
 pub mod profile_config;
 pub mod reconnect;
+pub mod tool_projection;
 pub mod warm_pool;
 pub mod workspace_config;
 

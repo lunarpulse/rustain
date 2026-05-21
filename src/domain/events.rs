@@ -273,6 +273,10 @@ pub enum AppEvent {
         state: crate::domain::models::McpConnectionState,
         source_profile: Option<String>,
     },
+    McpCatalogChanged {
+        server_id: String,
+        tool_count: usize,
+    },
 }
 
 /// Event wrapping a tool execution result.

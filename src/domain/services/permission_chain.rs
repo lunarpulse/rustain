@@ -4,7 +4,7 @@
 use crate::domain::models::{
     ActiveSkill, FileOperation, PermissionMode, ToolRisk, risk_for_builtin,
 };
-use crate::domain::ports::SecurityPort;
+use crate::domain::ports::{SecurityPort, ToolSetPort};
 use std::collections::HashSet;
 
 /// Result of a permission chain check.
@@ -88,6 +88,7 @@ pub async fn check(
     input: &serde_json::Value,
     active_skills: Option<&[ActiveSkill]>,
     plan_file: Option<&std::path::Path>,
+    tools_port: &dyn ToolSetPort,
 ) -> PermissionDecision {
     // Step 0: exit_plan_mode short-circuit
     if tool_name == "exit_plan_mode" {
@@ -154,7 +155,7 @@ pub async fn check(
     }
 
     // Step 3.5: Mode × risk gating (AC1, AC7)
-    let risk = risk_for_builtin(tool_name);
+    let risk = risk_for_tool(tool_name, tools_port);
     let mode = security.current_mode();
     match mode_risk_outcome(mode, risk) {
         Some(true) => return PermissionDecision::Allow,
@@ -178,10 +179,40 @@ pub async fn check(
     }
 }
 
-/// Derive server_id from tool_name (MCP pattern `<server>.<tool>`).
-/// Today returns None for all built-ins — full implementation lands in 9-2.
+/// Derive risk for a tool, considering both built-in and MCP tools.
+///
+/// For built-in names (no `mcp__` prefix): delegates to `risk_for_builtin`.
+/// For MCP names (`mcp__<server>__<tool>`): reads `parallel_safe` from the
+/// tool catalog; Safe when `parallel_safe == true`, Elevated otherwise.
+/// Unknown names (including unresolvable MCP names) default to Elevated.
+pub fn risk_for_tool(tool_name: &str, tools_port: &dyn ToolSetPort) -> ToolRisk {
+    if tool_name.starts_with("mcp__") {
+        // P-21: Verify tool actually exists in catalog before treating as MCP
+        let available = tools_port.available_tools();
+        let found = available.iter().find(|t| t.name == tool_name);
+        if let Some(tool) = found {
+            return if tool.parallel_safe {
+                ToolRisk::Safe
+            } else {
+                ToolRisk::Elevated
+            };
+        }
+        // Unknown MCP tool — fail-safe to Elevated
+        return ToolRisk::Elevated;
+    }
+    risk_for_builtin(tool_name)
+}
+
+/// Derive server_id from tool_name (MCP pattern `mcp__<server>__<tool>`).
+/// Returns `Some("mcp__<server>")` for MCP tools or `None` for built-ins.
+/// Uses the `mcp__` prefix to prevent future skill/builtin name collisions.
 fn derive_server_id(tool_name: &str) -> Option<String> {
-    tool_name.find('.').map(|dot| tool_name[..dot].to_string())
+    if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        if let Some((server, _tool)) = rest.split_once("__") {
+            return Some(format!("mcp__{server}"));
+        }
+    }
+    None
 }
 
 /// Derive path_hint from tool_name and input (for Read/Write/Edit).

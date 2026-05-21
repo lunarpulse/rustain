@@ -31,6 +31,7 @@ pub struct ComposeContext {
     /// `[tools.config] include_builtin = false` disables builtin tools
     /// so only MCP tools are available (Story 9.1 AC-4, used by 9.2).
     pub include_builtin_tools: bool,
+    pub domain_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
 }
 
 impl AgentCore {
@@ -214,9 +215,13 @@ pub fn build_tools(
                 .mcp_servers
                 .iter()
                 .map(|spec| {
-                    Arc::new(crate::adapters::mcp::client::McpClientAdapter::new(
+                    let client = crate::adapters::mcp::client::McpClientAdapter::new(
                         spec.clone(),
-                    ))
+                        ctx.domain_tx.clone(),
+                    );
+                    let arc = Arc::new(client);
+                    arc.set_self_weak(Arc::downgrade(&arc));
+                    arc
                 })
                 .collect();
             let adapter = crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
@@ -373,6 +378,7 @@ mod tests {
             skill_activator: Arc::new(SkillActivator::new()),
             mcp_servers: Vec::new(),
             include_builtin_tools: true,
+            domain_tx: None,
         }
     }
 

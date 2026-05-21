@@ -1,13 +1,19 @@
-//! Composite toolset adapter — delegates to builtin adapter while owning
-//! MCP client lifecycle (Story 9.1).
+//! Composite toolset adapter — composes builtin tools with MCP-discovered
+//! tools (Story 9.1 + 9.2).
 //!
-//! `available_tools()` and `execute()` are delegated to `builtin` for this
-//! story. Story 9.2 will extend them to include MCP-discovered tools.
+//! `available_tools()` projects MCP `cached_tools` into canonical
+//! `mcp__<server>__<tool>` names per ADR-06-08. `execute()` routes
+//! `mcp__`-prefixed names to the appropriate `McpClientAdapter::call_tool`.
 
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Global counter for synthetic tool_use_id generation.
+/// Combines with timestamp to avoid collisions under parallel calls.
+static MCP_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::domain::errors::{ToolError, TransitionError};
 use crate::domain::events::ToolProgressEvent;
@@ -33,6 +39,14 @@ impl CompositeToolsetAdapter {
         server_specs: Vec<McpServerSpec>,
         include_builtin: bool,
     ) -> Self {
+        // P-15: Validate no duplicate server IDs
+        let mut seen = std::collections::HashSet::new();
+        for client in &mcp_clients {
+            let id = client.server_id();
+            if !seen.insert(id) {
+                tracing::error!(server_id = %id, "Duplicate MCP server ID detected — routing will be nondeterministic");
+            }
+        }
         Self {
             builtin,
             mcp_clients,
@@ -89,16 +103,73 @@ impl CompositeToolsetAdapter {
             crate::adapters::mcp::lazy_connect::lazy_connect_all(clients).await;
         });
     }
+
+    async fn dispatch_mcp_call(
+        &self,
+        client: std::sync::Arc<crate::adapters::mcp::client::McpClientAdapter>,
+        tool_name: &str,
+        input: serde_json::Value,
+        cancel: CancellationToken,
+        tool_use_id: String,
+        _progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
+    ) -> Result<ToolResult, ToolError> {
+        // P-22: progress_tx is accepted but MCP tools don't support progress events yet
+        // TODO: Wire progress channel when rmcp supports streaming results
+        match client.call_tool(tool_name, input, cancel).await {
+            Ok(mut result) => {
+                result.tool_use_id = tool_use_id;
+                tracing::debug!(
+                    server = %client.server_id(),
+                    tool = %tool_name,
+                    "MCP tool call completed"
+                );
+                Ok(result)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    server = %client.server_id(),
+                    tool = %tool_name,
+                    error = %e,
+                    "MCP tool call failed"
+                );
+                Err(match &e {
+                    crate::adapters::mcp::error::McpError::Cancelled => ToolError::Cancelled,
+                    crate::adapters::mcp::error::McpError::Timeout(_) => ToolError::Timeout,
+                    _ => ToolError::ExecutionFailed(e.to_string()),
+                })
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl ToolSetPort for CompositeToolsetAdapter {
     fn available_tools(&self) -> Vec<ToolDefinition> {
-        if self.include_builtin {
+        let mut out = if self.include_builtin {
             self.builtin.available_tools()
         } else {
             Vec::new()
+        };
+
+        for client in &self.mcp_clients {
+            let state = client.state();
+            if !matches!(
+                state,
+                McpConnectionState::Connected { .. } | McpConnectionState::Degraded { .. }
+            ) {
+                continue;
+            }
+            if let Some(tools) = client.cached_tools() {
+                let server_id = client.server_id();
+                for tool in &tools {
+                    out.push(crate::adapters::mcp::tool_projection::project_tool(
+                        server_id, tool,
+                    ));
+                }
+            }
         }
+
+        out
     }
 
     fn health_snapshot(&self) -> HealthSummary {
@@ -184,11 +255,31 @@ impl ToolSetPort for CompositeToolsetAdapter {
         input: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
-        // Story 9.1: delegate to builtin only.
-        // Story 9.2 will route mcp__ prefixed names to MCP clients.
-        if tool_name.starts_with("mcp__") {
-            tracing::warn!("Story 9.1: MCP invocation attempted but routing lands in 9.2");
-            return Err(ToolError::NotFound(tool_name.to_string()));
+        if let Some((server_id, tool_name_inner)) =
+            crate::adapters::mcp::tool_projection::parse_mcp_tool_name(tool_name)
+        {
+            let client = self
+                .mcp_clients
+                .iter()
+                .find(|c| c.server_id() == server_id)
+                .cloned()
+                .ok_or_else(|| {
+                    ToolError::NotFound(format!("MCP server '{server_id}' not in active profile"))
+                })?;
+            let state = client.state();
+            if !matches!(
+                state,
+                McpConnectionState::Connected { .. } | McpConnectionState::Degraded { .. }
+            ) {
+                return Err(ToolError::NotFound(format!(
+                    "MCP server '{server_id}' is not connected (state: {state:?})"
+                )));
+            }
+            let seq = MCP_TOOL_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let synthetic_id = format!("mcp-{}-{}", chrono::Utc::now().timestamp_millis(), seq);
+            return self
+                .dispatch_mcp_call(client, tool_name_inner, input, cancel, synthetic_id, None)
+                .await;
         }
         self.builtin.execute(tool_name, input, cancel).await
     }
@@ -201,6 +292,28 @@ impl ToolSetPort for CompositeToolsetAdapter {
         cancel: CancellationToken,
         progress_tx: Option<mpsc::UnboundedSender<ToolProgressEvent>>,
     ) -> Result<ToolResult, ToolError> {
+        if let Some((server_id, tool_name_inner)) =
+            crate::adapters::mcp::tool_projection::parse_mcp_tool_name(tool_name)
+        {
+            let client = self
+                .mcp_clients
+                .iter()
+                .find(|c| c.server_id() == server_id)
+                .cloned()
+                .ok_or_else(|| {
+                    ToolError::NotFound(format!("MCP server '{server_id}' not in active profile"))
+                })?;
+            return self
+                .dispatch_mcp_call(
+                    client,
+                    tool_name_inner,
+                    input,
+                    cancel,
+                    tool_use_id.to_string(),
+                    progress_tx,
+                )
+                .await;
+        }
         self.builtin
             .execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
             .await

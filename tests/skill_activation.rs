@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use rustain::adapters::noop::NoOpToolSet;
 use rustain::adapters::skill_activation::SkillActivator;
 use rustain::domain::models::{
     ActiveSkill, MAX_SKILL_ACTIVATION_DEPTH, SkillActivationError, SkillDef, SkillSource,
@@ -87,6 +88,7 @@ async fn test_allowed_tools_enforced_denies_bash() {
         &serde_json::json!({"command": "ls"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -110,8 +112,15 @@ async fn test_allowed_tools_empty_denies_all_except_activate_skill() {
     let skills: Option<&[ActiveSkill]> = Some(snap.active_skills());
     let security = rustain::adapters::noop::NoOpSecurity;
 
-    let deny =
-        permission_chain::check(&security, "Read", &serde_json::json!({}), skills, None).await;
+    let deny = permission_chain::check(
+        &security,
+        "Read",
+        &serde_json::json!({}),
+        skills,
+        None,
+        &NoOpToolSet,
+    )
+    .await;
     assert!(matches!(deny, PermissionDecision::Deny(_)));
 
     let allow = permission_chain::check(
@@ -120,6 +129,7 @@ async fn test_allowed_tools_empty_denies_all_except_activate_skill() {
         &serde_json::json!({"name": "other"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -148,6 +158,7 @@ async fn test_allowed_tools_none_is_no_constraint() {
         &serde_json::json!({"command": "ls"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -192,6 +203,7 @@ async fn test_multi_skill_intersection() {
         &serde_json::json!({"file_path": "/workspace/src/main.rs"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(!matches!(read_ok, PermissionDecision::Deny(_)));
@@ -202,6 +214,7 @@ async fn test_multi_skill_intersection() {
         &serde_json::json!({"command": "ls"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(bash_deny, PermissionDecision::Deny(_)));
@@ -212,6 +225,7 @@ async fn test_multi_skill_intersection() {
         &serde_json::json!({"pattern": "test", "path": "/workspace/src"}),
         skills,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(

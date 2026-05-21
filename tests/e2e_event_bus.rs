@@ -67,6 +67,7 @@ fn test_app_state_honors_raw_capacity() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -116,6 +117,7 @@ fn test_app_state_session_cancel_is_root_token() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,

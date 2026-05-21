@@ -865,12 +865,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     // The actual filtering is done by the event loop which has access to registries
                     state.autocomplete.filter_text = if state.autocomplete.kind
                         == AutocompleteKind::FileMention
+                        && filter.to_lowercase() == "mcp/"
+                    {
+                        state.autocomplete.kind = AutocompleteKind::McpMention;
+                        String::new()
+                    } else if state.autocomplete.kind == AutocompleteKind::FileMention
                         && filter == "Agents/"
                     {
                         state.autocomplete.kind = AutocompleteKind::AgentMention;
                         String::new()
                     } else if state.autocomplete.kind == AutocompleteKind::AgentMention {
                         let after_slash = filter.strip_prefix("Agents/").unwrap_or(&filter);
+                        after_slash.to_string()
+                    } else if state.autocomplete.kind == AutocompleteKind::McpMention {
+                        let filter_lower = filter.to_lowercase();
+                        let after_slash = filter_lower
+                            .strip_prefix("mcp/")
+                            .unwrap_or(&filter_lower);
                         after_slash.to_string()
                     } else {
                         filter
@@ -2447,9 +2458,20 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                     {
                         state.autocomplete.kind = AutocompleteKind::FileMention;
                     }
+                    if state.autocomplete.kind == AutocompleteKind::McpMention
+                        && !filter.to_lowercase().starts_with("mcp/")
+                    {
+                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                    }
                     let filter_text = if state.autocomplete.kind == AutocompleteKind::AgentMention {
                         filter
                             .strip_prefix("Agents/")
+                            .unwrap_or(&filter)
+                            .to_string()
+                    } else if state.autocomplete.kind == AutocompleteKind::McpMention {
+                        filter
+                            .strip_prefix("MCP/")
+                            .or_else(|| filter.strip_prefix("mcp/"))
                             .unwrap_or(&filter)
                             .to_string()
                     } else {
@@ -2530,6 +2552,19 @@ fn apply_autocomplete_selection(
                     .resolved_mentions
                     .push(ResolvedMention { path: path.clone() });
             }
+            None
+        }
+        AutocompleteSuggestion::McpTool { server, name, .. } => {
+            // Insert canonical mcp__<server>__<tool> form per DG 2.4
+            let canonical = format!("mcp__{}__{}", server, name);
+            let before: String = state.input_buffer.chars().take(trigger).collect();
+            let after: String = state
+                .input_buffer
+                .chars()
+                .skip(state.cursor_position)
+                .collect();
+            state.input_buffer = format!("{}{}{}", before, canonical, after);
+            state.cursor_position = trigger + canonical.chars().count();
             None
         }
     }

@@ -162,6 +162,7 @@ fn test_coding_profile_composes_seven_ports() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -203,6 +204,7 @@ fn test_base_profile_composes_all_noop() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -231,6 +233,7 @@ fn test_personal_assistant_preview_composes_with_fallback() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -269,6 +272,7 @@ fn test_reload_recomposes_agent_core() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     };
     let ctx_arc = Arc::new(ctx);
 

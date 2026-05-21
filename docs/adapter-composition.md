@@ -98,7 +98,7 @@ The `ComposeContext` snapshot is NOT re-built at reload time — profile changes
 
 ## Composite Tools Adapter
 
-The `composite` adapter (Story 9.1) delegates tool execution to the builtin adapter while managing MCP server lifecycle (connect, reconnect, shutdown, profile-switch migration).
+The `composite` adapter (Story 9.1 + 9.2) delegates tool execution to the builtin adapter while managing MCP server lifecycle (connect, reconnect, shutdown, profile-switch migration). MCP-discovered tools are projected into the tool catalog with canonical `mcp__<server>__<tool>` naming per ADR-06-08 (see [Invoking MCP tools](mcp.md#invoking-mcp-tools)). `@MCP/` autocomplete lets users discover and insert MCP tool names into the input buffer (see [Discovering tools with @MCP/](mcp.md#discovering-tools-with-mcp)).
 
 ### Configuration
 

@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use rustain::adapters::noop::NoOpToolSet;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, PermissionMode, PlanApprovalOutcome, SandboxPolicy,
 };
@@ -198,6 +199,7 @@ async fn ac3_exit_plan_mode_mode_gated() {
         &serde_json::json!({"summary": "test"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -211,6 +213,7 @@ async fn ac3_exit_plan_mode_mode_gated() {
         &serde_json::json!({"summary": "test"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -386,6 +389,7 @@ async fn ac6_safe_tools_pass() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -402,6 +406,7 @@ async fn ac6_exit_plan_mode_passes() {
         &serde_json::json!({"summary": "done"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -420,6 +425,7 @@ async fn ac6_plan_file_write_exception() {
         &serde_json::json!({"file_path": plan_path.to_str().unwrap(), "content": "x"}),
         None,
         Some(&plan_path),
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -436,6 +442,7 @@ async fn ac6_other_tools_refused_with_plan_mode_error() {
         &serde_json::json!({"file_path": "a.rs", "content": "x"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     match result {

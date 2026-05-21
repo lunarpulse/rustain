@@ -80,9 +80,9 @@ pub trait CapabilityProvider: Send + Sync {
 
 **Adding a new protocol:** Implement `CapabilityProvider`, call `registry.register()`. Done — @mentions, permissions, TUI rendering work automatically.
 
-**Current providers (to implement):**
-- `AgentSkillsProvider` — `.agents/skills/`, `.claude/skills/` (Knowledge)
-- `McpProvider` — `.claude/mcp.json` (Tools)
+**Current providers (shipped and upcoming):**
+- `AgentSkillsProvider` — `.agents/skills/`, `.claude/skills/` (Knowledge) — Story 5.x shipped
+- `McpProvider` — `.claude/mcp.json` (Tools) — Story 9.1 + 9.2 ship the full discovery + invocation lifecycle (`mcp__<server>__<tool>` naming, `CompositeToolsetAdapter` projection, `McpClientAdapter::call_tool`, `@MCP/` autocomplete, `permission_chain` annotation-aware gating, `display_tool_name` render projection). The formal `CapabilityProvider` trait lands in Story 9.3a.
 - `A2aProvider` — `.claude/a2a.json` + spawn/despawn (Agents)
 
 ## ToolCall FSM (Story 6-0b)

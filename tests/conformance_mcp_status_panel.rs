@@ -38,8 +38,8 @@ fn test_mcp_sub_rows_appear_in_health_output() {
     let (tx_a, _rx_a) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
-    let client_a = Arc::new(McpClientAdapter::new(spec_a.clone()).with_event_tx(tx_a));
-    let client_b = Arc::new(McpClientAdapter::new(spec_b.clone()).with_event_tx(tx_b));
+    let client_a = Arc::new(McpClientAdapter::new(spec_a.clone(), Some(tx_a)));
+    let client_b = Arc::new(McpClientAdapter::new(spec_b.clone(), Some(tx_b)));
 
     let composite = CompositeToolsetAdapter::new(
         builtin,

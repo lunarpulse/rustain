@@ -26,6 +26,7 @@ fn test_compose_ctx() -> ComposeContext {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     }
 }
 

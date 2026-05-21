@@ -1,8 +1,11 @@
 //! MCP client adapter — thin wrapper around `rmcp` for stdio transport.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
+
+/// Global counter for MCP tool_use_id generation to avoid timestamp collisions.
+static MCP_TOOL_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use rmcp::ServiceExt;
 use rmcp::handler::client::ClientHandler;
@@ -17,9 +20,42 @@ use crate::domain::models::{McpConnectionState, McpServerSpec, McpTransport};
 
 use super::error::McpError;
 
-struct McpClientService;
+struct McpClientService {
+    adapter: std::sync::Weak<McpClientAdapter>,
+}
 
-impl ClientHandler for McpClientService {}
+impl McpClientService {
+    fn new(adapter: std::sync::Weak<McpClientAdapter>) -> Self {
+        Self { adapter }
+    }
+}
+
+impl ClientHandler for McpClientService {
+    fn on_tool_list_changed(
+        &self,
+        _context: rmcp::service::NotificationContext<rmcp::service::RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send + '_ {
+        async {
+            if let Some(adapter) = self.adapter.upgrade() {
+                // Debounce: skip if refresh ran within last 100ms
+                let last_refresh = adapter.last_refresh_ms.load(Ordering::SeqCst);
+                let now = now_unix();
+                if now.saturating_sub(last_refresh) < 100 {
+                    tracing::debug!(server = %adapter.server_id(), "list_changed debounced");
+                    return;
+                }
+                adapter.last_refresh_ms.store(now, Ordering::SeqCst);
+                if let Err(e) = adapter.refresh_cached_tools().await {
+                    tracing::warn!(
+                        server = %adapter.server_id(),
+                        error = %e,
+                        "Failed to refresh cached tools on list_changed notification"
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// Per-server MCP client handle.
 ///
@@ -36,10 +72,15 @@ pub struct McpClientAdapter {
     reconnect_attempts: AtomicU32,
     cancel_token: std::sync::RwLock<CancellationToken>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: PERMANENT per ADR-09-01 — quick clone for cancel token, never held across .await
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
+    self_weak: std::sync::RwLock<Option<std::sync::Weak<McpClientAdapter>>>,
+    last_refresh_ms: std::sync::atomic::AtomicU64,
 }
 
 impl McpClientAdapter {
-    pub fn new(spec: McpServerSpec) -> Self {
+    pub fn new(
+        spec: McpServerSpec,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
+    ) -> Self {
         Self {
             spec,
             state: std::sync::RwLock::new(McpConnectionState::NotConnected), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: PERMANENT per ADR-09-01
@@ -47,16 +88,14 @@ impl McpClientAdapter {
             running: tokio::sync::Mutex::new(None),
             reconnect_attempts: AtomicU32::new(0),
             cancel_token: std::sync::RwLock::new(CancellationToken::new()), // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: PERMANENT per ADR-09-01
-            event_tx: None,
+            event_tx,
+            self_weak: std::sync::RwLock::new(None),
+            last_refresh_ms: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    pub fn with_event_tx(
-        mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
-    ) -> Self {
-        self.event_tx = Some(tx);
-        self
+    pub fn set_self_weak(&self, weak: std::sync::Weak<McpClientAdapter>) {
+        *self.self_weak.write().unwrap() = Some(weak);
     }
 
     pub fn server_id(&self) -> &str {
@@ -161,7 +200,8 @@ impl McpClientAdapter {
         let ct = self.cancel_token();
 
         let result = tokio::time::timeout(Duration::from_secs(10), async {
-            let service = McpClientService;
+            let service =
+                McpClientService::new(self.self_weak.read().unwrap().clone().unwrap_or_default());
             let running = service
                 .serve_with_ct(transport, ct)
                 .await
@@ -277,6 +317,143 @@ impl McpClientAdapter {
             }
             _ => HealthSummary::unknown(),
         }
+    }
+
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<crate::domain::models::ToolResult, McpError> {
+        let running_guard = self.running.lock().await;
+        let running = running_guard
+            .as_ref()
+            .ok_or(McpError::TransportClosed("not connected".into()))?;
+        let peer = running.peer().clone();
+        drop(running_guard);
+
+        let params = if let Some(args) = arguments.as_object().cloned() {
+            rmcp::model::CallToolRequestParams::new(tool_name.to_string()).with_arguments(args)
+        } else {
+            return Err(McpError::CallToolFailed(
+                "arguments must be a JSON object".into()
+            ));
+        };
+
+        let request = rmcp::model::CallToolRequest::new(params);
+
+        let timeout = std::time::Duration::from_secs(60);
+        let call_fut = peer.send_request(rmcp::model::ClientRequest::CallToolRequest(request));
+
+        let result = tokio::select! {
+            r = tokio::time::timeout(timeout, call_fut) => match r {
+                Ok(Ok(rmcp::model::ServerResult::CallToolResult(res))) => res,
+                Ok(Ok(_other)) => return Err(McpError::CallToolFailed(
+                    "unexpected server result type".into()
+                )),
+                Ok(Err(e)) => {
+                    // P-25: Distinguish transport-closed from other errors
+                    let err_str = format!("{e}");
+                    if err_str.contains("transport") || err_str.contains("closed") {
+                        return Err(McpError::TransportClosed(err_str));
+                    }
+                    return Err(McpError::CallToolFailed(err_str));
+                }
+                Err(_) => return Err(McpError::Timeout(60)),
+            },
+            _ = cancel.cancelled() => return Err(McpError::Cancelled),
+        };
+
+        let seq = MCP_TOOL_ID_SEQ.fetch_add(1, Ordering::SeqCst);
+        let tool_use_id = format!("mcp-{}-{}", chrono::Utc::now().timestamp_millis(), seq);
+        Ok(super::tool_projection::project_rmcp_result(
+            result,
+            tool_use_id,
+        ))
+    }
+
+    pub async fn refresh_cached_tools(&self) -> Result<(), McpError> {
+        let running_guard = self.running.lock().await;
+        let running = running_guard
+            .as_ref()
+            .ok_or(McpError::TransportClosed("not connected".into()))?;
+        let result = running.list_tools(None).await;
+        drop(running_guard);
+
+        let tools = match result {
+            Ok(rmcp::model::ListToolsResult { tools, .. }) => tools,
+            Err(e) => {
+                return Err(McpError::ToolsListFailed(format!("{e:?}")));
+            }
+        };
+
+        let tool_count = tools.len();
+        {
+            let mut cache = self.cached_tools.write().unwrap();
+            *cache = Some(tools);
+        }
+
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(crate::domain::events::AppEvent::McpCatalogChanged {
+                server_id: self.spec.id.clone(),
+                tool_count,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_call_tool_returns_transport_closed_when_not_running() {
+        let spec = McpServerSpec {
+            id: "test".to_string(),
+            transport: McpTransport::Stdio,
+            command: Some("true".to_string()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        };
+        let client = McpClientAdapter::new(spec, None);
+        let result = client
+            .call_tool("echo", serde_json::json!({}), CancellationToken::new())
+            .await;
+        assert!(
+            matches!(result, Err(McpError::TransportClosed(_))),
+            "should return TransportClosed when not connected, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_weak_pointer_upgrade_failure() {
+        let spec = McpServerSpec {
+            id: "weak-test".to_string(),
+            transport: McpTransport::Stdio,
+            command: Some("true".to_string()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            persistent: false,
+            source: crate::domain::models::McpServerSource::Workspace,
+        };
+        let service = {
+            let client = Arc::new(McpClientAdapter::new(spec, None));
+            // set_self_weak not called — simulates a bug where the weak ref is never set
+            let svc = McpClientService::new(Arc::downgrade(&client));
+            // client is dropped here, so the weak ref becomes dangling
+            svc
+        };
+        // The on_tool_list_changed should handle upgrade failure gracefully.
+        // We can't easily construct a NotificationContext without a real Peer,
+        // but we verify the service struct can be created with a dangling weak ref.
+        assert!(service.adapter.upgrade().is_none(), "weak ref should fail to upgrade after strong ref dropped");
     }
 }
 

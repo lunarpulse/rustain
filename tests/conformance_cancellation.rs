@@ -253,6 +253,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
+        domain_tx: None,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,

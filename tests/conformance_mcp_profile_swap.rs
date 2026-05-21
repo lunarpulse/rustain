@@ -38,8 +38,8 @@ async fn test_no_zombie_mcp_processes_after_swap() {
     let (tx_a, _rx_a) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let (tx_b, _rx_b) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
-    let client_a = Arc::new(McpClientAdapter::new(spec_a.clone()).with_event_tx(tx_a));
-    let client_b = Arc::new(McpClientAdapter::new(spec_b.clone()).with_event_tx(tx_b));
+    let client_a = Arc::new(McpClientAdapter::new(spec_a.clone(), Some(tx_a)));
+    let client_b = Arc::new(McpClientAdapter::new(spec_b.clone(), Some(tx_b)));
 
     let composite = CompositeToolsetAdapter::new(
         builtin,
@@ -73,9 +73,9 @@ async fn test_persistent_server_survives_profile_swap() {
     let (tx_e, _rx_e) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
 
     let client_persistent =
-        Arc::new(McpClientAdapter::new(spec_persistent.clone()).with_event_tx(tx_p));
+        Arc::new(McpClientAdapter::new(spec_persistent.clone(), Some(tx_p)));
     let client_ephemeral =
-        Arc::new(McpClientAdapter::new(spec_ephemeral.clone()).with_event_tx(tx_e));
+        Arc::new(McpClientAdapter::new(spec_ephemeral.clone(), Some(tx_e)));
 
     let composite = CompositeToolsetAdapter::new(
         builtin,

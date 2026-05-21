@@ -3,6 +3,7 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::theme::Theme;
+use crate::adapters::tui::widgets::tool_block::display_tool_name;
 use crate::domain::models::tool_call::ApprovalSource;
 
 /// Extract a short summary of the tool input for display.
@@ -91,7 +92,7 @@ pub fn render_permission_lines<'a>(
         ));
     }
     line1_spans.push(Span::styled(
-        format!("{}: ", tool_name),
+        format!("{}: ", display_tool_name(tool_name)),
         Style::default()
             .fg(theme.colors.tool_name)
             .add_modifier(Modifier::BOLD),
@@ -109,7 +110,16 @@ pub fn render_permission_lines<'a>(
     line1_spans.push(Span::styled(" ┃", border_style));
     lines.push(Line::from(line1_spans));
 
-    // Line 2: [y] Allow  [s] Session  [a] Always
+    // Line 2: [y] Allow  [s] Session  [a] Always (or Always for [server] for MCP)
+    let always_label = if let Some(rest) = tool_name.strip_prefix("mcp__") {
+        if let Some((server, _)) = rest.split_once("__") {
+            format!(" Always for [{server}]")
+        } else {
+            " Always".to_string()
+        }
+    } else {
+        " Always".to_string()
+    };
     lines.push(Line::from(vec![
         Span::styled("┃ ", border_style),
         Span::styled("[y]", Style::default().fg(theme.colors.success)),
@@ -117,7 +127,7 @@ pub fn render_permission_lines<'a>(
         Span::styled("[s]", Style::default().fg(theme.colors.accent)),
         Span::styled(" Session  ", Style::default().fg(theme.colors.fg_secondary)),
         Span::styled("[a]", Style::default().fg(theme.colors.warning)),
-        Span::styled(" Always", Style::default().fg(theme.colors.fg_secondary)),
+        Span::styled(always_label, Style::default().fg(theme.colors.fg_secondary)),
         Span::styled(" ┃", border_style),
     ]));
 

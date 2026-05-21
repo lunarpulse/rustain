@@ -239,6 +239,7 @@ mod tests {
             skill_activator: Arc::new(crate::adapters::skill_activation::SkillActivator::new()),
             mcp_servers: Vec::new(),
             include_builtin_tools: true,
+            domain_tx: None,
         });
         let ctx = ReloadContext {
             cli: &test_cli(),

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use rustain::adapters::noop::NoOpSecurity;
+use rustain::adapters::noop::{NoOpSecurity, NoOpToolSet};
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::domain::models::PermissionMode;
 use rustain::domain::models::{ApprovalOutcome, ApprovalScope};
@@ -28,6 +28,7 @@ async fn test_safe_bash_command_not_blocked() {
         &serde_json::json!({"command": "echo hello"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -45,6 +46,7 @@ async fn test_read_allowed_with_noop() {
         &serde_json::json!({"file_path": "./src/main.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -59,6 +61,7 @@ async fn test_blocked_command_denied_even_with_allow_permission() {
         &serde_json::json!({"command": "rm -rf /"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -73,6 +76,7 @@ async fn test_workspace_violation_denied() {
         &serde_json::json!({"file_path": "/etc/passwd"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -93,6 +97,7 @@ async fn test_multiple_tool_calls_sequential() {
         &serde_json::json!({"command": "echo hello"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(r1, PermissionDecision::Allow);
@@ -103,6 +108,7 @@ async fn test_multiple_tool_calls_sequential() {
         &serde_json::json!({"command": "rm -rf /"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(r2, PermissionDecision::Deny(_)));
@@ -118,6 +124,7 @@ async fn test_yolo_mode_still_blocks_dangerous() {
         &serde_json::json!({"command": "rm -rf /"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -192,6 +199,7 @@ async fn test_mode_risk_plan_safe_auto_allows() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -206,6 +214,7 @@ async fn test_mode_risk_plan_standard_denies() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -220,6 +229,7 @@ async fn test_mode_risk_plan_elevated_denies() {
         &serde_json::json!({"command": "ls"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(matches!(result, PermissionDecision::Deny(_)));
@@ -234,6 +244,7 @@ async fn test_mode_risk_normal_safe_auto_allows() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -248,6 +259,7 @@ async fn test_mode_risk_normal_standard_prompts() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -265,6 +277,7 @@ async fn test_mode_risk_normal_elevated_prompts() {
         &serde_json::json!({"command": "ls"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -282,6 +295,7 @@ async fn test_mode_risk_autoedit_safe_auto_allows() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -296,6 +310,7 @@ async fn test_mode_risk_autoedit_standard_auto_allows() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -310,6 +325,7 @@ async fn test_mode_risk_autoedit_elevated_prompts() {
         &serde_json::json!({"command": "ls"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -327,6 +343,7 @@ async fn test_mode_risk_yolo_safe_auto_allows() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -341,6 +358,7 @@ async fn test_mode_risk_yolo_standard_auto_allows() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -355,6 +373,7 @@ async fn test_mode_risk_yolo_elevated_auto_allows() {
         &serde_json::json!({"command": "ls"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert_eq!(result, PermissionDecision::Allow);
@@ -765,6 +784,7 @@ async fn test_blocklist_overrides_yolo_conformance() {
         &serde_json::json!({"command": "rm -rf /"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     assert!(
@@ -836,6 +856,7 @@ async fn test_plan_mode_blocks_standard_tools() {
         &serde_json::json!({"file_path": "a.rs"}),
         None,
         None,
+        &NoOpToolSet,
     )
     .await;
     match result {
