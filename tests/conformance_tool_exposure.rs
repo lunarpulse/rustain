@@ -205,6 +205,8 @@ fn test_compose_with_default_config_binds_static_full() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: std::sync::Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     };
     let selection = ProfileSelection {
         dimensions: std::collections::BTreeMap::new(),
@@ -235,6 +237,8 @@ fn test_compose_with_unknown_exposure_returns_error() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "semantic".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: std::sync::Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     };
     let selection = ProfileSelection {
         dimensions: std::collections::BTreeMap::new(),

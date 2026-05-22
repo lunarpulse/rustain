@@ -46,6 +46,7 @@ mod tests {
             scheduler: None,
             context: None,
             tool_exposure: None,
+            skill_exposure: None,
         }
     }
 

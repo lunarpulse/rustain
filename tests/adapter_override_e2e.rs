@@ -32,6 +32,8 @@ fn test_compose_ctx() -> ComposeContext {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     }
 }
 

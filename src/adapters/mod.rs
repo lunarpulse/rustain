@@ -20,6 +20,7 @@ pub mod provider;
 pub mod security_adapter;
 pub mod skill_activation;
 pub mod skill_provider;
+pub mod skill_exposure;
 pub mod skill_registry;
 pub mod tool_exposure;
 pub mod toolset_adapter;

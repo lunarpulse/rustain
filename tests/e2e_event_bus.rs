@@ -42,6 +42,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         scheduler: None,
         context: None,
         tool_exposure: None,
+        skill_exposure: None,
     }
 }
 
@@ -70,6 +71,8 @@ fn test_app_state_honors_raw_capacity() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -121,6 +124,8 @@ fn test_app_state_session_cancel_is_root_token() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,

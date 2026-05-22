@@ -84,6 +84,7 @@ pub async fn run() -> Result<()> {
         scheduler: cli.scheduler.clone(),
         context: cli.context.clone(),
         tool_exposure: cli.tool_exposure.clone(),
+        skill_exposure: cli.skill_exposure.clone(),
     };
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
@@ -149,6 +150,12 @@ pub async fn run() -> Result<()> {
 
     // Story 9.4 — validate tools.exposure BEFORE AgentCore composition
     if let Err(e) = validate_tools_exposure(&app_config.tools.exposure) {
+        eprintln!("Config validation failed: {}", e);
+        std::process::exit(1);
+    }
+
+    // Story 9.6 — validate skill_exposure.kind BEFORE AgentCore composition
+    if let Err(e) = validate_skill_exposure(&app_config.skill_exposure.kind) {
         eprintln!("Config validation failed: {}", e);
         std::process::exit(1);
     }
@@ -732,11 +739,21 @@ pub async fn run() -> Result<()> {
     let shared_skill_registry = Arc::new(tokio::sync::RwLock::new(SkillRegistry::new()));
     let skill_activator = Arc::new(SkillActivator::with_registry(shared_skill_registry));
     skill_activator.set_event_tx(domain_tx.clone()).await;
+    // Story 9.6 — two-layer skill cache (L1 LRU + L2 disk snapshot).
+    // The cache is constructed BEFORE SkillRegistry::discover (which runs in
+    // event_loop.rs). The `SkillCache::warm_up(...)` call that populates the
+    // cache from the discovered registry is deferred to event_loop.rs after
+    // `SkillRegistry::discover` completes. The cache itself is available
+    // immediately (empty L1) for early consumers like `skill_view`.
+    let shared_skill_cache = Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
+        crate::infrastructure::skill_cache::SkillCacheConfig::default(),
+    ));
     let agent_activator = Arc::new(crate::adapters::agent_activation::AgentActivator::new(
         Arc::clone(&security),
     ));
     let mut tools_adapter = ToolSetAdapter::new(workspace_path.clone(), Arc::clone(&tools_storage));
     tools_adapter.set_activator(Arc::clone(&skill_activator));
+    tools_adapter.set_skill_cache(Arc::clone(&shared_skill_cache));
     tools_adapter.set_plan_manager(plan_manager.clone());
     tools_adapter.set_event_tx(domain_tx.clone());
 
@@ -813,6 +830,8 @@ pub async fn run() -> Result<()> {
         include_builtin_tools: resolved.include_builtin_tools,
         domain_tx: Some(domain_tx.clone()),
         tool_exposure: app_config.tools.exposure.clone(),
+        skill_exposure: app_config.skill_exposure.kind.clone(),
+        skill_cache: Arc::clone(&shared_skill_cache),
     };
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
@@ -1095,7 +1114,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
+    let unsupported_discovery: Vec<(String, String)> = Vec::new();
 
     #[cfg(feature = "openai")]
     let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =
@@ -1433,6 +1452,43 @@ fn spawn_periodic_catalog_refresh(
             }
         }
     });
+}
+
+/// Story 9.6 — validate the `skill_exposure.kind` config value at startup.
+///
+/// Phase A accepts ONLY `"l1-metadata"` (the DEFAULT) and `"static-full"`.
+/// `"meta-search"` produces an actionable error pointing at Story 9.7.
+pub fn validate_skill_exposure(kind: &str) -> Result<(), crate::domain::errors::DomainError> {
+    use crate::domain::errors::{ConfigError, DomainError};
+    if kind.is_empty() {
+        return Err(DomainError::Config(ConfigError::Invalid {
+            field: "skill_exposure.kind".into(),
+            value: "empty exposure strategy value is invalid. \
+                    Phase A accepts `\"l1-metadata\"` (the default) or `\"static-full\"` \
+                    (codex-parity opt-in)."
+                .to_string(),
+        }));
+    }
+    match kind {
+        "l1-metadata" | "static-full" => Ok(()),
+        "meta-search" => Err(DomainError::Config(ConfigError::Invalid {
+            field: "skill_exposure.kind".into(),
+            value: "`meta-search` skill exposure strategy is deferred to Story 9.7; \
+                     see ADR-09-02 §Phase B Prerequisites. \
+                     For Phase A, set `[skill_exposure].kind = \"l1-metadata\"` \
+                     (the default) or remove the key entirely."
+                .to_string(),
+        })),
+        other => Err(DomainError::Config(ConfigError::Invalid {
+            field: "skill_exposure.kind".into(),
+            value: format!(
+                "unknown skill exposure strategy `{}`. Phase A accepts only `\"l1-metadata\"` \
+                 (default) and `\"static-full\"` (codex-parity opt-in fallback). \
+                 Reserved values: `\"meta-search\"` (Story 9.7 Phase B, currently deferred).",
+                other
+            ),
+        })),
+    }
 }
 
 /// Story 9.4 — validate the `tools.exposure` config value at startup.

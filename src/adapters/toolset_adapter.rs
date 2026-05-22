@@ -60,6 +60,9 @@ pub struct ToolSetAdapter {
     progress_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>>,
     /// Tool progress configuration (tail_lines cap, threshold). Story 16.9.
     tool_progress_config: Mutex<ToolProgressConfig>,
+    /// Optional skill cache for `skill_view` tool execution (Story 9.6).
+    #[allow(dead_code)]
+    skill_cache: Option<std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>>,
 }
 
 /// Context for the `stream_lines` helper, bundling the many parameters
@@ -182,12 +185,21 @@ impl ToolSetAdapter {
             event_tx: None,
             progress_tx: Mutex::new(None),
             tool_progress_config: Mutex::new(ToolProgressConfig::default()),
+            skill_cache: None,
         }
     }
 
     #[allow(dead_code)]
     pub fn set_activator(&mut self, activator: Arc<SkillActivator>) {
         self.activator = Some(activator);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_skill_cache(
+        &mut self,
+        cache: std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>,
+    ) {
+        self.skill_cache = Some(cache);
     }
 
     #[allow(dead_code)]
@@ -704,6 +716,25 @@ impl ToolSetPort for ToolSetAdapter {
                 parallel_safe: true,
             },
             ToolDefinition {
+                name: "skill_view".to_string(),
+                description: "Fetch the full SKILL.md body for a named skill. \
+                              Use this when L1 skill metadata is insufficient to act — the body \
+                              contains the recipe, examples, and bundled resources \
+                              references. Equivalent to the `read_skill` affordance in \
+                              peer harnesses (gemini-cli, opencode, hermes-agent).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Skill name as it appears in the L1 metadata listing."
+                        }
+                    },
+                    "required": ["name"]
+                }),
+                parallel_safe: true,
+            },
+            ToolDefinition {
                 name: "exit_plan_mode".to_string(),
                 description: "Signal that planning is complete. Presents the plan file to the user for approval. Use only when the plan is fully written and ready for review.".to_string(),
                 input_schema: serde_json::json!({
@@ -764,6 +795,7 @@ impl ToolSetPort for ToolSetAdapter {
             "Read" | "read" => self.execute_read(&input, cancel).await,
             "Write" | "write" => self.execute_write(&input, "", cancel).await,
             "activate_skill" => self.execute_activate_skill(&input).await,
+            "skill_view" => self.execute_skill_view(&input, "", cancel).await,
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             "propose_plan" => self.execute_propose_plan(&input).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
@@ -783,6 +815,7 @@ impl ToolSetPort for ToolSetAdapter {
                 self.execute_bash_with_progress(&input, cancel, tool_use_id, progress_tx)
                     .await
             }
+            "skill_view" => self.execute_skill_view(&input, tool_use_id, cancel).await,
             _ => {
                 let _ = (tool_use_id, progress_tx);
                 self.execute(tool_name, input, cancel).await
@@ -947,6 +980,48 @@ impl ToolSetAdapter {
                 is_error: true,
             }),
         }
+    }
+
+    async fn execute_skill_view(
+        &self,
+        input: &serde_json::Value,
+        tool_use_id: &str,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let name = input
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed(
+                "skill_view requires 'name' string argument".into(),
+            ))?;
+
+        let cache = self.skill_cache.as_ref().ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "skill cache not initialized — composition error".into(),
+            )
+        })?;
+
+        let body = cache.body(name).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!(
+                "skill_view: failed to fetch body for '{}': {}",
+                name, e
+            ))
+        })?;
+
+        let source: Option<crate::domain::models::SkillSource> = cache.source(name).await.ok();
+        let trust_attr = match source {
+            Some(s) if s.priority() < 3 => " trust=\"workspace\"",
+            _ => "",
+        };
+
+        Ok(ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: format!(
+                "<skill name=\"{}\"{}>\n{}\n</skill>",
+                name, trust_attr, body
+            ),
+            is_error: false,
+        })
     }
 }
 

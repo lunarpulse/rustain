@@ -3,7 +3,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::domain::models::{
-    MAX_SKILL_FILE_SIZE, SkillDef, SkillSource, validate_skill_frontmatter,
+    MAX_SKILL_FILE_SIZE, SkillDef, SkillSource, SkillValidationWarning,
+    validate_skill_frontmatter,
 };
 use crate::domain::services::frontmatter;
 
@@ -12,6 +13,10 @@ pub struct SkillRegistry {
     skills: Vec<SkillDef>,
     all_skills: Vec<SkillDef>,
     warnings_count: usize,
+    /// Structured warning records for the adapter-status panel (Story 9.6).
+    /// Each record carries the skill name + file path + validation error
+    /// for actionable surface.
+    warnings: Vec<SkillValidationWarning>,
     discovered: bool,
 }
 
@@ -19,6 +24,9 @@ pub struct SkillRegistry {
 /// AC7/AC8 require distinguishing "no skill here" (silent) from "malformed skill" (warning).
 enum ScanOutcome {
     Valid(SkillDef),
+    /// Skill loaded successfully but frontmatter lint warnings were found
+    /// (non-fatal Anthropic spec violations per AC-9-6-6).
+    ValidLinted(SkillDef, SkillValidationWarning),
     /// No skill file was attempted — silent skip (AC8, AC5).
     NotASkill,
     /// A skill file was attempted but failed validation — already logged, count once.
@@ -31,6 +39,7 @@ impl SkillRegistry {
             skills: Vec::new(),
             all_skills: Vec::new(),
             warnings_count: 0,
+            warnings: Vec::new(),
             discovered: false,
         }
     }
@@ -41,6 +50,7 @@ impl SkillRegistry {
             skills: Vec::new(),
             all_skills: all,
             warnings_count: 0,
+            warnings: Vec::new(),
             discovered: true,
         }
     }
@@ -55,8 +65,14 @@ impl SkillRegistry {
             skills: skills.clone(),
             all_skills: skills,
             warnings_count: 0,
+            warnings: Vec::new(),
             discovered: true,
         }
+    }
+
+    /// Access structured warning records for the adapter-status panel (Story 9.6).
+    pub fn warnings(&self) -> &[SkillValidationWarning] {
+        &self.warnings
     }
 
     /// Discover skills from workspace + global directories.
@@ -73,6 +89,7 @@ impl SkillRegistry {
 
         let mut all_candidates: Vec<SkillDef> = Vec::new();
         let mut warnings = 0usize;
+        let mut warning_records: Vec<SkillValidationWarning> = Vec::new();
 
         // Track canonical paths already scanned so that `workspace == home`
         // does not double-scan `.agents/skills` (AC7, prevents spurious shadow warnings).
@@ -86,9 +103,10 @@ impl SkillRegistry {
                     continue;
                 }
                 scanned.push(canonical);
-                let (defs, warns) = scan_dir(&skill_dir, *source);
+                let (defs, warns, wr) = scan_dir(&skill_dir, *source);
                 all_candidates.extend(defs);
                 warnings += warns;
+                warning_records.extend(wr);
             }
         }
 
@@ -98,9 +116,10 @@ impl SkillRegistry {
                 let canonical = std::fs::canonicalize(&global_dir).unwrap_or(global_dir.clone());
                 if !scanned.contains(&canonical) {
                     scanned.push(canonical);
-                    let (defs, warns) = scan_dir(&global_dir, SkillSource::GlobalAgents);
+                    let (defs, warns, wr) = scan_dir(&global_dir, SkillSource::GlobalAgents);
                     all_candidates.extend(defs);
                     warnings += warns;
+                    warning_records.extend(wr);
                 }
             }
         }
@@ -124,6 +143,7 @@ impl SkillRegistry {
             skills: active,
             all_skills: all,
             warnings_count: warnings,
+            warnings: warning_records,
             discovered: true,
         }
     }
@@ -169,17 +189,16 @@ impl Default for SkillRegistry {
     }
 }
 
-fn scan_dir(dir: &Path, source: SkillSource) -> (Vec<SkillDef>, usize) {
+fn scan_dir(dir: &Path, source: SkillSource) -> (Vec<SkillDef>, usize, Vec<SkillValidationWarning>) {
     let mut candidates = Vec::new();
     let mut warnings = 0usize;
+    let mut warning_records: Vec<SkillValidationWarning> = Vec::new();
 
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            // Directory-level I/O failure — logged for developers but NOT counted
-            // as a per-skill validation warning (AC3: validation failures are per-skill).
             tracing::warn!("Failed to read skill directory {}: {}", dir.display(), e);
-            return (candidates, 0);
+            return (candidates, 0, warning_records);
         }
     };
 
@@ -198,12 +217,32 @@ fn scan_dir(dir: &Path, source: SkillSource) -> (Vec<SkillDef>, usize) {
 
         match outcome {
             ScanOutcome::Valid(def) => candidates.push(def),
-            ScanOutcome::NotASkill => {} // silent (AC8)
-            ScanOutcome::Invalid => warnings += 1,
+            ScanOutcome::ValidLinted(def, warning) => {
+                warnings += 1;
+                warning_records.push(warning);
+                candidates.push(def);
+            }
+            ScanOutcome::NotASkill => {}
+            ScanOutcome::Invalid => {
+                warnings += 1;
+                // Build a structured warning record for the adapter-status panel (Story 9.6).
+                // Derive skill_name from the file/dir name.
+                let skill_name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                warning_records.push(SkillValidationWarning {
+                    skill_name,
+                    skill_file: path.clone(),
+                    error: crate::domain::models::SkillValidationError::IoError(
+                        "skill validation failed — see startup warnings".into(),
+                    ),
+                });
+            }
         }
     }
 
-    (candidates, warnings)
+    (candidates, warnings, warning_records)
 }
 
 fn parse_skill_directory(dir: &Path, source: SkillSource) -> ScanOutcome {
@@ -233,9 +272,18 @@ fn parse_skill_directory(dir: &Path, source: SkillSource) -> ScanOutcome {
     }
 
     let mut saw_invalid = false;
+    let mut pending_warning: Option<SkillValidationWarning> = None;
     for file in md_files {
         match parse_skill_file(&file, dir, &dir_name, source) {
             ScanOutcome::Valid(def) => return ScanOutcome::Valid(def),
+            ScanOutcome::ValidLinted(def, warning) => {
+                // Propagate the warning — the first linted skill wins per
+                // first-Valid semantics.
+                if pending_warning.is_none() {
+                    pending_warning = Some(warning);
+                }
+                return ScanOutcome::ValidLinted(def, pending_warning.unwrap());
+            }
             ScanOutcome::Invalid => saw_invalid = true,
             ScanOutcome::NotASkill => {}
         }
@@ -341,9 +389,28 @@ fn parse_skill_file(
         }
     };
 
+    let mut lint_warning: Option<crate::domain::models::SkillValidationError> = None;
+
     if let Err(e) = validate_skill_frontmatter(&name, &description, expected_name) {
-        tracing::warn!("Skill '{}' excluded: {}", path.display(), e);
-        return ScanOutcome::Invalid;
+        // Story 9.6: the 3 new Anthropic spec variants (NameMustStartWithLetter,
+        // DescriptionTooShort, DescriptionMissingWhenTrigger) are NON-FATAL
+        // lint warnings — skills still load but are flagged. Pre-existing
+        // fatal variants (MissingField, NameTooLong, NameInvalid,
+        // NameDirectoryMismatch) continue to exclude the skill.
+        let is_non_fatal = matches!(
+            e,
+            crate::domain::models::SkillValidationError::NameMustStartWithLetter(_)
+                | crate::domain::models::SkillValidationError::DescriptionTooShort(_)
+                | crate::domain::models::SkillValidationError::DescriptionMissingWhenTrigger(_)
+        );
+        if is_non_fatal {
+            tracing::warn!("Skill '{}' frontmatter lint (loaded with warning): {}", path.display(), e);
+            lint_warning = Some(e);
+            // Fall through — skill loads, warning is recorded at the return site.
+        } else {
+            tracing::warn!("Skill '{}' excluded: {}", path.display(), e);
+            return ScanOutcome::Invalid;
+        }
     }
 
     let allowed_tools = frontmatter::extract_list_field(fm, "allowed-tools");
@@ -384,14 +451,25 @@ fn parse_skill_file(
         }
     }
 
-    ScanOutcome::Valid(SkillDef {
+    let def = SkillDef {
         name,
         description,
         file: canonical_file,
         directory: canonical_dir,
         source,
         allowed_tools,
-    })
+    };
+
+    if let Some(warning_err) = lint_warning {
+        let warning = SkillValidationWarning {
+            skill_name: def.name.clone(),
+            skill_file: def.file.clone(),
+            error: warning_err,
+        };
+        ScanOutcome::ValidLinted(def, warning)
+    } else {
+        ScanOutcome::Valid(def)
+    }
 }
 
 /// Read a file up to and including the closing YAML frontmatter delimiter, without

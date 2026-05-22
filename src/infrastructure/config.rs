@@ -42,12 +42,22 @@ struct CliOverrides {
     /// struct at the same precedence layer as `RUSTAIN_TOOLS__EXPOSURE`.
     #[serde(skip_serializing_if = "Option::is_none", rename = "tools")]
     tools: Option<CliToolsOverride>,
+    /// Story 9.6 — overrides `app_config.skill_exposure.kind`. Routed via nested
+    /// figment key `skill_exposure.kind`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "skill_exposure")]
+    skill_exposure: Option<CliSkillExposureOverride>,
 }
 
 #[derive(Serialize, Default)]
 struct CliToolsOverride {
     #[serde(skip_serializing_if = "Option::is_none", rename = "exposure")]
     exposure: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+struct CliSkillExposureOverride {
+    #[serde(skip_serializing_if = "Option::is_none", rename = "kind")]
+    kind: Option<String>,
 }
 
 impl From<&Cli> for CliOverrides {
@@ -59,6 +69,10 @@ impl From<&Cli> for CliOverrides {
             tools: cli.tool_exposure.clone().map(|exposure| CliToolsOverride {
                 exposure: Some(exposure),
             }),
+            skill_exposure: cli
+                .skill_exposure
+                .clone()
+                .map(|kind| CliSkillExposureOverride { kind: Some(kind) }),
         }
     }
 }
@@ -169,6 +183,7 @@ pub fn load_default() -> AppConfig {
         scheduler: None,
         context: None,
         tool_exposure: None,
+        skill_exposure: None,
     };
     load(
         &cli,
@@ -271,6 +286,7 @@ mod tests {
             scheduler: None,
             context: None,
             tool_exposure: None,
+            skill_exposure: None,
         }
     }
 

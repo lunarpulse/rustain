@@ -9,6 +9,7 @@ pub mod profile_resolution;
 pub mod provider_factory;
 pub mod runtime;
 pub mod signals;
+pub mod skill_cache;
 pub mod startup;
 pub mod terminal_info;
 pub mod utils;

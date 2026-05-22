@@ -271,6 +271,39 @@ impl Default for ToolsExposureConfig {
     }
 }
 
+/// Per-turn skill exposure strategy configuration (Story 9.6).
+///
+/// Threaded through the existing 7-layer Figment stack at
+/// `src/infrastructure/config.rs` — no new precedence rules.
+///
+/// # Phase A
+///
+/// Accepts ONLY `"l1-metadata"` (the DEFAULT per ADR-09-02 §Decision, INVERTED
+/// from Tools' `static-full` default per evidence asymmetry) and `"static-full"`
+/// (codex-parity opt-in fallback). Selecting `"meta-search"` produces an
+/// actionable startup error pointing at ADR-09-02 §Phase B Prerequisites.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillExposureConfig {
+    /// Strategy kind. Phase A: `"l1-metadata"` (default) or `"static-full"`.
+    /// Reserved Phase B: `"meta-search"` (Story 9.7).
+    #[serde(default = "SkillExposureConfig::default_kind")]
+    pub kind: String,
+}
+
+impl SkillExposureConfig {
+    fn default_kind() -> String {
+        "l1-metadata".to_string()
+    }
+}
+
+impl Default for SkillExposureConfig {
+    fn default() -> Self {
+        Self {
+            kind: Self::default_kind(),
+        }
+    }
+}
+
 /// Application configuration loaded from file + env.
 ///
 /// NOTE (Story 5-1 Task 3.5): we intentionally do NOT use
@@ -335,6 +368,11 @@ pub struct AppConfig {
     /// Per-turn tool exposure strategy configuration. Story 9.4.
     #[serde(default)]
     pub tools: ToolsExposureConfig,
+    /// Per-turn skill exposure strategy configuration. Story 9.6.
+    /// Defaults to `"l1-metadata"` (the spec-aligned default per ADR-09-02 §Decision,
+    /// INVERTED from the Tools track which defaults to `static-full`).
+    #[serde(default)]
+    pub skill_exposure: SkillExposureConfig,
 }
 
 impl AppConfig {
@@ -508,6 +546,7 @@ impl Default for AppConfig {
             pricing: Self::default_pricing_catalog(),
             budget: BudgetConfig::default(),
             tools: ToolsExposureConfig::default(),
+            skill_exposure: SkillExposureConfig::default(),
         }
     }
 }

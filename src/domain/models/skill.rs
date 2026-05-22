@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 pub const MAX_SKILL_FILE_SIZE: u64 = 1_048_576;
 pub const MAX_SKILL_ACTIVATION_DEPTH: u8 = 3;
 
@@ -14,7 +16,7 @@ pub struct SkillDef {
     pub allowed_tools: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SkillSource {
     WorkspaceAgents,
     WorkspaceRustain,
@@ -224,7 +226,10 @@ pub enum SkillValidationError {
     MissingField(String),
     NameTooLong(usize),
     NameInvalid(String),
+    NameMustStartWithLetter(String),
     DescriptionTooLong(usize),
+    DescriptionTooShort(usize),
+    DescriptionMissingWhenTrigger(String),
     NameDirectoryMismatch { name: String, dir: String },
     IoError(String),
 }
@@ -242,12 +247,25 @@ impl std::fmt::Display for SkillValidationError {
             SkillValidationError::NameInvalid(name) => {
                 write!(
                     f,
-                    "name '{}' does not match pattern ^[a-z0-9][a-z0-9-]*$",
+                    "name '{}' does not match pattern ^[a-z][a-z0-9-]*$",
                     name
                 )
             }
+            SkillValidationError::NameMustStartWithLetter(name) => {
+                write!(f, "name '{}' must start with a lowercase letter", name)
+            }
             SkillValidationError::DescriptionTooLong(len) => {
                 write!(f, "description too long ({} chars, max 1024)", len)
+            }
+            SkillValidationError::DescriptionTooShort(len) => {
+                write!(f, "description too short ({} chars, min 20)", len)
+            }
+            SkillValidationError::DescriptionMissingWhenTrigger(desc) => {
+                write!(
+                    f,
+                    "description missing 'when' trigger phrase: '{}'",
+                    desc
+                )
             }
             SkillValidationError::NameDirectoryMismatch { name, dir } => {
                 write!(f, "name '{}' does not match directory '{}'", name, dir)
@@ -255,6 +273,16 @@ impl std::fmt::Display for SkillValidationError {
             SkillValidationError::IoError(msg) => write!(f, "I/O error: {}", msg),
         }
     }
+}
+
+/// Structured warning record for frontmatter lint failures.
+/// Each record carries the skill name, file path, and the validation error
+/// for actionable surface in the adapter-status panel (Story 9.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillValidationWarning {
+    pub skill_name: String,
+    pub skill_file: std::path::PathBuf,
+    pub error: SkillValidationError,
 }
 
 #[allow(dead_code)]
@@ -271,27 +299,54 @@ pub fn validate_skill_frontmatter(
     }
     let valid_name_pattern = name.chars().enumerate().all(|(i, c)| {
         if i == 0 {
-            c.is_ascii_lowercase() || c.is_ascii_digit()
+            c.is_ascii_lowercase()
         } else {
             c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
         }
     });
     if !valid_name_pattern {
+        // Non-fatal lint: name starts with a digit. However, NameDirectoryMismatch
+        // (fatal) must take precedence — check directory first to avoid masking
+        // a fatal error with a non-fatal warning.
+        let starts_with_digit = name.chars().next().map_or(false, |c| c.is_ascii_digit());
+        if starts_with_digit && name != expected_name {
+            return Err(SkillValidationError::NameDirectoryMismatch {
+                name: name.to_string(),
+                dir: expected_name.to_string(),
+            });
+        }
+        if starts_with_digit {
+            return Err(SkillValidationError::NameMustStartWithLetter(
+                name.to_string(),
+            ));
+        }
         return Err(SkillValidationError::NameInvalid(name.to_string()));
+    }
+    // Check name-directory mismatch BEFORE description checks (fatal errors
+    // should take precedence over non-fatal lint warnings per AC-9-6-6).
+    if name != expected_name {
+        return Err(SkillValidationError::NameDirectoryMismatch {
+            name: name.to_string(),
+            dir: expected_name.to_string(),
+        });
     }
     if description.is_empty() {
         return Err(SkillValidationError::MissingField(
             "description".to_string(),
         ));
     }
+    if description.len() < 20 {
+        return Err(SkillValidationError::DescriptionTooShort(
+            description.len(),
+        ));
+    }
     if description.len() > 1024 {
         return Err(SkillValidationError::DescriptionTooLong(description.len()));
     }
-    if name != expected_name {
-        return Err(SkillValidationError::NameDirectoryMismatch {
-            name: name.to_string(),
-            dir: expected_name.to_string(),
-        });
+    if !description.to_lowercase().contains("when") {
+        return Err(SkillValidationError::DescriptionMissingWhenTrigger(
+            description.to_string(),
+        ));
     }
     Ok(())
 }
@@ -302,7 +357,7 @@ mod tests {
 
     #[test]
     fn valid_frontmatter() {
-        assert!(validate_skill_frontmatter("review-code", "Reviews code", "review-code").is_ok());
+        assert!(validate_skill_frontmatter("review-code", "Reviews code when the user runs /review", "review-code").is_ok());
     }
 
     #[test]
@@ -350,7 +405,7 @@ mod tests {
     #[test]
     fn name_directory_mismatch() {
         assert!(matches!(
-            validate_skill_frontmatter("bar", "desc", "foo"),
+            validate_skill_frontmatter("bar", "A description that is long enough with a when clause", "foo"),
             Err(SkillValidationError::NameDirectoryMismatch { .. })
         ));
     }
@@ -373,18 +428,20 @@ mod tests {
     #[test]
     fn name_64_chars_accepted() {
         let name = "a".repeat(64);
-        assert!(validate_skill_frontmatter(&name, "desc", &name).is_ok());
+        assert!(validate_skill_frontmatter(&name, "Description long enough for validation when needed", &name).is_ok());
     }
 
     #[test]
     fn description_1024_chars_accepted() {
-        let desc = "x".repeat(1024);
+        let prefix = "When activated, this skill ";
+        let suffix = "x".repeat(1024 - prefix.len());
+        let desc = format!("{}{}", prefix, suffix);
         assert!(validate_skill_frontmatter("foo", &desc, "foo").is_ok());
     }
 
     #[test]
     fn name_with_hyphens_accepted() {
-        assert!(validate_skill_frontmatter("my-skill-123", "desc", "my-skill-123").is_ok());
+        assert!(validate_skill_frontmatter("my-skill-123", "Description long enough for validation when needed", "my-skill-123").is_ok());
     }
 
     #[test]

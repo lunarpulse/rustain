@@ -255,6 +255,8 @@ async fn ac4_signal_cancel_before_shutdown() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -293,6 +295,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             scheduler: None,
             context: None,
             tool_exposure: None,
+            skill_exposure: None,
         },
     );
 

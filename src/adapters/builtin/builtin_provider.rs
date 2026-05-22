@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discover_projects_all_6_builtin_tools() {
+    async fn test_discover_projects_all_7_builtin_tools() {
         let adapter = make_toolset_adapter();
         let provider = BuiltinProvider::new(adapter);
         let caps = provider.discover().await.unwrap();
@@ -127,6 +127,7 @@ mod tests {
                 "activate_skill",
                 "exit_plan_mode",
                 "propose_plan",
+                "skill_view",
             ]
         );
     }

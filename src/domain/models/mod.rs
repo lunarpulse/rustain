@@ -13,6 +13,7 @@ mod config;
 mod content;
 pub mod conversation;
 pub mod filtered_catalog;
+pub mod filtered_skill_catalog;
 mod focus;
 pub mod launch_spec;
 pub mod mcp_server_spec;
@@ -32,6 +33,8 @@ pub mod sandbox;
 mod session;
 pub mod session_meta;
 mod skill;
+pub mod skill_catalog_delta;
+pub mod skill_metadata;
 mod stream;
 pub mod tab;
 pub mod tool_call;
@@ -98,8 +101,10 @@ pub use session_meta::{
 pub use skill::{
     ActiveSkill, MAX_SKILL_ACTIVATION_DEPTH, MAX_SKILL_FILE_SIZE, SkillActivationError,
     SkillActivationOutcome, SkillActivationSet, SkillDef, SkillSource, SkillTrustResponse,
-    SkillValidationError, validate_skill_frontmatter,
+    SkillValidationError, SkillValidationWarning, validate_skill_frontmatter,
 };
+pub use skill_catalog_delta::SkillCatalogDelta;
+pub use skill_metadata::SkillMetadata;
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 // TODO(S16.4): remove these upward re-exports once consumers migrate to domain::services::reducer
@@ -117,6 +122,7 @@ pub use capability_registry::{
 };
 pub use catalog_delta::CatalogDelta;
 pub use filtered_catalog::FilteredCatalog;
+pub use filtered_skill_catalog::FilteredSkillCatalog;
 pub use launch_spec::AgentLaunchSpec;
 pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
 pub use mcp_server_state::McpConnectionState;

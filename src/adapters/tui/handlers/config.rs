@@ -220,6 +220,7 @@ mod tests {
             scheduler: None,
             context: None,
             tool_exposure: None,
+            skill_exposure: None,
         }
     }
 
@@ -242,6 +243,8 @@ mod tests {
             include_builtin_tools: true,
             domain_tx: None,
             tool_exposure: "static-full".into(),
+            skill_exposure: "l1-metadata".into(),
+            skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
         });
         let ctx = ReloadContext {
             cli: &test_cli(),

@@ -61,6 +61,12 @@ pub struct Cli {
     /// (Story 9.7).
     #[arg(long, global = true, value_parser = ["static-full"])]
     pub tool_exposure: Option<String>,
+    /// Override per-turn skill exposure strategy (Story 9.6). Phase A: `"l1-metadata"`
+    /// (the DEFAULT per ADR-09-02 — INVERTED from Tools track default per evidence
+    /// asymmetry) or `"static-full"` (codex-parity opt-in). Reserved Phase B:
+    /// `"meta-search"` (Story 9.7).
+    #[arg(long, global = true, value_parser = ["l1-metadata", "static-full"])]
+    pub skill_exposure: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

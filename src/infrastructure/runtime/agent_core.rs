@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
     ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort, SessionPort,
-    ToolExposurePort, ToolSetPort,
+    SkillExposurePort, ToolExposurePort, ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -26,6 +26,9 @@ pub struct AgentCore {
     /// path per ADR-09-01 v2.1 §W1 (Disabled is NOT a trait impl; the eval
     /// harness binds None).
     pub tool_exposure: Arc<ArcSwap<Option<Arc<dyn ToolExposurePort>>>>,
+    /// Story 9.6 — per-turn skill exposure strategy. `None` for headless / eval
+    /// path per ADR-09-01 v2.1 §W1 (inherited — Disabled is NOT a trait impl).
+    pub skill_exposure: Arc<ArcSwap<Option<Arc<dyn SkillExposurePort>>>>,
 }
 
 impl AgentCore {
@@ -46,6 +49,7 @@ impl AgentCore {
             scheduler: Self::wrap(Arc::new(NoOpScheduler) as Arc<dyn SchedulerPort>),
             context: Self::wrap(Arc::new(NoOpContext) as Arc<dyn ContextPort>),
             tool_exposure: Self::wrap_optional(None as Option<Arc<dyn ToolExposurePort>>),
+            skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
         }
     }
 
@@ -76,7 +80,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_noop_constructs_all_eight_ports() {
+    fn test_noop_constructs_all_nine_ports() {
         let core = AgentCore::test_noop();
         // Each load_full() must return a non-null Arc
         let p = core.persona.load_full();
@@ -87,6 +91,7 @@ mod tests {
         let sc = core.scheduler.load_full();
         let cx = core.context.load_full();
         let te = core.tool_exposure.load_full();
+        let se = core.skill_exposure.load_full();
         assert!(Arc::strong_count(&p) >= 1);
         assert!(Arc::strong_count(&m) >= 1);
         assert!(Arc::strong_count(&s) >= 1);
@@ -95,5 +100,6 @@ mod tests {
         assert!(Arc::strong_count(&sc) >= 1);
         assert!(Arc::strong_count(&cx) >= 1);
         assert!(te.is_none(), "tool_exposure defaults to None in noop agent");
+        assert!(se.is_none(), "skill_exposure defaults to None in noop agent");
     }
 }

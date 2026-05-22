@@ -485,7 +485,7 @@ fn test_describe_default_impl_is_empty_for_noop() {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
-async fn test_builtin_provider_discover_returns_6_tools() {
+async fn test_builtin_provider_discover_returns_7_tools() {
     use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
     use rustain::adapters::filesystem::FileSystemStorage;
     use rustain::adapters::toolset_adapter::ToolSetAdapter;
@@ -513,6 +513,7 @@ async fn test_builtin_provider_discover_returns_6_tools() {
             "activate_skill",
             "exit_plan_mode",
             "propose_plan",
+            "skill_view",
         ]
     );
 }
@@ -721,9 +722,9 @@ async fn test_registry_holds_all_three_protocols() {
     let skill_count = snap.iter().filter(|c| c.protocol == "skill").count();
 
     assert_eq!(mcp_count, 2, "fake MCP server has echo + add tools");
-    assert_eq!(builtin_count, 6, "ToolSetAdapter has 6 builtin tools");
+    assert_eq!(builtin_count, 7, "ToolSetAdapter has 7 builtin tools (including skill_view from 9.6)");
     assert_eq!(skill_count, 3, "SkillRegistry has 3 programmatic skills");
-    assert_eq!(snap.len(), 11);
+    assert_eq!(snap.len(), 12);
 }
 
 #[cfg(feature = "mcp")]
@@ -932,11 +933,11 @@ async fn test_catalog_delta_added_removed_correctness() {
         None, // no skill_activator
     );
 
-    // Initial populate: version=1, registry has 6 builtin + 2 MCP = 8
+    // Initial populate: version=1, registry has 7 builtin (incl. skill_view from 9.6) + 2 MCP = 9
     let _ = composite.populate_registry().await.unwrap();
     assert_eq!(composite.catalog_version(), 1);
     let snap1 = composite.capability_registry().snapshot();
-    assert_eq!(snap1.len(), 8, "6 builtin + 2 MCP tools");
+    assert_eq!(snap1.len(), 9, "7 builtin + 2 MCP tools");
 
     // Emit another delta with no changes: version=2, added=0 removed=0
     let _ = composite.emit_catalog_delta().await.unwrap();
@@ -944,7 +945,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap2 = composite.capability_registry().snapshot();
     assert_eq!(
         snap2.len(),
-        8,
+        9,
         "no tools added or removed — registry unchanged"
     );
 
@@ -971,7 +972,7 @@ async fn test_catalog_delta_added_removed_correctness() {
 
     // Verify registry grew by 1
     let snap3 = composite.capability_registry().snapshot();
-    assert_eq!(snap3.len(), 9, "added multiply tool");
+    assert_eq!(snap3.len(), 10, "added multiply tool (7 builtin + 3 MCP)");
 
     // Emit delta: version=3, should detect 1 added
     let _ = composite.emit_catalog_delta().await.unwrap();
@@ -987,7 +988,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
     assert_eq!(
         snap4.len(),
-        9,
-        "registry still has 9 tools after delta emit"
+        10,
+        "registry still has 10 tools after delta emit"
     );
 }

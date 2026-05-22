@@ -164,6 +164,8 @@ fn test_coding_profile_composes_seven_ports() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -207,6 +209,8 @@ fn test_base_profile_composes_all_noop() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -237,6 +241,8 @@ fn test_personal_assistant_preview_composes_with_fallback() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -277,6 +283,8 @@ fn test_reload_recomposes_agent_core() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
     };
     let ctx_arc = Arc::new(ctx);
 

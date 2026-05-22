@@ -35,6 +35,13 @@ pub struct ComposeContext {
     /// Story 9.4 — exposure strategy name from AppConfig.tools.exposure.
     /// Phase A: always "static-full".
     pub tool_exposure: String,
+    /// Story 9.6 — skill exposure strategy name from AppConfig.skill_exposure.kind.
+    /// Phase A: "l1-metadata" (default) or "static-full" (opt-in).
+    pub skill_exposure: String,
+    /// Story 9.6 — shared two-layer skill cache (L1 LRU + L2 disk snapshot).
+    /// Passed to both L1MetadataExposure and StaticFullExposure constructors,
+    /// and to ToolSetAdapter for the skill_view builtin tool.
+    pub skill_cache: std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>,
 }
 
 impl AgentCore {
@@ -69,6 +76,7 @@ impl AgentCore {
             build_context(n, c, ctx)
         })?;
         let tool_exposure = build_tool_exposure(selection, ctx)?;
+        let skill_exposure = build_skill_exposure(selection, ctx)?;
 
         let elapsed = started.elapsed();
         tracing::info!(
@@ -85,6 +93,7 @@ impl AgentCore {
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
             tool_exposure: Self::wrap_optional(tool_exposure),
+            skill_exposure: Self::wrap_optional(skill_exposure),
         })
     }
 }
@@ -379,6 +388,73 @@ pub fn build_tool_exposure(
     }
 }
 
+/// Story 9.6 — build the per-turn skill exposure strategy from active config.
+///
+/// Returns `Some(Arc::new(L1MetadataExposure))` for the default `"l1-metadata"`,
+/// `Some(Arc::new(StaticFullExposure))` for opt-in `"static-full"`, or `None`
+/// for the headless / eval-harness path per ADR-09-01 v2.1 §W1 (inherited).
+///
+/// # Coupling with `validate_skill_exposure`
+///
+/// `startup::validate_skill_exposure` runs BEFORE this factory and rejects
+/// anything other than `"l1-metadata"` or `"static-full"` with an actionable
+/// error citing Story 9.7 + ADR-09-02. This factory's `Err` arm is
+/// defense-in-depth — it should be unreachable in production.
+pub fn build_skill_exposure(
+    _selection: &ProfileSelection,
+    ctx: &ComposeContext,
+) -> Result<Option<Arc<dyn crate::domain::ports::SkillExposurePort>>, AdapterCompositionError> {
+    // ⚠ ASYMMETRY-BY-DESIGN — DO NOT silently restore symmetry with build_tool_exposure ⚠
+    //
+    // This factory defaults to `L1MetadataExposure` (the SPEC-ALIGNED default per
+    // ADR-09-02 §Decision). The sibling factory `build_tool_exposure` (see above)
+    // defaults to `StaticFullExposure`. THE TWO DEFAULTS ARE INTENTIONALLY ASYMMETRIC:
+    //
+    //   - SKILLS default to L1Metadata because ADR-09-02 §Context documents
+    //     7-signal ecosystem evidence saturation (gemini-cli, hermes-agent,
+    //     opencode, Anthropic-spec, Google, Boliv, K-Dense-AI) AND the Anthropic
+    //     Skills spec mandates progressive disclosure. Codex is the lone outlier.
+    //
+    //   - TOOLS default to StaticFull because ADR-09-01 §Decision documents
+    //     PARTIAL ecosystem evidence (Arcade single-anchor) AND vendor primitives
+    //     for MCP-side meta-search are still beta.
+    //
+    // If a future refactor wants to "fix" the asymmetry, DO NOT do so without
+    // re-opening:
+    //   1. ADR-09-01 §Decision (Tool-side evidence channel)
+    //   2. ADR-09-02 §Decision (Skill-side evidence channel)
+    // Each port has independent evidence channels per SCP-2026-05-21
+    // (John Round-2 directive). Symmetric defaults would either over-eager
+    // the Tools side or under-serve the Skills side.
+    //
+    // See also:
+    //   - SCP-2026-05-21-skill-exposure-strategy.md §4.2
+    //   - The sibling guard comment at build_tool_exposure above
+    //   - epic-9-design-flags-2026-05-20.md Flag 4 (Tools) + Flag 5 (Skills)
+    match ctx.skill_exposure.as_str() {
+        "l1-metadata" => Ok(Some(Arc::new(
+            crate::adapters::skill_exposure::L1MetadataExposure::new(
+                Arc::clone(&ctx.skill_cache),
+            ),
+        ))),
+        "static-full" => Ok(Some(Arc::new(
+            crate::adapters::skill_exposure::StaticFullExposure::new(
+                Arc::clone(&ctx.skill_cache),
+            ),
+        ))),
+        "meta-search" => Err(AdapterCompositionError::UnknownAdapter {
+            port: PortDimension::Tools, // re-use Tools dimension (no new PortDimension variant)
+            name: "meta-search skill exposure deferred to Story 9.7; see ADR-09-02 §Phase B Prerequisites".into(),
+            available: vec!["l1-metadata".into(), "static-full".into()],
+        }),
+        other => Err(AdapterCompositionError::UnknownAdapter {
+            port: PortDimension::Tools, // re-use Tools dimension (no new PortDimension variant)
+            name: other.to_string(),
+            available: vec!["l1-metadata".into(), "static-full".into()],
+        }),
+    }
+}
+
 // ── BuiltAdapter — typed dispatch enum for per-port adapter construction ──
 
 pub enum BuiltAdapter {
@@ -432,6 +508,7 @@ pub fn build_for_port(
 mod tests {
     use super::*;
     use crate::adapters::noop::NoOpStorage;
+    use crate::infrastructure::skill_cache::SkillCache;
     use std::path::PathBuf;
 
     fn test_compose_ctx() -> ComposeContext {
@@ -444,6 +521,8 @@ mod tests {
             include_builtin_tools: true,
             domain_tx: None,
             tool_exposure: "static-full".into(),
+            skill_exposure: "l1-metadata".into(),
+            skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
         }
     }
 
