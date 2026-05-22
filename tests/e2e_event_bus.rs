@@ -41,6 +41,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         channels: None,
         scheduler: None,
         context: None,
+        tool_exposure: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn test_app_state_honors_raw_capacity() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -118,6 +120,7 @@ fn test_app_state_session_cancel_is_root_token() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,

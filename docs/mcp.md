@@ -2,6 +2,8 @@
 
 Story 9.1 ships the foundational MCP infrastructure: configuration parsing, client lifecycle, and composite toolset adapter.
 
+For per-turn tool exposure (how many of your N MCP tools the model sees on each request), see [docs/profiles.md §`[tools]` table](./profiles.md#tools-table--top-level-config-story-94) and ADR-09-01 v2.2.
+
 ## Supported Transports
 
 - **stdio v0.5** — fully supported (Story 9.1)

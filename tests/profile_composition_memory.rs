@@ -20,6 +20,7 @@ fn compose_ctx() -> ComposeContext {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     }
 }
 

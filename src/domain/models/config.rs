@@ -238,6 +238,39 @@ impl Default for LayoutConfig {
     }
 }
 
+/// Per-turn tool exposure strategy configuration (Story 9.4).
+///
+/// Threaded through the existing 7-layer Figment stack at
+/// `src/infrastructure/config.rs:96-132` — no new precedence rules.
+///
+/// # Phase A
+///
+/// Accepts ONLY `"static-full"` (the default). Selecting `"meta-search"`
+/// produces an actionable startup error pointing at ADR-09-01 v2.2
+/// §Phase B Prerequisites — the `MetaSearchExposure` impl is deferred to
+/// Story 9.7.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolsExposureConfig {
+    /// Strategy kind. Phase A: `"static-full"` only. Reserved Phase B values:
+    /// `"meta-search"` (ADR-09-02 v1 §Decision shared infrastructure).
+    #[serde(default = "ToolsExposureConfig::default_exposure")]
+    pub exposure: String,
+}
+
+impl ToolsExposureConfig {
+    fn default_exposure() -> String {
+        "static-full".to_string()
+    }
+}
+
+impl Default for ToolsExposureConfig {
+    fn default() -> Self {
+        Self {
+            exposure: Self::default_exposure(),
+        }
+    }
+}
+
 /// Application configuration loaded from file + env.
 ///
 /// NOTE (Story 5-1 Task 3.5): we intentionally do NOT use
@@ -299,6 +332,9 @@ pub struct AppConfig {
     /// Daily budget configuration. Story 7.5 AC5.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Per-turn tool exposure strategy configuration. Story 9.4.
+    #[serde(default)]
+    pub tools: ToolsExposureConfig,
 }
 
 impl AppConfig {
@@ -471,6 +507,7 @@ impl Default for AppConfig {
             router: crate::domain::models::router::RouterConfig::default(),
             pricing: Self::default_pricing_catalog(),
             budget: BudgetConfig::default(),
+            tools: ToolsExposureConfig::default(),
         }
     }
 }

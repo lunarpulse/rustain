@@ -219,6 +219,7 @@ mod tests {
             channels: None,
             scheduler: None,
             context: None,
+            tool_exposure: None,
         }
     }
 
@@ -240,6 +241,7 @@ mod tests {
             mcp_servers: Vec::new(),
             include_builtin_tools: true,
             domain_tx: None,
+            tool_exposure: "static-full".into(),
         });
         let ctx = ReloadContext {
             cli: &test_cli(),

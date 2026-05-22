@@ -936,11 +936,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     let _ = composite.populate_registry().await.unwrap();
     assert_eq!(composite.catalog_version(), 1);
     let snap1 = composite.capability_registry().snapshot();
-    assert_eq!(
-        snap1.len(),
-        8,
-        "6 builtin + 2 MCP tools"
-    );
+    assert_eq!(snap1.len(), 8, "6 builtin + 2 MCP tools");
 
     // Emit another delta with no changes: version=2, added=0 removed=0
     let _ = composite.emit_catalog_delta().await.unwrap();
@@ -984,6 +980,14 @@ async fn test_catalog_delta_added_removed_correctness() {
     // Verify the multiply tool is present after delta emit
     let snap4 = composite.capability_registry().snapshot();
     let multiply_tools: Vec<_> = snap4.iter().filter(|c| c.name == "multiply").collect();
-    assert_eq!(multiply_tools.len(), 1, "multiply tool should be in registry");
-    assert_eq!(snap4.len(), 9, "registry still has 9 tools after delta emit");
+    assert_eq!(
+        multiply_tools.len(),
+        1,
+        "multiply tool should be in registry"
+    );
+    assert_eq!(
+        snap4.len(),
+        9,
+        "registry still has 9 tools after delta emit"
+    );
 }

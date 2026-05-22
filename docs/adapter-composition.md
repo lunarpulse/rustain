@@ -169,6 +169,27 @@ The `CompositeToolsetAdapter` holds an internal `CapabilityRegistry` (Story 9.3a
 
 **Observer subscription:** The `CatalogObserver` trait + `CapabilityRegistry::subscribe(observer)` seam is shipped in 9.3a. The fan-out implementation (`CatalogObserverRegistry` at `src/infrastructure/composition/catalog_observer_registry.rs`) lands in Story 9.4b Phase B (per ADR-09-01 v2.2 §Phased Implementation).
 
+### Tool Exposure Strategy (Story 9.4 Phase A)
+
+The `ToolExposurePort` trait sits as a sibling to `ToolSetPort`:
+
+| Trait | Question answered | Owner |
+|-------|-------------------|-------|
+| `ToolSetPort` | Which tools is the user allowed to call? | `CompositeToolsetAdapter` |
+| `ToolExposurePort` | Of those, what does the model see this turn? | `StaticFullExposure` (Phase A); `MetaSearchExposure` (Phase B) |
+
+Phase A ships the load-bearing seam (trait + `FilteredCatalog` value type +
+`StaticFullExposure` passthrough + `CapabilityMatrix` stub returning
+`Capability::Full` for every provider + composition-root binding +
+`[tools].exposure` config key accepting only `"static-full"`).
+
+Phase B (Story 9.7) drops in `MetaSearchExposure` + the shared
+`MetaSearchEngine` infrastructure WITHOUT refactoring any call site — that's
+the load-bearing property of the Phase A seam.
+
+See ADR-09-01 v2.2 §Phased Implementation for the load-bearing-vs-speculative
+distinction that motivated the Phase A/B split.
+
 ### ToolDescriptor — Domain Catalog Shape (Story 9.3b)
 
 `ToolDescriptor` is the domain catalog shape consumed by `FilteredCatalog`

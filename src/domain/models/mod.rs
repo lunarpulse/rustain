@@ -12,6 +12,7 @@ mod completion;
 mod config;
 mod content;
 pub mod conversation;
+pub mod filtered_catalog;
 mod focus;
 pub mod launch_spec;
 pub mod mcp_server_spec;
@@ -115,6 +116,7 @@ pub use capability_registry::{
     CapabilityRegistry, ProviderId, RegisterHandle, RegisteredCapability, RegistryError,
 };
 pub use catalog_delta::CatalogDelta;
+pub use filtered_catalog::FilteredCatalog;
 pub use launch_spec::AgentLaunchSpec;
 pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
 pub use mcp_server_state::McpConnectionState;

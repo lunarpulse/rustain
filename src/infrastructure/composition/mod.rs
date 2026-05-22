@@ -32,6 +32,9 @@ pub struct ComposeContext {
     /// so only MCP tools are available (Story 9.1 AC-4, used by 9.2).
     pub include_builtin_tools: bool,
     pub domain_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
+    /// Story 9.4 — exposure strategy name from AppConfig.tools.exposure.
+    /// Phase A: always "static-full".
+    pub tool_exposure: String,
 }
 
 impl AgentCore {
@@ -65,6 +68,7 @@ impl AgentCore {
         let context = compose_one(PortDimension::Context, selection, |n, c| {
             build_context(n, c, ctx)
         })?;
+        let tool_exposure = build_tool_exposure(selection, ctx)?;
 
         let elapsed = started.elapsed();
         tracing::info!(
@@ -80,6 +84,7 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
+            tool_exposure: Self::wrap_optional(tool_exposure),
         })
     }
 }
@@ -317,6 +322,63 @@ pub fn build_context(
     }
 }
 
+/// Story 9.4 — build the per-turn exposure strategy from active config.
+///
+/// Returns `Some(Arc::new(StaticFullExposure))` for normal startup (the only
+/// Phase A impl) and `None` for the headless / eval-harness path per
+/// ADR-09-01 v2.1 §W1.
+///
+/// # Coupling with `validate_tools_exposure`
+///
+/// `startup::validate_tools_exposure` runs BEFORE this factory and rejects
+/// anything other than `"static-full"` with an actionable error citing
+/// Story 9.7 + ADR-09-01 v2.2. This factory's `Err` arm is defense-in-depth
+/// — it should be unreachable in production. If you add a new valid exposure
+/// value (e.g. Phase B `"meta-search"`), update BOTH this match AND the
+/// validation function.
+pub fn build_tool_exposure(
+    _selection: &ProfileSelection,
+    ctx: &ComposeContext,
+) -> Result<Option<Arc<dyn crate::domain::ports::ToolExposurePort>>, AdapterCompositionError> {
+    // ⚠ ASYMMETRY-BY-DESIGN: Tools default = `StaticFullExposure` (per ADR-09-01
+    // §Decision) while Skills default = `L1MetadataExposure` (per ADR-09-02
+    // §Decision Story 9.6). Do NOT "fix" this asymmetry by aligning defaults
+    // without RE-OPENING BOTH ADRs:
+    //
+    //   - ADR-09-01 §Decision (Tools=StaticFullExposure): Mary's "MCP ecosystem
+    //     evidence is partial — Arcade single-anchor only" stance + Lunarpulse's
+    //     n=1 user signal. The MetaSearch Phase B path is GATED on the 7 Phase B
+    //     Prerequisites in ADR-09-02 §Phased Implementation (subsumes ADR-09-01's
+    //     original 5). Default `static-full` preserves zero-behavior-change for
+    //     all current users.
+    //
+    //   - ADR-09-02 §Decision (Skills=L1MetadataExposure): 7-signal ecosystem
+    //     evidence (gemini-cli, hermes-agent, opencode, Anthropic-spec, Google,
+    //     Boliv 97%-reduction production deployment, K-Dense-AI/claude-skills-mcp)
+    //     + Anthropic spec mandate for progressive disclosure. Default
+    //     `l1-metadata` honors spec + 3-of-4 ecosystem peers from day one.
+    //
+    // Each port has INDEPENDENT evidence channels and the defaults reflect those
+    // channels HONESTLY. Symmetric defaults would either (a) burn 25-50k prefix
+    // tokens on typical Skills catalogs with no opt-in (if both default to
+    // static-full), or (b) destabilize MCP-default behavior for the n=0
+    // production users on meta-search Phase A (if both default to meta-search).
+    // Neither is acceptable.
+    //
+    // See SCP-2026-05-21-skill-exposure-strategy §4.2 for the John Round-2
+    // directive that mandated this guard comment.
+    match ctx.tool_exposure.as_str() {
+        "static-full" => Ok(Some(Arc::new(
+            crate::adapters::tool_exposure::StaticFullExposure::new(),
+        ))),
+        other => Err(AdapterCompositionError::UnknownAdapter {
+            port: PortDimension::Tools,
+            name: other.to_string(),
+            available: vec!["static-full".into()],
+        }),
+    }
+}
+
 // ── BuiltAdapter — typed dispatch enum for per-port adapter construction ──
 
 pub enum BuiltAdapter {
@@ -381,6 +443,7 @@ mod tests {
             mcp_servers: Vec::new(),
             include_builtin_tools: true,
             domain_tx: None,
+            tool_exposure: "static-full".into(),
         }
     }
 

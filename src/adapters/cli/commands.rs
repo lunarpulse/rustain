@@ -56,6 +56,11 @@ pub struct Cli {
     /// Override context adapter for this session.
     #[arg(long, global = true)]
     pub context: Option<String>,
+    /// Override per-turn tool exposure strategy (Story 9.4). Phase A: only
+    /// `"static-full"` is accepted (the default). Reserved Phase B: `"meta-search"`
+    /// (Story 9.7).
+    #[arg(long, global = true, value_parser = ["static-full"])]
+    pub tool_exposure: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -83,6 +83,7 @@ pub async fn run() -> Result<()> {
         channels: cli.channels.clone(),
         scheduler: cli.scheduler.clone(),
         context: cli.context.clone(),
+        tool_exposure: cli.tool_exposure.clone(),
     };
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
@@ -145,6 +146,12 @@ pub async fn run() -> Result<()> {
     };
 
     let app_config = config::load(&cli, &toml_resolver);
+
+    // Story 9.4 — validate tools.exposure BEFORE AgentCore composition
+    if let Err(e) = validate_tools_exposure(&app_config.tools.exposure) {
+        eprintln!("Config validation failed: {}", e);
+        std::process::exit(1);
+    }
 
     // Accumulate any profile-related notices for post-EventBus flush
     let mut accumulated_notices: Vec<String> = startup_notices;
@@ -805,6 +812,7 @@ pub async fn run() -> Result<()> {
         mcp_servers: resolved.mcp_servers.clone(),
         include_builtin_tools: resolved.include_builtin_tools,
         domain_tx: Some(domain_tx.clone()),
+        tool_exposure: app_config.tools.exposure.clone(),
     };
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
@@ -1425,4 +1433,41 @@ fn spawn_periodic_catalog_refresh(
             }
         }
     });
+}
+
+/// Story 9.4 — validate the `tools.exposure` config value at startup.
+///
+/// Phase A accepts ONLY `"static-full"`. `"meta-search"` produces an actionable
+/// error pointing at Story 9.7. Unknown values produce a generic error.
+pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::errors::DomainError> {
+    use crate::domain::errors::{ConfigError, DomainError};
+    if exposure.is_empty() {
+        return Err(DomainError::Config(ConfigError::Invalid {
+            field: "tools.exposure".into(),
+            value: "\
+                empty exposure strategy value is invalid. \
+                Phase A accepts only `\"static-full\"` (the default). \
+                Remove `[tools]` block or set `[tools].exposure = \"static-full\"`."
+                .to_string(),
+        }));
+    }
+    match exposure {
+        "static-full" => Ok(()),
+        "meta-search" => Err(DomainError::Config(ConfigError::Invalid {
+            field: "tools.exposure".into(),
+            value: "`meta-search` exposure strategy is deferred to Story 9.7; \
+                     see ADR-09-01 v2.2 §Phase B Prerequisites. \
+                     For Phase A, set `[tools].exposure = \"static-full\"` \
+                     (the default) or remove the key entirely."
+                .to_string(),
+        })),
+        other => Err(DomainError::Config(ConfigError::Invalid {
+            field: "tools.exposure".into(),
+            value: format!(
+                "unknown exposure strategy `{}`. Phase A accepts only `\"static-full\"`. \
+                 Reserved values: `\"meta-search\"` (Story 9.7 Phase B, currently deferred).",
+                other
+            ),
+        })),
+    }
 }

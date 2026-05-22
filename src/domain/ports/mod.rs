@@ -33,6 +33,8 @@ mod session_port;
 #[allow(unused_imports)]
 mod storage;
 #[allow(unused_imports)]
+mod tool_exposure;
+#[allow(unused_imports)]
 mod toolset;
 #[allow(unused_imports)]
 mod usage_ledger;
@@ -55,5 +57,6 @@ pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
 pub use session_port::SessionPort;
 pub use storage::StoragePort;
+pub use tool_exposure::ToolExposurePort;
 pub use toolset::ToolSetPort;
 pub use usage_ledger::UsageLedgerPort;

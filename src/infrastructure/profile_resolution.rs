@@ -45,6 +45,7 @@ mod tests {
             channels: None,
             scheduler: None,
             context: None,
+            tool_exposure: None,
         }
     }
 

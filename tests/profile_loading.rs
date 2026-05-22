@@ -163,6 +163,7 @@ fn test_coding_profile_composes_seven_ports() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -205,6 +206,7 @@ fn test_base_profile_composes_all_noop() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -234,6 +236,7 @@ fn test_personal_assistant_preview_composes_with_fallback() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -273,6 +276,7 @@ fn test_reload_recomposes_agent_core() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     };
     let ctx_arc = Arc::new(ctx);
 

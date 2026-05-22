@@ -130,6 +130,26 @@ It merges at **layer 6** of the 7-layer figment chain:
 
 Any `AppConfig` field is valid in the `[overrides]` block.
 
+### `[tools]` table — top-level config (Story 9.4)
+
+The top-level `[tools]` table in `~/.config/rustain/config.toml` (Story 9.4)
+carries the per-turn exposure strategy:
+
+```toml
+[tools]
+exposure = "static-full"   # Phase A: only "static-full" is accepted.
+                           # Phase B (Story 9.7): "meta-search" will be available.
+```
+
+This is DIFFERENT from the profile-layer `[tools]` table (Flag 2 wiring),
+which selects the toolset adapter (`composite` / `builtin-only` / `builtin-full`)
+per profile. To set per-profile exposure, override at the user-global or
+workspace layer instead — exposure is session-wide v1.
+
+CLI: `--tool-exposure static-full`
+Env: `RUSTAIN_TOOLS__EXPOSURE=static-full` (note the double-underscore nest
+separator per existing `RUSTAIN_*` env var convention).
+
 ### `preview` — Preview Profiles
 
 Set `preview = true` to mark a profile as a preview. Preview profiles gracefully

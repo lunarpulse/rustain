@@ -37,6 +37,17 @@ struct CliOverrides {
     log_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     snapshot_retention_count: Option<usize>,
+    /// Story 9.4 — overrides `app_config.tools.exposure`. Routed via nested
+    /// figment key `tools.exposure` so it merges into the AppConfig.tools
+    /// struct at the same precedence layer as `RUSTAIN_TOOLS__EXPOSURE`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "tools")]
+    tools: Option<CliToolsOverride>,
+}
+
+#[derive(Serialize, Default)]
+struct CliToolsOverride {
+    #[serde(skip_serializing_if = "Option::is_none", rename = "exposure")]
+    exposure: Option<String>,
 }
 
 impl From<&Cli> for CliOverrides {
@@ -45,6 +56,9 @@ impl From<&Cli> for CliOverrides {
             model: cli.model.clone(),
             log_level: cli.log_level.clone(),
             snapshot_retention_count: cli.snapshot_retention,
+            tools: cli.tool_exposure.clone().map(|exposure| CliToolsOverride {
+                exposure: Some(exposure),
+            }),
         }
     }
 }
@@ -154,6 +168,7 @@ pub fn load_default() -> AppConfig {
         channels: None,
         scheduler: None,
         context: None,
+        tool_exposure: None,
     };
     load(
         &cli,
@@ -255,6 +270,7 @@ mod tests {
             channels: None,
             scheduler: None,
             context: None,
+            tool_exposure: None,
         }
     }
 

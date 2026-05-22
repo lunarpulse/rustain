@@ -57,6 +57,34 @@ rustain/src/
 - `infrastructure/` → imports from domain/ ONLY
 - `main.rs` → ONLY file naming concrete adapter types
 
+## Tool Exposure Strategy (Story 9.4 Phase A)
+
+**Sibling port** `ToolExposurePort` (`src/domain/ports/tool_exposure.rs`)
+decouples *"what tools is the user allowed to call?"* (existing `ToolSetPort`)
+from *"what does the model see this turn?"* (new port).
+
+**Phase A — load-bearing seam only:**
+- `StaticFullExposure` (the only Phase A impl) — behavior-identical passthrough
+- `FilteredCatalog` — render-input shape (Vec<ToolDescriptor>)
+- `CapabilityMatrix` stub — returns `Capability::Full` for every provider
+- `[tools].exposure` config key — accepts only `"static-full"` (the default);
+  `"meta-search"` produces an actionable startup error pointing at Story 9.7
+- Composition-root binding: `tool_exposure: Arc<ArcSwap<Option<Arc<dyn ToolExposurePort>>>>`
+  on AgentCore; `None` reserved for headless / eval per ADR-09-01 v2.1 §W1
+
+**Phase B (Story 9.7 — DEFERRED):** Shared `MetaSearchEngine` infrastructure
+(per ADR-09-02 v1 §Decision) covers BOTH `ToolExposurePort` and
+`SkillExposurePort` consumers through one engine. Adds `MetaSearchExposure` +
+BM25 + `meta-search` cargo feature + per-provider native primitives + the
+unified `search_capabilities(query, kind?)` LLM-facing primitive.
+
+**Asymmetry-by-design with Skills (Story 9.6 / ADR-09-02 v1):** Tools default
+to `StaticFullExposure`; Skills default to `L1MetadataExposure`. Asymmetry is
+BY DESIGN per evidence asymmetry (Skills has 7-signal ecosystem saturation +
+Anthropic spec mandate; MCP has partial evidence with Arcade single-anchor).
+Composition root carries a guard comment citing BOTH ADRs to prevent silent
+symmetry restoration.
+
 ## Capability Provider Architecture (CPA)
 
 The core extensibility pattern. All interop protocols implement `CapabilityProvider` (4 methods per Decision Gate 3.1):

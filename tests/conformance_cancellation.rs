@@ -254,6 +254,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        tool_exposure: "static-full".into(),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -291,6 +292,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             channels: None,
             scheduler: None,
             context: None,
+            tool_exposure: None,
         },
     );
 
