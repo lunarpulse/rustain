@@ -879,9 +879,8 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                         after_slash.to_string()
                     } else if state.autocomplete.kind == AutocompleteKind::McpMention {
                         let filter_lower = filter.to_lowercase();
-                        let after_slash = filter_lower
-                            .strip_prefix("mcp/")
-                            .unwrap_or(&filter_lower);
+                        let after_slash =
+                            filter_lower.strip_prefix("mcp/").unwrap_or(&filter_lower);
                         after_slash.to_string()
                     } else {
                         filter

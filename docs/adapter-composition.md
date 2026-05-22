@@ -168,3 +168,30 @@ The `CompositeToolsetAdapter` holds an internal `CapabilityRegistry` (Story 9.3a
 **Reactive surface:** Every `register` / `deregister` / `update` emits a `CapabilityEvent` through the existing `AppEvent` bus (same `event_tx` channel as `McpConnectionStateChanged` and `McpCatalogChanged` from 9.1 + 9.2). The event loop sets `needs_redraw = true`, so the adapter-status panel automatically picks up the registry snapshot on the next render tick.
 
 **Observer subscription:** The `CatalogObserver` trait + `CapabilityRegistry::subscribe(observer)` seam is shipped in 9.3a. The fan-out implementation (`CatalogObserverRegistry` at `src/infrastructure/composition/catalog_observer_registry.rs`) lands in Story 9.4b Phase B (per ADR-09-01 v2.2 §Phased Implementation).
+
+### ToolDescriptor — Domain Catalog Shape (Story 9.3b)
+
+`ToolDescriptor` is the domain catalog shape consumed by `FilteredCatalog`
+(Story 9.4 Phase A), `IndexableItem` (Story 9.7 Phase B), and
+`SkillExposurePort::render` (Story 9.6 Phase A).
+
+| Type | Shape | Used by |
+|------|-------|---------|
+| `ToolDefinition` (`tools.rs:7`) | LLM-wire | Anthropic / OpenAI / Ollama tool schemas |
+| `RegisteredCapability` (`capability_registry.rs:51`) | Registry working shape | `CapabilityRegistry::snapshot()` |
+| `ToolDescriptor` (`tool_descriptor.rs`) | Domain catalog | `FilteredCatalog`, `IndexableItem`, `SkillExposurePort` |
+
+Conversion: `From<&RegisteredCapability> for ToolDescriptor` synthesizes
+`ToolAnnotations { read_only_hint: Some(parallel_safe), ..None }` (best-effort).
+Richer annotations require provider-side population — currently only MCP
+preserves the full rmcp `ToolAnnotations` shape; built-ins + skills default
+to read_only_hint = Some(parallel_safe).
+
+### CatalogDelta — Phase A No-op, Phase B Broadcast (Story 9.3b → Story 9.7)
+
+`CatalogDelta { added, removed, version }` is the diff type emitted by
+`CompositeToolsetAdapter::emit_catalog_delta()` whenever the merged catalog
+changes (provider registered/deregistered, MCP server `notifications/tools/list_changed`).
+
+- **Phase A (Story 9.3b):** type defined, `emit_catalog_delta` returns `Ok(())` no-op. Version counter increments and prev-catalog diffing happens internally so future Phase B wiring observes a stable monotonic version. No broadcast subscriber.
+- **Phase B (Story 9.7):** `tokio::sync::broadcast::Sender<CatalogDelta>` field added; owned-task debounce per ADR-09-01 v2.2 §W3. `CatalogObserverRegistry` at `src/infrastructure/composition/catalog_observer_registry.rs` subscribes and fans out to `Vec<Arc<dyn CatalogObserver>>`.

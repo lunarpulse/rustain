@@ -230,6 +230,7 @@ pub fn build_tools(
                 ctx.mcp_servers.clone(),
                 ctx.include_builtin_tools,
                 ctx.domain_tx.clone(),
+                Some(ctx.skill_activator.clone()),
             );
             Ok(Arc::new(adapter))
         }

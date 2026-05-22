@@ -34,6 +34,7 @@ mod skill;
 mod stream;
 pub mod tab;
 pub mod tool_call;
+pub mod tool_descriptor;
 mod tools;
 pub mod transaction;
 pub mod turn;
@@ -137,6 +138,7 @@ pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
     status_chip,
 };
+pub use tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use turn::{

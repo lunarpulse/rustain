@@ -493,10 +493,7 @@ fn test_workspace_restriction_not_applied_to_mcp_tools() {
 #[test]
 fn test_plan_mode_denies_non_read_only_mcp_tool() {
     // A non-read-only MCP tool should be denied in Plan mode
-    let outcome = permission_chain::mode_risk_outcome(
-        PermissionMode::Plan,
-        ToolRisk::Elevated,
-    );
+    let outcome = permission_chain::mode_risk_outcome(PermissionMode::Plan, ToolRisk::Elevated);
     assert_eq!(
         outcome,
         Some(false),
@@ -509,7 +506,10 @@ fn test_plan_mode_denies_non_read_only_mcp_tool() {
 async fn test_list_changed_refreshes_cache() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut env = BTreeMap::new();
-    env.insert("FAKE_MCP_EMIT_LIST_CHANGED_AFTER_MS".to_string(), "500".to_string());
+    env.insert(
+        "FAKE_MCP_EMIT_LIST_CHANGED_AFTER_MS".to_string(),
+        "500".to_string(),
+    );
     let client = fake_spec_connected("refresh-svr", env, tx);
     client.connect().await.expect("should connect");
 
@@ -526,7 +526,10 @@ async fn test_list_changed_refreshes_cache() {
         "should receive McpCatalogChanged event within timeout"
     );
     if let Ok(Some(AppEvent::McpCatalogChanged { server_id, .. })) = event {
-        assert_eq!(server_id, "refresh-svr", "event should be for correct server");
+        assert_eq!(
+            server_id, "refresh-svr",
+            "event should be for correct server"
+        );
     }
 }
 
@@ -565,14 +568,17 @@ fn test_mcp_autocomplete_groups_by_server() {
         &[client1, client2],
         None,
     );
-    assert!(results.is_empty(), "disconnected clients should yield no tools");
+    assert!(
+        results.is_empty(),
+        "disconnected clients should yield no tools"
+    );
 }
 
 #[test]
 fn test_include_builtin_false_yields_mcp_only_catalog() {
     // Test that include_builtin=false works with CompositeToolsetAdapter
-    use rustain::adapters::noop::NoOpToolSet;
     use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::noop::NoOpToolSet;
 
     let builtin = Arc::new(NoOpToolSet);
     let composite = CompositeToolsetAdapter::new(
@@ -581,10 +587,14 @@ fn test_include_builtin_false_yields_mcp_only_catalog() {
         vec![],
         false, // include_builtin = false
         None,
+        None,
     );
 
     let tools = composite.available_tools();
-    assert!(tools.is_empty(), "no MCP servers and include_builtin=false should yield empty catalog");
+    assert!(
+        tools.is_empty(),
+        "no MCP servers and include_builtin=false should yield empty catalog"
+    );
 }
 
 // ── AC-3 extended: workspace-restricted tools denied in Plan mode ───────────

@@ -48,6 +48,10 @@ MCP child processes inherit rustain's working directory and environment. They ca
 
 Press `Ctrl+X, A` to view MCP server health. Connected servers show tool counts; failed servers display error reasons.
 
+## Domain Catalog Shape
+
+For the domain catalog shape (`ToolDescriptor`) and delta semantics (`CatalogDelta`), see [docs/adapter-composition.md §Capability Registry](./adapter-composition.md#capability-registry).
+
 ## Invoking MCP Tools
 
 MCP tools are surfaced to the LLM with canonical `mcp__<server>__<tool>` naming per ADR-06-08. For example, `mcp__postgres__query` invokes the `query` tool on the `postgres` server. The display layer renders this as `[postgres] query` but the canonical form is used in the conversation log, LLM context, and permission chain.

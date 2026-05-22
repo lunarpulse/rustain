@@ -20,6 +20,15 @@ pub async fn handle_mcp_catalog_changed(
     tool_count: usize,
 ) {
     tracing::info!(target: "mcp", %server_id, %tool_count, "MCP tool catalog changed");
+
+    // Story 9.3b — repopulate registry (which internally emits catalog delta)
+    use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+        if let Err(e) = composite.populate_registry().await {
+            tracing::debug!(error = %e, "populate_registry failed on McpCatalogChanged");
+        }
+    }
+
     // P-17, P-27: Refresh autocomplete if dropdown is open with McpMention
     if state.autocomplete.active && state.autocomplete.kind == AutocompleteKind::McpMention {
         populate_autocomplete_suggestions(state, command_registry, workspace_path, tools).await;

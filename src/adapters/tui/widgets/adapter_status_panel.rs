@@ -244,15 +244,23 @@ fn get_mcp_health_rows(_agent_core: &AgentCore) -> Vec<McpHealthRow> {
 ///
 /// Extracted as a pure function so tests can verify the formatting
 /// without constructing an `AgentCore`.
-pub fn format_registry_summary(snap: &[crate::domain::models::capability_registry::RegisteredCapability]) -> Option<String> {
+///
+/// Story 9.3b — extended to show all three protocols (MCP, builtin, skill).
+pub fn format_registry_summary(
+    snap: &[crate::domain::models::capability_registry::RegisteredCapability],
+) -> Option<String> {
     if snap.is_empty() {
         return None;
     }
     let mcp_count = snap.iter().filter(|c| c.protocol == "mcp").count();
+    let builtin_count = snap.iter().filter(|c| c.protocol == "builtin").count();
+    let skill_count = snap.iter().filter(|c| c.protocol == "skill").count();
     Some(format!(
-        "Registry: {} capabilities ({} MCP)",
+        "Registry: {} capabilities ({} MCP, {} builtin, {} skill)",
         snap.len(),
-        mcp_count
+        mcp_count,
+        builtin_count,
+        skill_count
     ))
 }
 

@@ -21,9 +21,30 @@ use crate::domain::models::{ToolDefinition, ToolResult};
 // 2026-05-20 — Story 9.1 added swap_tier() with default SwapTier::Hot +
 // prepare_detach/receive_state/post_transition_verify defaults returning Ok(empty),
 // matching the warm-tier protocol from Story 8.4. Composite override returns Warm.
+//
+// 2026-05-21 — Story 9.3b added `describe() -> Vec<ToolDescriptor>` sibling to
+// `available_tools()`. Default returns `Vec::new()` so existing implementors
+// compile unchanged.
 #[async_trait]
 pub trait ToolSetPort: Send + Sync {
     fn available_tools(&self) -> Vec<ToolDefinition>;
+
+    /// Domain catalog shape — companion to `available_tools()`.
+    ///
+    /// `available_tools() -> Vec<ToolDefinition>` is the LLM-wire shape
+    /// (serialized into Anthropic / OpenAI / Ollama tool schemas); it stays as-is.
+    /// `describe() -> Vec<ToolDescriptor>` is the domain catalog shape consumed
+    /// by `FilteredCatalog` (Story 9.4 Phase A), `IndexableItem` (Story 9.7
+    /// Phase B), and `SkillExposurePort` (Story 9.6 Phase A).
+    ///
+    /// Default returns `Vec::new()` so existing implementors (`NoOpToolSet`,
+    /// `MockToolSet`) compile unchanged per Story 8.3 AC-6 additive discipline.
+    /// Concrete adapters that hold a `CapabilityRegistry` should override —
+    /// `CompositeToolsetAdapter` overrides to return
+    /// `self.capability_registry.snapshot().iter().map(ToolDescriptor::from).collect()`.
+    fn describe(&self) -> Vec<crate::domain::models::tool_descriptor::ToolDescriptor> {
+        Vec::new()
+    }
 
     fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
         crate::domain::models::HealthSummary::unknown()

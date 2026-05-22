@@ -202,7 +202,9 @@ impl CapabilityRegistry {
         match self.inner.try_read() {
             Ok(inner) => inner.capabilities.values().cloned().collect(),
             Err(_) => {
-                tracing::warn!("CapabilityRegistry::snapshot() lock contention — returning empty vec");
+                tracing::warn!(
+                    "CapabilityRegistry::snapshot() lock contention — returning empty vec"
+                );
                 Vec::new()
             }
         }

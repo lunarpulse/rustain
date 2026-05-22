@@ -308,7 +308,7 @@ fn test_status_panel_shows_registry_count() {
     let summary = format_registry_summary(&snap);
     assert_eq!(
         summary,
-        Some("Registry: 1 capabilities (1 MCP)".to_string()),
+        Some("Registry: 1 capabilities (1 MCP, 0 builtin, 0 skill)".to_string()),
         "panel should render correct registry summary"
     );
 
@@ -381,10 +381,7 @@ fn test_mcp_provider_discover_round_trip() {
         .to_path_buf();
     let candidates = vec![
         exe_dir.join(binary_name),
-        exe_dir
-            .parent()
-            .expect("deps parent")
-            .join(binary_name),
+        exe_dir.parent().expect("deps parent").join(binary_name),
     ];
     let command = candidates
         .iter()
@@ -405,11 +402,11 @@ fn test_mcp_provider_discover_round_trip() {
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let client = std::sync::Arc::new(
-            rustain::adapters::mcp::client::McpClientAdapter::new(spec.clone(), None),
-        );
-        client
-            .set_self_weak(std::sync::Arc::downgrade(&client));
+        let client = std::sync::Arc::new(rustain::adapters::mcp::client::McpClientAdapter::new(
+            spec.clone(),
+            None,
+        ));
+        client.set_self_weak(std::sync::Arc::downgrade(&client));
 
         // Connect to populate cached_tools
         let _ = client.connect().await;
@@ -422,6 +419,7 @@ fn test_mcp_provider_discover_round_trip() {
             vec![client.clone()],
             vec![spec],
             true,
+            None,
             None,
         );
 
@@ -458,4 +456,534 @@ fn test_mcp_provider_discover_round_trip() {
             assert!(!cap.name.is_empty());
         }
     });
+}
+
+// ── Story 9.3b tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_re_export_surface_compiles_v2() {
+    // Compile-only test: verify ToolDescriptor, ToolId, ToolAnnotations are
+    // re-exported from domain::models.
+    use rustain::domain::models::{ToolAnnotations, ToolDescriptor, ToolId};
+    let _: ToolDescriptor = ToolDescriptor {
+        id: ToolId("builtin::Bash".into()),
+        name: "Bash".into(),
+        description: "test".into(),
+        input_schema: serde_json::Value::Object(Default::default()),
+        provider_id: "builtin".into(),
+        annotations: ToolAnnotations::default(),
+    };
+}
+
+#[test]
+fn test_describe_default_impl_is_empty_for_noop() {
+    use rustain::adapters::noop::NoOpToolSet;
+    use rustain::domain::ports::ToolSetPort;
+    let noop = NoOpToolSet;
+    assert!(noop.describe().is_empty());
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn test_builtin_provider_discover_returns_6_tools() {
+    use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::toolset_adapter::ToolSetAdapter;
+    use rustain::domain::ports::ToolSetPort;
+
+    let storage = Arc::new(FileSystemStorage::new(std::path::PathBuf::from(".")));
+    let adapter: Arc<dyn ToolSetPort> =
+        Arc::new(ToolSetAdapter::new(std::path::PathBuf::from("."), storage));
+    let composite = CompositeToolsetAdapter::new(adapter, vec![], vec![], true, None, None);
+
+    let _ = composite.populate_registry().await.unwrap();
+    let snap = composite.capability_registry().snapshot();
+    let mut builtin_names: Vec<String> = snap
+        .iter()
+        .filter(|c| c.protocol == "builtin")
+        .map(|c| c.name.clone())
+        .collect();
+    builtin_names.sort();
+    assert_eq!(
+        builtin_names,
+        vec![
+            "Bash",
+            "Read",
+            "Write",
+            "activate_skill",
+            "exit_plan_mode",
+            "propose_plan",
+        ]
+    );
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn test_builtin_provider_capabilities_in_process() {
+    use rustain::adapters::builtin::BuiltinProvider;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::toolset_adapter::ToolSetAdapter;
+    use rustain::domain::models::provider_capabilities::TransportKind;
+
+    let storage = Arc::new(FileSystemStorage::new(std::path::PathBuf::from(".")));
+    let adapter = Arc::new(ToolSetAdapter::new(std::path::PathBuf::from("."), storage));
+    let provider = BuiltinProvider::new(adapter);
+    let caps = provider.capabilities();
+    assert_eq!(caps.transport_kind, TransportKind::InProcess);
+    assert!(!caps.supports_streaming);
+    assert!(!caps.supports_list_changed);
+}
+
+#[tokio::test]
+async fn test_skill_provider_discover_with_zero_skills() {
+    use rustain::adapters::skill_activation::SkillActivator;
+    use rustain::adapters::skill_provider::SkillsProvider;
+
+    let activator = Arc::new(SkillActivator::new());
+    let provider = SkillsProvider::new(activator);
+    let caps = provider.discover().await.unwrap();
+    assert!(caps.is_empty());
+}
+
+#[tokio::test]
+async fn test_skill_provider_discover_with_3_skills() {
+    use rustain::adapters::skill_activation::SkillActivator;
+    use rustain::adapters::skill_provider::SkillsProvider;
+    use rustain::adapters::skill_registry::SkillRegistry;
+    use rustain::domain::models::{SkillDef, SkillSource};
+
+    let skills = vec![
+        SkillDef {
+            name: "review".into(),
+            description: "Code review skill".into(),
+            file: std::path::PathBuf::from("review.md"),
+            directory: std::path::PathBuf::from("/tmp"),
+            source: SkillSource::WorkspaceAgents,
+            allowed_tools: None,
+        },
+        SkillDef {
+            name: "test".into(),
+            description: "Test generation skill".into(),
+            file: std::path::PathBuf::from("test.md"),
+            directory: std::path::PathBuf::from("/tmp"),
+            source: SkillSource::WorkspaceAgents,
+            allowed_tools: None,
+        },
+        SkillDef {
+            name: "refactor".into(),
+            description: "Refactoring skill".into(),
+            file: std::path::PathBuf::from("refactor.md"),
+            directory: std::path::PathBuf::from("/tmp"),
+            source: SkillSource::WorkspaceAgents,
+            allowed_tools: None,
+        },
+    ];
+    let registry = SkillRegistry::from_skills(skills);
+    let activator = Arc::new(SkillActivator::new());
+    activator.set_registry(registry).await;
+
+    let provider = SkillsProvider::new(activator);
+    let caps = provider.discover().await.unwrap();
+    assert_eq!(caps.len(), 3);
+    let mut names: Vec<String> = caps.into_iter().map(|c| c.name).collect();
+    names.sort();
+    assert_eq!(names, vec!["refactor", "review", "test"]);
+}
+
+#[tokio::test]
+async fn test_skill_provider_invoke_returns_invoke_error_phase_a() {
+    use rustain::adapters::skill_activation::SkillActivator;
+    use rustain::adapters::skill_provider::SkillsProvider;
+    use rustain::domain::models::capability::CapabilityError;
+    use rustain::domain::models::capability_id::CapabilityId;
+    use tokio_util::sync::CancellationToken;
+
+    let activator = Arc::new(SkillActivator::new());
+    let provider = SkillsProvider::new(activator);
+    let id = CapabilityId {
+        protocol: "skill".into(),
+        server: String::new(),
+        tool: "review".into(),
+    };
+    let result = provider
+        .invoke(
+            &id,
+            serde_json::json!({"arguments": "foo"}),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(CapabilityError::InvocationFailed { .. })
+    ));
+}
+
+#[cfg(feature = "mcp")]
+#[serial_test::serial]
+#[tokio::test]
+async fn test_registry_holds_all_three_protocols() {
+    use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::mcp::client::McpClientAdapter;
+    use rustain::adapters::skill_activation::SkillActivator;
+    use rustain::adapters::toolset_adapter::ToolSetAdapter;
+    use rustain::domain::models::{McpServerSource, McpServerSpec, McpTransport};
+    use rustain::domain::models::{SkillDef, SkillSource};
+    use rustain::domain::ports::ToolSetPort;
+    use std::collections::BTreeMap;
+
+    let builtin: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
+        std::path::PathBuf::from("."),
+        Arc::new(FileSystemStorage::new(std::path::PathBuf::from("."))),
+    ));
+
+    // Fake MCP server with 2 tools (echo, add)
+    let binary_name = if cfg!(target_os = "windows") {
+        "fake-mcp-server.exe"
+    } else {
+        "fake-mcp-server"
+    };
+    let exe_dir = std::env::current_exe()
+        .expect("current exe")
+        .parent()
+        .expect("parent")
+        .to_path_buf();
+    let candidates = vec![
+        exe_dir.join(binary_name),
+        exe_dir.parent().expect("deps parent").join(binary_name),
+    ];
+    let command = candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+
+    let spec = McpServerSpec {
+        id: "three-proto".to_string(),
+        transport: McpTransport::Stdio,
+        command: Some(command.to_string_lossy().into_owned()),
+        args: vec![],
+        env: BTreeMap::new(),
+        url: None,
+        persistent: false,
+        source: McpServerSource::Workspace,
+    };
+    let client = Arc::new(McpClientAdapter::new(spec.clone(), None));
+    client.set_self_weak(Arc::downgrade(&client));
+    let _ = client.connect().await;
+
+    // SkillActivator with 3 programmatic skills
+    use rustain::adapters::skill_registry::SkillRegistry;
+    let skills = vec![
+        SkillDef {
+            name: "review".into(),
+            description: "Code review skill".into(),
+            file: std::path::PathBuf::from("review.md"),
+            directory: std::path::PathBuf::from("/tmp"),
+            source: SkillSource::WorkspaceAgents,
+            allowed_tools: None,
+        },
+        SkillDef {
+            name: "test".into(),
+            description: "Test generation skill".into(),
+            file: std::path::PathBuf::from("test.md"),
+            directory: std::path::PathBuf::from("/tmp"),
+            source: SkillSource::WorkspaceAgents,
+            allowed_tools: None,
+        },
+        SkillDef {
+            name: "refactor".into(),
+            description: "Refactoring skill".into(),
+            file: std::path::PathBuf::from("refactor.md"),
+            directory: std::path::PathBuf::from("/tmp"),
+            source: SkillSource::WorkspaceAgents,
+            allowed_tools: None,
+        },
+    ];
+    let registry = SkillRegistry::from_skills(skills);
+    let skill_activator = Arc::new(SkillActivator::new());
+    skill_activator.set_registry(registry).await;
+
+    let composite = CompositeToolsetAdapter::new(
+        builtin,
+        vec![client],
+        vec![spec],
+        true, // include_builtin
+        None,
+        Some(skill_activator),
+    );
+
+    composite.populate_registry().await.unwrap();
+    let snap = composite.capability_registry().snapshot();
+
+    let mcp_count = snap.iter().filter(|c| c.protocol == "mcp").count();
+    let builtin_count = snap.iter().filter(|c| c.protocol == "builtin").count();
+    let skill_count = snap.iter().filter(|c| c.protocol == "skill").count();
+
+    assert_eq!(mcp_count, 2, "fake MCP server has echo + add tools");
+    assert_eq!(builtin_count, 6, "ToolSetAdapter has 6 builtin tools");
+    assert_eq!(skill_count, 3, "SkillRegistry has 3 programmatic skills");
+    assert_eq!(snap.len(), 11);
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn test_describe_returns_tool_descriptors() {
+    use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::mcp::client::McpClientAdapter;
+    use rustain::adapters::noop::NoOpToolSet;
+    use rustain::domain::models::{McpServerSource, McpServerSpec, McpTransport};
+    use rustain::domain::ports::ToolSetPort;
+    use std::collections::BTreeMap;
+
+    let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
+    let spec = McpServerSpec {
+        id: "describe-test".to_string(),
+        transport: McpTransport::Stdio,
+        command: Some("echo".into()),
+        args: vec![],
+        env: BTreeMap::new(),
+        url: None,
+        persistent: false,
+        source: McpServerSource::Workspace,
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let client = Arc::new(McpClientAdapter::new(spec.clone(), Some(tx)));
+
+    let composite =
+        CompositeToolsetAdapter::new(builtin, vec![client], vec![spec], false, None, None);
+
+    // No registry population yet — describe should be empty
+    let desc = composite.describe();
+    assert!(desc.is_empty());
+
+    // After populate_registry, describe matches snapshot
+    let _ = composite.populate_registry().await;
+    let desc = composite.describe();
+    let snap = composite.capability_registry().snapshot();
+    assert_eq!(desc.len(), snap.len());
+    for (d, s) in desc.iter().zip(snap.iter()) {
+        assert_eq!(d.id.as_str(), s.id.as_string());
+        assert_eq!(d.provider_id, s.provider_id);
+    }
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn test_catalog_delta_version_monotonic() {
+    use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::noop::NoOpToolSet;
+    use rustain::domain::ports::ToolSetPort;
+
+    let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
+    let composite = CompositeToolsetAdapter::new(builtin, vec![], vec![], false, None, None);
+
+    assert_eq!(composite.catalog_version(), 0);
+
+    let _ = composite.emit_catalog_delta().await;
+    assert_eq!(composite.catalog_version(), 1);
+
+    let _ = composite.emit_catalog_delta().await;
+    assert_eq!(composite.catalog_version(), 2);
+
+    let _ = composite.emit_catalog_delta().await;
+    assert_eq!(composite.catalog_version(), 3);
+}
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn test_emit_catalog_delta_returns_ok_phase_a() {
+    use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::noop::NoOpToolSet;
+    use rustain::domain::ports::ToolSetPort;
+
+    let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
+    let composite = CompositeToolsetAdapter::new(builtin, vec![], vec![], false, None, None);
+
+    let result = composite.emit_catalog_delta().await;
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_status_panel_shows_all_three_protocol_counts() {
+    use rustain::adapters::tui::widgets::adapter_status_panel::format_registry_summary;
+    use rustain::domain::models::capability_registry::RegisteredCapability;
+
+    let snap = vec![
+        RegisteredCapability {
+            id: CapabilityId {
+                protocol: "mcp".into(),
+                server: "srv1".into(),
+                tool: "echo".into(),
+            },
+            protocol: "mcp".into(),
+            provider_id: "mcp:srv1".into(),
+            name: "echo".into(),
+            description: "test".into(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            parallel_safe: true,
+        },
+        RegisteredCapability {
+            id: CapabilityId {
+                protocol: "mcp".into(),
+                server: "srv2".into(),
+                tool: "add".into(),
+            },
+            protocol: "mcp".into(),
+            provider_id: "mcp:srv2".into(),
+            name: "add".into(),
+            description: "test".into(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            parallel_safe: true,
+        },
+        RegisteredCapability {
+            id: CapabilityId {
+                protocol: "builtin".into(),
+                server: String::new(),
+                tool: "Bash".into(),
+            },
+            protocol: "builtin".into(),
+            provider_id: "builtin".into(),
+            name: "Bash".into(),
+            description: "test".into(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            parallel_safe: false,
+        },
+        RegisteredCapability {
+            id: CapabilityId {
+                protocol: "skill".into(),
+                server: String::new(),
+                tool: "review".into(),
+            },
+            protocol: "skill".into(),
+            provider_id: "skill".into(),
+            name: "review".into(),
+            description: "test".into(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            parallel_safe: false,
+        },
+    ];
+
+    let summary = format_registry_summary(&snap);
+    assert_eq!(
+        summary,
+        Some("Registry: 4 capabilities (2 MCP, 1 builtin, 1 skill)".to_string())
+    );
+}
+
+#[cfg(feature = "mcp")]
+#[serial_test::serial]
+#[tokio::test]
+async fn test_catalog_delta_added_removed_correctness() {
+    use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::mcp::client::McpClientAdapter;
+    use rustain::adapters::toolset_adapter::ToolSetAdapter;
+    use rustain::domain::models::{McpServerSource, McpServerSpec, McpTransport};
+    use rustain::domain::ports::ToolSetPort;
+    use std::collections::BTreeMap;
+
+    let builtin: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
+        std::path::PathBuf::from("."),
+        Arc::new(FileSystemStorage::new(std::path::PathBuf::from("."))),
+    ));
+
+    // Fake MCP server with 2 tools (echo, add)
+    let binary_name = if cfg!(target_os = "windows") {
+        "fake-mcp-server.exe"
+    } else {
+        "fake-mcp-server"
+    };
+    let exe_dir = std::env::current_exe()
+        .expect("current exe")
+        .parent()
+        .expect("parent")
+        .to_path_buf();
+    let candidates = vec![
+        exe_dir.join(binary_name),
+        exe_dir.parent().expect("deps parent").join(binary_name),
+    ];
+    let command = candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+
+    let spec = McpServerSpec {
+        id: "delta-test".to_string(),
+        transport: McpTransport::Stdio,
+        command: Some(command.to_string_lossy().into_owned()),
+        args: vec![],
+        env: BTreeMap::new(),
+        url: None,
+        persistent: false,
+        source: McpServerSource::Workspace,
+    };
+    let client = Arc::new(McpClientAdapter::new(spec.clone(), None));
+    client.set_self_weak(Arc::downgrade(&client));
+    let _ = client.connect().await;
+
+    let composite = CompositeToolsetAdapter::new(
+        builtin,
+        vec![client],
+        vec![spec],
+        true, // include_builtin
+        None,
+        None, // no skill_activator
+    );
+
+    // Initial populate: version=1, registry has 6 builtin + 2 MCP = 8
+    let _ = composite.populate_registry().await.unwrap();
+    assert_eq!(composite.catalog_version(), 1);
+    let snap1 = composite.capability_registry().snapshot();
+    assert_eq!(
+        snap1.len(),
+        8,
+        "6 builtin + 2 MCP tools"
+    );
+
+    // Emit another delta with no changes: version=2, added=0 removed=0
+    let _ = composite.emit_catalog_delta().await.unwrap();
+    assert_eq!(composite.catalog_version(), 2);
+    let snap2 = composite.capability_registry().snapshot();
+    assert_eq!(
+        snap2.len(),
+        8,
+        "no tools added or removed — registry unchanged"
+    );
+
+    // Register a new capability manually (simulating MCP list_changed adding a tool)
+    use rustain::domain::models::capability_registry::RegisteredCapability;
+    let extra = RegisteredCapability {
+        id: rustain::domain::models::capability_id::CapabilityId {
+            protocol: "mcp".into(),
+            server: "delta-test".into(),
+            tool: "multiply".into(),
+        },
+        protocol: "mcp".into(),
+        provider_id: "mcp:delta-test".into(),
+        name: "multiply".into(),
+        description: "Multiply two numbers".into(),
+        input_schema: serde_json::json!({"type": "object"}),
+        parallel_safe: true,
+    };
+    let _handle = composite
+        .capability_registry()
+        .register(extra)
+        .await
+        .unwrap();
+
+    // Verify registry grew by 1
+    let snap3 = composite.capability_registry().snapshot();
+    assert_eq!(snap3.len(), 9, "added multiply tool");
+
+    // Emit delta: version=3, should detect 1 added
+    let _ = composite.emit_catalog_delta().await.unwrap();
+    assert_eq!(composite.catalog_version(), 3);
+
+    // Verify the multiply tool is present after delta emit
+    let snap4 = composite.capability_registry().snapshot();
+    let multiply_tools: Vec<_> = snap4.iter().filter(|c| c.name == "multiply").collect();
+    assert_eq!(multiply_tools.len(), 1, "multiply tool should be in registry");
+    assert_eq!(snap4.len(), 9, "registry still has 9 tools after delta emit");
 }

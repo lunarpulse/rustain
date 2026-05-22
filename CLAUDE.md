@@ -86,11 +86,13 @@ pub trait CapabilityProvider: Send + Sync {
 
 | Provider | Implementation | Story |
 |----------|---------------|-------|
-| `McpProvider` | Wraps `McpClientAdapter` (9.1+9.2) behind the trait | **Story 9.3a** (this story) |
-| `BuiltinProvider` | Refactor of `ToolSetAdapter` behind the trait | Story 9.3b |
-| `SkillsProvider` | Refactor of skill executor behind the trait | Story 9.3b |
+| `McpProvider` | Wraps `McpClientAdapter` (9.1+9.2) behind the trait | **Story 9.3a** |
+| `BuiltinProvider` | Refactor of `ToolSetAdapter` behind the trait | **Story 9.3b** (this story) |
+| `SkillsProvider` | Refactor of skill executor behind the trait | **Story 9.3b** (this story) |
 | `A2aProvider` | Implements `CapabilityProvider` when A2A lands | Epic 14 |
 | `SubagentProvider` | Implements `CapabilityProvider` for subagent dispatch | Epic 10 |
+
+**`ToolSetPort::describe()` sibling method:** The `ToolSetPort` trait gained `describe() -> Vec<ToolDescriptor>` (default `Vec::new()`) in Story 9.3b. This is the domain catalog shape consumed by `FilteredCatalog` (Story 9.4 Phase A), `IndexableItem` (Story 9.7 Phase B), and `SkillExposurePort` (Story 9.6 Phase A). The `available_tools()` method stays as the LLM-wire shape. `CompositeToolsetAdapter` overrides `describe()` to project from the internal registry.
 
 **CapabilityRegistry** is internal to `CompositeToolsetAdapter` — NO top-level `AppState.capability_registry`. Conformance test `tests/conformance_capability_registry.rs::test_no_capability_registry_on_app_state` enforces this.
 

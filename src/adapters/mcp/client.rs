@@ -336,7 +336,7 @@ impl McpClientAdapter {
             rmcp::model::CallToolRequestParams::new(tool_name.to_string()).with_arguments(args)
         } else {
             return Err(McpError::CallToolFailed(
-                "arguments must be a JSON object".into()
+                "arguments must be a JSON object".into(),
             ));
         };
 
@@ -453,7 +453,10 @@ mod tests {
         // The on_tool_list_changed should handle upgrade failure gracefully.
         // We can't easily construct a NotificationContext without a real Peer,
         // but we verify the service struct can be created with a dangling weak ref.
-        assert!(service.adapter.upgrade().is_none(), "weak ref should fail to upgrade after strong ref dropped");
+        assert!(
+            service.adapter.upgrade().is_none(),
+            "weak ref should fail to upgrade after strong ref dropped"
+        );
     }
 }
 
