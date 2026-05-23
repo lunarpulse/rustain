@@ -104,8 +104,20 @@ fn build_anthropic_from_config(
             }
         };
 
+        // Resolve base_url precedence: explicit config field > ANTHROPIC_BASE_URL
+        // env var. The env var is the Claude-Code-compatible mechanism for
+        // pointing at gateways/proxies (z.ai, LiteLLM, Helicone, etc.);
+        // without this fallback, `[provider.anthropic]` config silently hits
+        // the default api.anthropic.com endpoint and auth fails for gateway
+        // tokens. The legacy env-var-only construction path
+        // (`build_anthropic_provider_from_env`) does this correctly; this
+        // brings the config-driven path to parity.
+        let base_url = cfg.base_url.clone().or_else(|| {
+            crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL")
+        });
+
         let adapter =
-            AnthropicAdapter::new(auth_mode, cfg.model_id.clone(), None).map_err(|e| {
+            AnthropicAdapter::new(auth_mode, cfg.model_id.clone(), base_url).map_err(|e| {
                 ProviderError::Other(format!("Failed to create Anthropic adapter: {}", e))
             })?;
         Ok(Arc::new(adapter))

@@ -48,6 +48,13 @@ markers = [
     "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
     "story_6_3: Story 6-3 — Task Panel & Progress Monitoring",
     "story_16_6: Story 16-6 — Vim Keymap (Fold & Motion)",
+    "story_9_1: Story 9-1 — MCP Server Configuration & Connection",
+    "story_9_2: Story 9-2 — MCP Tool Discovery & Invocation",
+    "story_9_3: Story 9-3 — Capability Provider Architecture / Built-in Refactor",
+    "story_9_4: Story 9-4 — Tool Exposure Strategy",
+    "story_9_5: Story 9-5 — Sandbox Policy (Landlock)",
+    "story_9_6: Story 9-6 — Skill Exposure Port",
+    "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
 ]
 # Default: skip tests that need a live API unless explicitly requested.
 # Run all:      pytest

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,13 @@ def pytest_configure(config):
         "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
         "story_6_3: Story 6-3 — Task Panel & Progress Monitoring",
         "story_6_4: Story 6-4 — Task Control & Plan Deviation",
+        "story_9_1: Story 9-1 — MCP Server Configuration & Connection",
+        "story_9_2: Story 9-2 — MCP Tool Discovery & Invocation",
+        "story_9_3: Story 9-3 — Capability Provider Architecture / Built-in Refactor",
+        "story_9_4: Story 9-4 — Tool Exposure Strategy",
+        "story_9_5: Story 9-5 — Sandbox Policy (Landlock)",
+        "story_9_6: Story 9-6 — Skill Exposure Port",
+        "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
@@ -185,3 +194,151 @@ def _reset_tui_state(request):
 def workspace(tmp_path):
     """Provide a temporary workspace directory (no TUI, for unit-style helpers)."""
     return tmp_path
+
+
+# ── MCP fixtures (Epic 9) ────────────────────────────────────────────────────
+
+MCP_FIXTURE = Path(__file__).parent / "fixtures" / "mcp_fixture.py"
+
+
+def _write_test_mcp_profile(config_dir: Path, profile_name: str = "tests-mcp") -> None:
+    """Write a profile that selects the composite tools adapter so workspace
+    .claude/mcp.json is honored. Default 'coding' profile uses 'builtin-full'
+    which short-circuits MCP loading entirely.
+    """
+    profiles_dir = config_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / f"{profile_name}.toml").write_text(
+        f'name = "{profile_name}"\n'
+        'description = "Test profile — composite tools adapter for MCP E2E tests."\n'
+        'extends = "coding"\n'
+        "\n"
+        "[tools]\n"
+        'adapter = "composite"\n'
+    )
+
+
+def _write_mcp_json(
+    workspace_path: Path,
+    servers: dict[str, dict] | None = None,
+    *,
+    server_name: str = "echo",
+    server_env: dict[str, str] | None = None,
+) -> Path:
+    """Write ``.claude/mcp.json`` under the workspace.
+
+    When ``servers`` is None, registers a single stdio server (``server_name``)
+    pointing at the local Python fixture with optional env overrides.
+    """
+    claude_dir = workspace_path / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    if servers is None:
+        spec: dict = {
+            "command": sys.executable,
+            "args": [str(MCP_FIXTURE)],
+        }
+        if server_env:
+            spec["env"] = server_env
+        servers = {server_name: spec}
+    path = claude_dir / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": servers}, indent=2))
+    return path
+
+
+@pytest.fixture
+def tui_with_mcp(build_binary, request):
+    """Provide a RustainTUI wired to the local stdio MCP fixture server.
+
+    Behavior:
+      * Workspace is an isolated temp dir (auto-cleaned).
+      * ``.claude/mcp.json`` registers the ``echo`` server (overridable via
+        ``request.param``) pointing at ``tests_tui/fixtures/mcp_fixture.py``.
+      * A ``tests-mcp`` profile is written into ``RUSTAIN_CONFIG_DIR/profiles/``
+        with ``[tools] adapter = "composite"`` so the workspace MCP config is
+        actually loaded (the default ``coding`` profile uses ``builtin-full``).
+      * ``RUSTAIN_PROFILE=tests-mcp`` is injected via ``env_overrides``.
+      * Permissions: only Read/Glob/Grep are pre-allowed — MCP tools always
+        prompt by default so tests can drive the approval flow.
+
+    Parametrize with ``@pytest.mark.parametrize("tui_with_mcp", [{...}], indirect=True)``
+    where the dict can contain:
+      * ``servers``: full ``mcpServers`` dict (overrides default echo server)
+      * ``server_env``: env vars for the spawned fixture (e.g. ``FAKE_MCP_DROP_AFTER_MS``)
+      * ``server_name``: name registered in mcp.json (default ``echo``)
+      * ``allowed_tools``: override the auto-allow list
+    """
+    param = getattr(request, "param", {}) or {}
+    servers = param.get("servers")
+    server_env = param.get("server_env")
+    server_name = param.get("server_name", "echo")
+    allowed_tools = param.get("allowed_tools", ["Read", "Glob", "Grep"])
+
+    tmp = tempfile.TemporaryDirectory(prefix="rustain_mcp_test_")
+    ws = Path(tmp.name)
+
+    # Workspace MCP config
+    _write_mcp_json(ws, servers=servers, server_name=server_name, server_env=server_env)
+
+    # Profile that selects composite tools adapter
+    config_dir = ws / ".rustain"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    _write_test_mcp_profile(config_dir, profile_name="tests-mcp")
+    # Pre-create config.toml so sidebar/panel TUI tests can render. Default
+    # Focus density hides sidebars at the layout level regardless of
+    # `state.sidebar_visible`. We pre-write the config because RustainTUI.start
+    # only auto-creates it when missing; pre-creating lets us layer [layout]
+    # on top of the permissions block.
+    #
+    # Also registers an `anthropic` provider from env-var auth so live-LLM
+    # tests can actually talk to a model. The user's ~/.config/rustain
+    # config.toml is merged BEFORE our workspace config; without an explicit
+    # `[provider.anthropic]` block here, only the user's `[provider.openrouter]`
+    # would be present, which fails to construct in the default test build
+    # (`openai` feature not enabled). Setting enabled=false on openrouter
+    # overrides the user's inherited config so it doesn't poison the registry.
+    #
+    # Effect for tests without API keys: rustain will warn that the provider
+    # can't reach the endpoint, but the deterministic tier doesn't depend on
+    # the provider working — only `@requires_api` tests do, and those skip
+    # cleanly via the existing collection-modify hook + the runtime
+    # `_skip_if_provider_unreachable` helper.
+    config_toml = config_dir / "config.toml"
+    config_toml.write_text(
+        "[permissions]\n"
+        f"always_tools = {json.dumps(allowed_tools)}\n"
+        "\n"
+        "[layout]\n"
+        'density_mode = "monitor"\n'
+        "\n"
+        "# Disable any user-inherited openrouter provider — the default test\n"
+        "# build is missing the openai feature so it can't construct.\n"
+        "[provider.openrouter]\n"
+        "enabled = false\n"
+        "provider_id = \"openrouter\"\n"
+        "model_id = \"unused\"\n"
+        "api_key_env = \"OPENROUTER_API_KEY\"\n"
+        "\n"
+        "# Register the anthropic provider from env-var auth. The harness\n"
+        "# already loads ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY from .env\n"
+        "# into the spawned process env.\n"
+        "[provider.anthropic]\n"
+        "provider_id = \"anthropic\"\n"
+        "model_id = \"glm-4.7\"\n"
+        "api_key_env = \"ANTHROPIC_AUTH_TOKEN\"\n"
+        "enabled = true\n"
+        "kind = \"anthropic\"\n"
+    )
+
+    harness = RustainTUI(
+        fresh=True,
+        build=False,
+        workspace=ws,
+        allowed_tools=allowed_tools,
+        env_overrides={"RUSTAIN_PROFILE": "tests-mcp"},
+    )
+    harness.start()
+    try:
+        yield harness
+    finally:
+        harness.stop()
+        tmp.cleanup()

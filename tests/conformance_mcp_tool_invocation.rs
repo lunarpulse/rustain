@@ -57,6 +57,11 @@ fn fake_spec_connected(
     tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
 ) -> Arc<McpClientAdapter> {
     let client = Arc::new(McpClientAdapter::new(fake_spec(id, env), Some(tx)));
+    // CRITICAL: without this, the rmcp ClientHandler's notification context
+    // upgrades to a Weak::default() that never points back at the adapter,
+    // so list_changed callbacks silently no-op and McpCatalogChanged is
+    // never emitted. Production wires this in `composition/mod.rs:262`.
+    client.set_self_weak(Arc::downgrade(&client));
     client
 }
 
@@ -508,29 +513,52 @@ async fn test_list_changed_refreshes_cache() {
     let mut env = BTreeMap::new();
     env.insert(
         "FAKE_MCP_EMIT_LIST_CHANGED_AFTER_MS".to_string(),
-        "500".to_string(),
+        "300".to_string(),
     );
     let client = fake_spec_connected("refresh-svr", env, tx);
     client.connect().await.expect("should connect");
-
-    if !wait_connected(&client, 5000).await {
-        eprintln!("server not connected; skipping");
-        return;
-    }
-
-    // Wait for list_changed notification
-    let timeout = tokio::time::Duration::from_secs(2);
-    let event = tokio::time::timeout(timeout, rx.recv()).await;
     assert!(
-        event.is_ok(),
-        "should receive McpCatalogChanged event within timeout"
+        wait_connected(&client, 5000).await,
+        "fake-mcp-server must connect"
     );
-    if let Ok(Some(AppEvent::McpCatalogChanged { server_id, .. })) = event {
-        assert_eq!(
-            server_id, "refresh-svr",
-            "event should be for correct server"
-        );
-    }
+
+    // The fake server only emits the notification on its next stdin read,
+    // so we must drive at least one follow-up RPC after the timer arms.
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let _ = client
+        .call_tool(
+            "echo",
+            serde_json::json!({"text": "wake"}),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+    // Wait specifically for AppEvent::McpCatalogChanged — earlier versions of
+    // this test accepted ANY event because `event.is_ok()` matches the
+    // McpConnectionStateChanged emitted during connect handshake. The
+    // `if let` guard then silently skipped the real assertion. Discriminate
+    // explicitly so the failure is loud if the refresh path regresses.
+    let evt = tokio::time::timeout(tokio::time::Duration::from_secs(3), async {
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::McpCatalogChanged { server_id, .. })
+                    if server_id == "refresh-svr" =>
+                {
+                    return Some(server_id);
+                }
+                Some(_) => continue, // ignore other lifecycle events
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for McpCatalogChanged");
+
+    assert_eq!(
+        evt.as_deref(),
+        Some("refresh-svr"),
+        "expected catalog-changed event for refresh-svr"
+    );
 }
 
 #[test]

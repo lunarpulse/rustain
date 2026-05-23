@@ -113,7 +113,7 @@ predicates = "3"
 tracing-test = "0.2"
 
 [features]
-default = ["anthropic", "clipboard", "mcp"]
+default = ["anthropic", "openai", "ollama", "clipboard", "mcp"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses

@@ -123,6 +123,13 @@ class RustainTUI:
     timeout: float = 120.0
     """pexpect timeout for expect() calls."""
 
+    env_overrides: dict[str, str] | None = None
+    """Extra env vars merged into the spawned process env (last-write-wins).
+
+    Use for per-test settings such as ``RUSTAIN_PROFILE`` — keeps tests
+    isolated without mutating ``os.environ`` (xdist-safe).
+    """
+
     _child: pexpect.spawn | None = field(default=None, init=False, repr=False)
     _tmpdir: tempfile.TemporaryDirectory | None = field(
         default=None, init=False, repr=False
@@ -184,6 +191,9 @@ class RustainTUI:
         env["RUSTAIN_DATA_DIR"] = str(self._workspace_path / ".rustain_data")
         # Isolate logs per test (P0 flakiness fix: prevents cross-test log pollution)
         env["RUSTAIN_LOG_PATH"] = str(self._workspace_path / "rustain.log")
+        # Per-test env overrides (e.g. RUSTAIN_PROFILE for MCP tests).
+        if self.env_overrides:
+            env.update(self.env_overrides)
         args = [str(BINARY)]
         if self.fresh:
             args.append("--new")

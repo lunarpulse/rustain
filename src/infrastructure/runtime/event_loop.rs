@@ -220,6 +220,16 @@ pub async fn run(
     // Cache VS Code terminal detection once at startup (Sprint Change Proposal 2026-04-08, AC#4, AC9)
     state.is_vscode = crate::infrastructure::utils::is_vscode_terminal();
 
+    // Seed terminal_width from the current terminal size — crossterm only
+    // emits Resize events on actual size changes, so a fresh process at a
+    // stable size never receives one. Without this seed, state.terminal_width
+    // stays at its default (0) until the user resizes, which gates
+    // sidebar/panel actions ("Ctrl+X,A", "toggle sidebar") behind a phantom
+    // "terminal too narrow" branch (SIDEBAR_MIN_WIDTH=120).
+    if let Ok((cols, _rows)) = crossterm::terminal::size() {
+        state.terminal_width = cols;
+    }
+
     // Load and increment session count for contextual hint fading (UX-DR96)
     state.session_count = crate::adapters::tui::hints::load_and_increment_session_count();
     // Compute initial hint
