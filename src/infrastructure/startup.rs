@@ -85,6 +85,7 @@ pub async fn run() -> Result<()> {
         context: cli.context.clone(),
         tool_exposure: cli.tool_exposure.clone(),
         skill_exposure: cli.skill_exposure.clone(),
+        sandbox_adapter: cli.sandbox_adapter.clone(),
     };
 
     // 3. Load config — two-pass for story 8.2 chicken-and-egg resolution (AC-15).
@@ -156,6 +157,12 @@ pub async fn run() -> Result<()> {
 
     // Story 9.6 — validate skill_exposure.kind BEFORE AgentCore composition
     if let Err(e) = validate_skill_exposure(&app_config.skill_exposure.kind) {
+        eprintln!("Config validation failed: {}", e);
+        std::process::exit(1);
+    }
+
+    // Story 9.5 — validate sandbox.adapter BEFORE AgentCore composition
+    if let Err(e) = validate_sandbox_adapter(&app_config.sandbox.adapter) {
         eprintln!("Config validation failed: {}", e);
         std::process::exit(1);
     }
@@ -748,10 +755,27 @@ pub async fn run() -> Result<()> {
     let shared_skill_cache = Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
         crate::infrastructure::skill_cache::SkillCacheConfig::default(),
     ));
+    // Story 9.5 — shared sandbox slot and policy ref, created EARLY so
+    // ToolSetAdapter and ComposeContext/AppState share the SAME Arc instances.
+    // The slot starts as NoOpSandbox and is updated after AgentCore::compose().
+    let sandbox_slot: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>> = {
+        use crate::adapters::sandbox::NoOpSandbox;
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>,
+        ))
+    };
+    let sandbox_policy_ref: Arc<tokio::sync::RwLock<SandboxPolicy>> =
+        Arc::new(tokio::sync::RwLock::new(sandbox_policy.clone()));
+
     let agent_activator = Arc::new(crate::adapters::agent_activation::AgentActivator::new(
         Arc::clone(&security),
     ));
-    let mut tools_adapter = ToolSetAdapter::new(workspace_path.clone(), Arc::clone(&tools_storage));
+    let mut tools_adapter = ToolSetAdapter::new(
+        workspace_path.clone(),
+        Arc::clone(&tools_storage),
+        Arc::clone(&sandbox_slot),
+        Arc::clone(&sandbox_policy_ref),
+    );
     tools_adapter.set_activator(Arc::clone(&skill_activator));
     tools_adapter.set_skill_cache(Arc::clone(&shared_skill_cache));
     tools_adapter.set_plan_manager(plan_manager.clone());
@@ -832,6 +856,10 @@ pub async fn run() -> Result<()> {
         tool_exposure: app_config.tools.exposure.clone(),
         skill_exposure: app_config.skill_exposure.kind.clone(),
         skill_cache: Arc::clone(&shared_skill_cache),
+        sandbox_adapter: app_config.sandbox.adapter.clone(),
+        sandbox_startup_policy: sandbox_policy.clone(),
+        sandbox_slot: Arc::clone(&sandbox_slot),
+        sandbox_policy: Arc::clone(&sandbox_policy_ref),
     };
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
@@ -845,6 +873,43 @@ pub async fn run() -> Result<()> {
         }
     };
     let compose_snapshot = Arc::new(compose_ctx);
+
+    // Story 9.5 — wire the resolved sandbox adapter into the shared slot
+    // (used by ToolSetAdapter for Bash-tool enforcement) and into AgentCore.
+    {
+        let resolved = agent_core_inner.sandbox.load_full();
+        sandbox_slot.store(Arc::clone(&resolved));
+    }
+
+    // Story 9.5 — restrict the parent rustain process with Landlock
+    // (NoOp on non-Linux; non-fatal on ABI-too-old fallback).
+    // Must happen AFTER all 10 AgentCore slots are filled AND AFTER
+    // SkillCache warm_up has populated frontmatter (which happens on
+    // first skill_exposure render), but BEFORE the event loop enters.
+    //
+    // Uses the LEAST-RESTRICTIVE plausible policy (WorkspaceWrite + network)
+    // per sandbox.rs docstring: Landlock is one-way restrictive — once
+    // restricted, the process can never regain access. The mode-derived
+    // policy (e.g. ReadOnly in Plan mode) would permanently lock rustain.
+    // Per-call apply() tightens further for individual Bash invocations.
+    {
+        let startup_restrict_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![workspace_path.clone()],
+            read_only_paths: vec![
+                workspace_path.join(".git"),
+                workspace_path.join(".rustain"),
+            ],
+            network: true,
+        };
+        let sandbox = agent_core_inner.sandbox.load_full();
+        if let Err(e) = sandbox.restrict_self(&startup_restrict_policy).await {
+            tracing::warn!(
+                error = %e,
+                "Sandbox restrict_self failed at startup (non-fatal); \
+                 ADR-06-04 §Negative — documented as known limitation"
+            );
+        }
+    }
 
     // Story 8.5 AC-8 — apply startup-time adapter overrides from CLI flags
     {
@@ -892,11 +957,23 @@ pub async fn run() -> Result<()> {
     let tools: Arc<dyn ToolSetPort> = Arc::clone(&*agent_core_inner.tools.load());
 
     // Deferred AppState::new — now that AgentCore is composed, create the runtime state
+    // Story 9.5 — telemetry aggregator (7-day rolling window for active-ratio metrics).
+    let telemetry = {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".").join(".cache"))
+            .join("rustain")
+            .join("telemetry");
+        crate::infrastructure::telemetry::ActiveRatioWindow::new(
+            Some(cache_dir.join("active_ratio_window.json")),
+        )
+        .await
+    };
+
     let (app_state, domain_rx) = AppState::new(
         event_bus,
         domain_rx,
         approval_runtime.clone(),
-        sandbox_policy,
+        sandbox_policy_ref,
         plan_manager.clone(),
         plan_injector.clone(),
         provider_swap,
@@ -908,6 +985,7 @@ pub async fn run() -> Result<()> {
         compose_snapshot,
         profile_resolver_swap,
         cli_snapshot,
+        telemetry,
     );
 
     // 5d. Use the same storage adapter constructed above for session management.
@@ -1114,7 +1192,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         "anthropic".to_string(),
     ));
     let mut deferred_notices: Vec<(String, ProviderError)> = Vec::new();
-    let unsupported_discovery: Vec<(String, String)> = Vec::new();
+    let mut unsupported_discovery: Vec<(String, String)> = Vec::new();
 
     #[cfg(feature = "openai")]
     let mut discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget> =
@@ -1522,6 +1600,51 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
             value: format!(
                 "unknown exposure strategy `{}`. Phase A accepts only `\"static-full\"`. \
                  Reserved values: `\"meta-search\"` (Story 9.7 Phase B, currently deferred).",
+                other
+            ),
+        })),
+    }
+}
+
+/// Story 9.5 — validate the `sandbox.adapter` config value at startup.
+///
+/// Phase A accepts `"noop"` (default on all platforms) and `"landlock"`
+/// (Linux only, gated on `sandbox` cargo feature). On Linux without the
+/// feature, `"landlock"` produces an actionable error pointing at the
+/// `sandbox` cargo feature.
+pub fn validate_sandbox_adapter(adapter: &str) -> Result<(), crate::domain::errors::DomainError> {
+    use crate::domain::errors::{ConfigError, DomainError};
+    if adapter.is_empty() {
+        return Err(DomainError::Config(ConfigError::Invalid {
+            field: "sandbox.adapter".into(),
+            value: "empty sandbox adapter value is invalid. \
+                    Phase A accepts `\"noop\"` (the default on all platforms) \
+                    or `\"landlock\"` (Linux only, requires `sandbox` cargo feature)."
+                .to_string(),
+        }));
+    }
+    match adapter {
+        "noop" => Ok(()),
+        "landlock" => {
+            #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
+            {
+                return Err(DomainError::Config(ConfigError::Invalid {
+                    field: "sandbox.adapter".into(),
+                    value: "`landlock` sandbox adapter requires the `sandbox` cargo feature \
+                             AND a Linux build. Rebuild with `--features sandbox` or set \
+                             `[sandbox].adapter = \"noop\"` (the default). \
+                             See ADR-06-04 §Decision."
+                        .to_string(),
+                }));
+            }
+            #[cfg(all(target_os = "linux", feature = "sandbox"))]
+            Ok(())
+        }
+        other => Err(DomainError::Config(ConfigError::Invalid {
+            field: "sandbox.adapter".into(),
+            value: format!(
+                "unknown sandbox adapter `{}`. Phase A accepts only `\"noop\"` \
+                 (the default) and `\"landlock\"` (Linux + `sandbox` feature only).",
                 other
             ),
         })),

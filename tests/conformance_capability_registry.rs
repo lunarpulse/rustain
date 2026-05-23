@@ -493,7 +493,12 @@ async fn test_builtin_provider_discover_returns_7_tools() {
 
     let storage = Arc::new(FileSystemStorage::new(std::path::PathBuf::from(".")));
     let adapter: Arc<dyn ToolSetPort> =
-        Arc::new(ToolSetAdapter::new(std::path::PathBuf::from("."), storage));
+        Arc::new(ToolSetAdapter::new(
+            std::path::PathBuf::from("."),
+            storage,
+            Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+            Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        ));
     let composite = CompositeToolsetAdapter::new(adapter, vec![], vec![], true, None, None);
 
     let _ = composite.populate_registry().await.unwrap();
@@ -527,7 +532,12 @@ fn test_builtin_provider_capabilities_in_process() {
     use rustain::domain::models::provider_capabilities::TransportKind;
 
     let storage = Arc::new(FileSystemStorage::new(std::path::PathBuf::from(".")));
-    let adapter = Arc::new(ToolSetAdapter::new(std::path::PathBuf::from("."), storage));
+    let adapter = Arc::new(ToolSetAdapter::new(
+        std::path::PathBuf::from("."),
+        storage,
+        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+    ));
     let provider = BuiltinProvider::new(adapter);
     let caps = provider.capabilities();
     assert_eq!(caps.transport_kind, TransportKind::InProcess);
@@ -636,6 +646,8 @@ async fn test_registry_holds_all_three_protocols() {
     let builtin: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
         std::path::PathBuf::from("."),
         Arc::new(FileSystemStorage::new(std::path::PathBuf::from("."))),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     ));
 
     // Fake MCP server with 2 tools (echo, add)
@@ -887,6 +899,8 @@ async fn test_catalog_delta_added_removed_correctness() {
     let builtin: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
         std::path::PathBuf::from("."),
         Arc::new(FileSystemStorage::new(std::path::PathBuf::from("."))),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     ));
 
     // Fake MCP server with 2 tools (echo, add)

@@ -19,6 +19,7 @@ use crate::domain::services::plan_mode_injector::DefaultPlanInjector;
 use crate::infrastructure::composition::ComposeContext;
 use crate::infrastructure::runtime::agent_core::AgentCore;
 use crate::infrastructure::runtime::event_bus::EventBus;
+use crate::infrastructure::telemetry::{ActiveRatioWindow, ProviderId};
 
 /// Thin newtype implementing `ConfigStorePort` for the handler domain-isolation
 /// contract (Story 8.1 AC-14). The handler takes `&dyn ConfigStorePort` instead
@@ -64,6 +65,9 @@ pub struct AppState {
     pub profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     /// CLI snapshot for config reload (Story 8.1 AC-10).
     pub cli_snapshot: crate::adapters::cli::commands::Cli,
+    /// Story 9.5 — telemetry aggregator for 7-day rolling-window active-ratio
+    /// metrics + adapter-status panel warning surface.
+    pub telemetry: Arc<ActiveRatioWindow>,
 }
 
 impl AppState {
@@ -72,7 +76,7 @@ impl AppState {
         event_bus: Arc<EventBus>,
         domain_rx: mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
         approval_runtime: Arc<ApprovalRuntime>,
-        sandbox_policy: SandboxPolicy,
+        sandbox_policy: Arc<RwLock<SandboxPolicy>>,
         plan_manager: Arc<PlanManager>,
         plan_injector: Arc<DefaultPlanInjector>,
         provider: Arc<ArcSwap<Arc<dyn StreamingProvider>>>,
@@ -84,6 +88,7 @@ impl AppState {
         compose_snapshot: Arc<ComposeContext>,
         profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
         cli_snapshot: crate::adapters::cli::commands::Cli,
+        telemetry: Arc<ActiveRatioWindow>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
@@ -96,7 +101,7 @@ impl AppState {
                 session_cancel: CancellationToken::new(),
                 event_bus,
                 approval_runtime,
-                sandbox_policy: Arc::new(RwLock::new(sandbox_policy)),
+                sandbox_policy,
                 plan_manager,
                 plan_injector,
                 provider,
@@ -109,6 +114,7 @@ impl AppState {
                 compose_snapshot,
                 profile_resolver,
                 cli_snapshot,
+                telemetry,
             },
             domain_rx,
         )

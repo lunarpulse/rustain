@@ -47,6 +47,7 @@ mod tests {
             context: None,
             tool_exposure: None,
             skill_exposure: None,
+            sandbox_adapter: None,
         }
     }
 

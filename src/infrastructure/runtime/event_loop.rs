@@ -953,7 +953,7 @@ pub async fn run(
                                               _skill_snap,
                                               _agent_snap,
                                                                                 tab_manager.reset_and_clone_turn_cancel(),
-                                          app_state.usage_ledger.clone()).await;
+                                          app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
@@ -1830,7 +1830,7 @@ pub async fn run(
                                             _skill_snap,
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
-                                        app_state.usage_ledger.clone()).await;
+                                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
@@ -2933,7 +2933,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -2957,7 +2957,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -2973,7 +2973,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -2997,7 +2997,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -3124,7 +3124,7 @@ pub async fn run(
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
                                                         { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -3269,7 +3269,7 @@ pub async fn run(
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
                                                             { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -4399,7 +4399,7 @@ pub async fn run(
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
                                                 { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await; }
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -4787,6 +4787,11 @@ pub async fn run(
                             if let Some(tc) = streaming.active_tool_calls.get_mut(transition.call.id()) {
                                 tc.status = Some(crate::domain::models::tool_call::status_chip(&transition.call).to_string());
                             }
+                            // Story 9.5 — record tool invocation telemetry on Success (AC-9-5-10 Task 8.4).
+                            if matches!(transition.call, crate::domain::models::tool_call::ToolCall::Success { .. }) {
+                                use crate::infrastructure::telemetry::{ProviderId, MetricKind};
+                                let _ = app_state.telemetry.record_invocation(ProviderId::Anthropic, MetricKind::Tool).await;
+                            }
                             state.needs_redraw = true;
                         }
                     }
@@ -4934,7 +4939,7 @@ pub async fn run(
                                             _skill_snap,
                                             _agent_snap,
                                             tab_manager.reset_and_clone_turn_cancel(),
-                                        app_state.usage_ledger.clone()).await;
+                                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                     }
 
                                     // Update sidebar index on turn complete
@@ -5027,7 +5032,7 @@ pub async fn run(
                                             _skill_snap,
                                             _agent_snap,
                                                                               tab_manager.reset_and_clone_turn_cancel(),
-                                        app_state.usage_ledger.clone()).await;
+                                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
@@ -5203,7 +5208,7 @@ pub async fn run(
                                                 _skill_snap,
                                                 Some(fallback_agent),
                                                                                   tab_manager.reset_and_clone_turn_cancel(),
-                                            app_state.usage_ledger.clone()).await;
+                                            app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         }
                                     }
                                 }
@@ -5365,7 +5370,7 @@ pub async fn run(
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
                                 start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await;
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
                                 app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::AutoEdit));
@@ -5389,7 +5394,7 @@ pub async fn run(
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
                                 start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone()).await;
+                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::Reject => {
                                 let _ = domain_tx.send(AppEvent::SystemNotice {
@@ -5771,6 +5776,12 @@ pub async fn run(
                         security.set_mode(mode);
                         // Update sandbox policy
                         let new_policy = crate::domain::models::SandboxPolicy::from_mode(mode, &workspace_path);
+                        tracing::info!(
+                            target: "rustain::sandbox",
+                            mode = ?mode,
+                            policy = ?new_policy,
+                            "Sandbox policy updated on permission mode change (Story 9.5 AC-9-5-4 Task 4.7)"
+                        );
                         *app_state.sandbox_policy.write().await = new_policy;
 
                         // Plan mode warmup
@@ -5844,7 +5855,7 @@ pub async fn run(
                             _skill_snap,
                             _agent_snap,
                                                               tab_manager.reset_and_clone_turn_cancel(),
-                        app_state.usage_ledger.clone()).await;
+                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                             Ok(()) => state.needs_redraw = false,
@@ -6348,7 +6359,7 @@ pub async fn run(
                                 _skill_snap,
                                 _agent_snap,
                                                                   tab_manager.reset_and_clone_turn_cancel(),
-                            app_state.usage_ledger.clone()).await;
+                            app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                         }
                     }
@@ -6495,7 +6506,7 @@ pub async fn run(
                                         snap,
                                         agent_snap,
                                                                           tab_manager.reset_and_clone_turn_cancel(),
-                                    app_state.usage_ledger.clone()).await;
+                                    app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                     app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
@@ -6630,7 +6641,7 @@ pub async fn run(
                                     snap,
                                     agent_snap,
                                                                       tab_manager.reset_and_clone_turn_cancel(),
-                                app_state.usage_ledger.clone()).await;
+                                app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                 app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
@@ -7088,6 +7099,17 @@ pub async fn run(
             }
         }
     }
+
+    // Story 9.5 — persist telemetry aggregator snapshot on graceful shutdown (AC-9-5-10 Task 8.5).
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        app_state.telemetry.save_snapshot(),
+    ).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("Telemetry snapshot save failed on shutdown: {e}"),
+        Err(_) => tracing::warn!("Telemetry snapshot save timed out on shutdown (>2s)"),
+    }
+
     // Persist all background (non-active) tabs on shutdown
     let active_conv_id = conversation.id.clone();
     for tab in tab_manager.tabs() {
@@ -7592,6 +7614,7 @@ async fn start_turn(
     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
     turn_cancel: CancellationToken,
     usage_ledger: Arc<dyn UsageLedgerPort>,
+    telemetry: std::sync::Arc<crate::infrastructure::telemetry::ActiveRatioWindow>,
 ) {
     start_turn_inner(
         text,
@@ -7619,6 +7642,7 @@ async fn start_turn(
         agent_snapshot,
         turn_cancel,
         usage_ledger,
+        telemetry,
     )
     .await;
 }
@@ -7649,6 +7673,7 @@ async fn start_turn_inner(
     agent_snapshot: Option<crate::domain::models::ActiveAgent>,
     turn_cancel: CancellationToken,
     usage_ledger: Arc<dyn UsageLedgerPort>,
+    telemetry: std::sync::Arc<crate::infrastructure::telemetry::ActiveRatioWindow>,
 ) {
     tracing::debug!(
         "start_turn_inner: synthetic={synthetic} text_len={}",
@@ -7837,6 +7862,14 @@ async fn start_turn_inner(
         }
         None => all_tool_defs,
     };
+    // Story 9.5 — emit telemetry after tool list is built (AC-9-5-7).
+    {
+        use crate::infrastructure::telemetry::{emit_tool_after_render, ProviderId};
+        let provider_id = ProviderId::Anthropic;
+        let catalog_len = tool_defs.len();
+        let diagnostics = crate::adapters::tool_exposure::RenderDiagnostics::clean();
+        emit_tool_after_render(provider_id, catalog_len, &diagnostics, &telemetry).await;
+    }
     // --- Model resolution (Story 7.1c) ---
     let retry_count = state.retry_state.as_ref().map_or(0, |r| r.attempt as u32);
     let input_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);

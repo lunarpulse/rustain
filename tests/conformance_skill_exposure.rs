@@ -192,7 +192,12 @@ async fn test_builtin_provider_includes_skill_view() {
     let storage: Arc<dyn rustain::domain::ports::StoragePort> =
         Arc::new(FileSystemStorage::new(sessions));
 
-    let tools = ToolSetAdapter::new(ws, Arc::clone(&storage));
+    let tools = ToolSetAdapter::new(
+        ws,
+        Arc::clone(&storage),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+    );
     let provider = BuiltinProvider::new(Arc::new(tools));
     let caps = provider.discover().await.unwrap();
 
@@ -300,6 +305,10 @@ fn test_compose_with_default_config_binds_l1_metadata() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: test_cache(),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     };
     let selection = ProfileSelection {
         dimensions: BTreeMap::new(),
@@ -337,6 +346,10 @@ fn test_compose_with_static_full_binds_static_full() {
         tool_exposure: "static-full".into(),
         skill_exposure: "static-full".into(),
         skill_cache: test_cache(),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     };
     let selection = ProfileSelection {
         dimensions: BTreeMap::new(),

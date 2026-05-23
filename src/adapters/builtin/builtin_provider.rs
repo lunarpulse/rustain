@@ -87,11 +87,21 @@ mod tests {
     use super::*;
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::toolset_adapter::ToolSetAdapter;
+    use arc_swap::ArcSwap;
     use std::path::PathBuf;
 
     fn make_toolset_adapter() -> Arc<ToolSetAdapter> {
         let storage = Arc::new(FileSystemStorage::new(PathBuf::from(".")));
-        Arc::new(ToolSetAdapter::new(PathBuf::from("."), storage))
+        Arc::new(ToolSetAdapter::new(
+            PathBuf::from("."),
+            storage,
+            Arc::new(ArcSwap::from_pointee(Arc::new(
+                crate::adapters::sandbox::NoOpSandbox,
+            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            )),
+        ))
     }
 
     #[test]

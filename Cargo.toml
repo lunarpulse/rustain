@@ -82,6 +82,9 @@ blake3 = "1"
 hex = "0.4"
 gray_matter = "0.2"
 
+# ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
+landlock = { version = "0.4", optional = true }
+
 # ── Rustycode path deps — uncomment in Story 1.2 ────────────────
 # Verify crossterm/ratatui version compatibility with rustycode before enabling
 # domain = { path = "../rustycode/domain" }
@@ -107,6 +110,7 @@ procfs = "0.17"
 wiremock = "0.6"
 assert_cmd = "2.0"
 predicates = "3"
+tracing-test = "0.2"
 
 [features]
 default = ["anthropic", "clipboard", "mcp"]
@@ -118,6 +122,7 @@ openai = ["anthropic", "dep:reqwest"]
 ollama = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
 skills-validation = []
+sandbox = ["dep:landlock"]
 
 [profile.release]
 opt-level =  3 #"z"

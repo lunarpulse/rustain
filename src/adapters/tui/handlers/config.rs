@@ -221,6 +221,7 @@ mod tests {
             context: None,
             tool_exposure: None,
             skill_exposure: None,
+            sandbox_adapter: None,
         }
     }
 
@@ -245,6 +246,14 @@ mod tests {
             tool_exposure: "static-full".into(),
             skill_exposure: "l1-metadata".into(),
             skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
+            sandbox_adapter: "noop".into(),
+            sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+                crate::adapters::sandbox::NoOpSandbox,
+            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            )),
         });
         let ctx = ReloadContext {
             cli: &test_cli(),

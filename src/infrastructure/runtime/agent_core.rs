@@ -10,8 +10,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort, SessionPort,
-    SkillExposurePort, ToolExposurePort, ToolSetPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort,
+    SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -29,6 +29,16 @@ pub struct AgentCore {
     /// Story 9.6 — per-turn skill exposure strategy. `None` for headless / eval
     /// path per ADR-09-01 v2.1 §W1 (inherited — Disabled is NOT a trait impl).
     pub skill_exposure: Arc<ArcSwap<Option<Arc<dyn SkillExposurePort>>>>,
+    /// Story 9.5 — OS-level sandbox enforcement (ADR-06-04). Defaults to
+    /// `NoOpSandbox` on macOS/Windows and on Linux without the `sandbox` cargo
+    /// feature; binds `LandlockSandbox` on Linux with the feature enabled and
+    /// kernel ABI >= v3.
+    ///
+    /// NOT wrapped in `Option<_>` (unlike `tool_exposure` / `skill_exposure`)
+    /// because `NoOpSandbox` is the always-composable default — there is no
+    /// "headless / eval" path that wants NO sandbox-binding at all; the eval
+    /// harness wants `NoOpSandbox` explicitly.
+    pub sandbox: Arc<ArcSwap<Arc<dyn SandboxManager>>>,
 }
 
 impl AgentCore {
@@ -40,6 +50,7 @@ impl AgentCore {
             NoOpChannel, NoOpContext, NoOpMemory, NoOpPersona, NoOpScheduler, NoOpSession,
             NoOpToolSet,
         };
+        use crate::adapters::sandbox::NoOpSandbox;
         Self {
             persona: Self::wrap(Arc::new(NoOpPersona) as Arc<dyn PersonaPort>),
             memory: Self::wrap(Arc::new(NoOpMemory) as Arc<dyn MemoryPort>),
@@ -50,6 +61,7 @@ impl AgentCore {
             context: Self::wrap(Arc::new(NoOpContext) as Arc<dyn ContextPort>),
             tool_exposure: Self::wrap_optional(None as Option<Arc<dyn ToolExposurePort>>),
             skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
+            sandbox: Self::wrap(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>),
         }
     }
 
@@ -80,7 +92,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_noop_constructs_all_nine_ports() {
+    fn test_noop_constructs_all_ten_slots() {
+        use crate::adapters::sandbox::SandboxAdapterKind;
         let core = AgentCore::test_noop();
         // Each load_full() must return a non-null Arc
         let p = core.persona.load_full();
@@ -92,6 +105,7 @@ mod tests {
         let cx = core.context.load_full();
         let te = core.tool_exposure.load_full();
         let se = core.skill_exposure.load_full();
+        let sb = core.sandbox.load_full();
         assert!(Arc::strong_count(&p) >= 1);
         assert!(Arc::strong_count(&m) >= 1);
         assert!(Arc::strong_count(&s) >= 1);
@@ -101,5 +115,6 @@ mod tests {
         assert!(Arc::strong_count(&cx) >= 1);
         assert!(te.is_none(), "tool_exposure defaults to None in noop agent");
         assert!(se.is_none(), "skill_exposure defaults to None in noop agent");
+        assert_eq!(sb.kind(), SandboxAdapterKind::NoOp, "sandbox defaults to NoOpSandbox");
     }
 }

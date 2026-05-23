@@ -26,7 +26,12 @@ fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
     let storage: Arc<dyn StoragePort> = Arc::new(
         rustain::adapters::filesystem::FileSystemStorage::new(sessions_dir),
     );
-    ToolSetAdapter::new(dir.to_path_buf(), storage)
+    ToolSetAdapter::new(
+        dir.to_path_buf(),
+        storage,
+        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+    )
 }
 
 // ── Simple mock security port for ToolScheduler construction ────────────────

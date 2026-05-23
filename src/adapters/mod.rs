@@ -17,6 +17,7 @@ pub mod persona_adapter;
 pub mod profile_resolver;
 pub mod project_context_loader;
 pub mod provider;
+pub mod sandbox;
 pub mod security_adapter;
 pub mod skill_activation;
 pub mod skill_provider;

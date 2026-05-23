@@ -26,7 +26,12 @@ fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
     let sessions_dir = dir.join(".claude").join("sessions");
     let storage: Arc<dyn rustain::domain::ports::StoragePort> =
         Arc::new(FileSystemStorage::new(sessions_dir));
-    ToolSetAdapter::new(dir.to_path_buf(), storage)
+    ToolSetAdapter::new(
+        dir.to_path_buf(),
+        storage,
+        Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+    )
 }
 
 #[tokio::test]
@@ -257,12 +262,16 @@ async fn ac4_signal_cancel_before_shutdown() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
         domain_rx,
         approval_runtime,
-        SandboxPolicy::ReadOnly { network: false },
+        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly { network: false })),
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
         provider_swap.clone(),
@@ -296,7 +305,9 @@ async fn ac4_signal_cancel_before_shutdown() {
             context: None,
             tool_exposure: None,
             skill_exposure: None,
+            sandbox_adapter: None,
         },
+        rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
     );
 
     app_state.session_cancel.cancel();

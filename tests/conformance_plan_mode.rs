@@ -232,7 +232,12 @@ async fn ac3_exit_plan_mode_emits_event() {
     let storage: Arc<dyn StoragePort> = Arc::new(
         rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()),
     );
-    let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), storage);
+    let adapter = ToolSetAdapter::new(
+        tmp.path().to_path_buf(),
+        storage,
+        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+    );
 
     // Set up plan manager and event channel
     let plans_dir = tmp.path().join("plans");

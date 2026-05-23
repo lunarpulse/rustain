@@ -46,6 +46,10 @@ struct CliOverrides {
     /// figment key `skill_exposure.kind`.
     #[serde(skip_serializing_if = "Option::is_none", rename = "skill_exposure")]
     skill_exposure: Option<CliSkillExposureOverride>,
+    /// Story 9.5 — overrides `app_config.sandbox.adapter`. Routed via nested
+    /// figment key `sandbox.adapter`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "sandbox")]
+    sandbox: Option<CliSandboxOverride>,
 }
 
 #[derive(Serialize, Default)]
@@ -58,6 +62,12 @@ struct CliToolsOverride {
 struct CliSkillExposureOverride {
     #[serde(skip_serializing_if = "Option::is_none", rename = "kind")]
     kind: Option<String>,
+}
+
+#[derive(Serialize, Default)]
+struct CliSandboxOverride {
+    #[serde(skip_serializing_if = "Option::is_none", rename = "adapter")]
+    adapter: Option<String>,
 }
 
 impl From<&Cli> for CliOverrides {
@@ -73,6 +83,9 @@ impl From<&Cli> for CliOverrides {
                 .skill_exposure
                 .clone()
                 .map(|kind| CliSkillExposureOverride { kind: Some(kind) }),
+            sandbox: cli.sandbox_adapter.clone().map(|adapter| CliSandboxOverride {
+                adapter: Some(adapter),
+            }),
         }
     }
 }
@@ -184,6 +197,7 @@ pub fn load_default() -> AppConfig {
         context: None,
         tool_exposure: None,
         skill_exposure: None,
+        sandbox_adapter: None,
     };
     load(
         &cli,
@@ -287,6 +301,7 @@ mod tests {
             context: None,
             tool_exposure: None,
             skill_exposure: None,
+            sandbox_adapter: None,
         }
     }
 

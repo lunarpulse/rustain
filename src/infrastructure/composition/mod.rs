@@ -11,8 +11,8 @@ use crate::domain::errors::AdapterCompositionError;
 use crate::domain::models::profile::{AdapterRef, PortDimension, ProfileSelection};
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort, SessionPort, StoragePort,
-    ToolSetPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort,
+    SessionPort, StoragePort, ToolSetPort,
 };
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
@@ -42,6 +42,19 @@ pub struct ComposeContext {
     /// Passed to both L1MetadataExposure and StaticFullExposure constructors,
     /// and to ToolSetAdapter for the skill_view builtin tool.
     pub skill_cache: std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>,
+    /// Story 9.5 — sandbox adapter name from AppConfig.sandbox.adapter.
+    /// Phase A: "noop" (default on all platforms) or "landlock" (Linux + feature).
+    pub sandbox_adapter: String,
+    /// Story 9.5 — startup sandbox policy for `restrict_self()` parent-process
+    /// call. Derived from `SandboxPolicy::from_mode(initial_mode, workspace)`.
+    pub sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy,
+    /// Story 9.5 — sandbox manager ArcSwap slot, initialized to NoOpSandbox
+    /// and updated to the real adapter after AgentCore::compose. Threaded
+    /// through to ToolSetAdapter for Bash-tool enforcement.
+    pub sandbox_slot: Arc<arc_swap::ArcSwap<Arc<dyn SandboxManager>>>,
+    /// Story 9.5 — sandbox policy shared reference for Bash-tool enforcement.
+    /// Mirrors the AppState.sandbox_policy field; read at spawn time.
+    pub sandbox_policy: Arc<tokio::sync::RwLock<crate::domain::models::sandbox::SandboxPolicy>>,
 }
 
 impl AgentCore {
@@ -77,6 +90,7 @@ impl AgentCore {
         })?;
         let tool_exposure = build_tool_exposure(selection, ctx)?;
         let skill_exposure = build_skill_exposure(selection, ctx)?;
+        let sandbox = build_sandbox(selection, ctx)?;
 
         let elapsed = started.elapsed();
         tracing::info!(
@@ -94,6 +108,7 @@ impl AgentCore {
             context: Self::wrap(context),
             tool_exposure: Self::wrap_optional(tool_exposure),
             skill_exposure: Self::wrap_optional(skill_exposure),
+            sandbox: Self::wrap(sandbox),
         })
     }
 }
@@ -206,12 +221,22 @@ pub fn build_tools(
 ) -> Result<Arc<dyn ToolSetPort>, AdapterCompositionError> {
     match name {
         "builtin-only" => {
-            let adapter = ToolSetAdapter::new(ctx.workspace_path.clone(), Arc::clone(&ctx.storage));
+            let adapter = ToolSetAdapter::new(
+                ctx.workspace_path.clone(),
+                Arc::clone(&ctx.storage),
+                Arc::clone(&ctx.sandbox_slot),
+                Arc::clone(&ctx.sandbox_policy),
+            );
             Ok(Arc::new(adapter))
         }
         "builtin-full" => {
             let mut adapter =
-                ToolSetAdapter::new(ctx.workspace_path.clone(), Arc::clone(&ctx.storage));
+                ToolSetAdapter::new(
+                    ctx.workspace_path.clone(),
+                    Arc::clone(&ctx.storage),
+                    Arc::clone(&ctx.sandbox_slot),
+                    Arc::clone(&ctx.sandbox_policy),
+                );
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
             Ok(Arc::new(adapter))
         }
@@ -455,6 +480,71 @@ pub fn build_skill_exposure(
     }
 }
 
+/// Story 9.5 — build the sandbox manager from active config + platform/feature.
+///
+/// Resolution order:
+/// 1. `ctx.sandbox_adapter` (Figment-resolved from `[sandbox].adapter`)
+/// 2. If `"noop"`: bind `NoOpSandbox`.
+/// 3. If `"landlock"` AND `#[cfg(all(target_os = "linux", feature = "sandbox"))]`:
+///     attempt `LandlockSandbox::new(&startup_policy)`. On `Ok`: bind. On
+///     `Err(AbiTooOld | RulesetBuildFailed | ...)`: log `tracing::warn!` and
+///     fall back to `NoOpSandbox`.
+/// 4. If `"landlock"` AND not Linux OR without `sandbox` feature:
+///     `Err(AdapterCompositionError::UnknownAdapter)` — defense-in-depth;
+///     `startup::validate_sandbox_adapter` runs BEFORE this factory and
+///     converts the same configuration error into an actionable startup
+///     message.
+///
+/// # Coupling with `validate_sandbox_adapter`
+///
+/// `startup::validate_sandbox_adapter` runs BEFORE this factory and rejects
+/// `"landlock"` with an actionable error pointing at the `sandbox` cargo
+/// feature when the build is missing it. This factory's `Err` arm is
+/// defense-in-depth.
+pub fn build_sandbox(
+    _selection: &ProfileSelection,
+    ctx: &ComposeContext,
+) -> Result<Arc<dyn SandboxManager>, AdapterCompositionError> {
+    use crate::adapters::sandbox::NoOpSandbox;
+
+    match ctx.sandbox_adapter.as_str() {
+        "noop" => Ok(Arc::new(NoOpSandbox)),
+
+        #[cfg(all(target_os = "linux", feature = "sandbox"))]
+        "landlock" => {
+            use crate::adapters::sandbox::LandlockSandbox;
+            match LandlockSandbox::new(&ctx.sandbox_startup_policy) {
+                Ok(sb) => Ok(Arc::new(sb)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Landlock sandbox construction failed; falling back to NoOpSandbox \
+                         (ADR-06-04 §Negative — documented as known limitation per NFR33)"
+                    );
+                    Ok(Arc::new(NoOpSandbox))
+                }
+            }
+        }
+
+        #[cfg(not(all(target_os = "linux", feature = "sandbox")))]
+        "landlock" => Err(AdapterCompositionError::UnknownAdapter {
+            port: PortDimension::Tools, // re-use; no new PortDimension Phase A
+            name: "landlock requires the `sandbox` cargo feature on Linux".into(),
+            available: vec!["noop".into()],
+        }),
+
+        other => Err(AdapterCompositionError::UnknownAdapter {
+            port: PortDimension::Tools,
+            name: other.to_string(),
+            available: vec![
+                "noop".into(),
+                #[cfg(all(target_os = "linux", feature = "sandbox"))]
+                "landlock".into(),
+            ],
+        }),
+    }
+}
+
 // ── BuiltAdapter — typed dispatch enum for per-port adapter construction ──
 
 pub enum BuiltAdapter {
@@ -512,6 +602,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_compose_ctx() -> ComposeContext {
+        use crate::adapters::sandbox::NoOpSandbox;
         ComposeContext {
             workspace_path: PathBuf::from("/tmp/test"),
             project_context: ProjectContext::empty(),
@@ -523,6 +614,10 @@ mod tests {
             tool_exposure: "static-full".into(),
             skill_exposure: "l1-metadata".into(),
             skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
+            sandbox_adapter: "noop".into(),
+            sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>)),
+            sandbox_policy: Arc::new(tokio::sync::RwLock::new(crate::domain::models::sandbox::SandboxPolicy::Permissive)),
         }
     }
 

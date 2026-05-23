@@ -11,5 +11,6 @@ pub mod runtime;
 pub mod signals;
 pub mod skill_cache;
 pub mod startup;
+pub mod telemetry;
 pub mod terminal_info;
 pub mod utils;

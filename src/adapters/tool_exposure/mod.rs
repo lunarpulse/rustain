@@ -77,6 +77,10 @@ pub struct RenderDiagnostics {
     /// Human-readable explanation surfaced to telemetry and the adapter-status
     /// panel. `None` when no fidelity loss occurred.
     pub reason: Option<String>,
+    /// Story 9.5 — estimated token count of serialized tool definitions.
+    /// Populated by future provider-aware exposures in Phase B.
+    /// Phase A: always `None` (passthrough doesn't pre-compute).
+    pub definition_tokens_estimate: Option<usize>,
 }
 
 impl RenderDiagnostics {
@@ -87,6 +91,7 @@ impl RenderDiagnostics {
             truncated: false,
             dropped_count: 0,
             reason: None,
+            definition_tokens_estimate: None,
         }
     }
 }

@@ -238,6 +238,36 @@ impl Default for LayoutConfig {
     }
 }
 
+/// Sandbox enforcement configuration (Story 9.5, ADR-06-04 §Decision).
+///
+/// Threaded through the existing 7-layer Figment stack.
+///
+/// # Phase A
+///
+/// Accepts `"noop"` (default on all platforms) and `"landlock"` (Linux only,
+/// gated on `sandbox` cargo feature). On Linux without the feature,
+/// `"landlock"` produces an actionable startup error pointing at the
+/// `sandbox` cargo feature.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    #[serde(default = "SandboxConfig::default_adapter")]
+    pub adapter: String,
+}
+
+impl SandboxConfig {
+    fn default_adapter() -> String {
+        "noop".to_string()
+    }
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            adapter: Self::default_adapter(),
+        }
+    }
+}
+
 /// Per-turn tool exposure strategy configuration (Story 9.4).
 ///
 /// Threaded through the existing 7-layer Figment stack at
@@ -373,6 +403,10 @@ pub struct AppConfig {
     /// INVERTED from the Tools track which defaults to `static-full`).
     #[serde(default)]
     pub skill_exposure: SkillExposureConfig,
+    /// OS-level sandbox enforcement configuration. Story 9.5.
+    /// Defaults to `"noop"` on all platforms; `"landlock"` opt-in on Linux.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 impl AppConfig {
@@ -547,6 +581,7 @@ impl Default for AppConfig {
             budget: BudgetConfig::default(),
             tools: ToolsExposureConfig::default(),
             skill_exposure: SkillExposureConfig::default(),
+            sandbox: SandboxConfig::default(),
         }
     }
 }

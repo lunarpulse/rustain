@@ -67,6 +67,10 @@ pub struct Cli {
     /// `"meta-search"` (Story 9.7).
     #[arg(long, global = true, value_parser = ["l1-metadata", "static-full"])]
     pub skill_exposure: Option<String>,
+    /// Override sandbox adapter (Story 9.5). Phase A: `"noop"` (default on all
+    /// platforms) or `"landlock"` (Linux + `sandbox` cargo feature only).
+    #[arg(long, global = true, value_parser = ["noop", "landlock"])]
+    pub sandbox_adapter: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

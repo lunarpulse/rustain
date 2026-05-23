@@ -22,7 +22,7 @@ use crate::adapters::skill_activation::SkillActivator;
 use crate::domain::errors::ToolError;
 use crate::domain::events::{AppEvent, ToolProgressEvent};
 use crate::domain::models::checkpoint::CheckpointId;
-use crate::domain::models::{ToolDefinition, ToolProgressConfig, ToolResult};
+use crate::domain::models::{SandboxPolicy, ToolDefinition, ToolProgressConfig, ToolResult};
 use crate::domain::ports::{StoragePort, ToolSetPort};
 use crate::domain::services::plan_manager::PlanManager;
 
@@ -63,6 +63,12 @@ pub struct ToolSetAdapter {
     /// Optional skill cache for `skill_view` tool execution (Story 9.6).
     #[allow(dead_code)]
     skill_cache: Option<std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>>,
+    /// Story 9.5 — sandbox manager for Bash tool OS-level enforcement.
+    /// Initialized to NoOpSandbox at construction; updated after AgentCore::compose
+    /// via ArcSwap to the real LandlockSandbox (if configured).
+    sandbox: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>>,
+    /// Story 9.5 — sandbox policy reference for reading current policy at Bash spawn time.
+    sandbox_policy: Arc<tokio::sync::RwLock<SandboxPolicy>>,
 }
 
 /// Context for the `stream_lines` helper, bundling the many parameters
@@ -173,7 +179,12 @@ async fn stream_lines(
 }
 
 impl ToolSetAdapter {
-    pub fn new(workspace_path: PathBuf, storage: Arc<dyn StoragePort>) -> Self {
+    pub fn new(
+        workspace_path: PathBuf,
+        storage: Arc<dyn StoragePort>,
+        sandbox: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>>,
+        sandbox_policy: Arc<tokio::sync::RwLock<SandboxPolicy>>,
+    ) -> Self {
         Self {
             workspace_path,
             write_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -186,6 +197,8 @@ impl ToolSetAdapter {
             progress_tx: Mutex::new(None),
             tool_progress_config: Mutex::new(ToolProgressConfig::default()),
             skill_cache: None,
+            sandbox,
+            sandbox_policy,
         }
     }
 
@@ -265,14 +278,28 @@ impl ToolSetAdapter {
         // Drop the lock before spawning child
         let _ = cfg;
 
-        let mut child = tokio::process::Command::new("bash")
+        let mut child = tokio::process::Command::new("bash");
+        child
             .arg("-c")
             .arg(command)
             .current_dir(&self.workspace_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+
+        // Story 9.5 — apply OS-level sandbox enforcement before spawn.
+        // Runs AFTER PermissionChain::check (which the caller performs)
+        // and BEFORE spawn(). On NoOpSandbox this is a no-op.
+        {
+            let sandbox = self.sandbox.load_full();
+            let policy: SandboxPolicy = self.sandbox_policy.read().await.clone();
+            if let Err(e) = sandbox.apply(&mut child, &policy).await {
+                return Err(ToolError::ExecutionFailed(format!("sandbox: {e}")));
+            }
+        }
+
+        let mut child = child
             .spawn()
             .map_err(|e| ToolError::ExecutionFailed(format!("spawn: {e}")))?;
 
@@ -1029,6 +1056,7 @@ impl ToolSetAdapter {
 mod tests {
     use super::*;
     use crate::adapters::filesystem::FileSystemStorage;
+    use arc_swap::ArcSwap;
 
     fn test_cancel() -> CancellationToken {
         CancellationToken::new()
@@ -1037,7 +1065,16 @@ mod tests {
     fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
         let sessions_dir = dir.join(".claude").join("sessions");
         let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir));
-        ToolSetAdapter::new(dir.to_path_buf(), storage)
+        ToolSetAdapter::new(
+            dir.to_path_buf(),
+            storage,
+            Arc::new(ArcSwap::from_pointee(Arc::new(
+                crate::adapters::sandbox::NoOpSandbox,
+            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            )),
+        )
     }
 
     #[tokio::test]
@@ -1137,7 +1174,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sessions_dir = tmp.path().join(".claude").join("sessions");
         let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::new(sessions_dir.clone()));
-        let adapter = ToolSetAdapter::new(tmp.path().to_path_buf(), Arc::clone(&storage));
+        let adapter = ToolSetAdapter::new(
+            tmp.path().to_path_buf(),
+            Arc::clone(&storage),
+            Arc::new(ArcSwap::from_pointee(Arc::new(
+                crate::adapters::sandbox::NoOpSandbox,
+            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            )),
+        );
 
         let conv_id = generate_conversation_id();
         let conv = crate::domain::models::Conversation {

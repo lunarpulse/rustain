@@ -43,6 +43,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         context: None,
         tool_exposure: None,
         skill_exposure: None,
+        sandbox_adapter: None,
     }
 }
 
@@ -73,12 +74,16 @@ fn test_app_state_honors_raw_capacity() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
         domain_rx,
         approval_runtime,
-        SandboxPolicy::ReadOnly { network: false },
+        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly { network: false })),
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
         provider_swap.clone(),
@@ -95,6 +100,7 @@ fn test_app_state_honors_raw_capacity() {
         )
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
+        rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -126,12 +132,16 @@ fn test_app_state_session_cancel_is_root_token() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,
         domain_rx2,
         approval_runtime,
-        SandboxPolicy::ReadOnly { network: false },
+        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly { network: false })),
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
         provider_swap2.clone(),
@@ -148,6 +158,7 @@ fn test_app_state_session_cancel_is_root_token() {
         )
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
+        rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
     );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());

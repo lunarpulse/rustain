@@ -166,6 +166,10 @@ fn test_coding_profile_composes_seven_ports() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -211,6 +215,10 @@ fn test_base_profile_composes_all_noop() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -243,6 +251,10 @@ fn test_personal_assistant_preview_composes_with_fallback() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -285,6 +297,10 @@ fn test_reload_recomposes_agent_core() {
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
     };
     let ctx_arc = Arc::new(ctx);
 
