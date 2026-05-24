@@ -501,4 +501,194 @@ mod tests {
             models.len()
         );
     }
+
+    mod tool_call_ordering {
+        use super::*;
+        use crate::domain::models::{MessageRole, ToolResultMessage, ToolUseMessage};
+
+        fn make_options() -> CompletionOptions {
+            CompletionOptions {
+                model: "test-model".to_string(),
+                max_tokens: 4096,
+                system_prompt: String::new(),
+                temperature: None,
+                tools: vec![],
+            }
+        }
+
+        #[test]
+        fn test_tool_results_emitted_before_user_text() {
+            // Reproduce the bug scenario: build_api_messages produces
+            // [User, Assistant(tool_uses), User(text + tool_results)]
+            // The OpenAI adapter must emit tool messages BEFORE the user text
+            // so the API sees: [user, assistant(tool_calls), tool, user]
+            let tool_use = ToolUseMessage {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            };
+            let tool_result = ToolResultMessage {
+                tool_use_id: "call_1".to_string(),
+                content: "src/ tests/".to_string(),
+                is_error: false,
+            };
+
+            let messages = vec![
+                Message {
+                    role: MessageRole::User,
+                    content: "what files are in .?".to_string(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: "Let me check".to_string(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![tool_use],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: "what about hidden files?".to_string(),
+                    images: vec![],
+                    tool_results: vec![tool_result],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+            ];
+
+            let request = OpenAiRequest::from((&messages[..], &make_options()));
+
+            assert_eq!(
+                request.messages.len(),
+                4,
+                "expected 4 messages: [user, assistant(tool_calls), tool, user]"
+            );
+
+            assert_eq!(request.messages[0].role, "user");
+            assert_eq!(request.messages[0].content, "what files are in .?");
+
+            assert_eq!(request.messages[1].role, "assistant");
+            assert_eq!(request.messages[1].content, "Let me check");
+            let tc = request.messages[1].tool_calls.as_ref().unwrap();
+            assert_eq!(tc.len(), 1);
+            assert_eq!(tc[0].id, "call_1");
+
+            // Tool message MUST come before the follow-up user text
+            assert_eq!(request.messages[2].role, "tool");
+            assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_1"));
+            assert_eq!(request.messages[2].content, "src/ tests/");
+
+            assert_eq!(request.messages[3].role, "user");
+            assert_eq!(request.messages[3].content, "what about hidden files?");
+        }
+
+        #[test]
+        fn test_tool_results_empty_content_skips_text_message() {
+            // Reproduce the inner turn loop pattern: User message with empty
+            // content and tool_results. The adapter should only emit tool
+            // messages (no empty user text message).
+            let tool_use = ToolUseMessage {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            };
+            let tool_result = ToolResultMessage {
+                tool_use_id: "call_1".to_string(),
+                content: "src/ tests/".to_string(),
+                is_error: false,
+            };
+
+            let messages = vec![
+                Message {
+                    role: MessageRole::User,
+                    content: "what files are in .?".to_string(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: "Let me check".to_string(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![tool_use],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: String::new(), // empty — inner-loop pattern
+                    images: vec![],
+                    tool_results: vec![tool_result],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+            ];
+
+            let request = OpenAiRequest::from((&messages[..], &make_options()));
+
+            assert_eq!(
+                request.messages.len(),
+                3,
+                "expected 3 messages: [user, assistant(tool_calls), tool] — no empty user"
+            );
+
+            assert_eq!(request.messages[0].role, "user");
+            assert_eq!(request.messages[1].role, "assistant");
+            assert_eq!(request.messages[2].role, "tool");
+            assert_eq!(request.messages[2].tool_call_id.as_deref(), Some("call_1"));
+        }
+
+        #[test]
+        fn test_tool_results_with_error_flag() {
+            let tool_use = ToolUseMessage {
+                id: "call_err".to_string(),
+                name: "broken_tool".to_string(),
+                input: serde_json::json!({}),
+            };
+            let tool_result = ToolResultMessage {
+                tool_use_id: "call_err".to_string(),
+                content: "command not found".to_string(),
+                is_error: true,
+            };
+
+            let messages = vec![
+                Message {
+                    role: MessageRole::Assistant,
+                    content: String::new(),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: vec![tool_use],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: String::new(),
+                    images: vec![],
+                    tool_results: vec![tool_result],
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                },
+            ];
+
+            let request = OpenAiRequest::from((&messages[..], &make_options()));
+
+            assert_eq!(request.messages.len(), 2);
+            assert_eq!(request.messages[1].role, "tool");
+            assert_eq!(request.messages[1].tool_call_id.as_deref(), Some("call_err"));
+            assert!(request.messages[1].content.starts_with("Error: "));
+        }
+    }
 }

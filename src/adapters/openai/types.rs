@@ -97,11 +97,27 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
             let has_tool_uses = !msg.tool_uses.is_empty();
 
             if has_tool_results {
-                // Emit the text-bearing message first (if any), then
-                // role:"tool" messages for each tool result.
-                // The OpenAI API requires that every assistant message
-                // with tool_calls is IMMEDIATELY followed by role:"tool"
-                // messages with matching tool_call_id.
+                // Emit role:"tool" messages FIRST (before any role-carrying
+                // text message) so they immediately follow the assistant
+                // message with tool_calls. The OpenAI API requires that
+                // every assistant message with tool_calls is IMMEDIATELY
+                // followed by role:"tool" messages with matching tool_call_id.
+                for tr in &msg.tool_results {
+                    let tool_content = if tr.is_error {
+                        format!("Error: {}", tr.content)
+                    } else {
+                        tr.content.clone()
+                    };
+                    openai_messages.push(OpenAiMessage {
+                        role: "tool".to_string(),
+                        content: tool_content,
+                        tool_calls: None,
+                        tool_call_id: Some(tr.tool_use_id.clone()),
+                        reasoning_content: None,
+                    });
+                }
+
+                // Then emit the role-carrying text message (if any text or tool_uses)
                 if has_text || has_tool_uses {
                     let tool_calls = if has_tool_uses {
                         Some(
@@ -126,21 +142,6 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
                         tool_calls,
                         tool_call_id: None,
                         reasoning_content: msg.reasoning_content.clone(),
-                    });
-                }
-
-                for tr in &msg.tool_results {
-                    let tool_content = if tr.is_error {
-                        format!("Error: {}", tr.content)
-                    } else {
-                        tr.content.clone()
-                    };
-                    openai_messages.push(OpenAiMessage {
-                        role: "tool".to_string(),
-                        content: tool_content,
-                        tool_calls: None,
-                        tool_call_id: Some(tr.tool_use_id.clone()),
-                        reasoning_content: None,
                     });
                 }
             } else {
