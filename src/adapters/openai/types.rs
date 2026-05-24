@@ -70,43 +70,80 @@ pub struct OpenAiToolCallFunction {
 
 impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
     fn from((messages, options): (&[Message], &CompletionOptions)) -> Self {
-        let openai_messages: Vec<OpenAiMessage> = messages
-            .iter()
-            .filter_map(|msg| {
-                let role = match msg.role {
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "assistant",
-                    MessageRole::System => "system",
-                };
+        let mut openai_messages: Vec<OpenAiMessage> = Vec::new();
 
-                // Build content from text + images + tool results
-                let mut content = msg.content.clone();
+        for msg in messages {
+            let role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => "system",
+            };
 
-                // Append tool results
+            // Build text content (text + images only; tool results are
+            // emitted as separate role:"tool" messages per the OpenAI spec)
+            let mut content = msg.content.clone();
+            for img in &msg.images {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("[Image: {}]", img.media_type));
+            }
+
+            let has_tool_results = !msg.tool_results.is_empty();
+            let has_text = !content.is_empty();
+            let has_tool_uses = !msg.tool_uses.is_empty();
+
+            if has_tool_results {
+                // Emit the text-bearing message first (if any), then
+                // role:"tool" messages for each tool result.
+                // The OpenAI API requires that every assistant message
+                // with tool_calls is IMMEDIATELY followed by role:"tool"
+                // messages with matching tool_call_id.
+                if has_text || has_tool_uses {
+                    let tool_calls = if has_tool_uses {
+                        Some(
+                            msg.tool_uses
+                                .iter()
+                                .map(|tu| OpenAiToolCall {
+                                    id: tu.id.clone(),
+                                    call_type: "function".to_string(),
+                                    function: OpenAiToolCallFunction {
+                                        name: tu.name.clone(),
+                                        arguments: tu.input.to_string(),
+                                    },
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    };
+                    openai_messages.push(OpenAiMessage {
+                        role: role.to_string(),
+                        content,
+                        tool_calls,
+                        tool_call_id: None,
+                    });
+                }
+
                 for tr in &msg.tool_results {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&format!("Tool result ({}): {}", tr.tool_use_id, tr.content));
+                    let tool_content = if tr.is_error {
+                        format!("Error: {}", tr.content)
+                    } else {
+                        tr.content.clone()
+                    };
+                    openai_messages.push(OpenAiMessage {
+                        role: "tool".to_string(),
+                        content: tool_content,
+                        tool_calls: None,
+                        tool_call_id: Some(tr.tool_use_id.clone()),
+                    });
                 }
-
-                // Append image mentions as text (OpenAI-compatible endpoints handle
-                // images differently than Anthropic; for now, mention them in text)
-                for img in &msg.images {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&format!("[Image: {}]", img.media_type));
+            } else {
+                // No tool results: single message as before
+                if content.is_empty() && !has_tool_uses {
+                    continue;
                 }
-
-                // Skip truly empty messages
-                if content.is_empty() && msg.tool_uses.is_empty() {
-                    return None;
-                }
-
-                let tool_calls = if msg.tool_uses.is_empty() {
-                    None
-                } else {
+                let tool_calls = if has_tool_uses {
                     Some(
                         msg.tool_uses
                             .iter()
@@ -120,16 +157,17 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
                             })
                             .collect(),
                     )
+                } else {
+                    None
                 };
-
-                Some(OpenAiMessage {
+                openai_messages.push(OpenAiMessage {
                     role: role.to_string(),
                     content,
                     tool_calls,
                     tool_call_id: None,
-                })
-            })
-            .collect();
+                });
+            }
+        }
 
         let tools: Vec<OpenAiToolDef> = options.tools.iter().map(OpenAiToolDef::from).collect();
 

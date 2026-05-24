@@ -64,14 +64,14 @@ fn test_priority_wins_on_duplicate_name() {
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    write_skill_in(ws, ".agents/skills", "review", "Workspace agent review");
-    write_skill_in(ws, ".claude/skills", "review", "Claude review");
+    write_skill_in(ws, ".agents/skills", "review", "Reviews code when the user runs /review");
+    write_skill_in(ws, ".claude/skills", "review", "Reviews code when the user runs /review alt");
 
     let registry = SkillRegistry::discover(ws, Some(&home), &[]);
     assert_eq!(registry.skills().len(), 1);
     let skill = registry.find("review").unwrap();
     assert_eq!(skill.source, SkillSource::WorkspaceAgents);
-    assert_eq!(skill.description, "Workspace agent review");
+    assert_eq!(skill.description, "Reviews code when the user runs /review");
     // AC7 (P20): shadowing must NOT surface to the user as a validation warning.
     assert_eq!(
         registry.warnings_count(),
@@ -265,7 +265,7 @@ fn test_filter_not_on_description() {
 fn test_disabled_nonexistent_silent() {
     let tmp = tempfile::tempdir().unwrap();
     let ws = tmp.path();
-    write_skill_in(ws, ".agents/skills", "good", "Good skill");
+    write_skill_in(ws, ".agents/skills", "good", "A good skill when you need it most");
 
     let registry = SkillRegistry::discover(ws, None, &["nonexistent".to_string()]);
     assert_eq!(registry.skills().len(), 1);
@@ -279,14 +279,14 @@ fn test_global_tier_lower_priority_than_workspace() {
     let home = tmp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    write_skill_in(ws, ".agents/skills", "shared", "Workspace version");
-    write_skill_in(&home, ".agents/skills", "shared", "Global version");
+    write_skill_in(ws, ".agents/skills", "shared", "Workspace version when active");
+    write_skill_in(&home, ".agents/skills", "shared", "Global version when active");
 
     let registry = SkillRegistry::discover(ws, Some(&home), &[]);
     assert_eq!(registry.skills().len(), 1);
     assert_eq!(
         registry.find("shared").unwrap().description,
-        "Workspace version"
+        "Workspace version when active"
     );
     // AC7: dedup shadow must not generate a user-facing warning.
     assert_eq!(registry.warnings_count(), 0);
@@ -394,7 +394,7 @@ fn test_workspace_equals_home_no_double_scan() {
     let tmp = tempfile::tempdir().unwrap();
     // Use the SAME directory as both workspace and home.
     let ws_home = tmp.path();
-    write_skill_in(ws_home, ".agents/skills", "solo", "Solo skill");
+    write_skill_in(ws_home, ".agents/skills", "solo", "A solo skill when you need it");
 
     let registry = SkillRegistry::discover(ws_home, Some(ws_home), &[]);
     assert_eq!(registry.skills().len(), 1);

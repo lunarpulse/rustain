@@ -496,6 +496,24 @@ struct OllamaChatRequest {
 struct OllamaMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OllamaRequestToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OllamaRequestToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: String,
+    function: OllamaRequestToolCallFunction,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OllamaRequestToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -583,39 +601,95 @@ struct OllamaShowResponse {
 
 impl From<(&[Message], &CompletionOptions, &str)> for OllamaChatRequest {
     fn from((messages, options, model): (&[Message], &CompletionOptions, &str)) -> Self {
-        let ollama_messages: Vec<OllamaMessage> = messages
-            .iter()
-            .map(|msg| {
-                let role = match msg.role {
-                    MessageRole::User => "user",
-                    MessageRole::Assistant => "assistant",
-                    MessageRole::System => "system",
-                };
+        let mut ollama_messages: Vec<OllamaMessage> = Vec::new();
 
-                let mut content = msg.content.clone();
+        for msg in messages {
+            let role = match msg.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::System => "system",
+            };
 
-                // Append tool results as text (Ollama uses text-based tool results)
+            // Build text content (text + images only; tool results are
+            // emitted as separate role:"tool" messages per the OpenAI spec)
+            let mut content = msg.content.clone();
+            for img in &msg.images {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&format!("[Image: {}]", img.media_type));
+            }
+
+            let has_tool_results = !msg.tool_results.is_empty();
+            let has_text = !content.is_empty();
+            let has_tool_uses = !msg.tool_uses.is_empty();
+
+            if has_tool_results {
+                if has_text || has_tool_uses {
+                    let tool_calls = if has_tool_uses {
+                        Some(
+                            msg.tool_uses
+                                .iter()
+                                .map(|tu| OllamaRequestToolCall {
+                                    id: tu.id.clone(),
+                                    call_type: "function".to_string(),
+                                    function: OllamaRequestToolCallFunction {
+                                        name: tu.name.clone(),
+                                        arguments: tu.input.to_string(),
+                                    },
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    };
+                    ollama_messages.push(OllamaMessage {
+                        role: role.to_string(),
+                        content,
+                        tool_calls,
+                        tool_call_id: None,
+                    });
+                }
+
                 for tr in &msg.tool_results {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&format!("Tool result ({}): {}", tr.tool_use_id, tr.content));
+                    let tool_content = if tr.is_error {
+                        format!("Error: {}", tr.content)
+                    } else {
+                        tr.content.clone()
+                    };
+                    ollama_messages.push(OllamaMessage {
+                        role: "tool".to_string(),
+                        content: tool_content,
+                        tool_calls: None,
+                        tool_call_id: Some(tr.tool_use_id.clone()),
+                    });
                 }
-
-                // Append image mentions
-                for img in &msg.images {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&format!("[Image: {}]", img.media_type));
-                }
-
-                OllamaMessage {
+            } else {
+                let tool_calls = if has_tool_uses {
+                    Some(
+                        msg.tool_uses
+                            .iter()
+                            .map(|tu| OllamaRequestToolCall {
+                                id: tu.id.clone(),
+                                call_type: "function".to_string(),
+                                function: OllamaRequestToolCallFunction {
+                                    name: tu.name.clone(),
+                                    arguments: tu.input.to_string(),
+                                },
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+                ollama_messages.push(OllamaMessage {
                     role: role.to_string(),
                     content,
-                }
-            })
-            .collect();
+                    tool_calls,
+                    tool_call_id: None,
+                });
+            }
+        }
 
         let tools: Vec<OllamaToolDef> = options
             .tools
