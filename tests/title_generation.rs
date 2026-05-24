@@ -281,6 +281,7 @@ async fn test_generate_title_via_mock_provider() {
         tool_results: vec![],
         tool_uses: vec![],
         context_prefix: None,
+    reasoning_content: None,
     }];
     let options = CompletionOptions {
         model: "test-model".to_string(),
@@ -319,6 +320,7 @@ async fn test_title_generation_failure_silent() {
                 tool_results: vec![],
                 tool_uses: vec![],
                 context_prefix: None,
+            reasoning_content: None,
             }],
             CompletionOptions {
                 model: "test".to_string(),

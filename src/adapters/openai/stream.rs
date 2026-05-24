@@ -74,6 +74,16 @@ impl OpenAiStreamTransformer {
                 }
             }
 
+            // DeepSeek v4 reasoning/thinking content
+            if let Some(reasoning) = &delta.reasoning_content {
+                if !reasoning.is_empty() {
+                    chunks.push(StreamChunk::Thinking {
+                        content: reasoning.clone(),
+                        parent_tool_use_id: None,
+                    });
+                }
+            }
+
             // Tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
                 for tc in tool_calls {

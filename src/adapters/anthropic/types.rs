@@ -283,6 +283,7 @@ mod tests {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
+        reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),
@@ -316,6 +317,7 @@ mod tests {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
+        reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),
@@ -348,6 +350,7 @@ mod tests {
             }],
             tool_uses: vec![],
             context_prefix: None,
+        reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),
@@ -418,6 +421,7 @@ mod tests {
                 tool_results: vec![],
                 tool_uses: vec![],
                 context_prefix: None,
+            reasoning_content: None,
             },
             Message {
                 role: MessageRole::Assistant,
@@ -426,6 +430,7 @@ mod tests {
                 tool_results: vec![],
                 tool_uses: vec![],
                 context_prefix: None,
+            reasoning_content: None,
             },
         ];
         let options = CompletionOptions {
@@ -474,6 +479,7 @@ mod tests {
                 tool_results: vec![],
                 tool_uses: vec![],
                 context_prefix: None,
+            reasoning_content: None,
             },
             Message {
                 role: MessageRole::Assistant,
@@ -486,6 +492,7 @@ mod tests {
                     input: serde_json::json!({"file_path": "file.txt"}),
                 }],
                 context_prefix: None,
+            reasoning_content: None,
             },
             Message {
                 role: MessageRole::User,
@@ -498,6 +505,7 @@ mod tests {
                 }],
                 tool_uses: vec![],
                 context_prefix: None,
+            reasoning_content: None,
             },
         ];
         let options = CompletionOptions {
@@ -542,6 +550,7 @@ mod tests {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
+        reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),
@@ -589,6 +598,7 @@ mod tests {
             }],
             tool_uses: vec![],
             context_prefix: None,
+        reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),
@@ -621,6 +631,7 @@ mod tests {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
+        reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),

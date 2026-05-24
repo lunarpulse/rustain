@@ -52,6 +52,9 @@ pub struct OpenAiMessage {
     pub tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// DeepSeek v4 thinking mode: echoed back verbatim on assistant messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +125,7 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
                         content,
                         tool_calls,
                         tool_call_id: None,
+                        reasoning_content: msg.reasoning_content.clone(),
                     });
                 }
 
@@ -136,6 +140,7 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
                         content: tool_content,
                         tool_calls: None,
                         tool_call_id: Some(tr.tool_use_id.clone()),
+                        reasoning_content: None,
                     });
                 }
             } else {
@@ -165,6 +170,7 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
                     content,
                     tool_calls,
                     tool_call_id: None,
+                    reasoning_content: msg.reasoning_content.clone(),
                 });
             }
         }
@@ -210,6 +216,9 @@ pub struct OpenAiDelta {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<OpenAiDeltaToolCall>>,
+    /// DeepSeek v4 thinking mode: reasoning/thinking content in deltas.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

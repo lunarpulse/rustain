@@ -28,6 +28,10 @@ pub struct Message {
     /// Tool use blocks from assistant messages (needed for multi-turn tool conversations).
     pub tool_uses: Vec<ToolUseMessage>,
     pub context_prefix: Option<String>,
+    /// Reasoning/thinking content (DeepSeek v4 thinking mode). Echoed back verbatim
+    /// on assistant messages so the API can validate continuity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// A tool use block from an assistant message, sent back for multi-turn tool conversations.

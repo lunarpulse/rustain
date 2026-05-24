@@ -1,5 +1,5 @@
 use crate::domain::models::{
-    Conversation, Message, MessageRole, ToolResultMessage, ToolUseMessage,
+    ContentBlockType, Conversation, Message, MessageRole, ToolResultMessage, ToolUseMessage,
 };
 
 /// Resolved file content to be attached to a message.
@@ -84,6 +84,16 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
         };
 
         if cm.role == MessageRole::Assistant {
+            // Extract thinking/reasoning content from content_blocks so
+            // providers like DeepSeek v4 that require it can echo it back.
+            let reasoning_content = cm
+                .content_blocks
+                .iter()
+                .find_map(|b| match b {
+                    ContentBlockType::Thinking(text) => Some(text.clone()),
+                    _ => None,
+                });
+
             messages.push(Message {
                 role: cm.role,
                 content: cm.content.clone(),
@@ -91,6 +101,7 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                 tool_results: vec![],
                 tool_uses,
                 context_prefix: None,
+                reasoning_content,
             });
 
             // Collect tool results — buffer them for the next User message
@@ -121,6 +132,7 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                 tool_results,
                 tool_uses: vec![],
                 context_prefix: None,
+                reasoning_content: None,
             });
         }
     }
@@ -134,6 +146,7 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
             tool_results: pending_tool_results,
             tool_uses: vec![],
             context_prefix: None,
+            reasoning_content: None,
         });
     }
 

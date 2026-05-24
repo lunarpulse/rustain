@@ -95,6 +95,7 @@ pub async fn run_turn(
                 let mut stop_reason = StopReason::EndTurn;
                 let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
                 let mut accumulated_text = String::new();
+                let mut accumulated_thinking = String::new();
 
                 let mut iteration_usage: Option<crate::domain::models::UsageInfo> = None;
 
@@ -117,6 +118,9 @@ pub async fn run_turn(
                         }
                         StreamChunk::Text { content, .. } => {
                             accumulated_text.push_str(content);
+                        }
+                        StreamChunk::Thinking { content, .. } => {
+                            accumulated_thinking.push_str(content);
                         }
                         StreamChunk::Usage { usage, .. } => {
                             iteration_usage = Some(usage.clone());
@@ -218,6 +222,11 @@ pub async fn run_turn(
                             tool_results: vec![],
                             tool_uses: tool_use_msgs,
                             context_prefix: None,
+                            reasoning_content: if accumulated_thinking.is_empty() {
+                                None
+                            } else {
+                                Some(std::mem::take(&mut accumulated_thinking))
+                            },
                         });
 
                         // Create a checkpoint BEFORE executing any tools in this turn (AC2, Story 4-3b).
@@ -418,6 +427,7 @@ pub async fn run_turn(
                             tool_results: tool_result_messages,
                             tool_uses: vec![],
                             context_prefix: None,
+                            reasoning_content: None,
                         });
 
                         // Loop back to stream_completion

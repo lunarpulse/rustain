@@ -8920,6 +8920,7 @@ async fn generate_title(
         tool_results: vec![],
         tool_uses: vec![],
         context_prefix: None,
+    reasoning_content: None,
     }];
     let options = CompletionOptions {
         model: model.to_string(),
