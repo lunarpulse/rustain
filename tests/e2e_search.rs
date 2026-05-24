@@ -119,6 +119,7 @@ fn render_once(
                 &[],
                 None,
                 None,
+                None, // open_prose
             );
         })
         .unwrap();
@@ -475,6 +476,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
                 &[],
                 None,
                 None,
+                None, // open_prose
             );
         })
         .unwrap();
@@ -578,6 +580,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
                 &[],
                 None,
                 None,
+                None, // open_prose
             );
         })
         .unwrap();

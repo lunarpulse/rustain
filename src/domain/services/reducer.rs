@@ -103,7 +103,7 @@ use crate::domain::models::{
 /// - `wall_anchor_ms` / `instant_anchor` — wall-clock anchor pair captured once at `new()`.
 pub struct ReducerState {
     pub open_turn: Option<Turn>,
-    open_prose: Option<String>,
+    pub open_prose: Option<String>,
     open_reasoning: Option<String>,
     pub pending_invocations: HashMap<String, PartId>,
     /// Completed invocations (removed from `pending_invocations` on ToolResult,

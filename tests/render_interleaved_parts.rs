@@ -125,7 +125,8 @@ fn render_text(
             &[],
             &[],
             None,
-            None,
+            None, // liveness
+            None, // open_prose
         );
     });
     use ratatui::buffer::Buffer;

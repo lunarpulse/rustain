@@ -8439,6 +8439,9 @@ fn render(
                         liveness_snapshot.as_ref();
                     let tab_id = state.active_tab_id;
                     let render_state = state.tab_render_states.entry(tab_id).or_default();
+                    let open_prose_ref: Option<&str> = tab_manager_for_bar
+                        .map(|tm| tm.active_tab().reducer.open_prose.as_deref())
+                        .unwrap_or(None);
                     let result = chat_pane::render_with_search(
                         frame,
                         app_layout.chat_pane,
@@ -8459,6 +8462,7 @@ fn render(
                         bookmark_indices,
                         state.pending_plan_card.as_ref(),
                         liveness_ref,
+                        open_prose_ref,
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;

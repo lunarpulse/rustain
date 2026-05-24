@@ -1288,6 +1288,7 @@ pub fn render(
         &[],
         None,
         None, // liveness
+        None, // open_prose
     )
 }
 
@@ -1331,6 +1332,7 @@ pub fn render_with_search(
     bookmarks: &[usize],
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
+    open_prose: Option<&str>,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -1587,6 +1589,19 @@ pub fn render_with_search(
         0
     };
     let _ = open_turn_height;
+
+    // Open prose height: text buffered during streaming, not yet committed to turn.parts
+    if let Some(op) = open_prose {
+        if !op.is_empty() {
+            let cw = width.saturating_sub(2);
+            cumulative_offset +=
+                crate::adapters::tui::markdown::compute_height(
+                    op,
+                    cw,
+                    &crate::adapters::tui::markdown::RenderOptions::default(),
+                );
+        }
+    }
 
     // Feedback block contribution
     let feedback_pre_height: usize = if !feedback_blocks.is_empty() {
@@ -1863,6 +1878,37 @@ pub fn render_with_search(
                 }
             }
             line_offset += tl_len;
+
+            // Open prose: render streaming text not yet committed to turn.parts
+            if let Some(op) = open_prose {
+                if !op.is_empty() {
+                    let cw = width.saturating_sub(2);
+                    let prose_lines = crate::adapters::tui::markdown::render(
+                        op,
+                        cw,
+                        theme,
+                        &crate::adapters::tui::markdown::RenderOptions::default(),
+                    );
+                    let gutter_prose = gutter_lines(prose_lines, theme);
+                    let gp_len = gutter_prose.len();
+                    for (j, line) in gutter_prose.into_iter().enumerate() {
+                        let abs_line = line_offset + j;
+                        if abs_line >= visible_start && abs_line < visible_end {
+                            lines.push(line);
+                        }
+                    }
+                    line_offset += gp_len;
+                    // Trailing gutter half-line
+                    let abs_last = line_offset;
+                    if abs_last >= visible_start && abs_last < visible_end {
+                        lines.push(Line::from(Span::styled(
+                            "│",
+                            Style::default().fg(theme.colors.accent),
+                        )));
+                    }
+                    line_offset += 1;
+                }
+            }
         }
     }
 
@@ -3021,6 +3067,7 @@ mod parts_aware_tests {
                     &[],
                     None,
                     None, // liveness
+                    None, // open_prose
                 );
             })
             .unwrap();
@@ -3055,6 +3102,7 @@ mod parts_aware_tests {
                     &[],
                     None,
                     None, // liveness
+                    None, // open_prose
                 );
             })
             .unwrap();
@@ -3091,6 +3139,7 @@ mod parts_aware_tests {
                     &[],
                     None,
                     None, // liveness
+                    None, // open_prose
                 );
             })
             .unwrap();
