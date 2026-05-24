@@ -51,6 +51,12 @@ pub struct CompositeToolsetAdapter {
     prev_catalog: TokioMutex<Vec<crate::domain::models::tool_descriptor::ToolDescriptor>>,
     /// Story 9.3b — monotonic version counter for catalog deltas.
     catalog_version: AtomicU64,
+    /// Story 9.7 Phase B — broadcast sender for catalog deltas.
+    /// When `Some`, `emit_catalog_delta` sends the delta after computing it.
+    /// Set by `set_catalog_broadcast` after `CatalogObserverRegistry` is
+    /// constructed (two-phase wiring: adapter built first, then registry).
+    #[cfg(feature = "meta-search")]
+    catalog_broadcast: std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>>,
 }
 
 impl CompositeToolsetAdapter {
@@ -81,12 +87,24 @@ impl CompositeToolsetAdapter {
             skill_activator,
             prev_catalog: TokioMutex::new(Vec::new()),
             catalog_version: AtomicU64::new(0),
+            #[cfg(feature = "meta-search")]
+            catalog_broadcast: std::sync::OnceLock::new(),
         }
     }
 
     /// Story 9.3a — access the capability registry.
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         &self.capability_registry
+    }
+
+    /// Story 9.7 Phase B — wire the catalog delta broadcast sender.
+    /// Called after `CatalogObserverRegistry` is constructed.
+    #[cfg(feature = "meta-search")]
+    pub fn set_catalog_broadcast(
+        &self,
+        sender: tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>,
+    ) {
+        let _ = self.catalog_broadcast.set(sender);
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
@@ -211,13 +229,17 @@ impl CompositeToolsetAdapter {
             *prev = snapshot;
         }
 
-        // PHASE A: no broadcast. Trace at debug level so Phase B wiring
-        // is visible in logs without changing the method body.
+        // PHASE B: broadcast to observers if sender wired.
+        #[cfg(feature = "meta-search")]
+        if let Some(sender) = self.catalog_broadcast.get() {
+            let _ = sender.send(delta.clone());
+        }
+
         tracing::debug!(
             added = delta.added.len(),
             removed = delta.removed.len(),
             version = delta.version,
-            "Phase A catalog delta computed (no broadcast — Story 9.7 Phase B)"
+            "catalog delta computed"
         );
 
         Ok(())

@@ -29,6 +29,7 @@ pub fn port_label(port: PortDimension) -> &'static str {
         PortDimension::Channels => "channels",
         PortDimension::Scheduler => "scheduler",
         PortDimension::Context => "context",
+        PortDimension::Skills => "skills",
     }
 }
 

@@ -21,6 +21,7 @@ fn test_metadata(name: &str) -> SkillMetadata {
         name: name.into(),
         description: format!("{name} provides functionality when the user needs it"),
         source: SkillSource::WorkspaceAgents,
+        terse: None,
     }
 }
 
@@ -208,8 +209,9 @@ async fn test_builtin_provider_includes_skill_view() {
     );
 }
 
-// ── AC-9-6-8: Config validation rejects meta-search with actionable error ──
+// ── AC-9-6-8: Config validation rejects meta-search with actionable error (Phase A only) ──
 
+#[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_meta_search_config_rejected_with_actionable_error() {
     
@@ -309,6 +311,10 @@ fn test_compose_with_default_config_binds_l1_metadata() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
     let selection = ProfileSelection {
         dimensions: BTreeMap::new(),
@@ -350,6 +356,10 @@ fn test_compose_with_static_full_binds_static_full() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
     let selection = ProfileSelection {
         dimensions: BTreeMap::new(),
@@ -404,6 +414,7 @@ fn test_search_stub_payload_variant_reserved() {
     }
 }
 
+#[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_phase_a_no_meta_search_feature() {
     let cargo_toml =
@@ -467,6 +478,7 @@ async fn test_cache_source_retrieval() {
         name: "ws-skill".into(),
         description: "workspace skill when needed".into(),
         source: SkillSource::WorkspaceClaude,
+        terse: None,
     };
     cache.insert("ws-skill", meta, "body".into()).await;
 

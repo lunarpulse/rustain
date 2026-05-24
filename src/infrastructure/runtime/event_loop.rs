@@ -6202,6 +6202,19 @@ pub async fn run(
                         // Both TuiState and SkillActivator share the same Arc, so
                         // no clone/set_registry/replace_skill_registry needed.
                         state.refresh_skill_name_cache().await;
+                        // Story 9.7 Phase B — warm the two-layer skill cache from the
+                        // discovered registry so meta-search can index skill metadata.
+                        {
+                            let skill_cache = std::sync::Arc::clone(&app_state.compose_snapshot.skill_cache);
+                            let registry = state.skill_registry.read().await;
+                            skill_cache.populate_from_registry(&*registry).await;
+                        }
+                        // Story 9.7 Phase B — rebuild the merged BM25 index so that
+                        // `search_capabilities` sees the newly-discovered skills.
+                        #[cfg(feature = "meta-search")]
+                        if let Some(ref catalog_registry) = app_state.catalog_registry {
+                            catalog_registry.rebuild_now();
+                        }
                         state.needs_redraw = true;
                         // AC6: if the user already has `/` autocomplete open when
                         // discovery finishes, refresh suggestions so newly

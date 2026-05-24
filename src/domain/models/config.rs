@@ -334,6 +334,63 @@ impl Default for SkillExposureConfig {
     }
 }
 
+/// Phase B search configuration per ADR-09-02 v2 §Audience Split.
+///
+/// `skills` and `tools` are independent per-port runtime knobs (NOT
+/// compile-time forks — the `meta-search` cargo feature gates both;
+/// Figment chooses which port indexes when the feature is compiled).
+///
+/// # Asymmetric defaults
+///
+/// `skills = "on"`: Skills ecosystem evidence saturates (7 signals per
+/// ADR-09-02 §Context). When the user opts into `[skill_exposure].kind = "meta-search"`,
+/// the `MetaSearchExposure` skill-side adapter substitutes the per-turn
+/// L1 metadata block with the unified `search_capabilities` meta-tool.
+///
+/// `tools = "off"`: MCP ecosystem evidence is partial (Arcade single-anchor
+/// per Mary Round 2). When the user sets `[tools].exposure = "meta-search"`
+/// without flipping `[search] tools = "on"`, the system rejects at startup
+/// with an actionable error pointing at the evidence asymmetry.
+///
+/// # DO NOT silently restore symmetry
+///
+/// See `composition/mod.rs::build_tool_exposure` + `build_skill_exposure`
+/// asymmetry-by-design guard comments (extended Phase B for the search
+/// table) and `epic-9-design-flags-2026-05-20.md` Flag 4 + Flag 5.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default = "default_search_skills")]
+    pub skills: String,
+    #[serde(default = "default_search_tools")]
+    pub tools: String,
+}
+
+fn default_search_skills() -> String { "on".into() }
+fn default_search_tools() -> String { "off".into() }
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            skills: default_search_skills(),
+            tools: default_search_tools(),
+        }
+    }
+}
+
+impl SearchConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, val) in [("skills", &self.skills), ("tools", &self.tools)] {
+            if val != "on" && val != "off" {
+                return Err(format!(
+                    "[search].{} = '{}' is invalid — must be \"on\" or \"off\" per ADR-09-02 v2 §Audience Split",
+                    field, val
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Application configuration loaded from file + env.
 ///
 /// NOTE (Story 5-1 Task 3.5): we intentionally do NOT use
@@ -404,9 +461,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub skill_exposure: SkillExposureConfig,
     /// OS-level sandbox enforcement configuration. Story 9.5.
-    /// Defaults to `"noop"` on all platforms; `"landlock"` opt-in on Linux.
+    /// Defaults to "noop" on all platforms; "landlock" opt-in on Linux.
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// Phase B search configuration per ADR-09-02 v2 §Audience Split.
+    ///
+    /// `skills` and `tools` are independent per-port runtime knobs (NOT
+    /// compile-time forks — the `meta-search` cargo feature gates both;
+    /// Figment chooses which port indexes when the feature is compiled).
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 impl AppConfig {
@@ -582,6 +646,7 @@ impl Default for AppConfig {
             tools: ToolsExposureConfig::default(),
             skill_exposure: SkillExposureConfig::default(),
             sandbox: SandboxConfig::default(),
+            search: SearchConfig::default(),
         }
     }
 }

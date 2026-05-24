@@ -38,6 +38,10 @@ fn test_compose_ctx() -> ComposeContext {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     }
 }
 

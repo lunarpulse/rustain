@@ -220,6 +220,7 @@ fn get_health_summary(agent_core: &AgentCore, port: PortDimension) -> HealthSumm
         PortDimension::Channels => agent_core.channels.load_full().health_snapshot(),
         PortDimension::Scheduler => agent_core.scheduler.load_full().health_snapshot(),
         PortDimension::Context => agent_core.context.load_full().health_snapshot(),
+        PortDimension::Skills => crate::domain::models::HealthSummary::unknown(),
     }
 }
 

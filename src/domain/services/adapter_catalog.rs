@@ -77,6 +77,7 @@ fn catalog_for(port: PortDimension) -> &'static [&'static AdapterDescriptor] {
         Channels => CHANNELS_ADAPTERS,
         Scheduler => SCHEDULER_ADAPTERS,
         Context => CONTEXT_ADAPTERS,
+        Skills => &[],
     }
 }
 

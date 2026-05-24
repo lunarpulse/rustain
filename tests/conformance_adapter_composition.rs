@@ -34,6 +34,10 @@ fn test_compose_ctx() -> ComposeContext {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     }
 }
 
@@ -83,6 +87,7 @@ fn test_all_catalog_names_dispatched() {
                     Err(e) => e.to_string().contains("feature not compiled"),
                 },
                 PortDimension::Context => build_context(name, None, &ctx).is_ok(),
+                PortDimension::Skills => true,
             };
             if !dispatched {
                 panic!(
@@ -95,6 +100,7 @@ fn test_all_catalog_names_dispatched() {
                         PortDimension::Channels => "channels",
                         PortDimension::Scheduler => "scheduler",
                         PortDimension::Context => "context",
+                        PortDimension::Skills => "skills",
                     },
                     name
                 );

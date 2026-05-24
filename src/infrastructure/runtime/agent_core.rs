@@ -39,6 +39,16 @@ pub struct AgentCore {
     /// "headless / eval" path that wants NO sandbox-binding at all; the eval
     /// harness wants `NoOpSandbox` explicitly.
     pub sandbox: Arc<ArcSwap<Arc<dyn SandboxManager>>>,
+    /// Story 9.7 Phase B — shared merged BM25 index for meta-search.
+    /// `None` when the `meta-search` feature is compiled but no `[search]`
+    /// knob is "on" per ADR-09-01 v2.1 §W1 inherited.
+    ///
+    /// Per spec AC-9-7-11 and party-mode consensus 3/4 (2026-05-24):
+    /// `ArcSwap<Option<Arc<MergedIndex>>>` NOT `Arc<ArcSwap<...>>` because
+    /// `MergedIndex` is the shared state being swapped — the outer `Arc`
+    /// would be redundant (ArcSwap already provides atomic-swap semantics).
+    #[cfg(feature = "meta-search")]
+    pub merged_index: ArcSwap<Option<Arc<crate::infrastructure::search::MergedIndex>>>,
 }
 
 impl AgentCore {
@@ -62,6 +72,8 @@ impl AgentCore {
             tool_exposure: Self::wrap_optional(None as Option<Arc<dyn ToolExposurePort>>),
             skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
             sandbox: Self::wrap(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>),
+            #[cfg(feature = "meta-search")]
+            merged_index: ArcSwap::from_pointee(None as Option<Arc<crate::infrastructure::search::MergedIndex>>),
         }
     }
 
@@ -92,7 +104,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_noop_constructs_all_ten_slots() {
+    fn test_noop_constructs_all_eleven_slots() {
         use crate::adapters::sandbox::SandboxAdapterKind;
         let core = AgentCore::test_noop();
         // Each load_full() must return a non-null Arc
@@ -115,6 +127,12 @@ mod tests {
         assert!(Arc::strong_count(&cx) >= 1);
         assert!(te.is_none(), "tool_exposure defaults to None in noop agent");
         assert!(se.is_none(), "skill_exposure defaults to None in noop agent");
-        assert_eq!(sb.kind(), SandboxAdapterKind::NoOp, "sandbox defaults to NoOpSandbox");
+        // Sandbox defaults to NoOpSandbox in test_noop()
+        assert_eq!(sb.kind(), SandboxAdapterKind::NoOp);
+        #[cfg(feature = "meta-search")]
+        {
+            let mi = core.merged_index.load_full();
+            assert!(mi.is_none(), "merged_index defaults to None in noop agent");
+        }
     }
 }

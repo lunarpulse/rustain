@@ -5,8 +5,11 @@ pub mod autocomplete;
 pub mod budget;
 pub mod capability;
 pub mod capability_id;
+pub mod capability_kind;
 pub mod capability_registry;
 pub mod catalog_delta;
+pub mod doc_key;
+pub mod search_hit;
 pub mod checkpoint;
 mod completion;
 mod config;
@@ -64,7 +67,7 @@ pub use config::AppConfig;
 #[allow(unused_imports)]
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
-pub use config::{AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, ToolProgressConfig};
+pub use config::{AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig, ToolProgressConfig};
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 #[allow(unused_imports)]
@@ -117,11 +120,14 @@ pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
 pub use budget::BudgetConfig;
 pub use capability::{Capability, CapabilityError};
 pub use capability_id::CapabilityId;
+pub use capability_kind::CapabilityKind;
 pub use capability_registry::{
     CapabilityRegistry, ProviderId, RegisterHandle, RegisteredCapability, RegistryError,
 };
 pub use catalog_delta::CatalogDelta;
+pub use doc_key::DocKey;
 pub use filtered_catalog::FilteredCatalog;
+pub use search_hit::SearchHit;
 pub use filtered_skill_catalog::FilteredSkillCatalog;
 pub use launch_spec::AgentLaunchSpec;
 pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};

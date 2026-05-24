@@ -99,6 +99,7 @@ pub async fn handle_clear_adapter_override(
         PortDimension::Channels => "terminal".to_string(),
         PortDimension::Scheduler => "none".to_string(),
         PortDimension::Context => "default".to_string(),
+        PortDimension::Skills => "static-full".to_string(),
     });
 
     let adapter_ref = AdapterRef {

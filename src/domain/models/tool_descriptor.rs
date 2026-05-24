@@ -206,3 +206,59 @@ mod tests {
         assert!(!json.contains("\"readOnlyHint\":null"));
     }
 }
+
+#[cfg(feature = "meta-search")]
+impl crate::domain::ports::search::IndexableItem for ToolDescriptor {
+    fn doc_key(&self) -> crate::domain::models::doc_key::DocKey {
+        crate::domain::models::doc_key::DocKey::new(
+            crate::domain::models::capability_kind::CapabilityKind::Tool,
+            self.name.clone(),
+        )
+    }
+
+    fn searchable_text(&self) -> std::borrow::Cow<'_, str> {
+        // Concatenate name + description for BM25 tokenization. Annotations
+        // (title hint, read_only_hint, etc.) are NOT indexed Phase B — they
+        // are metadata about parallelism + safety, not retrieval signal.
+        // The 9.3b annotation set is preserved verbatim on the ToolDescriptor
+        // struct; `IndexableItem` adds a projection method, not a field.
+        std::borrow::Cow::Owned(format!("{} {}", self.name, self.description))
+    }
+
+    fn description(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.description)
+    }
+
+    fn to_search_hit(&self, score: f32, matched_terms: Option<Vec<String>>) -> crate::domain::models::search_hit::SearchHit {
+        let terse = crate::domain::services::meta_search::compute_terse(
+            &self.description,
+            &self.name,
+        );
+        let hit = crate::domain::models::search_hit::SearchHit {
+            name: self.name.clone(),
+            kind: crate::domain::models::capability_kind::CapabilityKind::Tool,
+            terse,
+            score,
+            // provider: populated only on collision (post-rank pass in
+            // MergedIndex::populate_provider_disambiguation per Decision
+            // Gate 9.7.4). The canonical projection emits None; the merged
+            // index populates Some after detecting same-name across providers.
+            provider: None,
+            matched_terms,
+        };
+        if !crate::domain::models::capability_id::CapabilityId::from_mcp_wire_name(&hit.name).is_some()
+            && !crate::domain::models::capability_id::CapabilityId::parse(&format!("builtin::{}", hit.name)).is_some()
+        {
+            debug_assert!(
+                false,
+                "ToolDescriptor.to_search_hit produced name '{}' that does not round-trip via CapabilityId — AC-9-7-3",
+                hit.name
+            );
+            tracing::warn!(
+                "ToolDescriptor.to_search_hit produced name '{}' that does not round-trip via CapabilityId — AC-9-7-3",
+                hit.name
+            );
+        }
+        hit
+    }
+}

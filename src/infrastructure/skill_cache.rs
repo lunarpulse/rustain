@@ -145,6 +145,19 @@ impl SkillCache {
             .ok_or_else(|| SkillCacheError::SkillNotFound(name.to_string()))
     }
 
+    /// Synchronous snapshot of all cached skill metadata (for rebuild_fn).
+    /// Uses `try_lock()` — returns empty vec on contention, matching
+    /// `CapabilityRegistry::snapshot()` semantics.
+    pub fn try_snapshot_metadata(&self) -> Vec<SkillMetadata> {
+        match self.inner.try_lock() {
+            Ok(guard) => guard.iter().map(|(_, e)| e.metadata.clone()).collect(),
+            Err(_) => {
+                tracing::warn!("SkillCache::try_snapshot_metadata() lock contention — returning empty vec");
+                Vec::new()
+            }
+        }
+    }
+
     /// Build the FilteredSkillCatalog from the cache.
     pub async fn snapshot_catalog(
         &self,

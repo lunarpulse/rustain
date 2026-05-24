@@ -78,6 +78,10 @@ fn test_app_state_honors_raw_capacity() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -101,6 +105,8 @@ fn test_app_state_honors_raw_capacity() {
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
+        #[cfg(feature = "meta-search")]
+        None,
     );
     // AppState should own an EventBus with the requested capacity.
     // We verify this indirectly by ensuring subscribe_raw works.
@@ -136,6 +142,10 @@ fn test_app_state_session_cancel_is_root_token() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,
@@ -159,6 +169,8 @@ fn test_app_state_session_cancel_is_root_token() {
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
+        #[cfg(feature = "meta-search")]
+        None,
     );
     // The session_cancel should be a root token (no parent)
     assert!(!app_state.session_cancel.is_cancelled());

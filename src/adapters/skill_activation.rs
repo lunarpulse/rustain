@@ -365,6 +365,7 @@ mod tests {
             directory: PathBuf::from("/nonexistent"),
             source: crate::domain::models::SkillSource::WorkspaceAgents,
             allowed_tools: None,
+            terse: None,
         };
         let result = activator.activate(&def, String::new(), "conv-1", 0).await;
         assert!(matches!(
@@ -448,6 +449,7 @@ mod tests {
             directory: tmp.path().join("deep"),
             source: crate::domain::models::SkillSource::GlobalAgents,
             allowed_tools: None,
+            terse: None,
         };
 
         // caller_depth=0 → new skill at depth 1
@@ -485,6 +487,7 @@ mod tests {
             directory: tmp.path().join("test-skill"),
             source: crate::domain::models::SkillSource::GlobalAgents,
             allowed_tools: None,
+            terse: None,
         };
         let result = activator.activate(&def, String::new(), "conv-1", 0).await;
         assert!(result.is_ok());

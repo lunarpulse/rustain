@@ -21,16 +21,11 @@ use crate::domain::models::SkillSource;
 /// description ~80 tok per Anthropic anchor + 15 tok structural overhead).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillMetadata {
-    /// Skill's invocation name (matches frontmatter `name` field; validated
-    /// against `^[a-z][a-z0-9-]{0,63}$` per the Anthropic contract — see
-    /// AC-9-6-6 frontmatter linter).
     pub name: String,
-    /// One-line description (frontmatter `description` field; validated for
-    /// length ∈ [20, 1024] and presence of "when" trigger phrase per AC-9-6-6).
     pub description: String,
-    /// Provenance: which tier did the skill come from (workspace vs global).
-    /// Drives the trust-marker XML attribute on rendered output.
     pub source: SkillSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terse: Option<String>,
 }
 
 impl SkillMetadata {
@@ -41,6 +36,7 @@ impl SkillMetadata {
             name: def.name.clone(),
             description: def.description.clone(),
             source: def.source,
+            terse: def.terse.clone(),
         }
     }
 
@@ -78,6 +74,7 @@ mod tests {
             directory: PathBuf::from(format!("/tmp/{name}")),
             source,
             allowed_tools: None,
+            terse: None,
         }
     }
 
@@ -103,6 +100,7 @@ mod tests {
             name: "review-code".into(),
             description: "Reviews code for style issues when the user runs /review".into(),
             source: SkillSource::WorkspaceClaude,
+            terse: None,
         };
         let tokens = meta.estimated_tokens();
         assert!(tokens > 0, "token estimate must be positive");
@@ -115,25 +113,71 @@ mod tests {
             name: "a".into(),
             description: "Skill A does something when asked".into(),
             source: SkillSource::WorkspaceAgents,
+            terse: None,
         };
         let ws_rustain = SkillMetadata {
             name: "b".into(),
             description: "Skill B does something when asked".into(),
             source: SkillSource::WorkspaceRustain,
+            terse: None,
         };
         let ws_claude = SkillMetadata {
             name: "c".into(),
             description: "Skill C does something when asked".into(),
             source: SkillSource::WorkspaceClaude,
+            terse: None,
         };
         let global = SkillMetadata {
             name: "d".into(),
             description: "Skill D does something when asked".into(),
             source: SkillSource::GlobalAgents,
+            terse: None,
         };
         assert!(ws_agents.is_workspace_scoped());
         assert!(ws_rustain.is_workspace_scoped());
         assert!(ws_claude.is_workspace_scoped());
         assert!(!global.is_workspace_scoped());
+    }
+}
+
+#[cfg(feature = "meta-search")]
+impl crate::domain::ports::search::IndexableItem for SkillMetadata {
+    fn doc_key(&self) -> crate::domain::models::doc_key::DocKey {
+        crate::domain::models::doc_key::DocKey::new(
+            crate::domain::models::capability_kind::CapabilityKind::Skill,
+            self.name.clone(),
+        )
+    }
+
+    fn searchable_text(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Owned(format!("{} {}", self.name, self.description))
+    }
+
+    fn description(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.description)
+    }
+
+    fn to_search_hit(&self, score: f32, matched_terms: Option<Vec<String>>) -> crate::domain::models::search_hit::SearchHit {
+        // SkillMetadata does NOT carry the optional SkillDef.terse override
+        // — only SkillDef does (AC-9-7-9). The composition root projects
+        // SkillDef → SkillMetadata + (separately) carries the optional terse
+        // override into the MergedIndex's CachedProjection at index time.
+        // Here we re-derive from description as the default; the index-time
+        // override is applied by MergedIndex::index_with_override (see
+        // Decision Gate 9.7.8 — note the override path is OWNED BY THE
+        // INDEX, not by the projection method, so SkillMetadata.terse does
+        // NOT need to exist as a field).
+        let terse = crate::domain::services::meta_search::compute_terse(
+            &self.description,
+            &self.name,
+        );
+        crate::domain::models::search_hit::SearchHit {
+            name: self.name.clone(),
+            kind: crate::domain::models::capability_kind::CapabilityKind::Skill,
+            terse,
+            score,
+            provider: None,
+            matched_terms,
+        }
     }
 }

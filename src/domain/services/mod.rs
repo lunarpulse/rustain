@@ -13,6 +13,8 @@ pub mod history_rebuild;
 pub mod identity_color;
 pub mod import;
 pub mod message_builder;
+pub mod meta_search;
+pub use meta_search::compute_terse;
 pub mod model_router;
 pub mod permission_chain;
 pub mod plan_effort;

@@ -38,15 +38,16 @@ struct ToolExecutionContext {
 }
 
 /// ToolSetPort implementation with Bash, Read, Write tools.
+#[derive(Clone)]
 pub struct ToolSetAdapter {
     workspace_path: PathBuf,
     write_locks: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
     storage: Arc<dyn StoragePort>,
     /// Active checkpoint context for the current tool-executing turn.
     /// Set by `set_execution_context` before any tools run; cleared between turns.
-    current_context: Mutex<Option<ToolExecutionContext>>,
+    current_context: Arc<Mutex<Option<ToolExecutionContext>>>,
     /// Current plan file path for `exit_plan_mode` resolution.
-    current_plan_file: Mutex<Option<std::path::PathBuf>>,
+    current_plan_file: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// Optional skill activator for `activate_skill` tool execution.
     #[allow(dead_code)]
     activator: Option<Arc<SkillActivator>>,
@@ -57,9 +58,9 @@ pub struct ToolSetAdapter {
     #[allow(dead_code)]
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<AppEvent>>,
     /// Progress event sender for long-running tool stdout tail. Story 16.9.
-    progress_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>>,
+    progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<ToolProgressEvent>>>>,
     /// Tool progress configuration (tail_lines cap, threshold). Story 16.9.
-    tool_progress_config: Mutex<ToolProgressConfig>,
+    tool_progress_config: Arc<Mutex<ToolProgressConfig>>,
     /// Optional skill cache for `skill_view` tool execution (Story 9.6).
     #[allow(dead_code)]
     skill_cache: Option<std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>>,
@@ -69,6 +70,9 @@ pub struct ToolSetAdapter {
     sandbox: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>>,
     /// Story 9.5 — sandbox policy reference for reading current policy at Bash spawn time.
     sandbox_policy: Arc<tokio::sync::RwLock<SandboxPolicy>>,
+    /// Story 9.7 Phase B — optional meta-search engine for `search_capabilities` builtin tool.
+    #[cfg(feature = "meta-search")]
+    meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
 }
 
 /// Context for the `stream_lines` helper, bundling the many parameters
@@ -189,16 +193,18 @@ impl ToolSetAdapter {
             workspace_path,
             write_locks: Arc::new(Mutex::new(HashMap::new())),
             storage,
-            current_context: Mutex::new(None),
-            current_plan_file: Mutex::new(None),
+            current_context: Arc::new(Mutex::new(None)),
+            current_plan_file: Arc::new(Mutex::new(None)),
             activator: None,
             plan_manager: None,
             event_tx: None,
-            progress_tx: Mutex::new(None),
-            tool_progress_config: Mutex::new(ToolProgressConfig::default()),
+            progress_tx: Arc::new(Mutex::new(None)),
+            tool_progress_config: Arc::new(Mutex::new(ToolProgressConfig::default())),
             skill_cache: None,
             sandbox,
             sandbox_policy,
+            #[cfg(feature = "meta-search")]
+            meta_search_engine: None,
         }
     }
 
@@ -213,6 +219,11 @@ impl ToolSetAdapter {
         cache: std::sync::Arc<crate::infrastructure::skill_cache::SkillCache>,
     ) {
         self.skill_cache = Some(cache);
+    }
+
+    #[cfg(feature = "meta-search")]
+    pub fn set_meta_search_engine(&mut self, engine: Arc<dyn crate::domain::ports::search::MetaSearchEngine>) {
+        self.meta_search_engine = Some(engine);
     }
 
     #[allow(dead_code)]
@@ -808,7 +819,28 @@ impl ToolSetPort for ToolSetAdapter {
                 }),
                 parallel_safe: false,
             },
+            #[cfg(feature = "meta-search")]
+            crate::adapters::tool_exposure::meta_search::build_search_capabilities_tool_definition(),
         ]
+    }
+
+    fn describe(&self) -> Vec<crate::domain::models::tool_descriptor::ToolDescriptor> {
+        self.available_tools()
+            .iter()
+            .map(|def| crate::domain::models::tool_descriptor::ToolDescriptor {
+                id: crate::domain::models::tool_descriptor::ToolId(
+                    format!("builtin::{}", def.name)
+                ),
+                name: def.name.clone(),
+                description: def.description.clone(),
+                input_schema: def.input_schema.clone(),
+                provider_id: "builtin".to_string(),
+                annotations: crate::domain::models::tool_descriptor::ToolAnnotations {
+                    read_only_hint: Some(def.parallel_safe),
+                    ..Default::default()
+                },
+            })
+            .collect()
     }
 
     async fn execute(
@@ -825,6 +857,8 @@ impl ToolSetPort for ToolSetAdapter {
             "skill_view" => self.execute_skill_view(&input, "", cancel).await,
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             "propose_plan" => self.execute_propose_plan(&input).await,
+            #[cfg(feature = "meta-search")]
+            "search_capabilities" => self.execute_search_capabilities(&input, "", cancel).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
     }
@@ -843,6 +877,8 @@ impl ToolSetPort for ToolSetAdapter {
                     .await
             }
             "skill_view" => self.execute_skill_view(&input, tool_use_id, cancel).await,
+            #[cfg(feature = "meta-search")]
+            "search_capabilities" => self.execute_search_capabilities(&input, tool_use_id, cancel).await,
             _ => {
                 let _ = (tool_use_id, progress_tx);
                 self.execute(tool_name, input, cancel).await
@@ -1048,6 +1084,65 @@ impl ToolSetAdapter {
                 name, trust_attr, body
             ),
             is_error: false,
+        })
+    }
+
+    #[cfg(feature = "meta-search")]
+    async fn execute_search_capabilities(
+        &self,
+        input: &serde_json::Value,
+        tool_use_id: &str,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let engine = self
+            .meta_search_engine
+            .as_ref()
+            .ok_or_else(|| ToolError::Other("meta-search engine not configured".into()))?;
+
+        let query = input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput("missing required field: query".into()))?;
+
+        let kind_filter = match input.get("kind") {
+            None => None,
+            Some(v) => {
+                let kind_str = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidInput("kind must be a string".into())
+                })?;
+                match kind_str {
+                    "tool" => Some(crate::domain::models::capability_kind::CapabilityKind::Tool),
+                    "skill" => Some(crate::domain::models::capability_kind::CapabilityKind::Skill),
+                    other => return Err(ToolError::InvalidInput(format!(
+                        "invalid kind '{}': must be \"tool\" or \"skill\"", other
+                    ))),
+                }
+            }
+        };
+
+        let top_k = input
+            .get("top_k")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as usize;
+
+        if top_k == 0 {
+            return Err(ToolError::InvalidInput("top_k must be at least 1".into()));
+        }
+        if top_k > 20 {
+            return Err(ToolError::InvalidInput("top_k must not exceed 20".into()));
+        }
+
+        let hits: Vec<crate::domain::models::search_hit::SearchHit> = engine
+            .search(query, kind_filter, top_k)
+            .await
+            .map_err(|e| ToolError::Other(format!("search failed: {}", e)))?;
+
+        let json = serde_json::to_string(&hits).map_err(|e| ToolError::Other(e.to_string()))?;
+
+        Ok(ToolResult {
+            content: json,
+            is_error: false,
+            tool_use_id: tool_use_id.to_string(),
         })
     }
 }

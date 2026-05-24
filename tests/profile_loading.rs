@@ -170,6 +170,10 @@ fn test_coding_profile_composes_seven_ports() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -219,6 +223,10 @@ fn test_base_profile_composes_all_noop() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -255,6 +263,10 @@ fn test_personal_assistant_preview_composes_with_fallback() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
 
     let core = rustain::infrastructure::runtime::agent_core::AgentCore::compose(
@@ -301,6 +313,10 @@ fn test_reload_recomposes_agent_core() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
     let ctx_arc = Arc::new(ctx);
 

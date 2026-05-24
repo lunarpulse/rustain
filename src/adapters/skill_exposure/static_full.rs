@@ -118,6 +118,7 @@ mod tests {
                     name: "present".into(),
                     description: "Present skill when needed".into(),
                     source: SkillSource::WorkspaceAgents,
+                    terse: None,
                 },
                 "body content".into(),
             )
@@ -129,11 +130,13 @@ mod tests {
                 name: "present".into(),
                 description: "Present skill when needed".into(),
                 source: SkillSource::WorkspaceAgents,
+                terse: None,
             },
             SkillMetadata {
                 name: "missing".into(),
                 description: "Missing skill when needed".into(),
                 source: SkillSource::WorkspaceAgents,
+                terse: None,
             },
         ]);
 

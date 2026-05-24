@@ -8,6 +8,8 @@ pub mod profile_install;
 pub mod profile_resolution;
 pub mod provider_factory;
 pub mod runtime;
+#[cfg(feature = "meta-search")]
+pub mod search;
 pub mod signals;
 pub mod skill_cache;
 pub mod startup;

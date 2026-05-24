@@ -29,6 +29,7 @@ fn write_skill(dir: &std::path::Path, name: &str, body: &str) -> SkillDef {
         directory: canonical_dir,
         source: SkillSource::WorkspaceAgents,
         allowed_tools: None,
+        terse: None,
     }
 }
 
@@ -557,6 +558,7 @@ async fn test_file_too_large_rejects_activation() {
         directory: std::fs::canonicalize(&skill_dir).unwrap(),
         source: SkillSource::GlobalAgents,
         allowed_tools: None,
+        terse: None,
     };
     let activator = SkillActivator::new();
     let result = activator.activate(&def, String::new(), "conv-1", 0).await;
@@ -575,6 +577,7 @@ async fn test_file_missing_at_activation() {
         directory: PathBuf::from("/nonexistent/ghost"),
         source: SkillSource::GlobalAgents,
         allowed_tools: None,
+        terse: None,
     };
     let activator = SkillActivator::new();
     let result = activator.activate(&def, String::new(), "conv-1", 0).await;
@@ -661,6 +664,7 @@ async fn test_activate_disabled_skill_returns_error() {
         directory: canonical_dir,
         source: SkillSource::GlobalAgents,
         allowed_tools: None,
+        terse: None,
     };
     let registry = rustain::adapters::skill_registry::SkillRegistry::from_disabled(vec![def]);
     let activator = SkillActivator::new();

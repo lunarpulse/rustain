@@ -72,6 +72,7 @@ mod tests {
             name: name.into(),
             description: desc.into(),
             source: SkillSource::WorkspaceAgents,
+            terse: None,
         }
     }
 
@@ -99,6 +100,7 @@ mod tests {
             name: "test-skill".into(),
             description: "A test skill for when testing is needed".into(),
             source: SkillSource::WorkspaceClaude,
+            terse: None,
         }]);
         let json = serde_json::to_string(&catalog).unwrap();
         let back: FilteredSkillCatalog = serde_json::from_str(&json).unwrap();

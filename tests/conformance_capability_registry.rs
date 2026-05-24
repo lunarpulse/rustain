@@ -485,7 +485,7 @@ fn test_describe_default_impl_is_empty_for_noop() {
 
 #[cfg(feature = "mcp")]
 #[tokio::test]
-async fn test_builtin_provider_discover_returns_7_tools() {
+async fn test_builtin_provider_discover_returns_expected_tools() {
     use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
     use rustain::adapters::filesystem::FileSystemStorage;
     use rustain::adapters::toolset_adapter::ToolSetAdapter;
@@ -509,17 +509,21 @@ async fn test_builtin_provider_discover_returns_7_tools() {
         .map(|c| c.name.clone())
         .collect();
     builtin_names.sort();
+    let mut expected = vec![
+        "Bash",
+        "Read",
+        "Write",
+        "activate_skill",
+        "exit_plan_mode",
+        "propose_plan",
+        "skill_view",
+    ];
+    #[cfg(feature = "meta-search")]
+    expected.push("search_capabilities");
+    expected.sort();
     assert_eq!(
         builtin_names,
-        vec![
-            "Bash",
-            "Read",
-            "Write",
-            "activate_skill",
-            "exit_plan_mode",
-            "propose_plan",
-            "skill_view",
-        ]
+        expected
     );
 }
 
@@ -571,6 +575,7 @@ async fn test_skill_provider_discover_with_3_skills() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
+        terse: None,
         },
         SkillDef {
             name: "test".into(),
@@ -579,6 +584,7 @@ async fn test_skill_provider_discover_with_3_skills() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
+        terse: None,
         },
         SkillDef {
             name: "refactor".into(),
@@ -587,6 +593,7 @@ async fn test_skill_provider_discover_with_3_skills() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
+        terse: None,
         },
     ];
     let registry = SkillRegistry::from_skills(skills);
@@ -695,6 +702,7 @@ async fn test_registry_holds_all_three_protocols() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
+        terse: None,
         },
         SkillDef {
             name: "test".into(),
@@ -703,6 +711,7 @@ async fn test_registry_holds_all_three_protocols() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
+        terse: None,
         },
         SkillDef {
             name: "refactor".into(),
@@ -711,6 +720,7 @@ async fn test_registry_holds_all_three_protocols() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
+        terse: None,
         },
     ];
     let registry = SkillRegistry::from_skills(skills);
@@ -734,9 +744,9 @@ async fn test_registry_holds_all_three_protocols() {
     let skill_count = snap.iter().filter(|c| c.protocol == "skill").count();
 
     assert_eq!(mcp_count, 2, "fake MCP server has echo + add tools");
-    assert_eq!(builtin_count, 7, "ToolSetAdapter has 7 builtin tools (including skill_view from 9.6)");
+    assert_eq!(builtin_count, 7 + cfg!(feature = "meta-search") as usize, "ToolSetAdapter builtin tools (including skill_view from 9.6, search_capabilities from 9.7)");
     assert_eq!(skill_count, 3, "SkillRegistry has 3 programmatic skills");
-    assert_eq!(snap.len(), 12);
+    assert_eq!(snap.len(), 12 + cfg!(feature = "meta-search") as usize);
 }
 
 #[cfg(feature = "mcp")]
@@ -947,11 +957,11 @@ async fn test_catalog_delta_added_removed_correctness() {
         None, // no skill_activator
     );
 
-    // Initial populate: version=1, registry has 7 builtin (incl. skill_view from 9.6) + 2 MCP = 9
+    // Initial populate: version=1, registry has 7 builtin (incl. skill_view from 9.6) + 2 MCP = 9 (10 with meta-search)
     let _ = composite.populate_registry().await.unwrap();
     assert_eq!(composite.catalog_version(), 1);
     let snap1 = composite.capability_registry().snapshot();
-    assert_eq!(snap1.len(), 9, "7 builtin + 2 MCP tools");
+    assert_eq!(snap1.len(), 9 + cfg!(feature = "meta-search") as usize, "7 builtin + 2 MCP tools (+ search_capabilities with meta-search)");
 
     // Emit another delta with no changes: version=2, added=0 removed=0
     let _ = composite.emit_catalog_delta().await.unwrap();
@@ -959,7 +969,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap2 = composite.capability_registry().snapshot();
     assert_eq!(
         snap2.len(),
-        9,
+        9 + cfg!(feature = "meta-search") as usize,
         "no tools added or removed — registry unchanged"
     );
 
@@ -986,7 +996,7 @@ async fn test_catalog_delta_added_removed_correctness() {
 
     // Verify registry grew by 1
     let snap3 = composite.capability_registry().snapshot();
-    assert_eq!(snap3.len(), 10, "added multiply tool (7 builtin + 3 MCP)");
+    assert_eq!(snap3.len(), 10 + cfg!(feature = "meta-search") as usize, "added multiply tool (7 builtin + 2 MCP + 1 extra, + search_capabilities with meta-search)");
 
     // Emit delta: version=3, should detect 1 added
     let _ = composite.emit_catalog_delta().await.unwrap();
@@ -1002,7 +1012,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
     assert_eq!(
         snap4.len(),
-        10,
-        "registry still has 10 tools after delta emit"
+        10 + cfg!(feature = "meta-search") as usize,
+        "registry unchanged after delta emit"
     );
 }

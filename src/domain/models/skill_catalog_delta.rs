@@ -71,6 +71,7 @@ mod tests {
                     name: "new-skill".into(),
                     description: "A new skill when called".into(),
                     source: SkillSource::WorkspaceAgents,
+                    terse: None,
                 },
             ],
             removed: vec!["old-skill".into()],

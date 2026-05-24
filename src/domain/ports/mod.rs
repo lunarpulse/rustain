@@ -61,6 +61,8 @@ pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
 pub use session_port::SessionPort;
+pub mod search;
+pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};
 pub use skill_exposure::SkillExposurePort;
 pub use storage::StoragePort;
 pub use tool_exposure::ToolExposurePort;

@@ -14,6 +14,10 @@ pub struct SkillDef {
     pub directory: PathBuf,
     pub source: SkillSource,
     pub allowed_tools: Option<Vec<String>>,
+    /// Phase B frontmatter override for the `terse` projection. When `Some`,
+    /// this value is used verbatim instead of `compute_terse(description, name)`.
+    /// When `None` (default), the terse string is auto-derived.
+    pub terse: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

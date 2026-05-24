@@ -139,6 +139,7 @@ fn test_pre_v94_config_round_trips() {
     assert_eq!(config.tools.exposure, "static-full");
 }
 
+#[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_meta_search_config_rejected_with_actionable_error() {
     let err = rustain::infrastructure::startup::validate_tools_exposure("meta-search");
@@ -179,6 +180,7 @@ fn test_cli_flag_static_full_accepted() {
     assert_eq!(cli.tool_exposure, Some("static-full".into()));
 }
 
+#[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_cli_flag_meta_search_rejected_by_clap() {
     let result = Cli::try_parse_from(["rustain", "--tool-exposure", "meta-search"]);
@@ -211,6 +213,10 @@ fn test_compose_with_default_config_binds_static_full() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(rustain::adapters::sandbox::NoOpSandbox) as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
     let selection = ProfileSelection {
         dimensions: std::collections::BTreeMap::new(),
@@ -247,6 +253,10 @@ fn test_compose_with_unknown_exposure_returns_error() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(rustain::adapters::sandbox::NoOpSandbox) as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     };
     let selection = ProfileSelection {
         dimensions: std::collections::BTreeMap::new(),
@@ -287,8 +297,9 @@ fn test_asymmetry_guard_comment_present() {
     );
 }
 
-// ── AC-9-4-9: No CatalogObserverRegistry in Phase A ──
+// ── AC-9-4-9: No CatalogObserverRegistry in Phase A (now Phase B shipped) ──
 
+#[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_phase_a_no_catalog_observer_registry_file() {
     let phase_b_file = std::path::Path::new(concat!(

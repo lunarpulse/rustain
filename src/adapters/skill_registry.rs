@@ -415,6 +415,8 @@ fn parse_skill_file(
 
     let allowed_tools = frontmatter::extract_list_field(fm, "allowed-tools");
 
+    let terse = frontmatter::extract_field(fm, "terse").map(|s| s.to_string());
+
     let canonical_dir = match std::fs::canonicalize(skill_dir) {
         Ok(c) => c,
         Err(e) => {
@@ -458,6 +460,7 @@ fn parse_skill_file(
         directory: canonical_dir,
         source,
         allowed_tools,
+        terse,
     };
 
     if let Some(warning_err) = lint_warning {

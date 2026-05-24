@@ -79,6 +79,7 @@ scopeguard = "1"
 shell-words = "1"
 lru = "0.12"
 blake3 = "1"
+bm25 = { version = "=2.3.2", optional = true }
 hex = "0.4"
 gray_matter = "0.2"
 
@@ -122,6 +123,7 @@ openai = ["anthropic", "dep:reqwest"]
 ollama = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
 skills-validation = []
+meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]
 
 [profile.release]

@@ -68,6 +68,10 @@ pub struct AppState {
     /// Story 9.5 — telemetry aggregator for 7-day rolling-window active-ratio
     /// metrics + adapter-status panel warning surface.
     pub telemetry: Arc<ActiveRatioWindow>,
+    /// Story 9.7 Phase B — catalog observer registry for meta-search reindex triggers.
+    /// Only present when the `meta-search` feature is enabled.
+    #[cfg(feature = "meta-search")]
+    pub catalog_registry: Option<Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>>,
 }
 
 impl AppState {
@@ -89,6 +93,8 @@ impl AppState {
         profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
         cli_snapshot: crate::adapters::cli::commands::Cli,
         telemetry: Arc<ActiveRatioWindow>,
+        #[cfg(feature = "meta-search")]
+        catalog_registry: Option<Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
@@ -115,6 +121,8 @@ impl AppState {
                 profile_resolver,
                 cli_snapshot,
                 telemetry,
+                #[cfg(feature = "meta-search")]
+                catalog_registry,
             },
             domain_rx,
         )

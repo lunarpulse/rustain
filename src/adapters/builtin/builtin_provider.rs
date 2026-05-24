@@ -122,23 +122,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_discover_projects_all_7_builtin_tools() {
+    async fn test_discover_projects_all_builtin_tools() {
         let adapter = make_toolset_adapter();
         let provider = BuiltinProvider::new(adapter);
         let caps = provider.discover().await.unwrap();
         let mut names: Vec<String> = caps.into_iter().map(|c| c.name).collect();
         names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "Bash",
-                "Read",
-                "Write",
-                "activate_skill",
-                "exit_plan_mode",
-                "propose_plan",
-                "skill_view",
-            ]
-        );
+        #[cfg(not(feature = "meta-search"))]
+        {
+            assert_eq!(
+                names,
+                vec![
+                    "Bash",
+                    "Read",
+                    "Write",
+                    "activate_skill",
+                    "exit_plan_mode",
+                    "propose_plan",
+                    "skill_view",
+                ]
+            );
+        }
+        #[cfg(feature = "meta-search")]
+        {
+            assert_eq!(
+                names,
+                vec![
+                    "Bash",
+                    "Read",
+                    "Write",
+                    "activate_skill",
+                    "exit_plan_mode",
+                    "propose_plan",
+                    "search_capabilities",
+                    "skill_view",
+                ]
+            );
+        }
     }
 }

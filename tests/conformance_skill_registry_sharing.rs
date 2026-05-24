@@ -22,6 +22,7 @@ async fn test_skill_registry_sharing_after_rescan() {
         directory: std::path::PathBuf::from("/fake/foo"),
         source: rustain::domain::models::SkillSource::GlobalAgents,
         allowed_tools: None,
+        terse: None,
     };
     {
         let mut guard = shared.write().await;
@@ -40,6 +41,7 @@ async fn test_skill_registry_sharing_after_rescan() {
         directory: std::path::PathBuf::from("/fake/bar"),
         source: rustain::domain::models::SkillSource::GlobalAgents,
         allowed_tools: None,
+        terse: None,
     };
     let updated_registry = SkillRegistry::from_skills(vec![foo.clone(), bar.clone()]);
     {
@@ -75,6 +77,7 @@ async fn test_contended_write_then_read() {
             directory: std::path::PathBuf::from("/fake/init"),
             source: rustain::domain::models::SkillSource::GlobalAgents,
             allowed_tools: None,
+        terse: None,
         }]);
     }
 
@@ -94,6 +97,7 @@ async fn test_contended_write_then_read() {
                 directory: std::path::PathBuf::from("/fake/upd"),
                 source: rustain::domain::models::SkillSource::GlobalAgents,
                 allowed_tools: None,
+        terse: None,
             }]);
         }
         // Signal the main task that the write is complete.
@@ -136,6 +140,7 @@ fn test_from_skills_reflects_skills() {
         directory: std::path::PathBuf::from("/fake"),
         source: rustain::domain::models::SkillSource::GlobalAgents,
         allowed_tools: None,
+        terse: None,
     }]);
     assert_eq!(reg.skills().len(), 1);
     assert!(reg.is_discovered());

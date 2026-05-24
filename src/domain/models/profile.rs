@@ -12,6 +12,7 @@ pub enum PortDimension {
     Channels,
     Scheduler,
     Context,
+    Skills,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +217,7 @@ preview = true
             PortDimension::Tools,
             PortDimension::Channels,
             PortDimension::Session,
+            PortDimension::Skills,
         ];
         dims.sort();
         assert_eq!(
@@ -228,6 +230,7 @@ preview = true
                 PortDimension::Channels,
                 PortDimension::Scheduler,
                 PortDimension::Context,
+                PortDimension::Skills,
             ]
         );
     }

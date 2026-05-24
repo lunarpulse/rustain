@@ -96,6 +96,7 @@ mod tests {
             name: name.into(),
             description: description.into(),
             source: SkillSource::WorkspaceAgents,
+            terse: None,
         }
     }
 

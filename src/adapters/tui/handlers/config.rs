@@ -254,6 +254,10 @@ mod tests {
             sandbox_policy: Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),
+            #[cfg(feature = "meta-search")]
+            search_config: crate::domain::models::SearchConfig::default(),
+            #[cfg(feature = "meta-search")]
+            meta_search_engine: None,
         });
         let ctx = ReloadContext {
             cli: &test_cli(),

@@ -266,6 +266,10 @@ async fn ac4_signal_cancel_before_shutdown() {
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        #[cfg(feature = "meta-search")]
+        search_config: rustain::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -308,6 +312,8 @@ async fn ac4_signal_cancel_before_shutdown() {
             sandbox_adapter: None,
         },
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
+        #[cfg(feature = "meta-search")]
+        None,
     );
 
     app_state.session_cancel.cancel();

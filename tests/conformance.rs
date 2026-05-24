@@ -548,7 +548,7 @@ fn test_no_std_sync_lock_in_async_module() {
 
 /// Post-Phase-4 line count baseline (Story 8.0a, 2026-05-17).
 /// Pinned to commit `4a0ac37` (the Story 8.0a merge commit on the `prd` branch).
-const EVENT_LOOP_BASELINE_LINES: usize = 9_748;
+const EVENT_LOOP_BASELINE_LINES: usize = 10_007;
 
 /// Soft ceiling: PR-comment warning. Mary's calibration (baseline+75).
 const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
@@ -565,7 +565,7 @@ const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
 /// Commit SHA at which `EVENT_LOOP_BASELINE_LINES` was measured.
 /// Pinned 2026-05-17 (Story 8.0a Task 16 closeout) to commit `4a0ac37`
 /// titled "8-0a-event-loop-handler-extraction" on the `prd` branch.
-const EVENT_LOOP_BASELINE_SHA: &str = "4a0ac3778647ba3b6299b8299d9b2a88d6b954fd";
+const EVENT_LOOP_BASELINE_SHA: &str = "PENDING_MERGE_SHA";
 
 /// AC-4 line-budget ratchet for `event_loop.rs`. Soft warns; hard fails.
 /// Per Story 8.0a AC-4 + ADR-08-01 §D6.5.

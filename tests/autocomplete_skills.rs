@@ -14,6 +14,7 @@ fn mk_skill(name: &str, description: &str, source: SkillSource) -> SkillDef {
         directory: PathBuf::from(format!("/tmp/{}", name)),
         source,
         allowed_tools: None,
+        terse: None,
     }
 }
 

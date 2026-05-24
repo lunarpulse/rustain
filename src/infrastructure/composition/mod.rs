@@ -1,6 +1,9 @@
 //! Composition root for `AgentCore` — dispatches profile adapter names
 //! to concrete adapter constructors. One factory per port dimension.
 
+#[cfg(feature = "meta-search")]
+pub mod catalog_observer_registry;
+
 use std::sync::Arc;
 
 use crate::adapters::noop::{NoOpChannel, NoOpContext, NoOpMemory, NoOpScheduler, NoOpSession};
@@ -55,6 +58,10 @@ pub struct ComposeContext {
     /// Story 9.5 — sandbox policy shared reference for Bash-tool enforcement.
     /// Mirrors the AppState.sandbox_policy field; read at spawn time.
     pub sandbox_policy: Arc<tokio::sync::RwLock<crate::domain::models::sandbox::SandboxPolicy>>,
+    #[cfg(feature = "meta-search")]
+    pub search_config: crate::domain::models::SearchConfig,
+    #[cfg(feature = "meta-search")]
+    pub meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
 }
 
 impl AgentCore {
@@ -109,6 +116,8 @@ impl AgentCore {
             tool_exposure: Self::wrap_optional(tool_exposure),
             skill_exposure: Self::wrap_optional(skill_exposure),
             sandbox: Self::wrap(sandbox),
+            #[cfg(feature = "meta-search")]
+            merged_index: arc_swap::ArcSwap::from_pointee(None as Option<Arc<crate::infrastructure::search::MergedIndex>>),
         })
     }
 }
@@ -221,12 +230,16 @@ pub fn build_tools(
 ) -> Result<Arc<dyn ToolSetPort>, AdapterCompositionError> {
     match name {
         "builtin-only" => {
-            let adapter = ToolSetAdapter::new(
+            let mut adapter = ToolSetAdapter::new(
                 ctx.workspace_path.clone(),
                 Arc::clone(&ctx.storage),
                 Arc::clone(&ctx.sandbox_slot),
                 Arc::clone(&ctx.sandbox_policy),
             );
+            #[cfg(feature = "meta-search")]
+            if let Some(ref engine) = ctx.meta_search_engine {
+                adapter.set_meta_search_engine(Arc::clone(engine));
+            }
             Ok(Arc::new(adapter))
         }
         "builtin-full" => {
@@ -238,6 +251,10 @@ pub fn build_tools(
                     Arc::clone(&ctx.sandbox_policy),
                 );
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
+            #[cfg(feature = "meta-search")]
+            if let Some(ref engine) = ctx.meta_search_engine {
+                adapter.set_meta_search_engine(Arc::clone(engine));
+            }
             Ok(Arc::new(adapter))
         }
         #[cfg(feature = "mcp")]
@@ -401,10 +418,41 @@ pub fn build_tool_exposure(
     //
     // See SCP-2026-05-21-skill-exposure-strategy §4.2 for the John Round-2
     // directive that mandated this guard comment.
+    //
+    // ⚠ PHASE B ASYMMETRY-BY-DESIGN — DO NOT silently restore symmetry on `[search]` runtime config ⚠
+    //
+    // Phase B introduces a SECOND ASYMMETRIC DEFAULT pair:
+    //   [search] skills = "on"  → Skills meta-search ON by default (when user opts into [skill_exposure].kind = "meta-search")
+    //   [search] tools  = "off" → Tools meta-search OFF by default (user must explicitly opt in via BOTH knobs)
+    //
+    // The asymmetry is BY DESIGN per ADR-09-02 v2 §Audience Split + Mary Round 4
+    // Phase B Prereq re-evaluation:
+    //   - Skills track: 7-signal ecosystem saturation → meta-search defaults ON when feature compiled.
+    //   - Tools track: PARTIAL ecosystem evidence (Arcade single-anchor) → meta-search defaults OFF
+    //     even when feature compiled; user must flip BOTH `[search].tools = "on"` AND
+    //     `[tools].exposure = "meta-search"` to opt in.
+    //
+    // This asymmetry is independent of (and STACKS on) the Phase A asymmetric defaults documented
+    // above (StaticFullExposure-vs-L1MetadataExposure). DO NOT collapse either asymmetry to "fix"
+    // the other without re-opening BOTH ADR-09-01 + ADR-09-02 + SCP-2026-05-23-phase-b-audience-split.
     match ctx.tool_exposure.as_str() {
         "static-full" => Ok(Some(Arc::new(
             crate::adapters::tool_exposure::StaticFullExposure::new(),
         ))),
+        #[cfg(feature = "meta-search")]
+        "meta-search" => {
+            if let Some(engine) = &ctx.meta_search_engine {
+                Ok(Some(Arc::new(
+                    crate::adapters::tool_exposure::MetaSearchExposure::new(Arc::clone(engine)),
+                )))
+            } else {
+                Err(AdapterCompositionError::MissingComposeContext {
+                    port: PortDimension::Tools,
+                    name: "meta-search".into(),
+                    missing_field: "meta_search_engine".into(),
+                })
+            }
+        }
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Tools,
             name: other.to_string(),
@@ -456,6 +504,23 @@ pub fn build_skill_exposure(
     //   - SCP-2026-05-21-skill-exposure-strategy.md §4.2
     //   - The sibling guard comment at build_tool_exposure above
     //   - epic-9-design-flags-2026-05-20.md Flag 4 (Tools) + Flag 5 (Skills)
+    //
+    // ⚠ PHASE B ASYMMETRY-BY-DESIGN — DO NOT silently restore symmetry on `[search]` runtime config ⚠
+    //
+    // Phase B introduces a SECOND ASYMMETRIC DEFAULT pair:
+    //   [search] skills = "on"  → Skills meta-search ON by default (when user opts into [skill_exposure].kind = "meta-search")
+    //   [search] tools  = "off" → Tools meta-search OFF by default (user must explicitly opt in via BOTH knobs)
+    //
+    // The asymmetry is BY DESIGN per ADR-09-02 v2 §Audience Split + Mary Round 4
+    // Phase B Prereq re-evaluation:
+    //   - Skills track: 7-signal ecosystem saturation → meta-search defaults ON when feature compiled.
+    //   - Tools track: PARTIAL ecosystem evidence (Arcade single-anchor) → meta-search defaults OFF
+    //     even when feature compiled; user must flip BOTH `[search].tools = "on"` AND
+    //     `[tools].exposure = "meta-search"` to opt in.
+    //
+    // This asymmetry is independent of (and STACKS on) the Phase A asymmetric defaults documented
+    // above (StaticFullExposure-vs-L1MetadataExposure). DO NOT collapse either asymmetry to "fix"
+    // the other without re-opening BOTH ADR-09-01 + ADR-09-02 + SCP-2026-05-23-phase-b-audience-split.
     match ctx.skill_exposure.as_str() {
         "l1-metadata" => Ok(Some(Arc::new(
             crate::adapters::skill_exposure::L1MetadataExposure::new(
@@ -467,13 +532,28 @@ pub fn build_skill_exposure(
                 Arc::clone(&ctx.skill_cache),
             ),
         ))),
+        #[cfg(feature = "meta-search")]
+        "meta-search" => {
+            if let Some(engine) = &ctx.meta_search_engine {
+                Ok(Some(Arc::new(
+                    crate::adapters::skill_exposure::MetaSearchExposure::new(Arc::clone(engine)),
+                )))
+            } else {
+                Err(AdapterCompositionError::MissingComposeContext {
+                    port: PortDimension::Skills,
+                    name: "meta-search".into(),
+                    missing_field: "meta_search_engine".into(),
+                })
+            }
+        }
+        #[cfg(not(feature = "meta-search"))]
         "meta-search" => Err(AdapterCompositionError::UnknownAdapter {
-            port: PortDimension::Tools, // re-use Tools dimension (no new PortDimension variant)
-            name: "meta-search skill exposure deferred to Story 9.7; see ADR-09-02 §Phase B Prerequisites".into(),
+            port: PortDimension::Skills,
+            name: "meta-search skill exposure requires the `meta-search` cargo feature; see ADR-09-02 §Phase B".into(),
             available: vec!["l1-metadata".into(), "static-full".into()],
         }),
         other => Err(AdapterCompositionError::UnknownAdapter {
-            port: PortDimension::Tools, // re-use Tools dimension (no new PortDimension variant)
+            port: PortDimension::Skills,
             name: other.to_string(),
             available: vec!["l1-metadata".into(), "static-full".into()],
         }),
@@ -591,6 +671,15 @@ pub fn build_for_port(
             build_context(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
                 .map(BuiltAdapter::Context)
         }
+        PortDimension::Skills => {
+            Err(AdapterCompositionError::AdapterConstructionFailed {
+                port: PortDimension::Skills,
+                name: "skills".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from(
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "skill exposure is composed via build_skill_exposure, not build_for_port"),
+                ),
+            })
+        }
     }
 }
 
@@ -618,6 +707,10 @@ mod tests {
             sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
             sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>)),
             sandbox_policy: Arc::new(tokio::sync::RwLock::new(crate::domain::models::sandbox::SandboxPolicy::Permissive)),
+            #[cfg(feature = "meta-search")]
+            search_config: crate::domain::models::SearchConfig::default(),
+            #[cfg(feature = "meta-search")]
+            meta_search_engine: None,
         }
     }
 

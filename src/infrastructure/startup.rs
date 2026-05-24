@@ -167,6 +167,13 @@ pub async fn run() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Story 9.7 — validate [search] config (on/off per ADR-09-02)
+    #[cfg(feature = "meta-search")]
+    if let Err(e) = app_config.search.validate() {
+        eprintln!("Config validation failed: {}", e);
+        std::process::exit(1);
+    }
+
     // Accumulate any profile-related notices for post-EventBus flush
     let mut accumulated_notices: Vec<String> = startup_notices;
 
@@ -781,6 +788,74 @@ pub async fn run() -> Result<()> {
     tools_adapter.set_plan_manager(plan_manager.clone());
     tools_adapter.set_event_tx(domain_tx.clone());
 
+    // Story 9.7 Phase B — late-init slot for CapabilityRegistry.
+    // The registry is created inside CompositeToolsetAdapter during
+    // AgentCore::compose() — AFTER this meta-search block. The rebuild_fn
+    // captures this OnceLock; it is set once compose + populate complete.
+    #[cfg(feature = "meta-search")]
+    let capability_registry_slot: Arc<std::sync::OnceLock<Arc<crate::domain::models::capability_registry::CapabilityRegistry>>> =
+        Arc::new(std::sync::OnceLock::new());
+
+    // Story 9.7 Phase B — construct meta-search engine (gated)
+    #[cfg(feature = "meta-search")]
+    let (meta_search_engine, _catalog_registry): (
+        Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
+        Option<Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>>,
+    ) = {
+        let index_arcswap: Arc<arc_swap::ArcSwap<crate::infrastructure::search::MergedIndex>> =
+            Arc::new(arc_swap::ArcSwap::from_pointee(crate::infrastructure::search::MergedIndex::empty()));
+        let engine: Arc<dyn crate::domain::ports::search::MetaSearchEngine> =
+            Arc::new(crate::infrastructure::search::Bm25SearchEngine::new(Arc::clone(&index_arcswap)));
+        tools_adapter.set_meta_search_engine(Arc::clone(&engine));
+
+        let rebuild_fn: std::sync::Arc<dyn Fn() -> Arc<crate::infrastructure::search::MergedIndex> + Send + Sync> = {
+            let skill_cache = Arc::clone(&shared_skill_cache);
+            let registry_slot = Arc::clone(&capability_registry_slot);
+            let tools_fallback: Arc<dyn crate::domain::ports::ToolSetPort> = Arc::new(tools_adapter.clone());
+            std::sync::Arc::new(move || {
+                let tool_descs: Vec<crate::domain::models::tool_descriptor::ToolDescriptor> = if let Some(reg) = registry_slot.get() {
+                    let caps = reg.snapshot();
+                    caps.iter().map(|c| crate::domain::models::tool_descriptor::ToolDescriptor::from(c)).collect()
+                } else {
+                    tools_fallback.describe()
+                };
+
+                let skill_metas = skill_cache.try_snapshot_metadata();
+
+                let mut overrides: std::collections::BTreeMap<crate::domain::models::doc_key::DocKey, String> = std::collections::BTreeMap::new();
+                for s in &skill_metas {
+                    if let Some(ref terse) = s.terse {
+                        overrides.insert(
+                            crate::domain::models::doc_key::DocKey::new(
+                                crate::domain::models::capability_kind::CapabilityKind::Skill,
+                                s.name.clone(),
+                            ),
+                            terse.clone(),
+                        );
+                    }
+                }
+
+                let mut refs: Vec<&dyn crate::domain::ports::search::IndexableItem> = Vec::with_capacity(tool_descs.len() + skill_metas.len());
+                for t in &tool_descs { refs.push(t); }
+                for s in &skill_metas { refs.push(s); }
+
+                Arc::new(crate::infrastructure::search::MergedIndex::from_items_with_overrides(&refs, &overrides))
+            })
+        };
+        let registry = crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry::new(
+            Arc::clone(&index_arcswap),
+            rebuild_fn,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _handle: tokio::task::JoinHandle<()> = Arc::clone(&registry).spawn_reindex_task(cancel).await;
+        // Story 9.7 Phase B — build initial merged index from builtin tools so
+        // `search_capabilities` returns non-empty results before any catalog deltas arrive.
+        registry.rebuild_now();
+        (Some(engine), Some(registry))
+    };
+    #[cfg(not(feature = "meta-search"))]
+    let (meta_search_engine, _catalog_registry): (Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>, Option<()>) = (None, None);
+
     // Story 16.9: construct progress channel when live_tail is enabled
     let (progress_tx, progress_rx) = if app_config.tool_progress.live_tail {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -860,6 +935,10 @@ pub async fn run() -> Result<()> {
         sandbox_startup_policy: sandbox_policy.clone(),
         sandbox_slot: Arc::clone(&sandbox_slot),
         sandbox_policy: Arc::clone(&sandbox_policy_ref),
+        #[cfg(feature = "meta-search")]
+        search_config: app_config.search.clone(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: meta_search_engine.clone(),
     };
     let agent_core_inner = match crate::infrastructure::runtime::agent_core::AgentCore::compose(
         &resolved.name,
@@ -969,6 +1048,9 @@ pub async fn run() -> Result<()> {
         .await
     };
 
+    #[cfg(feature = "meta-search")]
+    let catalog_registry_for_app_state = _catalog_registry.clone();
+
     let (app_state, domain_rx) = AppState::new(
         event_bus,
         domain_rx,
@@ -986,6 +1068,8 @@ pub async fn run() -> Result<()> {
         profile_resolver_swap,
         cli_snapshot,
         telemetry,
+        #[cfg(feature = "meta-search")]
+        catalog_registry_for_app_state,
     );
 
     // 5d. Use the same storage adapter constructed above for session management.
@@ -1129,6 +1213,17 @@ pub async fn run() -> Result<()> {
             // the registry will also populate via McpCatalogChanged events post-connect).
             if let Err(e) = composite.populate_registry().await {
                 tracing::warn!(error = %e, "Capability registry population failed at startup; will retry on MCP catalog changes");
+            }
+            // Story 9.7 Phase B — wire catalog delta broadcast into the composite adapter
+            #[cfg(feature = "meta-search")]
+            if let Some(reg) = &_catalog_registry {
+                composite.set_catalog_broadcast(reg.tool_sender.clone());
+                let _ = capability_registry_slot.set(Arc::clone(composite.capability_registry()));
+                reg.rebuild_now();
+                tracing::debug!(
+                    tools = composite.capability_registry().snapshot().len(),
+                    "P-R2-1: initial MergedIndex built from live catalog"
+                );
             }
         }
     }
@@ -1549,11 +1644,14 @@ pub fn validate_skill_exposure(kind: &str) -> Result<(), crate::domain::errors::
     }
     match kind {
         "l1-metadata" | "static-full" => Ok(()),
+        #[cfg(feature = "meta-search")]
+        "meta-search" => Ok(()),
+        #[cfg(not(feature = "meta-search"))]
         "meta-search" => Err(DomainError::Config(ConfigError::Invalid {
             field: "skill_exposure.kind".into(),
-            value: "`meta-search` skill exposure strategy is deferred to Story 9.7; \
+            value: "`meta-search` skill exposure strategy requires the `meta-search` cargo feature; \
                      see ADR-09-02 §Phase B Prerequisites. \
-                     For Phase A, set `[skill_exposure].kind = \"l1-metadata\"` \
+                     Compile with `--features meta-search` or set `[skill_exposure].kind = \"l1-metadata\"` \
                      (the default) or remove the key entirely."
                 .to_string(),
         })),
@@ -1587,11 +1685,14 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
     }
     match exposure {
         "static-full" => Ok(()),
+        #[cfg(feature = "meta-search")]
+        "meta-search" => Ok(()),
+        #[cfg(not(feature = "meta-search"))]
         "meta-search" => Err(DomainError::Config(ConfigError::Invalid {
             field: "tools.exposure".into(),
-            value: "`meta-search` exposure strategy is deferred to Story 9.7; \
+            value: "`meta-search` exposure strategy requires the `meta-search` cargo feature; \
                      see ADR-09-01 v2.2 §Phase B Prerequisites. \
-                     For Phase A, set `[tools].exposure = \"static-full\"` \
+                     Compile with `--features meta-search` or set `[tools].exposure = \"static-full\"` \
                      (the default) or remove the key entirely."
                 .to_string(),
         })),
@@ -1599,7 +1700,7 @@ pub fn validate_tools_exposure(exposure: &str) -> Result<(), crate::domain::erro
             field: "tools.exposure".into(),
             value: format!(
                 "unknown exposure strategy `{}`. Phase A accepts only `\"static-full\"`. \
-                 Reserved values: `\"meta-search\"` (Story 9.7 Phase B, currently deferred).",
+                 Reserved values: `\"meta-search\"` (Story 9.7 Phase B, requires `--features meta-search`).",
                 other
             ),
         })),

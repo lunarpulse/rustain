@@ -9,9 +9,13 @@
 //! `MetaSearchExposure` + shared `MetaSearchEngine` infrastructure.
 
 pub mod l1_metadata;
+#[cfg(feature = "meta-search")]
+pub mod meta_search;
 pub mod static_full;
 
 pub use l1_metadata::L1MetadataExposure;
+#[cfg(feature = "meta-search")]
+pub use meta_search::MetaSearchExposure;
 pub use static_full::StaticFullExposure;
 
 use serde::{Deserialize, Serialize};

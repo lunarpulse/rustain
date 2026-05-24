@@ -53,6 +53,7 @@ fn port_name(port: PortDimension) -> &'static str {
         PortDimension::Channels => "channels",
         PortDimension::Scheduler => "scheduler",
         PortDimension::Context => "context",
+        PortDimension::Skills => "skills",
     }
 }
 
