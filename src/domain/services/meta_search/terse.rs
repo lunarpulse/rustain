@@ -73,14 +73,20 @@ mod tests {
     #[test]
     fn test_first_sentence_returned_verbatim() {
         let desc = "Runs ruff format on the file. The result is written back.";
-        assert_eq!(compute_terse(desc, "ruff_format"), "Runs ruff format on the file.");
+        assert_eq!(
+            compute_terse(desc, "ruff_format"),
+            "Runs ruff format on the file."
+        );
     }
 
     #[test]
     fn test_no_sentence_boundary_truncates_with_ellipsis() {
         let desc = "a".repeat(200);
         let out = compute_terse(&desc, "x");
-        assert!(out.ends_with('…'), "long desc without sentence terminator must end with ellipsis");
+        assert!(
+            out.ends_with('…'),
+            "long desc without sentence terminator must end with ellipsis"
+        );
         // The ellipsis is 3 bytes in UTF-8 ('…' = E2 80 A6). The prefix is
         // TERSE_MAX_BYTES bytes max.
         assert!(out.len() <= TERSE_MAX_BYTES + 3);

@@ -83,9 +83,12 @@ impl From<&Cli> for CliOverrides {
                 .skill_exposure
                 .clone()
                 .map(|kind| CliSkillExposureOverride { kind: Some(kind) }),
-            sandbox: cli.sandbox_adapter.clone().map(|adapter| CliSandboxOverride {
-                adapter: Some(adapter),
-            }),
+            sandbox: cli
+                .sandbox_adapter
+                .clone()
+                .map(|adapter| CliSandboxOverride {
+                    adapter: Some(adapter),
+                }),
         }
     }
 }

@@ -218,7 +218,7 @@ async fn turn_scheduler_migration() {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
-        reasoning_content: None,
+            reasoning_content: None,
         }],
         CompletionOptions {
             model: "test".into(),

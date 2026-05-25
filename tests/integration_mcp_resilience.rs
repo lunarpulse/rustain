@@ -27,9 +27,7 @@ use rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
 use rustain::adapters::mcp::client::McpClientAdapter;
 use rustain::adapters::noop::NoOpToolSet;
 use rustain::domain::events::AppEvent;
-use rustain::domain::models::{
-    McpConnectionState, McpServerSource, McpServerSpec, McpTransport,
-};
+use rustain::domain::models::{McpConnectionState, McpServerSource, McpServerSpec, McpTransport};
 use rustain::domain::ports::ToolSetPort;
 
 // ── Helpers (mirror conformance_mcp_lifecycle.rs binary discovery) ──────────
@@ -111,14 +109,8 @@ async fn r5_prepare_detach_kills_running_non_persistent_mcp_child() {
     // Smoke-check: child is alive before detach.
     // (Optional — pgrep may not always find a freshly-spawned child on every OS.)
 
-    let composite = CompositeToolsetAdapter::new(
-        builtin,
-        vec![client.clone()],
-        vec![spec],
-        true,
-        None,
-        None,
-    );
+    let composite =
+        CompositeToolsetAdapter::new(builtin, vec![client.clone()], vec![spec], true, None, None);
 
     composite
         .prepare_detach()
@@ -152,14 +144,8 @@ async fn r5_prepare_detach_does_not_kill_persistent_mcp_child() {
         "fake-mcp-server must connect"
     );
 
-    let composite = CompositeToolsetAdapter::new(
-        builtin,
-        vec![client.clone()],
-        vec![spec],
-        true,
-        None,
-        None,
-    );
+    let composite =
+        CompositeToolsetAdapter::new(builtin, vec![client.clone()], vec![spec], true, None, None);
 
     composite
         .prepare_detach()
@@ -241,9 +227,7 @@ async fn r8_list_changed_keeps_catalog_populated_after_refresh() {
     let evt = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             match rx.recv().await {
-                Some(AppEvent::McpCatalogChanged { server_id, .. })
-                    if server_id == "r8-svr" =>
-                {
+                Some(AppEvent::McpCatalogChanged { server_id, .. }) if server_id == "r8-svr" => {
                     return Some(server_id);
                 }
                 Some(_) => continue,
@@ -274,14 +258,8 @@ async fn r8_list_changed_keeps_catalog_populated_after_refresh() {
     // Composite-level: the same tools must surface on the LLM-facing catalog
     // with the `mcp__<server>__<tool>` projection.
     let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let composite = CompositeToolsetAdapter::new(
-        builtin,
-        vec![client.clone()],
-        vec![spec],
-        true,
-        None,
-        None,
-    );
+    let composite =
+        CompositeToolsetAdapter::new(builtin, vec![client.clone()], vec![spec], true, None, None);
     let names: Vec<String> = composite
         .available_tools()
         .into_iter()

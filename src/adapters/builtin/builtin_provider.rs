@@ -95,9 +95,10 @@ mod tests {
         Arc::new(ToolSetAdapter::new(
             PathBuf::from("."),
             storage,
-            Arc::new(ArcSwap::from_pointee(Arc::new(
-                crate::adapters::sandbox::NoOpSandbox,
-            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(crate::adapters::sandbox::NoOpSandbox)
+                    as Arc<dyn crate::domain::ports::SandboxManager>,
+            )),
             Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),

@@ -365,8 +365,12 @@ pub struct SearchConfig {
     pub tools: String,
 }
 
-fn default_search_skills() -> String { "on".into() }
-fn default_search_tools() -> String { "off".into() }
+fn default_search_skills() -> String {
+    "on".into()
+}
+fn default_search_tools() -> String {
+    "off".into()
+}
 
 impl Default for SearchConfig {
     fn default() -> Self {

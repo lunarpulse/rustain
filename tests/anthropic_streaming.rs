@@ -337,7 +337,7 @@ data: {\"type\":\"message_stop\"}\n\
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
-        reasoning_content: None,
+            reasoning_content: None,
         }];
         let options = CompletionOptions {
             model: "claude-sonnet-4-6".into(),
@@ -413,7 +413,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "claude-sonnet-4-6".into(),
@@ -465,7 +465,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "claude-sonnet-4-6".into(),
@@ -518,7 +518,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "claude-sonnet-4-6".into(),
@@ -594,7 +594,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "claude-sonnet-4-6".into(),
@@ -727,7 +727,7 @@ data: {\"type\":\"message_stop\"}\n\
                 tool_results: vec![],
                 tool_uses: vec![],
                 context_prefix: None,
-            reasoning_content: None,
+                reasoning_content: None,
             }],
             CompletionOptions {
                 model: "test".into(),
@@ -873,7 +873,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "claude-sonnet-4-6".into(),
@@ -942,7 +942,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "claude-sonnet-4-6".into(),
@@ -991,7 +991,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_results: vec![],
                     tool_uses: vec![],
                     context_prefix: None,
-                reasoning_content: None,
+                    reasoning_content: None,
                 }],
                 CompletionOptions {
                     model: "glm-4.7".into(),

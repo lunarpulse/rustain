@@ -37,8 +37,12 @@ pub async fn emit_after_render(
 
     // Metric 6: active_skill_ratio (gauge over 7d window).
     // Source: epics.md:4168.
-    aggregator.record_exposure(provider_id, MetricKind::Skill, diagnostics.catalog_size).await;
-    let ratio = aggregator.active_ratio(provider_id, MetricKind::Skill).await;
+    aggregator
+        .record_exposure(provider_id, MetricKind::Skill, diagnostics.catalog_size)
+        .await;
+    let ratio = aggregator
+        .active_ratio(provider_id, MetricKind::Skill)
+        .await;
     tracing::info!(
         target: "rustain::telemetry::skill_exposure",
         metric = "active_skill_ratio",

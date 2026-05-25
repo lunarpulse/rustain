@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::catalog_delta::CatalogDelta;
@@ -52,10 +52,7 @@ impl CatalogObserverRegistry {
     /// Create a new registry sharing the given `ArcSwap<MergedIndex>` with the engine.
     /// Subscribers are created eagerly to avoid race window where initial
     /// `populate_registry` delta is sent before `spawn_reindex_task` subscribes.
-    pub fn new(
-        shared_index: Arc<ArcSwap<MergedIndex>>,
-        rebuild_fn: RebuildFn,
-    ) -> Arc<Self> {
+    pub fn new(shared_index: Arc<ArcSwap<MergedIndex>>, rebuild_fn: RebuildFn) -> Arc<Self> {
         let (tool_tx, tool_rx) = broadcast::channel(CHANNEL_CAPACITY);
         let (skill_tx, skill_rx) = broadcast::channel(CHANNEL_CAPACITY);
         Arc::new(Self {
@@ -79,8 +76,18 @@ impl CatalogObserverRegistry {
         self: Arc<Self>,
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
-        let tool_rx = self.tool_rx.lock().await.take().expect("spawn_reindex_task called twice");
-        let skill_rx = self.skill_rx.lock().await.take().expect("spawn_reindex_task called twice");
+        let tool_rx = self
+            .tool_rx
+            .lock()
+            .await
+            .take()
+            .expect("spawn_reindex_task called twice");
+        let skill_rx = self
+            .skill_rx
+            .lock()
+            .await
+            .take()
+            .expect("spawn_reindex_task called twice");
         tokio::spawn(async move {
             let mut tool_rx = tool_rx;
             let mut skill_rx = skill_rx;

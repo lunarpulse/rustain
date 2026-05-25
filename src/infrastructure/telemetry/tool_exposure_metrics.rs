@@ -103,7 +103,9 @@ pub async fn emit_after_render(
     // Metric 3: active_tool_ratio (gauge) — ratio of tools actually invoked
     // to tools exposed in trailing 7-day window.
     // Source: epics.md:4164.
-    aggregator.record_exposure(provider_id, MetricKind::Tool, catalog_len).await;
+    aggregator
+        .record_exposure(provider_id, MetricKind::Tool, catalog_len)
+        .await;
     let ratio = aggregator.active_ratio(provider_id, MetricKind::Tool).await;
     tracing::info!(
         target: "rustain::telemetry::tool_exposure",

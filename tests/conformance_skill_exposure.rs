@@ -5,8 +5,8 @@
 //! forward-compat type reservations, and the two-layer cache.
 
 use rustain::adapters::skill_exposure::{
-    L1MetadataExposure, SkillExposureKind, SkillExposurePayload,
-    SkillRenderDiagnostics, SkillRenderOutcome, StaticFullExposure,
+    L1MetadataExposure, SkillExposureKind, SkillExposurePayload, SkillRenderDiagnostics,
+    SkillRenderOutcome, StaticFullExposure,
 };
 use rustain::domain::models::filtered_skill_catalog::FilteredSkillCatalog;
 use rustain::domain::models::skill_catalog_delta::SkillCatalogDelta;
@@ -116,12 +116,9 @@ async fn test_static_full_kind() {
 async fn test_static_full_renders_bodies_payload() {
     let cache = test_cache();
     let body = "# Test\n\nThis is a test skill body with sufficient length for token estimation purposes.\n\n## Usage\n\nRun `/test` to activate this skill.\n";
-    cache.insert(
-        "test-skill",
-        test_metadata("test-skill"),
-        body.to_string(),
-    )
-    .await;
+    cache
+        .insert("test-skill", test_metadata("test-skill"), body.to_string())
+        .await;
 
     let exposure = StaticFullExposure::new(cache);
     let catalog = FilteredSkillCatalog::from_metadata(vec![test_metadata("test-skill")]);
@@ -142,12 +139,9 @@ async fn test_static_full_renders_bodies_payload() {
 #[tokio::test]
 async fn test_static_full_skips_missing_bodies() {
     let cache = test_cache();
-    cache.insert(
-        "present",
-        test_metadata("present"),
-        "body content".into(),
-    )
-    .await;
+    cache
+        .insert("present", test_metadata("present"), "body content".into())
+        .await;
 
     let exposure = StaticFullExposure::new(cache);
     let catalog = FilteredSkillCatalog::from_metadata(vec![
@@ -179,7 +173,7 @@ async fn test_static_full_on_catalog_changed_is_no_op() {
 #[tokio::test]
 async fn test_builtin_provider_includes_skill_view() {
     use rustain::adapters::builtin::builtin_provider::BuiltinProvider;
-    
+
     use rustain::adapters::filesystem::FileSystemStorage;
     use rustain::adapters::toolset_adapter::ToolSetAdapter;
     use rustain::domain::ports::CapabilityProvider;
@@ -196,8 +190,13 @@ async fn test_builtin_provider_includes_skill_view() {
     let tools = ToolSetAdapter::new(
         ws,
         Arc::clone(&storage),
-        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
     );
     let provider = BuiltinProvider::new(Arc::new(tools));
     let caps = provider.discover().await.unwrap();
@@ -214,7 +213,6 @@ async fn test_builtin_provider_includes_skill_view() {
 #[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_meta_search_config_rejected_with_actionable_error() {
-    
     // Validate via the startup validation function (re-exported)
     let result = rustain::infrastructure::startup::validate_skill_exposure("meta-search");
     assert!(result.is_err(), "meta-search must be rejected");
@@ -270,7 +268,10 @@ fn test_cli_skill_exposure_flag_valid_values() {
     );
 
     let cli = Cli::try_parse_from(["rustain", "--skill-exposure", "static-full"]);
-    assert!(cli.is_ok(), "--skill-exposure static-full must parse successfully");
+    assert!(
+        cli.is_ok(),
+        "--skill-exposure static-full must parse successfully"
+    );
 }
 
 #[test]
@@ -298,9 +299,7 @@ fn test_compose_with_default_config_binds_l1_metadata() {
         workspace_path: std::path::PathBuf::from("/tmp/test"),
         project_context: ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage),
-        skill_activator: Arc::new(
-            rustain::adapters::skill_activation::SkillActivator::new(),
-        ),
+        skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
@@ -309,8 +308,13 @@ fn test_compose_with_default_config_binds_l1_metadata() {
         skill_cache: test_cache(),
         sandbox_adapter: "noop".into(),
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
-        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::sandbox::NoOpSandbox,
+        )
+            as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -320,8 +324,7 @@ fn test_compose_with_default_config_binds_l1_metadata() {
         dimensions: BTreeMap::new(),
     };
 
-    let result =
-        rustain::infrastructure::composition::build_skill_exposure(&selection, &ctx);
+    let result = rustain::infrastructure::composition::build_skill_exposure(&selection, &ctx);
     assert!(result.is_ok(), "default config must compose successfully");
     let built = result.unwrap();
     assert!(built.is_some(), "l1-metadata must yield Some");
@@ -343,9 +346,7 @@ fn test_compose_with_static_full_binds_static_full() {
         workspace_path: std::path::PathBuf::from("/tmp/test"),
         project_context: ProjectContext::empty(),
         storage: Arc::new(rustain::adapters::noop::NoOpStorage),
-        skill_activator: Arc::new(
-            rustain::adapters::skill_activation::SkillActivator::new(),
-        ),
+        skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
@@ -354,8 +355,13 @@ fn test_compose_with_static_full_binds_static_full() {
         skill_cache: test_cache(),
         sandbox_adapter: "noop".into(),
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
-        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::sandbox::NoOpSandbox,
+        )
+            as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -365,8 +371,7 @@ fn test_compose_with_static_full_binds_static_full() {
         dimensions: BTreeMap::new(),
     };
 
-    let result =
-        rustain::infrastructure::composition::build_skill_exposure(&selection, &ctx);
+    let result = rustain::infrastructure::composition::build_skill_exposure(&selection, &ctx);
     assert!(result.is_ok());
     assert_eq!(
         result.unwrap().unwrap().kind(),
@@ -417,8 +422,7 @@ fn test_search_stub_payload_variant_reserved() {
 #[cfg(not(feature = "meta-search"))]
 #[test]
 fn test_phase_a_no_meta_search_feature() {
-    let cargo_toml =
-        std::fs::read_to_string("Cargo.toml").expect("Cargo.toml must be readable");
+    let cargo_toml = std::fs::read_to_string("Cargo.toml").expect("Cargo.toml must be readable");
     assert!(
         !cargo_toml.contains("meta-search"),
         "Cargo.toml must not contain meta-search feature"
@@ -489,20 +493,8 @@ async fn test_cache_source_retrieval() {
 #[tokio::test]
 async fn test_cache_snapshot_catalog() {
     let cache = test_cache();
-    cache
-        .insert(
-            "a",
-            test_metadata("a"),
-            "body-a".into(),
-        )
-        .await;
-    cache
-        .insert(
-            "b",
-            test_metadata("b"),
-            "body-b".into(),
-        )
-        .await;
+    cache.insert("a", test_metadata("a"), "body-a".into()).await;
+    cache.insert("b", test_metadata("b"), "body-b".into()).await;
 
     let catalog = cache.snapshot_catalog().await;
     assert_eq!(catalog.len(), 2);
@@ -512,11 +504,7 @@ async fn test_cache_snapshot_catalog() {
 async fn test_cache_concurrent_reads_no_deadlock() {
     let cache = test_cache();
     cache
-        .insert(
-            "shared",
-            test_metadata("shared"),
-            "shared body".into(),
-        )
+        .insert("shared", test_metadata("shared"), "shared body".into())
         .await;
 
     let cache = Arc::new(cache);
@@ -555,14 +543,16 @@ async fn test_diagnostics_carry_catalog_size_and_token_estimate() {
 #[test]
 fn test_diagnostics_no_skill_name_in_reason_field() {
     let diag = SkillRenderDiagnostics::clean(3, 300);
-    assert!(diag.reason.is_none(), "clean diagnostics must have no reason");
+    assert!(
+        diag.reason.is_none(),
+        "clean diagnostics must have no reason"
+    );
 }
 
 // ── Manifest computation ──
 
 #[test]
 fn test_cache_manifest_deterministic_for_empty_dirs() {
-    
     let m1 = SkillCache::manifest(&[]);
     let m2 = SkillCache::manifest(&[]);
     assert_eq!(m1, m2, "manifest must be deterministic for empty input");
@@ -575,13 +565,24 @@ fn test_cache_manifest_differs_for_different_inputs() {
     let b = tmp.path().join("b");
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
-    std::fs::write(a.join("SKILL.md"), "---\nname: skill-a\ndescription: desc when needed\n---\n\nbody\n").unwrap();
-    std::fs::write(b.join("SKILL.md"), "---\nname: skill-b\ndescription: desc when needed\n---\n\nbody\n").unwrap();
+    std::fs::write(
+        a.join("SKILL.md"),
+        "---\nname: skill-a\ndescription: desc when needed\n---\n\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        b.join("SKILL.md"),
+        "---\nname: skill-b\ndescription: desc when needed\n---\n\nbody\n",
+    )
+    .unwrap();
 
-    
     let m1 = SkillCache::manifest(&[a.as_path()]);
     std::thread::sleep(std::time::Duration::from_millis(10)); // ensure mtime differs
-    std::fs::write(a.join("SKILL.md"), "---\nname: skill-a\ndescription: modified desc when needed\n---\n\nmodified\n").unwrap();
+    std::fs::write(
+        a.join("SKILL.md"),
+        "---\nname: skill-a\ndescription: modified desc when needed\n---\n\nmodified\n",
+    )
+    .unwrap();
     let m2 = SkillCache::manifest(&[a.as_path()]);
 
     assert_ne!(m1, m2, "manifest must change when file content changes");

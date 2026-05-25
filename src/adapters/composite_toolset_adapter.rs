@@ -56,7 +56,8 @@ pub struct CompositeToolsetAdapter {
     /// Set by `set_catalog_broadcast` after `CatalogObserverRegistry` is
     /// constructed (two-phase wiring: adapter built first, then registry).
     #[cfg(feature = "meta-search")]
-    catalog_broadcast: std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>>,
+    catalog_broadcast:
+        std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>>,
 }
 
 impl CompositeToolsetAdapter {

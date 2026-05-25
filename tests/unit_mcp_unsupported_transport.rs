@@ -73,7 +73,10 @@ async fn r14_sse_transport_returns_unsupported_and_does_not_spawn() {
                 "Unsupported reason should mention SSE; got: {reason}"
             );
         }
-        other => panic!("expected Unsupported state after SSE connect, got {:?}", other),
+        other => panic!(
+            "expected Unsupported state after SSE connect, got {:?}",
+            other
+        ),
     }
 
     // Belt-and-braces: the "would fail to spawn" binary path must never have

@@ -250,7 +250,8 @@ mod tests {
             sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
             sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
                 crate::adapters::sandbox::NoOpSandbox,
-            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            )
+                as Arc<dyn crate::domain::ports::SandboxManager>)),
             sandbox_policy: Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),

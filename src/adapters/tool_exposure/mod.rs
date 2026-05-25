@@ -5,9 +5,9 @@
 //! Phase B (Story 9.7) ships `MetaSearchExposure` + per-provider native
 //! primitive wiring.
 
+pub mod capability_matrix;
 #[cfg(feature = "meta-search")]
 pub mod meta_search;
-pub mod capability_matrix;
 pub mod static_full;
 
 pub use capability_matrix::{Capability, CapabilityMatrix};

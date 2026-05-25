@@ -104,7 +104,10 @@ mod tests {
         };
         let tokens = meta.estimated_tokens();
         assert!(tokens > 0, "token estimate must be positive");
-        assert!(tokens <= 100, "typical skill L1 metadata should be well under 100 tokens");
+        assert!(
+            tokens <= 100,
+            "typical skill L1 metadata should be well under 100 tokens"
+        );
     }
 
     #[test]
@@ -157,7 +160,11 @@ impl crate::domain::ports::search::IndexableItem for SkillMetadata {
         std::borrow::Cow::Borrowed(&self.description)
     }
 
-    fn to_search_hit(&self, score: f32, matched_terms: Option<Vec<String>>) -> crate::domain::models::search_hit::SearchHit {
+    fn to_search_hit(
+        &self,
+        score: f32,
+        matched_terms: Option<Vec<String>>,
+    ) -> crate::domain::models::search_hit::SearchHit {
         // SkillMetadata does NOT carry the optional SkillDef.terse override
         // — only SkillDef does (AC-9-7-9). The composition root projects
         // SkillDef → SkillMetadata + (separately) carries the optional terse
@@ -167,10 +174,8 @@ impl crate::domain::ports::search::IndexableItem for SkillMetadata {
         // Decision Gate 9.7.8 — note the override path is OWNED BY THE
         // INDEX, not by the projection method, so SkillMetadata.terse does
         // NOT need to exist as a field).
-        let terse = crate::domain::services::meta_search::compute_terse(
-            &self.description,
-            &self.name,
-        );
+        let terse =
+            crate::domain::services::meta_search::compute_terse(&self.description, &self.name);
         crate::domain::models::search_hit::SearchHit {
             name: self.name.clone(),
             kind: crate::domain::models::capability_kind::CapabilityKind::Skill,

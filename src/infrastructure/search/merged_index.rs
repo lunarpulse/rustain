@@ -47,9 +47,7 @@ impl MergedIndex {
                 cached.insert(
                     dk.clone(),
                     CachedProjection {
-                        terse: crate::domain::services::meta_search::compute_terse(&desc,
-                            &dk.name,
-                        ),
+                        terse: crate::domain::services::meta_search::compute_terse(&desc, &dk.name),
                         kind: dk.kind,
                         provider: None, // populated by caller after collision detection
                     },
@@ -57,11 +55,8 @@ impl MergedIndex {
                 bm25::Document::new(dk, text)
             })
             .collect();
-        let bm25 = bm25::SearchEngineBuilder::with_documents(
-            bm25::Language::English,
-            documents,
-        )
-        .build();
+        let bm25 =
+            bm25::SearchEngineBuilder::with_documents(bm25::Language::English, documents).build();
         Self { bm25, cached }
     }
 
@@ -91,12 +86,9 @@ impl MergedIndex {
                 let dk = item.doc_key();
                 let text = item.searchable_text().into_owned();
                 let desc = item.description().into_owned();
-                let terse = terse_overrides
-                    .get(&dk)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        crate::domain::services::meta_search::compute_terse(&desc, &dk.name)
-                    });
+                let terse = terse_overrides.get(&dk).cloned().unwrap_or_else(|| {
+                    crate::domain::services::meta_search::compute_terse(&desc, &dk.name)
+                });
                 cached.insert(
                     dk.clone(),
                     CachedProjection {
@@ -108,11 +100,8 @@ impl MergedIndex {
                 bm25::Document::new(dk, text)
             })
             .collect();
-        let bm25 = bm25::SearchEngineBuilder::with_documents(
-            bm25::Language::English,
-            documents,
-        )
-        .build();
+        let bm25 =
+            bm25::SearchEngineBuilder::with_documents(bm25::Language::English, documents).build();
         Self { bm25, cached }
     }
 
@@ -184,7 +173,12 @@ impl MergedIndex {
 
         // For entries with count > 1, populate provider
         for (dk, proj) in self.cached.iter_mut() {
-            if name_counts.get(&(dk.kind, dk.name.clone())).copied().unwrap_or(0) > 1 {
+            if name_counts
+                .get(&(dk.kind, dk.name.clone()))
+                .copied()
+                .unwrap_or(0)
+                > 1
+            {
                 match dk.kind {
                     CapabilityKind::Tool => {
                         if let Some(pid) = tool_provider(&dk.name) {
@@ -272,7 +266,9 @@ mod tests {
         let items: Vec<TestItem> = vec![
             TestItem {
                 name: "review-code".into(),
-                desc: "Review code for style violations and formatting issues. Very long description.".into(),
+                desc:
+                    "Review code for style violations and formatting issues. Very long description."
+                        .into(),
                 kind: CapabilityKind::Skill,
             },
             TestItem {
@@ -288,10 +284,16 @@ mod tests {
             "Custom terse override".into(),
         );
         let index = MergedIndex::from_items_with_overrides(&refs, &overrides);
-        let proj = index.cached.get(&DocKey::new(CapabilityKind::Skill, "review-code")).unwrap();
+        let proj = index
+            .cached
+            .get(&DocKey::new(CapabilityKind::Skill, "review-code"))
+            .unwrap();
         assert_eq!(proj.terse, "Custom terse override");
 
-        let tool_proj = index.cached.get(&DocKey::new(CapabilityKind::Tool, "query")).unwrap();
+        let tool_proj = index
+            .cached
+            .get(&DocKey::new(CapabilityKind::Tool, "query"))
+            .unwrap();
         assert_eq!(tool_proj.terse, "Run SQL queries against databases.");
     }
 

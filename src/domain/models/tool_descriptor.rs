@@ -229,11 +229,13 @@ impl crate::domain::ports::search::IndexableItem for ToolDescriptor {
         std::borrow::Cow::Borrowed(&self.description)
     }
 
-    fn to_search_hit(&self, score: f32, matched_terms: Option<Vec<String>>) -> crate::domain::models::search_hit::SearchHit {
-        let terse = crate::domain::services::meta_search::compute_terse(
-            &self.description,
-            &self.name,
-        );
+    fn to_search_hit(
+        &self,
+        score: f32,
+        matched_terms: Option<Vec<String>>,
+    ) -> crate::domain::models::search_hit::SearchHit {
+        let terse =
+            crate::domain::services::meta_search::compute_terse(&self.description, &self.name);
         let hit = crate::domain::models::search_hit::SearchHit {
             name: self.name.clone(),
             kind: crate::domain::models::capability_kind::CapabilityKind::Tool,
@@ -246,8 +248,13 @@ impl crate::domain::ports::search::IndexableItem for ToolDescriptor {
             provider: None,
             matched_terms,
         };
-        if !crate::domain::models::capability_id::CapabilityId::from_mcp_wire_name(&hit.name).is_some()
-            && !crate::domain::models::capability_id::CapabilityId::parse(&format!("builtin::{}", hit.name)).is_some()
+        if !crate::domain::models::capability_id::CapabilityId::from_mcp_wire_name(&hit.name)
+            .is_some()
+            && !crate::domain::models::capability_id::CapabilityId::parse(&format!(
+                "builtin::{}",
+                hit.name
+            ))
+            .is_some()
         {
             debug_assert!(
                 false,

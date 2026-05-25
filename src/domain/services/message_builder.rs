@@ -86,13 +86,10 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
         if cm.role == MessageRole::Assistant {
             // Extract thinking/reasoning content from content_blocks so
             // providers like DeepSeek v4 that require it can echo it back.
-            let reasoning_content = cm
-                .content_blocks
-                .iter()
-                .find_map(|b| match b {
-                    ContentBlockType::Thinking(text) => Some(text.clone()),
-                    _ => None,
-                });
+            let reasoning_content = cm.content_blocks.iter().find_map(|b| match b {
+                ContentBlockType::Thinking(text) => Some(text.clone()),
+                _ => None,
+            });
 
             messages.push(Message {
                 role: cm.role,

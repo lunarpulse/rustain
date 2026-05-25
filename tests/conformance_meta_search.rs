@@ -32,7 +32,14 @@ fn test_search_hit_serialization_field_set_locked() {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["kind", "matched_terms", "name", "provider", "score", "terse"],
+        vec![
+            "kind",
+            "matched_terms",
+            "name",
+            "provider",
+            "score",
+            "terse"
+        ],
         "SearchHit serialized field set MUST be exactly {{name, kind, terse, score, provider?, matched_terms?}}"
     );
 }
@@ -53,54 +60,52 @@ fn test_search_hit_omits_none_optionals_from_payload() {
 
 #[test]
 fn test_top_k_clamp_rejects_above_20() {
+    use arc_swap::ArcSwap;
     use rustain::domain::ports::search::MetaSearchError;
     use rustain::infrastructure::search::Bm25SearchEngine;
-    use arc_swap::ArcSwap;
     use std::sync::Arc;
 
-    let index = Arc::new(ArcSwap::from_pointee(rustain::infrastructure::search::MergedIndex::empty()));
+    let index = Arc::new(ArcSwap::from_pointee(
+        rustain::infrastructure::search::MergedIndex::empty(),
+    ));
     let engine = Bm25SearchEngine::new(index);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        engine.search("test", None, 25).await
-    });
+    let result = rt.block_on(async { engine.search("test", None, 25).await });
     assert!(matches!(result, Err(MetaSearchError::TopKTooLarge(25))));
 }
 
 #[test]
 fn test_top_k_clamp_accepts_at_20() {
-    use rustain::infrastructure::search::Bm25SearchEngine;
     use arc_swap::ArcSwap;
+    use rustain::infrastructure::search::Bm25SearchEngine;
     use std::sync::Arc;
 
-    let index = Arc::new(ArcSwap::from_pointee(rustain::infrastructure::search::MergedIndex::empty()));
+    let index = Arc::new(ArcSwap::from_pointee(
+        rustain::infrastructure::search::MergedIndex::empty(),
+    ));
     let engine = Bm25SearchEngine::new(index);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        engine.search("test", None, 20).await
-    });
+    let result = rt.block_on(async { engine.search("test", None, 20).await });
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_empty_query_rejected() {
+    use arc_swap::ArcSwap;
     use rustain::domain::ports::search::MetaSearchError;
     use rustain::infrastructure::search::Bm25SearchEngine;
-    use arc_swap::ArcSwap;
     use std::sync::Arc;
 
-    let index = Arc::new(ArcSwap::from_pointee(rustain::infrastructure::search::MergedIndex::empty()));
+    let index = Arc::new(ArcSwap::from_pointee(
+        rustain::infrastructure::search::MergedIndex::empty(),
+    ));
     let engine = Bm25SearchEngine::new(index);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    
-    let result = rt.block_on(async {
-        engine.search("", None, 5).await
-    });
+
+    let result = rt.block_on(async { engine.search("", None, 5).await });
     assert!(matches!(result, Err(MetaSearchError::EmptyQuery)));
 
-    let result = rt.block_on(async {
-        engine.search("   ", None, 5).await
-    });
+    let result = rt.block_on(async { engine.search("   ", None, 5).await });
     assert!(matches!(result, Err(MetaSearchError::EmptyQuery)));
 }
 
@@ -114,8 +119,8 @@ fn test_search_config_defaults_asymmetric() {
 
 #[test]
 fn test_bm25_engine_search_returns_ranked_hits() {
-    use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};
     use arc_swap::ArcSwap;
+    use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};
     use std::sync::Arc;
 
     struct TestItem {
@@ -143,26 +148,32 @@ fn test_bm25_engine_search_returns_ranked_hits() {
     }
 
     let items: Vec<TestItem> = vec![
-        TestItem { name: "query".into(), desc: "Run SQL queries".into(), kind: CapabilityKind::Tool },
-        TestItem { name: "review-code".into(), desc: "Review code for style".into(), kind: CapabilityKind::Skill },
+        TestItem {
+            name: "query".into(),
+            desc: "Run SQL queries".into(),
+            kind: CapabilityKind::Tool,
+        },
+        TestItem {
+            name: "review-code".into(),
+            desc: "Review code for style".into(),
+            kind: CapabilityKind::Skill,
+        },
     ];
     let refs: Vec<&TestItem> = items.iter().collect();
     let index = Arc::new(ArcSwap::from_pointee(MergedIndex::from_items(&refs)));
     let engine = Bm25SearchEngine::new(index);
-    
+
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let hits = rt.block_on(async {
-        engine.search("sql", None, 5).await.unwrap()
-    });
-    
+    let hits = rt.block_on(async { engine.search("sql", None, 5).await.unwrap() });
+
     assert!(!hits.is_empty());
     assert_eq!(hits[0].kind, CapabilityKind::Tool);
 }
 
 #[test]
 fn test_kind_filter_returns_only_filtered_kind() {
-    use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};
     use arc_swap::ArcSwap;
+    use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};
     use std::sync::Arc;
 
     struct TestItem {
@@ -190,26 +201,48 @@ fn test_kind_filter_returns_only_filtered_kind() {
     }
 
     let items: Vec<TestItem> = vec![
-        TestItem { name: "tool1".into(), desc: "A tool".into(), kind: CapabilityKind::Tool },
-        TestItem { name: "tool2".into(), desc: "Another tool".into(), kind: CapabilityKind::Tool },
-        TestItem { name: "skill1".into(), desc: "A skill".into(), kind: CapabilityKind::Skill },
-        TestItem { name: "skill2".into(), desc: "Another skill".into(), kind: CapabilityKind::Skill },
+        TestItem {
+            name: "tool1".into(),
+            desc: "A tool".into(),
+            kind: CapabilityKind::Tool,
+        },
+        TestItem {
+            name: "tool2".into(),
+            desc: "Another tool".into(),
+            kind: CapabilityKind::Tool,
+        },
+        TestItem {
+            name: "skill1".into(),
+            desc: "A skill".into(),
+            kind: CapabilityKind::Skill,
+        },
+        TestItem {
+            name: "skill2".into(),
+            desc: "Another skill".into(),
+            kind: CapabilityKind::Skill,
+        },
     ];
     let refs: Vec<&TestItem> = items.iter().collect();
     let index = Arc::new(ArcSwap::from_pointee(MergedIndex::from_items(&refs)));
     let engine = Bm25SearchEngine::new(index);
-    
+
     let rt = tokio::runtime::Runtime::new().unwrap();
-    
+
     // Filter for tools only
     let tool_hits = rt.block_on(async {
-        engine.search("tool", Some(CapabilityKind::Tool), 5).await.unwrap()
+        engine
+            .search("tool", Some(CapabilityKind::Tool), 5)
+            .await
+            .unwrap()
     });
     assert!(tool_hits.iter().all(|h| h.kind == CapabilityKind::Tool));
-    
+
     // Filter for skills only
     let skill_hits = rt.block_on(async {
-        engine.search("skill", Some(CapabilityKind::Skill), 5).await.unwrap()
+        engine
+            .search("skill", Some(CapabilityKind::Skill), 5)
+            .await
+            .unwrap()
     });
     assert!(skill_hits.iter().all(|h| h.kind == CapabilityKind::Skill));
 }
@@ -218,7 +251,10 @@ fn test_kind_filter_returns_only_filtered_kind() {
 fn test_compute_terse_first_sentence() {
     use rustain::domain::services::meta_search::compute_terse;
     let desc = "Runs ruff format on the file. The result is written back.";
-    assert_eq!(compute_terse(desc, "ruff_format"), "Runs ruff format on the file.");
+    assert_eq!(
+        compute_terse(desc, "ruff_format"),
+        "Runs ruff format on the file."
+    );
 }
 
 #[test]
@@ -239,39 +275,57 @@ fn test_compute_terse_long_truncates_with_ellipsis() {
 #[test]
 fn test_compute_terse_short_sentence_fits() {
     use rustain::domain::services::meta_search::compute_terse;
-    assert_eq!(compute_terse("Quick description.", "x"), "Quick description.");
+    assert_eq!(
+        compute_terse("Quick description.", "x"),
+        "Quick description."
+    );
 }
 
 #[test]
 fn test_compute_terse_question_mark() {
     use rustain::domain::services::meta_search::compute_terse;
-    assert_eq!(compute_terse("Can you format Python? Yes, with ruff.", "x"), "Can you format Python?");
+    assert_eq!(
+        compute_terse("Can you format Python? Yes, with ruff.", "x"),
+        "Can you format Python?"
+    );
 }
 
 #[test]
 fn test_compute_terse_exclamation() {
     use rustain::domain::services::meta_search::compute_terse;
-    assert_eq!(compute_terse("Run this now! It's important.", "x"), "Run this now!");
+    assert_eq!(
+        compute_terse("Run this now! It's important.", "x"),
+        "Run this now!"
+    );
 }
 
 #[test]
 fn test_search_config_validate_accepts_on_off() {
     use rustain::domain::models::SearchConfig;
-    let cfg = SearchConfig { skills: "on".into(), tools: "off".into() };
+    let cfg = SearchConfig {
+        skills: "on".into(),
+        tools: "off".into(),
+    };
     assert!(cfg.validate().is_ok());
 }
 
 #[test]
 fn test_search_config_validate_rejects_typos() {
     use rustain::domain::models::SearchConfig;
-    let cfg = SearchConfig { skills: "onn".into(), tools: "off".into() };
+    let cfg = SearchConfig {
+        skills: "onn".into(),
+        tools: "off".into(),
+    };
     assert!(cfg.validate().is_err());
 }
 
 #[test]
 fn test_search_config_validate_rejects_empty() {
     use rustain::domain::models::SearchConfig;
-    let cfg = SearchConfig { skills: "".into(), tools: "off".into() };
+    let cfg = SearchConfig {
+        skills: "".into(),
+        tools: "off".into(),
+    };
     assert!(cfg.validate().is_err());
 }
 
@@ -345,7 +399,9 @@ fn test_merged_index_from_items_with_overrides() {
         kind: CapabilityKind,
     }
     impl IndexableItem for TestItem {
-        fn doc_key(&self) -> DocKey { DocKey::new(self.kind, self.name.clone()) }
+        fn doc_key(&self) -> DocKey {
+            DocKey::new(self.kind, self.name.clone())
+        }
         fn searchable_text(&self) -> std::borrow::Cow<'_, str> {
             std::borrow::Cow::Owned(format!("{} {}", self.name, self.desc))
         }
@@ -356,12 +412,17 @@ fn test_merged_index_from_items_with_overrides() {
             SearchHit::minimal(self.name.clone(), self.kind, &self.desc, score)
         }
     }
-    let items = vec![
-        TestItem { name: "review-code".into(), desc: "Review code for style violations.".into(), kind: CapabilityKind::Skill },
-    ];
+    let items = vec![TestItem {
+        name: "review-code".into(),
+        desc: "Review code for style violations.".into(),
+        kind: CapabilityKind::Skill,
+    }];
     let refs: Vec<&TestItem> = items.iter().collect();
     let mut overrides = BTreeMap::new();
-    overrides.insert(DocKey::new(CapabilityKind::Skill, "review-code"), "Override terse".into());
+    overrides.insert(
+        DocKey::new(CapabilityKind::Skill, "review-code"),
+        "Override terse".into(),
+    );
     let index = MergedIndex::from_items_with_overrides(&refs, &overrides);
     let hits = index.search("review", None, 5);
     assert_eq!(hits[0].terse, "Override terse");
@@ -370,19 +431,25 @@ fn test_merged_index_from_items_with_overrides() {
 #[test]
 fn test_validate_tools_exposure_accepts_meta_search() {
     let result = rustain::infrastructure::startup::validate_tools_exposure("meta-search");
-    assert!(result.is_ok(), "meta-search must be accepted with the feature enabled");
+    assert!(
+        result.is_ok(),
+        "meta-search must be accepted with the feature enabled"
+    );
 }
 
 #[test]
 fn test_validate_skill_exposure_accepts_meta_search() {
     let result = rustain::infrastructure::startup::validate_skill_exposure("meta-search");
-    assert!(result.is_ok(), "meta-search must be accepted with the feature enabled");
+    assert!(
+        result.is_ok(),
+        "meta-search must be accepted with the feature enabled"
+    );
 }
 
 #[test]
 fn test_bm25_engine_index_swap() {
-    use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};
     use arc_swap::ArcSwap;
+    use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};
     use std::sync::Arc;
 
     let index = Arc::new(ArcSwap::from_pointee(MergedIndex::empty()));
@@ -394,7 +461,9 @@ fn test_bm25_engine_index_swap() {
         kind: CapabilityKind,
     }
     impl IndexableItem for TestItem {
-        fn doc_key(&self) -> DocKey { DocKey::new(self.kind, self.name.clone()) }
+        fn doc_key(&self) -> DocKey {
+            DocKey::new(self.kind, self.name.clone())
+        }
         fn searchable_text(&self) -> std::borrow::Cow<'_, str> {
             std::borrow::Cow::Owned(format!("{} {}", self.name, self.desc))
         }
@@ -410,7 +479,11 @@ fn test_bm25_engine_index_swap() {
     let hits = rt.block_on(async { engine.search("test", None, 5).await.unwrap() });
     assert!(hits.is_empty(), "empty index returns no hits");
 
-    let items = vec![TestItem { name: "query".into(), desc: "Run SQL queries".into(), kind: CapabilityKind::Tool }];
+    let items = vec![TestItem {
+        name: "query".into(),
+        desc: "Run SQL queries".into(),
+        kind: CapabilityKind::Tool,
+    }];
     let refs: Vec<&TestItem> = items.iter().collect();
     engine.swap_index(Arc::new(MergedIndex::from_items(&refs)));
 

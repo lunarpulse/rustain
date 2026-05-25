@@ -1,0 +1,6 @@
+{
+  "name": "write",
+  "description": "Write content to files on the filesystem with atomic operations.",
+  "kind": "builtin",
+  "provider_id": "builtin_provider"
+}

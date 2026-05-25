@@ -26,7 +26,14 @@ fn test_search_hit_serialization_field_set_locked() {
     keys.sort();
     assert_eq!(
         keys,
-        vec!["kind", "matched_terms", "name", "provider", "score", "terse"],
+        vec![
+            "kind",
+            "matched_terms",
+            "name",
+            "provider",
+            "score",
+            "terse"
+        ],
         "SearchHit serialized field set MUST be exactly {{name, kind, terse, score, provider?, matched_terms?}} \
          per ADR-09-02 v2 §LLM-Only Payload + Mary amendment A2. \
          Adding fields silently re-opens the 2-stage discovery violation. \
@@ -64,11 +71,23 @@ fn test_search_hit_struct_field_count_is_six() {
         "input_schema": {"FORBIDDEN": true},
         "category": "FORBIDDEN",
     });
-    let hit: SearchHit = serde_json::from_value(json).expect("deser succeeds, unknown fields silently dropped");
+    let hit: SearchHit =
+        serde_json::from_value(json).expect("deser succeeds, unknown fields silently dropped");
     let reserialized = serde_json::to_value(&hit).unwrap();
-    let keys: Vec<&str> = reserialized.as_object().unwrap().keys().map(|s| s.as_str()).collect();
-    assert!(!keys.contains(&"description"), "description MUST NOT round-trip — Mary A2 lock-down");
-    assert!(!keys.contains(&"input_schema"), "input_schema MUST NOT round-trip");
+    let keys: Vec<&str> = reserialized
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        !keys.contains(&"description"),
+        "description MUST NOT round-trip — Mary A2 lock-down"
+    );
+    assert!(
+        !keys.contains(&"input_schema"),
+        "input_schema MUST NOT round-trip"
+    );
     assert!(!keys.contains(&"category"), "category MUST NOT round-trip");
 }
 
@@ -78,16 +97,24 @@ fn test_search_hit_source_file_grep_for_forbidden_field_names() {
     // This catches the case where a maintainer adds a field but forgets to
     // run the round-trip test (e.g. behind a feature flag).
     let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/domain/models/search_hit.rs")
-    ).unwrap();
-    for forbidden in &["description:", "input_schema:", "parameters:", "version:", "category:", "icon:"] {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/domain/models/search_hit.rs"),
+    )
+    .unwrap();
+    for forbidden in &[
+        "description:",
+        "input_schema:",
+        "parameters:",
+        "version:",
+        "category:",
+        "icon:",
+    ] {
         assert!(
             !src.contains(forbidden),
             "src/domain/models/search_hit.rs contains forbidden field declaration '{}'. \
              Per ADR-09-02 v2 §LLM-Only Payload + Mary amendment A2, adding {} to SearchHit \
              re-opens the 2-stage discovery violation. Re-open ADR-09-02 v3 if you need this field.",
-            forbidden, forbidden
+            forbidden,
+            forbidden
         );
     }
 }

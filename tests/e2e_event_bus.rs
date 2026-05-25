@@ -76,8 +76,13 @@ fn test_app_state_honors_raw_capacity() {
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
         sandbox_adapter: "noop".into(),
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
-        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::sandbox::NoOpSandbox,
+        )
+            as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -87,7 +92,9 @@ fn test_app_state_honors_raw_capacity() {
         event_bus,
         domain_rx,
         approval_runtime,
-        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly { network: false })),
+        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly {
+            network: false,
+        })),
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
         provider_swap.clone(),
@@ -140,8 +147,13 @@ fn test_app_state_session_cancel_is_root_token() {
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
         sandbox_adapter: "noop".into(),
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
-        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        sandbox_policy: Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        sandbox_slot: Arc::new(ArcSwap::from_pointee(Arc::new(
+            rustain::adapters::sandbox::NoOpSandbox,
+        )
+            as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -151,7 +163,9 @@ fn test_app_state_session_cancel_is_root_token() {
         event_bus2,
         domain_rx2,
         approval_runtime,
-        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly { network: false })),
+        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::ReadOnly {
+            network: false,
+        })),
         Arc::new(PlanManager::new(std::path::PathBuf::from("."))),
         Arc::new(DefaultPlanInjector::new()),
         provider_swap2.clone(),

@@ -28,7 +28,8 @@ impl MetaSearchExposure {
     pub fn new(engine: Arc<dyn MetaSearchEngine>) -> Self {
         Self {
             engine,
-            meta_tool_descriptor: crate::adapters::tool_exposure::meta_search::build_search_capabilities_descriptor(),
+            meta_tool_descriptor:
+                crate::adapters::tool_exposure::meta_search::build_search_capabilities_descriptor(),
         }
     }
 }

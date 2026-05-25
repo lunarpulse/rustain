@@ -11,7 +11,10 @@ pub enum SwapTier {
 
 pub fn swap_tier(port: PortDimension) -> SwapTier {
     match port {
-        PortDimension::Persona | PortDimension::Tools | PortDimension::Context | PortDimension::Skills => SwapTier::Hot,
+        PortDimension::Persona
+        | PortDimension::Tools
+        | PortDimension::Context
+        | PortDimension::Skills => SwapTier::Hot,
         PortDimension::Memory | PortDimension::Session => SwapTier::Warm,
         PortDimension::Channels | PortDimension::Scheduler => SwapTier::Cold,
     }

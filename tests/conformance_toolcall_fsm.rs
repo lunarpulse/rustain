@@ -442,8 +442,13 @@ fn ac4_builtin_parallel_safe_flags() {
     let adapter = ToolSetAdapter::new(
         tmp.path().to_path_buf(),
         storage,
-        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
     );
     let defs = adapter.available_tools();
     let map: std::collections::HashMap<String, bool> = defs

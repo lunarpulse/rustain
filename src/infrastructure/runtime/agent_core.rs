@@ -10,8 +10,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort,
-    SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SessionPort,
+    SkillExposurePort, ToolExposurePort, ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -73,7 +73,9 @@ impl AgentCore {
             skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
             sandbox: Self::wrap(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>),
             #[cfg(feature = "meta-search")]
-            merged_index: ArcSwap::from_pointee(None as Option<Arc<crate::infrastructure::search::MergedIndex>>),
+            merged_index: ArcSwap::from_pointee(
+                None as Option<Arc<crate::infrastructure::search::MergedIndex>>,
+            ),
         }
     }
 
@@ -126,7 +128,10 @@ mod tests {
         assert!(Arc::strong_count(&sc) >= 1);
         assert!(Arc::strong_count(&cx) >= 1);
         assert!(te.is_none(), "tool_exposure defaults to None in noop agent");
-        assert!(se.is_none(), "skill_exposure defaults to None in noop agent");
+        assert!(
+            se.is_none(),
+            "skill_exposure defaults to None in noop agent"
+        );
         // Sandbox defaults to NoOpSandbox in test_noop()
         assert_eq!(sb.kind(), SandboxAdapterKind::NoOp);
         #[cfg(feature = "meta-search")]

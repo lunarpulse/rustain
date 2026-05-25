@@ -152,7 +152,9 @@ impl SkillCache {
         match self.inner.try_lock() {
             Ok(guard) => guard.iter().map(|(_, e)| e.metadata.clone()).collect(),
             Err(_) => {
-                tracing::warn!("SkillCache::try_snapshot_metadata() lock contention — returning empty vec");
+                tracing::warn!(
+                    "SkillCache::try_snapshot_metadata() lock contention — returning empty vec"
+                );
                 Vec::new()
             }
         }
@@ -216,8 +218,7 @@ impl SkillCache {
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| SkillCacheError::Serde(e.to_string()))?;
         if let Some(parent) = l2_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| SkillCacheError::Io(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| SkillCacheError::Io(e.to_string()))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -257,10 +258,15 @@ impl SkillCache {
                 return;
             }
             Ok(false) => {
-                tracing::info!("Skill cache: L2 snapshot stale or missing — populating from registry");
+                tracing::info!(
+                    "Skill cache: L2 snapshot stale or missing — populating from registry"
+                );
             }
             Err(e) => {
-                tracing::warn!("Skill cache: L2 snapshot load failed ({}) — populating from registry", e);
+                tracing::warn!(
+                    "Skill cache: L2 snapshot load failed ({}) — populating from registry",
+                    e
+                );
             }
         }
         self.populate_from_registry(registry).await;
@@ -273,7 +279,10 @@ impl SkillCache {
 
     /// Load L2 disk snapshot into L1 if manifest matches. Returns false if
     /// stale or missing L2 path.
-    pub async fn load_snapshot(&self, expected_manifest: [u8; 32]) -> Result<bool, SkillCacheError> {
+    pub async fn load_snapshot(
+        &self,
+        expected_manifest: [u8; 32],
+    ) -> Result<bool, SkillCacheError> {
         let Some(l2_path) = &self.l2_path else {
             return Ok(false);
         };

@@ -1594,12 +1594,11 @@ pub fn render_with_search(
     if let Some(op) = open_prose {
         if !op.is_empty() {
             let cw = width.saturating_sub(2);
-            cumulative_offset +=
-                crate::adapters::tui::markdown::compute_height(
-                    op,
-                    cw,
-                    &crate::adapters::tui::markdown::RenderOptions::default(),
-                );
+            cumulative_offset += crate::adapters::tui::markdown::compute_height(
+                op,
+                cw,
+                &crate::adapters::tui::markdown::RenderOptions::default(),
+            );
         }
     }
 

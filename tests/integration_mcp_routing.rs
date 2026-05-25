@@ -120,9 +120,9 @@ async fn build_composite(
         builtin,
         vec![client],
         vec![spec],
-        true,  // include_builtin (irrelevant for our mcp__-prefixed calls)
-        None,  // event_tx — not needed for runtime tests
-        None,  // skill_activator
+        true, // include_builtin (irrelevant for our mcp__-prefixed calls)
+        None, // event_tx — not needed for runtime tests
+        None, // skill_activator
     ))
 }
 
@@ -284,10 +284,7 @@ async fn r3_plan_mode_denies_elevated_mcp_at_runtime() {
             "plan-mode MUST NOT allow elevated MCP tool to succeed (output: {:?})",
             result.output
         ),
-        other => panic!(
-            "expected Cancelled or Error in plan mode, got {:?}",
-            other
-        ),
+        other => panic!("expected Cancelled or Error in plan mode, got {:?}", other),
     }
 }
 

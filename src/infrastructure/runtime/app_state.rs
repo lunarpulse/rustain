@@ -71,7 +71,9 @@ pub struct AppState {
     /// Story 9.7 Phase B — catalog observer registry for meta-search reindex triggers.
     /// Only present when the `meta-search` feature is enabled.
     #[cfg(feature = "meta-search")]
-    pub catalog_registry: Option<Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>>,
+    pub catalog_registry: Option<
+        Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>,
+    >,
 }
 
 impl AppState {

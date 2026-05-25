@@ -7127,7 +7127,9 @@ pub async fn run(
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
         app_state.telemetry.save_snapshot(),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!("Telemetry snapshot save failed on shutdown: {e}"),
         Err(_) => tracing::warn!("Telemetry snapshot save timed out on shutdown (>2s)"),
@@ -7887,7 +7889,7 @@ async fn start_turn_inner(
     };
     // Story 9.5 — emit telemetry after tool list is built (AC-9-5-7).
     {
-        use crate::infrastructure::telemetry::{emit_tool_after_render, ProviderId};
+        use crate::infrastructure::telemetry::{ProviderId, emit_tool_after_render};
         let provider_id = ProviderId::Anthropic;
         let catalog_len = tool_defs.len();
         let diagnostics = crate::adapters::tool_exposure::RenderDiagnostics::clean();
@@ -8924,7 +8926,7 @@ async fn generate_title(
         tool_results: vec![],
         tool_uses: vec![],
         context_prefix: None,
-    reasoning_content: None,
+        reasoning_content: None,
     }];
     let options = CompletionOptions {
         model: model.to_string(),

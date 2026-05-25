@@ -492,13 +492,17 @@ async fn test_builtin_provider_discover_returns_expected_tools() {
     use rustain::domain::ports::ToolSetPort;
 
     let storage = Arc::new(FileSystemStorage::new(std::path::PathBuf::from(".")));
-    let adapter: Arc<dyn ToolSetPort> =
-        Arc::new(ToolSetAdapter::new(
-            std::path::PathBuf::from("."),
-            storage,
-            Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-            Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
-        ));
+    let adapter: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
+        std::path::PathBuf::from("."),
+        storage,
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
+    ));
     let composite = CompositeToolsetAdapter::new(adapter, vec![], vec![], true, None, None);
 
     let _ = composite.populate_registry().await.unwrap();
@@ -521,10 +525,7 @@ async fn test_builtin_provider_discover_returns_expected_tools() {
     #[cfg(feature = "meta-search")]
     expected.push("search_capabilities");
     expected.sort();
-    assert_eq!(
-        builtin_names,
-        expected
-    );
+    assert_eq!(builtin_names, expected);
 }
 
 #[cfg(feature = "mcp")]
@@ -539,8 +540,13 @@ fn test_builtin_provider_capabilities_in_process() {
     let adapter = Arc::new(ToolSetAdapter::new(
         std::path::PathBuf::from("."),
         storage,
-        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
     ));
     let provider = BuiltinProvider::new(adapter);
     let caps = provider.capabilities();
@@ -575,7 +581,7 @@ async fn test_skill_provider_discover_with_3_skills() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         },
         SkillDef {
             name: "test".into(),
@@ -584,7 +590,7 @@ async fn test_skill_provider_discover_with_3_skills() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         },
         SkillDef {
             name: "refactor".into(),
@@ -593,7 +599,7 @@ async fn test_skill_provider_discover_with_3_skills() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         },
     ];
     let registry = SkillRegistry::from_skills(skills);
@@ -653,8 +659,13 @@ async fn test_registry_holds_all_three_protocols() {
     let builtin: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
         std::path::PathBuf::from("."),
         Arc::new(FileSystemStorage::new(std::path::PathBuf::from("."))),
-        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
     ));
 
     // Fake MCP server with 2 tools (echo, add)
@@ -702,7 +713,7 @@ async fn test_registry_holds_all_three_protocols() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         },
         SkillDef {
             name: "test".into(),
@@ -711,7 +722,7 @@ async fn test_registry_holds_all_three_protocols() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         },
         SkillDef {
             name: "refactor".into(),
@@ -720,7 +731,7 @@ async fn test_registry_holds_all_three_protocols() {
             directory: std::path::PathBuf::from("/tmp"),
             source: SkillSource::WorkspaceAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         },
     ];
     let registry = SkillRegistry::from_skills(skills);
@@ -744,7 +755,11 @@ async fn test_registry_holds_all_three_protocols() {
     let skill_count = snap.iter().filter(|c| c.protocol == "skill").count();
 
     assert_eq!(mcp_count, 2, "fake MCP server has echo + add tools");
-    assert_eq!(builtin_count, 7 + cfg!(feature = "meta-search") as usize, "ToolSetAdapter builtin tools (including skill_view from 9.6, search_capabilities from 9.7)");
+    assert_eq!(
+        builtin_count,
+        7 + cfg!(feature = "meta-search") as usize,
+        "ToolSetAdapter builtin tools (including skill_view from 9.6, search_capabilities from 9.7)"
+    );
     assert_eq!(skill_count, 3, "SkillRegistry has 3 programmatic skills");
     assert_eq!(snap.len(), 12 + cfg!(feature = "meta-search") as usize);
 }
@@ -909,8 +924,13 @@ async fn test_catalog_delta_added_removed_correctness() {
     let builtin: Arc<dyn ToolSetPort> = Arc::new(ToolSetAdapter::new(
         std::path::PathBuf::from("."),
         Arc::new(FileSystemStorage::new(std::path::PathBuf::from("."))),
-        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
     ));
 
     // Fake MCP server with 2 tools (echo, add)
@@ -961,7 +981,11 @@ async fn test_catalog_delta_added_removed_correctness() {
     let _ = composite.populate_registry().await.unwrap();
     assert_eq!(composite.catalog_version(), 1);
     let snap1 = composite.capability_registry().snapshot();
-    assert_eq!(snap1.len(), 9 + cfg!(feature = "meta-search") as usize, "7 builtin + 2 MCP tools (+ search_capabilities with meta-search)");
+    assert_eq!(
+        snap1.len(),
+        9 + cfg!(feature = "meta-search") as usize,
+        "7 builtin + 2 MCP tools (+ search_capabilities with meta-search)"
+    );
 
     // Emit another delta with no changes: version=2, added=0 removed=0
     let _ = composite.emit_catalog_delta().await.unwrap();
@@ -996,7 +1020,11 @@ async fn test_catalog_delta_added_removed_correctness() {
 
     // Verify registry grew by 1
     let snap3 = composite.capability_registry().snapshot();
-    assert_eq!(snap3.len(), 10 + cfg!(feature = "meta-search") as usize, "added multiply tool (7 builtin + 2 MCP + 1 extra, + search_capabilities with meta-search)");
+    assert_eq!(
+        snap3.len(),
+        10 + cfg!(feature = "meta-search") as usize,
+        "added multiply tool (7 builtin + 2 MCP + 1 extra, + search_capabilities with meta-search)"
+    );
 
     // Emit delta: version=3, should detect 1 added
     let _ = composite.emit_catalog_delta().await.unwrap();

@@ -222,7 +222,10 @@ impl ToolSetAdapter {
     }
 
     #[cfg(feature = "meta-search")]
-    pub fn set_meta_search_engine(&mut self, engine: Arc<dyn crate::domain::ports::search::MetaSearchEngine>) {
+    pub fn set_meta_search_engine(
+        &mut self,
+        engine: Arc<dyn crate::domain::ports::search::MetaSearchEngine>,
+    ) {
         self.meta_search_engine = Some(engine);
     }
 
@@ -827,19 +830,22 @@ impl ToolSetPort for ToolSetAdapter {
     fn describe(&self) -> Vec<crate::domain::models::tool_descriptor::ToolDescriptor> {
         self.available_tools()
             .iter()
-            .map(|def| crate::domain::models::tool_descriptor::ToolDescriptor {
-                id: crate::domain::models::tool_descriptor::ToolId(
-                    format!("builtin::{}", def.name)
-                ),
-                name: def.name.clone(),
-                description: def.description.clone(),
-                input_schema: def.input_schema.clone(),
-                provider_id: "builtin".to_string(),
-                annotations: crate::domain::models::tool_descriptor::ToolAnnotations {
-                    read_only_hint: Some(def.parallel_safe),
-                    ..Default::default()
+            .map(
+                |def| crate::domain::models::tool_descriptor::ToolDescriptor {
+                    id: crate::domain::models::tool_descriptor::ToolId(format!(
+                        "builtin::{}",
+                        def.name
+                    )),
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    input_schema: def.input_schema.clone(),
+                    provider_id: "builtin".to_string(),
+                    annotations: crate::domain::models::tool_descriptor::ToolAnnotations {
+                        read_only_hint: Some(def.parallel_safe),
+                        ..Default::default()
+                    },
                 },
-            })
+            )
             .collect()
     }
 
@@ -878,7 +884,10 @@ impl ToolSetPort for ToolSetAdapter {
             }
             "skill_view" => self.execute_skill_view(&input, tool_use_id, cancel).await,
             #[cfg(feature = "meta-search")]
-            "search_capabilities" => self.execute_search_capabilities(&input, tool_use_id, cancel).await,
+            "search_capabilities" => {
+                self.execute_search_capabilities(&input, tool_use_id, cancel)
+                    .await
+            }
             _ => {
                 let _ = (tool_use_id, progress_tx);
                 self.execute(tool_name, input, cancel).await
@@ -1051,17 +1060,12 @@ impl ToolSetAdapter {
         tool_use_id: &str,
         _cancel: CancellationToken,
     ) -> Result<ToolResult, ToolError> {
-        let name = input
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::ExecutionFailed(
-                "skill_view requires 'name' string argument".into(),
-            ))?;
+        let name = input.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            ToolError::ExecutionFailed("skill_view requires 'name' string argument".into())
+        })?;
 
         let cache = self.skill_cache.as_ref().ok_or_else(|| {
-            ToolError::ExecutionFailed(
-                "skill cache not initialized — composition error".into(),
-            )
+            ToolError::ExecutionFailed("skill cache not initialized — composition error".into())
         })?;
 
         let body = cache.body(name).await.map_err(|e| {
@@ -1107,23 +1111,23 @@ impl ToolSetAdapter {
         let kind_filter = match input.get("kind") {
             None => None,
             Some(v) => {
-                let kind_str = v.as_str().ok_or_else(|| {
-                    ToolError::InvalidInput("kind must be a string".into())
-                })?;
+                let kind_str = v
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidInput("kind must be a string".into()))?;
                 match kind_str {
                     "tool" => Some(crate::domain::models::capability_kind::CapabilityKind::Tool),
                     "skill" => Some(crate::domain::models::capability_kind::CapabilityKind::Skill),
-                    other => return Err(ToolError::InvalidInput(format!(
-                        "invalid kind '{}': must be \"tool\" or \"skill\"", other
-                    ))),
+                    other => {
+                        return Err(ToolError::InvalidInput(format!(
+                            "invalid kind '{}': must be \"tool\" or \"skill\"",
+                            other
+                        )));
+                    }
                 }
             }
         };
 
-        let top_k = input
-            .get("top_k")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5) as usize;
+        let top_k = input.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
         if top_k == 0 {
             return Err(ToolError::InvalidInput("top_k must be at least 1".into()));
@@ -1163,9 +1167,10 @@ mod tests {
         ToolSetAdapter::new(
             dir.to_path_buf(),
             storage,
-            Arc::new(ArcSwap::from_pointee(Arc::new(
-                crate::adapters::sandbox::NoOpSandbox,
-            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(crate::adapters::sandbox::NoOpSandbox)
+                    as Arc<dyn crate::domain::ports::SandboxManager>,
+            )),
             Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),
@@ -1272,9 +1277,10 @@ mod tests {
         let adapter = ToolSetAdapter::new(
             tmp.path().to_path_buf(),
             Arc::clone(&storage),
-            Arc::new(ArcSwap::from_pointee(Arc::new(
-                crate::adapters::sandbox::NoOpSandbox,
-            ) as Arc<dyn crate::domain::ports::SandboxManager>)),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(crate::adapters::sandbox::NoOpSandbox)
+                    as Arc<dyn crate::domain::ports::SandboxManager>,
+            )),
             Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),

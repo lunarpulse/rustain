@@ -1,0 +1,6 @@
+{
+  "name": "mcp__postgres__list-tables",
+  "description": "List all tables in a PostgreSQL database with schema information.",
+  "kind": "mcp",
+  "provider_id": "mcp:postgres"
+}

@@ -66,7 +66,9 @@ impl ActiveRatioWindow {
     /// manifest matches; otherwise starts fresh.
     pub async fn new(disk_path: Option<PathBuf>) -> Arc<Self> {
         let initial = match &disk_path {
-            Some(path) if path.exists() => Self::try_load(path).await.unwrap_or_else(|_| Self::fresh_state()),
+            Some(path) if path.exists() => Self::try_load(path)
+                .await
+                .unwrap_or_else(|_| Self::fresh_state()),
             _ => Self::fresh_state(),
         };
         Arc::new(Self {
@@ -84,7 +86,10 @@ impl ActiveRatioWindow {
     ) {
         let mut state = self.state.write().await;
         Self::advance_ring(&mut state);
-        let key = (provider_id.as_label().to_string(), kind.as_label().to_string());
+        let key = (
+            provider_id.as_label().to_string(),
+            kind.as_label().to_string(),
+        );
         let ring = state
             .rings
             .entry(key)
@@ -97,7 +102,10 @@ impl ActiveRatioWindow {
     pub async fn record_invocation(&self, provider_id: ProviderId, kind: MetricKind) {
         let mut state = self.state.write().await;
         Self::advance_ring(&mut state);
-        let key = (provider_id.as_label().to_string(), kind.as_label().to_string());
+        let key = (
+            provider_id.as_label().to_string(),
+            kind.as_label().to_string(),
+        );
         let ring = state
             .rings
             .entry(key)
@@ -109,7 +117,10 @@ impl ActiveRatioWindow {
     /// Compute the rolling-7d active ratio (invocations / exposures).
     pub async fn active_ratio(&self, provider_id: ProviderId, kind: MetricKind) -> f64 {
         let state = self.state.read().await;
-        let key = (provider_id.as_label().to_string(), kind.as_label().to_string());
+        let key = (
+            provider_id.as_label().to_string(),
+            kind.as_label().to_string(),
+        );
         match state.rings.get(&key) {
             Some(ring) => {
                 let total_exposures: u64 = ring.iter().map(|b| b.exposures).sum();
@@ -136,7 +147,10 @@ impl ActiveRatioWindow {
         threshold: f64,
     ) -> bool {
         let state = self.state.read().await;
-        let key = (provider_id.as_label().to_string(), kind.as_label().to_string());
+        let key = (
+            provider_id.as_label().to_string(),
+            kind.as_label().to_string(),
+        );
         let ring = match state.rings.get(&key) {
             Some(r) => r,
             None => return false,
@@ -207,7 +221,10 @@ impl ActiveRatioWindow {
         }
         for ring in state.rings.values_mut() {
             for i in 0..WINDOW_HOURS.min(hours_since_advance as usize) {
-                let idx = ((now / 3600) as usize).wrapping_sub(WINDOW_HOURS).wrapping_add(i) % WINDOW_HOURS;
+                let idx = ((now / 3600) as usize)
+                    .wrapping_sub(WINDOW_HOURS)
+                    .wrapping_add(i)
+                    % WINDOW_HOURS;
                 ring[idx] = Bucket::default();
             }
         }
@@ -236,10 +253,15 @@ mod tests {
     #[tokio::test]
     async fn test_in_memory_record_and_compute_ratio() {
         let win = ActiveRatioWindow::new_in_memory();
-        win.record_exposure(ProviderId::Anthropic, MetricKind::Tool, 100).await;
-        win.record_invocation(ProviderId::Anthropic, MetricKind::Tool).await;
-        win.record_invocation(ProviderId::Anthropic, MetricKind::Tool).await;
-        let ratio = win.active_ratio(ProviderId::Anthropic, MetricKind::Tool).await;
+        win.record_exposure(ProviderId::Anthropic, MetricKind::Tool, 100)
+            .await;
+        win.record_invocation(ProviderId::Anthropic, MetricKind::Tool)
+            .await;
+        win.record_invocation(ProviderId::Anthropic, MetricKind::Tool)
+            .await;
+        let ratio = win
+            .active_ratio(ProviderId::Anthropic, MetricKind::Tool)
+            .await;
         assert!(
             (ratio - 0.02).abs() < 1e-6,
             "ratio = 2 invocations / 100 exposures = 0.02; got {}",

@@ -1,0 +1,46 @@
+{
+  "fixtures": [
+    {
+      "doc_key": "skill::short-override",
+      "trait_class": "short",
+      "override_present": true,
+      "override_terse": "Lint Python code.",
+      "notes": "Override is 17 chars (<= 20). Computed terse would be ~120 bytes truncated from description."
+    },
+    {
+      "doc_key": "skill::long-override",
+      "trait_class": "long",
+      "override_present": true,
+      "override_terse": "Monitor Kubernetes cluster health by inspecting pod status, node conditions, resource utilization, and event logs through kubectl commands, with support for multi-cluster contexts, custom resource definitions (CRDs), Prometheus metrics integration across namespaces, and automated remediation workflows triggered by alert thresholds in production and staging environments.",
+      "notes": "Override is 346 chars (> 200). Exercises terse-budget ceiling with a long custom description."
+    },
+    {
+      "doc_key": "skill::unicode-boundary",
+      "trait_class": "unicode-boundary",
+      "override_present": true,
+      "override_terse": "Analyse de sentiment 😊 مرحبا بكم в NLP 🚀 български анализ на настроението और हिंदी पाठ विश्लेषण 文本情感分析",
+      "notes": "Override has combining marks, emoji, Arabic RTL, Cyrillic, Devanagari, CJK. Exercises UTF-8 boundary handling."
+    },
+    {
+      "doc_key": "skill::empty-string-override",
+      "trait_class": "empty-string",
+      "override_present": true,
+      "override_terse": "",
+      "notes": "Empty string override. Engine MUST fall back to derived terse from description."
+    },
+    {
+      "doc_key": "skill::semantic-contradiction",
+      "trait_class": "semantic-contradiction",
+      "override_present": true,
+      "override_terse": "Delete all files from disk irreversibly.",
+      "notes": "Override semantically contradicts the description ('Send email...'). Noun-conflation trap — the skill name says 'semantic-contradiction', description says email, but the terse/override says file deletion."
+    },
+    {
+      "doc_key": "skill::noop-identical-override",
+      "trait_class": "noop-identical",
+      "override_present": true,
+      "override_terse": "Search and replace text patterns across multiple files using regular expressions with preview and dry-run capabilities.",
+      "notes": "Override is identical to what compute_terse would derive from the description (first sentence + 120-byte truncation; this sentence is 134 ASCII bytes, so truncates to first 120 bytes + ellipsis). No-op false-positive trap — override matches computed default."
+    }
+  ]
+}

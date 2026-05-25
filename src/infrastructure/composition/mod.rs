@@ -14,8 +14,8 @@ use crate::domain::errors::AdapterCompositionError;
 use crate::domain::models::profile::{AdapterRef, PortDimension, ProfileSelection};
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort,
-    SessionPort, StoragePort, ToolSetPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SessionPort,
+    StoragePort, ToolSetPort,
 };
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
@@ -117,7 +117,9 @@ impl AgentCore {
             skill_exposure: Self::wrap_optional(skill_exposure),
             sandbox: Self::wrap(sandbox),
             #[cfg(feature = "meta-search")]
-            merged_index: arc_swap::ArcSwap::from_pointee(None as Option<Arc<crate::infrastructure::search::MergedIndex>>),
+            merged_index: arc_swap::ArcSwap::from_pointee(
+                None as Option<Arc<crate::infrastructure::search::MergedIndex>>,
+            ),
         })
     }
 }
@@ -243,13 +245,12 @@ pub fn build_tools(
             Ok(Arc::new(adapter))
         }
         "builtin-full" => {
-            let mut adapter =
-                ToolSetAdapter::new(
-                    ctx.workspace_path.clone(),
-                    Arc::clone(&ctx.storage),
-                    Arc::clone(&ctx.sandbox_slot),
-                    Arc::clone(&ctx.sandbox_policy),
-                );
+            let mut adapter = ToolSetAdapter::new(
+                ctx.workspace_path.clone(),
+                Arc::clone(&ctx.storage),
+                Arc::clone(&ctx.sandbox_slot),
+                Arc::clone(&ctx.sandbox_policy),
+            );
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
@@ -671,15 +672,14 @@ pub fn build_for_port(
             build_context(&adapter_ref.adapter, adapter_ref._config.as_ref(), ctx)
                 .map(BuiltAdapter::Context)
         }
-        PortDimension::Skills => {
-            Err(AdapterCompositionError::AdapterConstructionFailed {
-                port: PortDimension::Skills,
-                name: "skills".into(),
-                source: Box::<dyn std::error::Error + Send + Sync>::from(
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "skill exposure is composed via build_skill_exposure, not build_for_port"),
-                ),
-            })
-        }
+        PortDimension::Skills => Err(AdapterCompositionError::AdapterConstructionFailed {
+            port: PortDimension::Skills,
+            name: "skills".into(),
+            source: Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "skill exposure is composed via build_skill_exposure, not build_for_port",
+            )),
+        }),
     }
 }
 
@@ -705,8 +705,12 @@ mod tests {
             skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
             sandbox_adapter: "noop".into(),
             sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
-            sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>)),
-            sandbox_policy: Arc::new(tokio::sync::RwLock::new(crate::domain::models::sandbox::SandboxPolicy::Permissive)),
+            sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+                Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
+            )),
+            sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::sandbox::SandboxPolicy::Permissive,
+            )),
             #[cfg(feature = "meta-search")]
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]

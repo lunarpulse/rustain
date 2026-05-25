@@ -66,14 +66,12 @@ mod tests {
     #[test]
     fn test_added_removed_round_trip() {
         let delta = SkillCatalogDelta {
-            added: vec![
-                SkillMetadata {
-                    name: "new-skill".into(),
-                    description: "A new skill when called".into(),
-                    source: SkillSource::WorkspaceAgents,
-                    terse: None,
-                },
-            ],
+            added: vec![SkillMetadata {
+                name: "new-skill".into(),
+                description: "A new skill when called".into(),
+                source: SkillSource::WorkspaceAgents,
+                terse: None,
+            }],
             removed: vec!["old-skill".into()],
             version: 42,
         };

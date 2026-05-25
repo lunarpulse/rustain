@@ -68,7 +68,12 @@ pub struct SearchHit {
 
 impl SearchHit {
     /// Construct a minimal hit (4 mandatory fields, no optionals).
-    pub fn minimal(name: impl Into<String>, kind: CapabilityKind, terse: impl Into<String>, score: f32) -> Self {
+    pub fn minimal(
+        name: impl Into<String>,
+        kind: CapabilityKind,
+        terse: impl Into<String>,
+        score: f32,
+    ) -> Self {
         Self {
             name: name.into(),
             kind,
@@ -112,7 +117,14 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            vec!["kind", "matched_terms", "name", "provider", "score", "terse"],
+            vec![
+                "kind",
+                "matched_terms",
+                "name",
+                "provider",
+                "score",
+                "terse"
+            ],
             "SearchHit serialized field set MUST be exactly {{name, kind, terse, score, provider?, matched_terms?}} \
              per ADR-09-02 v2 §LLM-Only Payload + Mary amendment A2. \
              Adding fields silently re-opens the 2-stage discovery violation. \

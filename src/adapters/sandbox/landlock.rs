@@ -27,7 +27,7 @@ use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 use landlock::{
-    Access, ABI, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreated,
+    ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreated,
     RulesetCreatedAttr,
 };
 use tokio::process::Command;
@@ -64,9 +64,7 @@ impl LandlockSandbox {
     /// Build a Landlock ruleset for a given policy.
     ///
     /// Pure function: no side effects, no I/O beyond `PathFd::new`, no async.
-    fn build_ruleset(
-        policy: &SandboxPolicy,
-    ) -> Result<RulesetCreated, SandboxError> {
+    fn build_ruleset(policy: &SandboxPolicy) -> Result<RulesetCreated, SandboxError> {
         let mk_err = |e: landlock::RulesetError| SandboxError::RulesetBuildFailed(e.to_string());
 
         match policy {
@@ -85,7 +83,9 @@ impl LandlockSandbox {
                     .create()
                     .map_err(&mk_err)?
                     .add_rules([Ok(rule)])
-                    .map_err(|e: landlock::RulesetError| SandboxError::RulesetBuildFailed(e.to_string()))
+                    .map_err(|e: landlock::RulesetError| {
+                        SandboxError::RulesetBuildFailed(e.to_string())
+                    })
             }
             SandboxPolicy::ReadOnly { network } => {
                 // Read-only filesystem. Network deferred (ABI v4+).
@@ -107,7 +107,9 @@ impl LandlockSandbox {
                     .create()
                     .map_err(&mk_err)?
                     .add_rules([Ok(rule)])
-                    .map_err(|e: landlock::RulesetError| SandboxError::RulesetBuildFailed(e.to_string()))
+                    .map_err(|e: landlock::RulesetError| {
+                        SandboxError::RulesetBuildFailed(e.to_string())
+                    })
             }
             SandboxPolicy::WorkspaceWrite {
                 writable_roots,
@@ -128,10 +130,7 @@ impl LandlockSandbox {
                 let mut rules: Vec<Result<PathBeneath<PathFd>, landlock::RulesetError>> =
                     Vec::new();
                 // Allow read everywhere from /.
-                rules.push(Ok(PathBeneath::new(
-                    root_fd,
-                    AccessFs::from_read(ABI::V3),
-                )));
+                rules.push(Ok(PathBeneath::new(root_fd, AccessFs::from_read(ABI::V3))));
                 // Allow read+write on each writable_root.
                 for root in writable_roots {
                     if let Ok(fd) = PathFd::new(root) {
@@ -147,10 +146,7 @@ impl LandlockSandbox {
                 // Read-only paths: explicit read-only grant.
                 for ro in read_only_paths {
                     if let Ok(fd) = PathFd::new(ro) {
-                        rules.push(Ok(PathBeneath::new(
-                            fd,
-                            AccessFs::from_read(ABI::V3),
-                        )));
+                        rules.push(Ok(PathBeneath::new(fd, AccessFs::from_read(ABI::V3))));
                     } else {
                         tracing::warn!(
                             path = %ro.display(),
@@ -179,11 +175,7 @@ impl SandboxManager for LandlockSandbox {
         SandboxAdapterKind::Landlock
     }
 
-    async fn apply(
-        &self,
-        cmd: &mut Command,
-        policy: &SandboxPolicy,
-    ) -> Result<(), SandboxError> {
+    async fn apply(&self, cmd: &mut Command, policy: &SandboxPolicy) -> Result<(), SandboxError> {
         // Build the ruleset OUTSIDE the pre_exec closure (allocation-safe).
         let ruleset = Self::build_ruleset(policy)?;
 
@@ -269,8 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_ruleset_for_readonly() {
-        let res =
-            LandlockSandbox::build_ruleset(&SandboxPolicy::ReadOnly { network: false });
+        let res = LandlockSandbox::build_ruleset(&SandboxPolicy::ReadOnly { network: false });
         if res.is_err() {
             eprintln!(
                 "SKIPPED: Landlock ruleset build failed: {}",
@@ -299,7 +290,15 @@ mod tests {
         assert!(result.is_ok());
         // Actually spawn the child so the pre_exec closure — including
         // restrict_self — is exercised in the forked process.
-        let status = cmd.spawn().expect("spawn /bin/true").wait().await.expect("wait /bin/true");
-        assert!(status.success(), "/bin/true should exit 0 under landlock read-only sandbox");
+        let status = cmd
+            .spawn()
+            .expect("spawn /bin/true")
+            .wait()
+            .await
+            .expect("wait /bin/true");
+        assert!(
+            status.success(),
+            "/bin/true should exit 0 under landlock read-only sandbox"
+        );
     }
 }

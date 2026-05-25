@@ -1,0 +1,6 @@
+{
+  "name": "mcp__filesystem__write-file",
+  "description": "Write content to a file on the local filesystem with encoding options.",
+  "kind": "mcp",
+  "provider_id": "mcp:filesystem"
+}

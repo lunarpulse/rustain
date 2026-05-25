@@ -35,7 +35,11 @@ fn test_builtin_tool_name_round_trips_via_capability_id_parse() {
     // `builtin::<name>` via `CapabilityId::parse`.
     let registry_form = format!("builtin::{}", hit.name);
     let id = CapabilityId::parse(&registry_form);
-    assert!(id.is_some(), "builtin tool name '{}' must round-trip via CapabilityId::parse", registry_form);
+    assert!(
+        id.is_some(),
+        "builtin tool name '{}' must round-trip via CapabilityId::parse",
+        registry_form
+    );
 }
 
 #[test]

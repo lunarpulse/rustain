@@ -8,13 +8,12 @@ pub mod capability_id;
 pub mod capability_kind;
 pub mod capability_registry;
 pub mod catalog_delta;
-pub mod doc_key;
-pub mod search_hit;
 pub mod checkpoint;
 mod completion;
 mod config;
 mod content;
 pub mod conversation;
+pub mod doc_key;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
 mod focus;
@@ -33,6 +32,7 @@ pub mod provider;
 pub mod provider_capabilities;
 pub mod router;
 pub mod sandbox;
+pub mod search_hit;
 mod session;
 pub mod session_meta;
 mod skill;
@@ -67,7 +67,9 @@ pub use config::AppConfig;
 #[allow(unused_imports)]
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
-pub use config::{AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig, ToolProgressConfig};
+pub use config::{
+    AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig, ToolProgressConfig,
+};
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
 #[allow(unused_imports)]
@@ -127,7 +129,6 @@ pub use capability_registry::{
 pub use catalog_delta::CatalogDelta;
 pub use doc_key::DocKey;
 pub use filtered_catalog::FilteredCatalog;
-pub use search_hit::SearchHit;
 pub use filtered_skill_catalog::FilteredSkillCatalog;
 pub use launch_spec::AgentLaunchSpec;
 pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
@@ -145,6 +146,7 @@ pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 pub use provider_capabilities::{NativeRetrievalKind, ProviderCapabilities, TransportKind};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
+pub use search_hit::SearchHit;
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]

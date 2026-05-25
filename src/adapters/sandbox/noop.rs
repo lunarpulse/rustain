@@ -32,11 +32,7 @@ impl SandboxManager for NoOpSandbox {
         SandboxAdapterKind::NoOp
     }
 
-    async fn apply(
-        &self,
-        _cmd: &mut Command,
-        _policy: &SandboxPolicy,
-    ) -> Result<(), SandboxError> {
+    async fn apply(&self, _cmd: &mut Command, _policy: &SandboxPolicy) -> Result<(), SandboxError> {
         Ok(())
     }
 
@@ -63,19 +59,14 @@ mod tests {
     async fn test_apply_is_ok_for_all_policies() {
         let sb = NoOpSandbox;
         let mut cmd = Command::new("/bin/true");
-        assert!(sb
-            .apply(&mut cmd, &SandboxPolicy::Permissive)
-            .await
-            .is_ok());
-        assert!(sb
-            .apply(
-                &mut cmd,
-                &SandboxPolicy::ReadOnly { network: false },
-            )
-            .await
-            .is_ok());
-        assert!(sb
-            .apply(
+        assert!(sb.apply(&mut cmd, &SandboxPolicy::Permissive).await.is_ok());
+        assert!(
+            sb.apply(&mut cmd, &SandboxPolicy::ReadOnly { network: false },)
+                .await
+                .is_ok()
+        );
+        assert!(
+            sb.apply(
                 &mut cmd,
                 &SandboxPolicy::WorkspaceWrite {
                     writable_roots: vec![ws()],
@@ -84,28 +75,23 @@ mod tests {
                 },
             )
             .await
-            .is_ok());
+            .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn test_restrict_self_is_ok() {
         let sb = NoOpSandbox;
-        assert!(sb
-            .restrict_self(&SandboxPolicy::Permissive)
-            .await
-            .is_ok());
+        assert!(sb.restrict_self(&SandboxPolicy::Permissive).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_command_unmodified_after_apply() {
         let sb = NoOpSandbox;
         let mut cmd = Command::new("/bin/true");
-        sb.apply(
-            &mut cmd,
-            &SandboxPolicy::ReadOnly { network: false },
-        )
-        .await
-        .unwrap();
+        sb.apply(&mut cmd, &SandboxPolicy::ReadOnly { network: false })
+            .await
+            .unwrap();
         let status = cmd.status().await.unwrap();
         assert!(status.success());
     }

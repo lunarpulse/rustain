@@ -181,8 +181,13 @@ fn ac2_propose_plan_in_available_tools() {
     let adapter = ToolSetAdapter::new(
         tmp.path().to_path_buf(),
         storage,
-        Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(rustain::adapters::sandbox::NoOpSandbox) as Arc<dyn rustain::domain::ports::SandboxManager>)),
-        Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
     );
     let tools = adapter.available_tools();
     assert!(

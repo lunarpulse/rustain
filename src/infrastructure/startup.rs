@@ -768,7 +768,7 @@ pub async fn run() -> Result<()> {
     let sandbox_slot: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>> = {
         use crate::adapters::sandbox::NoOpSandbox;
         Arc::new(arc_swap::ArcSwap::from_pointee(
-            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>,
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
         ))
     };
     let sandbox_policy_ref: Arc<tokio::sync::RwLock<SandboxPolicy>> =
@@ -793,8 +793,9 @@ pub async fn run() -> Result<()> {
     // AgentCore::compose() — AFTER this meta-search block. The rebuild_fn
     // captures this OnceLock; it is set once compose + populate complete.
     #[cfg(feature = "meta-search")]
-    let capability_registry_slot: Arc<std::sync::OnceLock<Arc<crate::domain::models::capability_registry::CapabilityRegistry>>> =
-        Arc::new(std::sync::OnceLock::new());
+    let capability_registry_slot: Arc<
+        std::sync::OnceLock<Arc<crate::domain::models::capability_registry::CapabilityRegistry>>,
+    > = Arc::new(std::sync::OnceLock::new());
 
     // Story 9.7 Phase B — construct meta-search engine (gated)
     #[cfg(feature = "meta-search")]
@@ -854,7 +855,10 @@ pub async fn run() -> Result<()> {
         (Some(engine), Some(registry))
     };
     #[cfg(not(feature = "meta-search"))]
-    let (meta_search_engine, _catalog_registry): (Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>, Option<()>) = (None, None);
+    let (meta_search_engine, _catalog_registry): (
+        Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
+        Option<()>,
+    ) = (None, None);
 
     // Story 16.9: construct progress channel when live_tail is enabled
     let (progress_tx, progress_rx) = if app_config.tool_progress.live_tail {
@@ -974,10 +978,7 @@ pub async fn run() -> Result<()> {
     {
         let startup_restrict_policy = SandboxPolicy::WorkspaceWrite {
             writable_roots: vec![workspace_path.clone()],
-            read_only_paths: vec![
-                workspace_path.join(".git"),
-                workspace_path.join(".rustain"),
-            ],
+            read_only_paths: vec![workspace_path.join(".git"), workspace_path.join(".rustain")],
             network: true,
         };
         let sandbox = agent_core_inner.sandbox.load_full();
@@ -1042,9 +1043,9 @@ pub async fn run() -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from(".").join(".cache"))
             .join("rustain")
             .join("telemetry");
-        crate::infrastructure::telemetry::ActiveRatioWindow::new(
-            Some(cache_dir.join("active_ratio_window.json")),
-        )
+        crate::infrastructure::telemetry::ActiveRatioWindow::new(Some(
+            cache_dir.join("active_ratio_window.json"),
+        ))
         .await
     };
 

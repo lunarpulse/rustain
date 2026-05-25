@@ -138,13 +138,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_top_k_clamp_accepts_at_20() {
-        let items: Vec<TestItem> = vec![
-            TestItem {
-                name: "query".into(),
-                desc: "Run SQL queries".into(),
-                kind: CapabilityKind::Tool,
-            },
-        ];
+        let items: Vec<TestItem> = vec![TestItem {
+            name: "query".into(),
+            desc: "Run SQL queries".into(),
+            kind: CapabilityKind::Tool,
+        }];
         let refs: Vec<&TestItem> = items.iter().collect();
         let index = Arc::new(ArcSwap::from_pointee(MergedIndex::from_items(&refs)));
         let engine = Bm25SearchEngine::new(index);

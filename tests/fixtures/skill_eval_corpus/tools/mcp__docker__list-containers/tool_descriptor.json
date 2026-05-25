@@ -1,0 +1,6 @@
+{
+  "name": "mcp__docker__list-containers",
+  "description": "List Docker containers with status, ports, and resource usage.",
+  "kind": "mcp",
+  "provider_id": "mcp:docker"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "mcp__github__create-issue",
+  "description": "Create a new GitHub issue with labels, assignees, and Markdown body.",
+  "kind": "mcp",
+  "provider_id": "mcp:github"
+}

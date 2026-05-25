@@ -3,8 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::domain::models::{
-    MAX_SKILL_FILE_SIZE, SkillDef, SkillSource, SkillValidationWarning,
-    validate_skill_frontmatter,
+    MAX_SKILL_FILE_SIZE, SkillDef, SkillSource, SkillValidationWarning, validate_skill_frontmatter,
 };
 use crate::domain::services::frontmatter;
 
@@ -189,7 +188,10 @@ impl Default for SkillRegistry {
     }
 }
 
-fn scan_dir(dir: &Path, source: SkillSource) -> (Vec<SkillDef>, usize, Vec<SkillValidationWarning>) {
+fn scan_dir(
+    dir: &Path,
+    source: SkillSource,
+) -> (Vec<SkillDef>, usize, Vec<SkillValidationWarning>) {
     let mut candidates = Vec::new();
     let mut warnings = 0usize;
     let mut warning_records: Vec<SkillValidationWarning> = Vec::new();
@@ -404,7 +406,11 @@ fn parse_skill_file(
                 | crate::domain::models::SkillValidationError::DescriptionMissingWhenTrigger(_)
         );
         if is_non_fatal {
-            tracing::warn!("Skill '{}' frontmatter lint (loaded with warning): {}", path.display(), e);
+            tracing::warn!(
+                "Skill '{}' frontmatter lint (loaded with warning): {}",
+                path.display(),
+                e
+            );
             lint_warning = Some(e);
             // Fall through — skill loads, warning is recorded at the return site.
         } else {

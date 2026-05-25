@@ -28,7 +28,7 @@ async fn test_noop_provider_returns_error() {
         tool_results: vec![],
         tool_uses: vec![],
         context_prefix: None,
-    reasoning_content: None,
+        reasoning_content: None,
     }];
     let options = CompletionOptions {
         model: "test".to_string(),

@@ -1,0 +1,6 @@
+{
+  "name": "mcp__slack__list-channels",
+  "description": "List all accessible Slack channels with member counts and topic info.",
+  "kind": "mcp",
+  "provider_id": "mcp:slack"
+}

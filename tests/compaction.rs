@@ -222,7 +222,7 @@ fn test_shape_compacted_messages_slices_and_prefixes() {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
-        reasoning_content: None,
+            reasoning_content: None,
         },
         Message {
             role: MessageRole::Assistant,
@@ -231,7 +231,7 @@ fn test_shape_compacted_messages_slices_and_prefixes() {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
-        reasoning_content: None,
+            reasoning_content: None,
         },
         Message {
             role: MessageRole::User,
@@ -240,7 +240,7 @@ fn test_shape_compacted_messages_slices_and_prefixes() {
             tool_results: vec![],
             tool_uses: vec![],
             context_prefix: None,
-        reasoning_content: None,
+            reasoning_content: None,
         },
     ];
 

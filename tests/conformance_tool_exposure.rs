@@ -208,11 +208,18 @@ fn test_compose_with_default_config_binds_static_full() {
         domain_tx: None,
         tool_exposure: "static-full".into(),
         skill_exposure: "l1-metadata".into(),
-        skill_cache: std::sync::Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        skill_cache: std::sync::Arc::new(
+            rustain::infrastructure::skill_cache::SkillCache::new_in_memory(),
+        ),
         sandbox_adapter: "noop".into(),
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
-        sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(rustain::adapters::sandbox::NoOpSandbox) as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
-        sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::sandbox::NoOpSandbox,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -248,11 +255,18 @@ fn test_compose_with_unknown_exposure_returns_error() {
         domain_tx: None,
         tool_exposure: "semantic".into(),
         skill_exposure: "l1-metadata".into(),
-        skill_cache: std::sync::Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
+        skill_cache: std::sync::Arc::new(
+            rustain::infrastructure::skill_cache::SkillCache::new_in_memory(),
+        ),
         sandbox_adapter: "noop".into(),
         sandbox_startup_policy: rustain::domain::models::sandbox::SandboxPolicy::Permissive,
-        sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(rustain::adapters::sandbox::NoOpSandbox) as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
-        sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(rustain::domain::models::sandbox::SandboxPolicy::Permissive)),
+        sandbox_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::sandbox::NoOpSandbox,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
+        sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

@@ -101,9 +101,10 @@ async fn r4_persisted_approval_auto_approves_future_tools_on_same_server() {
 
     // Phase 1 — first runtime: user approves Always-and-save.
     {
-        let persistence: Arc<dyn ApprovalPersistencePort> = Arc::new(
-            ApprovalPersistenceToml::new(user_config.clone(), workspace_rules.clone()),
-        );
+        let persistence: Arc<dyn ApprovalPersistencePort> = Arc::new(ApprovalPersistenceToml::new(
+            user_config.clone(),
+            workspace_rules.clone(),
+        ));
         let rt = ApprovalRuntime::new(16, persistence);
         let (id, _rx) = rt
             .request(

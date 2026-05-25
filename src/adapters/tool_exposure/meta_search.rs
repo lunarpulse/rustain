@@ -67,9 +67,7 @@ impl ToolExposurePort for MetaSearchExposure {
 
 pub fn build_search_capabilities_descriptor() -> ToolDescriptor {
     ToolDescriptor {
-        id: crate::domain::models::tool_descriptor::ToolId(
-            "builtin::search_capabilities".into(),
-        ),
+        id: crate::domain::models::tool_descriptor::ToolId("builtin::search_capabilities".into()),
         name: "search_capabilities".into(),
         description: SEARCH_CAPABILITIES_DESCRIPTION.into(),
         input_schema: SEARCH_CAPABILITIES_SCHEMA.clone(),

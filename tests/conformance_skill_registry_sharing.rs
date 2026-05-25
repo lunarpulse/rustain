@@ -77,7 +77,7 @@ async fn test_contended_write_then_read() {
             directory: std::path::PathBuf::from("/fake/init"),
             source: rustain::domain::models::SkillSource::GlobalAgents,
             allowed_tools: None,
-        terse: None,
+            terse: None,
         }]);
     }
 
@@ -97,7 +97,7 @@ async fn test_contended_write_then_read() {
                 directory: std::path::PathBuf::from("/fake/upd"),
                 source: rustain::domain::models::SkillSource::GlobalAgents,
                 allowed_tools: None,
-        terse: None,
+                terse: None,
             }]);
         }
         // Signal the main task that the write is complete.

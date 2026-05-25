@@ -141,13 +141,17 @@ mod tests {
         ]);
 
         let outcome = exposure
-            .render(&catalog, &crate::domain::models::provider_capabilities::ProviderCapabilities {
-                supports_streaming: true,
-                supports_list_changed: true,
-                supports_native_retrieval: None,
-                max_tool_count: None,
-                transport_kind: crate::domain::models::provider_capabilities::TransportKind::Stdio,
-            })
+            .render(
+                &catalog,
+                &crate::domain::models::provider_capabilities::ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_list_changed: true,
+                    supports_native_retrieval: None,
+                    max_tool_count: None,
+                    transport_kind:
+                        crate::domain::models::provider_capabilities::TransportKind::Stdio,
+                },
+            )
             .await
             .unwrap();
 

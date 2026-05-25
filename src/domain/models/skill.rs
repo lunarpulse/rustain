@@ -265,11 +265,7 @@ impl std::fmt::Display for SkillValidationError {
                 write!(f, "description too short ({} chars, min 20)", len)
             }
             SkillValidationError::DescriptionMissingWhenTrigger(desc) => {
-                write!(
-                    f,
-                    "description missing 'when' trigger phrase: '{}'",
-                    desc
-                )
+                write!(f, "description missing 'when' trigger phrase: '{}'", desc)
             }
             SkillValidationError::NameDirectoryMismatch { name, dir } => {
                 write!(f, "name '{}' does not match directory '{}'", name, dir)
@@ -340,9 +336,7 @@ pub fn validate_skill_frontmatter(
         ));
     }
     if description.len() < 20 {
-        return Err(SkillValidationError::DescriptionTooShort(
-            description.len(),
-        ));
+        return Err(SkillValidationError::DescriptionTooShort(description.len()));
     }
     if description.len() > 1024 {
         return Err(SkillValidationError::DescriptionTooLong(description.len()));
@@ -361,7 +355,14 @@ mod tests {
 
     #[test]
     fn valid_frontmatter() {
-        assert!(validate_skill_frontmatter("review-code", "Reviews code when the user runs /review", "review-code").is_ok());
+        assert!(
+            validate_skill_frontmatter(
+                "review-code",
+                "Reviews code when the user runs /review",
+                "review-code"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -409,7 +410,11 @@ mod tests {
     #[test]
     fn name_directory_mismatch() {
         assert!(matches!(
-            validate_skill_frontmatter("bar", "A description that is long enough with a when clause", "foo"),
+            validate_skill_frontmatter(
+                "bar",
+                "A description that is long enough with a when clause",
+                "foo"
+            ),
             Err(SkillValidationError::NameDirectoryMismatch { .. })
         ));
     }
@@ -432,7 +437,14 @@ mod tests {
     #[test]
     fn name_64_chars_accepted() {
         let name = "a".repeat(64);
-        assert!(validate_skill_frontmatter(&name, "Description long enough for validation when needed", &name).is_ok());
+        assert!(
+            validate_skill_frontmatter(
+                &name,
+                "Description long enough for validation when needed",
+                &name
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -445,7 +457,14 @@ mod tests {
 
     #[test]
     fn name_with_hyphens_accepted() {
-        assert!(validate_skill_frontmatter("my-skill-123", "Description long enough for validation when needed", "my-skill-123").is_ok());
+        assert!(
+            validate_skill_frontmatter(
+                "my-skill-123",
+                "Description long enough for validation when needed",
+                "my-skill-123"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

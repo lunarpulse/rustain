@@ -237,7 +237,7 @@ async fn generate_compaction_summary(
         tool_results: vec![],
         tool_uses: vec![],
         context_prefix: None,
-    reasoning_content: None,
+        reasoning_content: None,
     }];
     let options = CompletionOptions {
         model: model.to_string(),

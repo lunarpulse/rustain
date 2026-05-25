@@ -112,9 +112,10 @@ fn build_anthropic_from_config(
         // tokens. The legacy env-var-only construction path
         // (`build_anthropic_provider_from_env`) does this correctly; this
         // brings the config-driven path to parity.
-        let base_url = cfg.base_url.clone().or_else(|| {
-            crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL")
-        });
+        let base_url = cfg
+            .base_url
+            .clone()
+            .or_else(|| crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL"));
 
         let adapter =
             AnthropicAdapter::new(auth_mode, cfg.model_id.clone(), base_url).map_err(|e| {

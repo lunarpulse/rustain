@@ -1,0 +1,6 @@
+{
+  "name": "mcp__github__search-repos",
+  "description": "Search GitHub repositories by name, language, and topic.",
+  "kind": "mcp",
+  "provider_id": "mcp:github"
+}

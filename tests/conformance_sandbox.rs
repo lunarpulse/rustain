@@ -12,10 +12,10 @@ use rustain::domain::ports::SandboxManager;
 // AC-9-5-1: Re-export surface compiles from both domain and adapter paths.
 #[test]
 fn test_re_export_surface_compiles() {
-    use rustain::domain::ports::SandboxManager as _;
     use rustain::adapters::sandbox::{
         NoOpSandbox as _, SandboxAdapterKind as _, SandboxError as _,
     };
+    use rustain::domain::ports::SandboxManager as _;
     let noop: Arc<dyn SandboxManager> = Arc::new(NoOpSandbox);
     assert_eq!(noop.kind(), SandboxAdapterKind::NoOp);
 }

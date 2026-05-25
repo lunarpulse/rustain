@@ -55,8 +55,7 @@ impl SkillExposurePort for L1MetadataExposure {
         _provider: &ProviderCapabilities,
     ) -> Result<SkillRenderOutcome, SkillExposureError> {
         let metadata = catalog.metadata().to_vec();
-        let definition_tokens_estimate: usize =
-            metadata.iter().map(|m| m.estimated_tokens()).sum();
+        let definition_tokens_estimate: usize = metadata.iter().map(|m| m.estimated_tokens()).sum();
         let catalog_size = metadata.len();
 
         Ok(SkillRenderOutcome {
@@ -76,8 +75,8 @@ impl SkillExposurePort for L1MetadataExposure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::provider_capabilities::TransportKind;
     use crate::domain::models::SkillSource;
+    use crate::domain::models::provider_capabilities::TransportKind;
     use crate::domain::models::skill_metadata::SkillMetadata;
     use crate::infrastructure::skill_cache::SkillCache;
 
@@ -117,7 +116,10 @@ mod tests {
         let exposure = L1MetadataExposure::new(test_cache());
         let catalog = FilteredSkillCatalog::from_metadata(vec![
             test_metadata("review-code", "Reviews code when the user requests review"),
-            test_metadata("write-docs", "Writes documentation when the user requests docs"),
+            test_metadata(
+                "write-docs",
+                "Writes documentation when the user requests docs",
+            ),
         ]);
         let outcome = exposure.render(&catalog, &test_caps()).await.unwrap();
         match outcome.payload {

@@ -15,7 +15,7 @@
 #![cfg(feature = "mcp")]
 
 use rmcp::model::{
-    CallToolResult, Content, RawContent, RawAudioContent, RawResource, ResourceContents,
+    CallToolResult, Content, RawAudioContent, RawContent, RawResource, ResourceContents,
 };
 
 use rustain::adapters::mcp::tool_projection::project_rmcp_result;
@@ -63,7 +63,10 @@ fn r10_resource_link_renders_as_bracketed_uri() {
     let link = raw_resource("https://example.com/handbook", "Handbook");
     let result = CallToolResult::success(vec![Content::resource_link(link)]);
     let projected = project_rmcp_result(result, "id-link".into());
-    assert_eq!(projected.content, "[resource: https://example.com/handbook]");
+    assert_eq!(
+        projected.content,
+        "[resource: https://example.com/handbook]"
+    );
 }
 
 #[test]
@@ -109,8 +112,7 @@ fn r10_error_with_non_text_still_renders_placeholders() {
     let projected = project_rmcp_result(result, "id-err".into());
     assert!(projected.is_error, "is_error flag must propagate");
     assert_eq!(
-        projected.content,
-        "upload rejected:\n[image: image/jpeg]",
+        projected.content, "upload rejected:\n[image: image/jpeg]",
         "error path must still produce placeholder output, not panic on non-text"
     );
 }

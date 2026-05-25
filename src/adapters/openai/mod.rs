@@ -687,7 +687,10 @@ mod tests {
 
             assert_eq!(request.messages.len(), 2);
             assert_eq!(request.messages[1].role, "tool");
-            assert_eq!(request.messages[1].tool_call_id.as_deref(), Some("call_err"));
+            assert_eq!(
+                request.messages[1].tool_call_id.as_deref(),
+                Some("call_err")
+            );
             assert!(request.messages[1].content.starts_with("Error: "));
         }
     }
