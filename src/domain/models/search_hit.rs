@@ -49,7 +49,7 @@ use crate::domain::models::capability_kind::CapabilityKind;
 ///   "Option::is_none")]` so the field is OMITTED from the JSON payload
 ///   when None — saves tokens in the common case.
 /// - `matched_terms` — OPTIONAL. Eval/debug only — populated when the
-///   `search_capabilities` builtin tool is invoked with the debug flag set
+///   `search_skills` / `search_tools` builtin tools are invoked with the debug flag set
 ///   (Story 9.8's `rustain catalog search --json` consumes this for
 ///   diff-based regression testing). Production LLM consumption defaults
 ///   `None`; the engine never speculatively populates this field on the LLM

@@ -6210,7 +6210,7 @@ pub async fn run(
                             skill_cache.populate_from_registry(&*registry).await;
                         }
                         // Story 9.7 Phase B — rebuild the merged BM25 index so that
-                        // `search_capabilities` sees the newly-discovered skills.
+                        // `search_skills` AND `search_tools` see the newly-discovered skills.
                         #[cfg(feature = "meta-search")]
                         if let Some(ref catalog_registry) = app_state.catalog_registry {
                             catalog_registry.rebuild_now();

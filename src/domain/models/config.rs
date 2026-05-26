@@ -345,7 +345,7 @@ impl Default for SkillExposureConfig {
 /// `skills = "on"`: Skills ecosystem evidence saturates (7 signals per
 /// ADR-09-02 §Context). When the user opts into `[skill_exposure].kind = "meta-search"`,
 /// the `MetaSearchExposure` skill-side adapter substitutes the per-turn
-/// L1 metadata block with the unified `search_capabilities` meta-tool.
+/// L1 metadata block with the `search_skills` / `search_tools` builtin tools.
 ///
 /// `tools = "off"`: MCP ecosystem evidence is partial (Arcade single-anchor
 /// per Mary Round 2). When the user sets `[tools].exposure = "meta-search"`

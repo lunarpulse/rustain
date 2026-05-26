@@ -23,7 +23,7 @@ use crate::domain::models::provider_capabilities::ProviderCapabilities;
 /// # Phase B (Story 9.7 — DEFERRED per ADR-09-01 v2.2 §Phased Implementation
 /// + ADR-09-02 v1 §Decision shared infrastructure)
 ///
-/// `MetaSearchExposure` will render `ExposurePayload::MetaTool(search_capabilities)`,
+/// `MetaSearchExposure` will render `ExposurePayload::MetaTool(search_tools)`,
 /// reindexing via shared `MetaSearchEngine` on `on_catalog_changed(delta)`
 /// with 250ms debounce (owned task per ADR-09-01 v2.2 §W3).
 #[async_trait]

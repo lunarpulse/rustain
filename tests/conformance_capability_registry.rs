@@ -523,7 +523,10 @@ async fn test_builtin_provider_discover_returns_expected_tools() {
         "skill_view",
     ];
     #[cfg(feature = "meta-search")]
-    expected.push("search_capabilities");
+    {
+        expected.push("search_skills");
+        expected.push("search_tools");
+    }
     expected.sort();
     assert_eq!(builtin_names, expected);
 }
@@ -757,11 +760,11 @@ async fn test_registry_holds_all_three_protocols() {
     assert_eq!(mcp_count, 2, "fake MCP server has echo + add tools");
     assert_eq!(
         builtin_count,
-        7 + cfg!(feature = "meta-search") as usize,
-        "ToolSetAdapter builtin tools (including skill_view from 9.6, search_capabilities from 9.7)"
+        7 + 2 * cfg!(feature = "meta-search") as usize,
+        "ToolSetAdapter builtin tools (including skill_view from 9.6, search_skills + search_tools from 9.7d)"
     );
     assert_eq!(skill_count, 3, "SkillRegistry has 3 programmatic skills");
-    assert_eq!(snap.len(), 12 + cfg!(feature = "meta-search") as usize);
+    assert_eq!(snap.len(), 12 + 2 * cfg!(feature = "meta-search") as usize);
 }
 
 #[cfg(feature = "mcp")]
@@ -983,8 +986,8 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap1 = composite.capability_registry().snapshot();
     assert_eq!(
         snap1.len(),
-        9 + cfg!(feature = "meta-search") as usize,
-        "7 builtin + 2 MCP tools (+ search_capabilities with meta-search)"
+        9 + 2 * cfg!(feature = "meta-search") as usize,
+        "7 builtin + 2 MCP tools (+ search_skills + search_tools with meta-search)"
     );
 
     // Emit another delta with no changes: version=2, added=0 removed=0
@@ -993,7 +996,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap2 = composite.capability_registry().snapshot();
     assert_eq!(
         snap2.len(),
-        9 + cfg!(feature = "meta-search") as usize,
+        9 + 2 * cfg!(feature = "meta-search") as usize,
         "no tools added or removed — registry unchanged"
     );
 
@@ -1022,8 +1025,8 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap3 = composite.capability_registry().snapshot();
     assert_eq!(
         snap3.len(),
-        10 + cfg!(feature = "meta-search") as usize,
-        "added multiply tool (7 builtin + 2 MCP + 1 extra, + search_capabilities with meta-search)"
+        10 + 2 * cfg!(feature = "meta-search") as usize,
+        "added multiply tool (7 builtin + 2 MCP + 1 extra, + search_skills + search_tools with meta-search)"
     );
 
     // Emit delta: version=3, should detect 1 added
@@ -1040,7 +1043,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
     assert_eq!(
         snap4.len(),
-        10 + cfg!(feature = "meta-search") as usize,
+        10 + 2 * cfg!(feature = "meta-search") as usize,
         "registry unchanged after delta emit"
     );
 }

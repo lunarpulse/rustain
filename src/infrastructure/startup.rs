@@ -850,7 +850,7 @@ pub async fn run() -> Result<()> {
         let cancel = tokio_util::sync::CancellationToken::new();
         let _handle: tokio::task::JoinHandle<()> = Arc::clone(&registry).spawn_reindex_task(cancel).await;
         // Story 9.7 Phase B — build initial merged index from builtin tools so
-        // `search_capabilities` returns non-empty results before any catalog deltas arrive.
+        // `search_skills` AND `search_tools` return non-empty results before any catalog deltas arrive.
         registry.rebuild_now();
         (Some(engine), Some(registry))
     };

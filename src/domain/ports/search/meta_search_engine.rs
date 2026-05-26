@@ -12,7 +12,7 @@ use crate::domain::models::search_hit::SearchHit;
 /// **Projection lives in domain, not in the engine.** The engine returns
 /// `(DocKey, score, Option<matched_terms>)` tuples to the caller via the
 /// `search` method's return type. The caller (`MetaSearchExposure::render`
-/// or the `search_capabilities` builtin tool) consults the `MergedIndex`'s
+/// or the `search_skills` / `search_tools` builtin tools) consults the `MergedIndex`'s
 /// `IndexableItem` registry to project each `DocKey` into a `SearchHit`
 /// via `IndexableItem::to_search_hit(score, matched)` (Amelia Round 4 §2).
 ///
@@ -27,7 +27,7 @@ pub trait MetaSearchEngine: Send + Sync {
     /// Run a search query and return ranked results.
     ///
     /// `top_k` MUST be clamped to `[1, 20]` by the caller (the
-    /// `search_capabilities` builtin tool enforces the clamp + hard-rejects
+    /// `search_skills` / `search_tools` builtin tools enforce the clamp + hard-rejects
     /// `top_k > 20` as prompt-injection defense per ADR-09-02 v2 §LLM-Only
     /// Payload).
     ///

@@ -340,7 +340,7 @@ fn test_meta_search_variant_reserved() {
 
 #[test]
 fn test_meta_tool_payload_variant_reserved() {
-    let descriptor = test_descriptor("search_capabilities");
+    let descriptor = test_descriptor("search_tools");
     let _payload = ExposurePayload::MetaTool(descriptor);
     // Compile-only: the variant exists in the type.
 }

@@ -59,7 +59,7 @@ pub enum SkillExposurePayload {
     /// `StaticFullExposure` — full SKILL.md body per skill. Phase A's opt-in
     /// constructible variant.
     Bodies(Vec<SkillFullEntry>),
-    /// `MetaSearchExposure` — single `search_capabilities` meta-tool entry.
+    /// `MetaSearchExposure` — single `search_skills` meta-tool entry.
     /// RESERVED for Phase B; no Phase A code constructs it.
     SearchStub(ToolDescriptor),
 }

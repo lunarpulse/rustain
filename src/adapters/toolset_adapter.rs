@@ -70,7 +70,7 @@ pub struct ToolSetAdapter {
     sandbox: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>>,
     /// Story 9.5 — sandbox policy reference for reading current policy at Bash spawn time.
     sandbox_policy: Arc<tokio::sync::RwLock<SandboxPolicy>>,
-    /// Story 9.7 Phase B — optional meta-search engine for `search_capabilities` builtin tool.
+    /// Story 9.7 Phase B — optional meta-search engine for `search_skills` AND `search_tools` builtin tools.
     #[cfg(feature = "meta-search")]
     meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
 }
@@ -823,7 +823,9 @@ impl ToolSetPort for ToolSetAdapter {
                 parallel_safe: false,
             },
             #[cfg(feature = "meta-search")]
-            crate::adapters::tool_exposure::meta_search::build_search_capabilities_tool_definition(),
+            crate::adapters::tool_exposure::meta_search::build_search_skills_tool_definition(),
+            #[cfg(feature = "meta-search")]
+            crate::adapters::tool_exposure::meta_search::build_search_tools_tool_definition(),
         ]
     }
 
@@ -864,7 +866,9 @@ impl ToolSetPort for ToolSetAdapter {
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             "propose_plan" => self.execute_propose_plan(&input).await,
             #[cfg(feature = "meta-search")]
-            "search_capabilities" => self.execute_search_capabilities(&input, "", cancel).await,
+            "search_skills" => self.execute_search_skills(&input, "", cancel).await,
+            #[cfg(feature = "meta-search")]
+            "search_tools" => self.execute_search_tools(&input, "", cancel).await,
             _ => Err(ToolError::NotFound(tool_name.to_string())),
         }
     }
@@ -884,10 +888,12 @@ impl ToolSetPort for ToolSetAdapter {
             }
             "skill_view" => self.execute_skill_view(&input, tool_use_id, cancel).await,
             #[cfg(feature = "meta-search")]
-            "search_capabilities" => {
-                self.execute_search_capabilities(&input, tool_use_id, cancel)
+            "search_skills" => {
+                self.execute_search_skills(&input, tool_use_id, cancel)
                     .await
             }
+            #[cfg(feature = "meta-search")]
+            "search_tools" => self.execute_search_tools(&input, tool_use_id, cancel).await,
             _ => {
                 let _ = (tool_use_id, progress_tx);
                 self.execute(tool_name, input, cancel).await
@@ -1092,7 +1098,7 @@ impl ToolSetAdapter {
     }
 
     #[cfg(feature = "meta-search")]
-    async fn execute_search_capabilities(
+    async fn execute_search_skills(
         &self,
         input: &serde_json::Value,
         tool_use_id: &str,
@@ -1108,24 +1114,49 @@ impl ToolSetAdapter {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing required field: query".into()))?;
 
-        let kind_filter = match input.get("kind") {
-            None => None,
-            Some(v) => {
-                let kind_str = v
-                    .as_str()
-                    .ok_or_else(|| ToolError::InvalidInput("kind must be a string".into()))?;
-                match kind_str {
-                    "tool" => Some(crate::domain::models::capability_kind::CapabilityKind::Tool),
-                    "skill" => Some(crate::domain::models::capability_kind::CapabilityKind::Skill),
-                    other => {
-                        return Err(ToolError::InvalidInput(format!(
-                            "invalid kind '{}': must be \"tool\" or \"skill\"",
-                            other
-                        )));
-                    }
-                }
-            }
-        };
+        let top_k = input.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+        if top_k == 0 {
+            return Err(ToolError::InvalidInput("top_k must be at least 1".into()));
+        }
+        if top_k > 20 {
+            return Err(ToolError::InvalidInput("top_k must not exceed 20".into()));
+        }
+
+        let hits: Vec<crate::domain::models::search_hit::SearchHit> = engine
+            .search(
+                query,
+                Some(crate::domain::models::capability_kind::CapabilityKind::Skill),
+                top_k,
+            )
+            .await
+            .map_err(|e| ToolError::Other(format!("search failed: {}", e)))?;
+
+        let json = serde_json::to_string(&hits).map_err(|e| ToolError::Other(e.to_string()))?;
+
+        Ok(ToolResult {
+            content: json,
+            is_error: false,
+            tool_use_id: tool_use_id.to_string(),
+        })
+    }
+
+    #[cfg(feature = "meta-search")]
+    async fn execute_search_tools(
+        &self,
+        input: &serde_json::Value,
+        tool_use_id: &str,
+        _cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let engine = self
+            .meta_search_engine
+            .as_ref()
+            .ok_or_else(|| ToolError::Other("meta-search engine not configured".into()))?;
+
+        let query = input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput("missing required field: query".into()))?;
 
         let top_k = input.get("top_k").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
@@ -1137,7 +1168,11 @@ impl ToolSetAdapter {
         }
 
         let hits: Vec<crate::domain::models::search_hit::SearchHit> = engine
-            .search(query, kind_filter, top_k)
+            .search(
+                query,
+                Some(crate::domain::models::capability_kind::CapabilityKind::Tool),
+                top_k,
+            )
             .await
             .map_err(|e| ToolError::Other(format!("search failed: {}", e)))?;
 

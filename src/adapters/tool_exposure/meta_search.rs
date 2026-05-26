@@ -2,7 +2,7 @@
 //! §Phased Implementation. When the user opts in via `[search] tools = "on"`
 //! AND `[tools].exposure = "meta-search"` AND the `meta-search` feature is
 //! compiled in, this adapter substitutes the full N-tool catalog with the
-//! single `search_capabilities` meta-tool entry per turn.
+//! single `search_tools` meta-tool entry per turn.
 
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -16,9 +16,9 @@ use crate::domain::ports::search::MetaSearchEngine;
 
 pub struct MetaSearchExposure {
     engine: Arc<dyn MetaSearchEngine>,
-    /// Cached descriptor for the `search_capabilities` meta-tool. Built
-    /// once at construction time (the schema is static — `query` + `kind?` +
-    /// `top_k?` parameters) so render() does not pay JSON-schema-build cost
+    /// Cached descriptor for the `search_tools` meta-tool. Built
+    /// once at construction time (the schema is static — `query` +
+    /// `top_k` parameters) so render() does not pay JSON-schema-build cost
     /// every turn.
     meta_tool_descriptor: ToolDescriptor,
 }
@@ -27,7 +27,7 @@ impl MetaSearchExposure {
     pub fn new(engine: Arc<dyn MetaSearchEngine>) -> Self {
         Self {
             engine,
-            meta_tool_descriptor: build_search_capabilities_descriptor(),
+            meta_tool_descriptor: build_search_tools_descriptor(),
         }
     }
 }
@@ -65,37 +65,48 @@ impl ToolExposurePort for MetaSearchExposure {
     }
 }
 
-pub fn build_search_capabilities_descriptor() -> ToolDescriptor {
+pub fn build_search_skills_descriptor() -> ToolDescriptor {
     ToolDescriptor {
-        id: crate::domain::models::tool_descriptor::ToolId("builtin::search_capabilities".into()),
-        name: "search_capabilities".into(),
-        description: SEARCH_CAPABILITIES_DESCRIPTION.into(),
-        input_schema: SEARCH_CAPABILITIES_SCHEMA.clone(),
+        id: crate::domain::models::tool_descriptor::ToolId("builtin::search_skills".into()),
+        name: "search_skills".into(),
+        description: SEARCH_SKILLS_DESCRIPTION.into(),
+        input_schema: SEARCH_SKILLS_SCHEMA.clone(),
         provider_id: "builtin".into(),
         annotations: crate::domain::models::tool_descriptor::ToolAnnotations::default(),
     }
 }
 
-const SEARCH_CAPABILITIES_DESCRIPTION: &str = "\
-Search the merged capability catalog (MCP tools + skills) by natural-language query. \
-Returns ranked hits with `name`, `kind`, `terse`, and `score`. \
-After choosing a hit, call the tool directly (for `kind: tool`) or call `skill_view` \
-(for `kind: skill`) to retrieve the full body. Use this when you need to discover \
-capabilities by intent rather than by name.";
+pub fn build_search_tools_descriptor() -> ToolDescriptor {
+    ToolDescriptor {
+        id: crate::domain::models::tool_descriptor::ToolId("builtin::search_tools".into()),
+        name: "search_tools".into(),
+        description: SEARCH_TOOLS_DESCRIPTION.into(),
+        input_schema: SEARCH_TOOLS_SCHEMA.clone(),
+        provider_id: "builtin".into(),
+        annotations: crate::domain::models::tool_descriptor::ToolAnnotations::default(),
+    }
+}
+
+const SEARCH_SKILLS_DESCRIPTION: &str = "\
+Search the Agent Skill catalog by natural-language query. \
+Returns ranked skill hits with `name`, `kind: \"skill\"`, `terse`, and `score`. \
+After choosing a hit, call `skill_view` to retrieve the full SKILL.md body. \
+Use this when you need a procedural recipe / multi-step workflow rather than a single tool call.";
+
+const SEARCH_TOOLS_DESCRIPTION: &str = "\
+Search the MCP + builtin tool catalog by natural-language query. \
+Returns ranked tool hits with `name`, `kind: \"tool\"`, `terse`, and `score`. \
+After choosing a hit, call the tool directly with the appropriate parameters. \
+Use this when you need a single discrete action (read a file, query a database, etc.).";
 
 use std::sync::LazyLock;
-static SEARCH_CAPABILITIES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+static SEARCH_SKILLS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
                 "description": "Natural-language description of the capability you need."
-            },
-            "kind": {
-                "type": "string",
-                "enum": ["tool", "skill"],
-                "description": "Optional filter: 'tool' returns only MCP/builtin tool hits; 'skill' returns only skill hits; omit for both."
             },
             "top_k": {
                 "type": "integer",
@@ -109,11 +120,40 @@ static SEARCH_CAPABILITIES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|
     })
 });
 
-pub fn build_search_capabilities_tool_definition() -> crate::domain::models::ToolDefinition {
+static SEARCH_TOOLS_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Natural-language description of the capability you need."
+            },
+            "top_k": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5,
+                "description": "Maximum hits to return (clamped to [1, 20])."
+            }
+        },
+        "required": ["query"]
+    })
+});
+
+pub fn build_search_skills_tool_definition() -> crate::domain::models::ToolDefinition {
     crate::domain::models::ToolDefinition {
-        name: "search_capabilities".into(),
-        description: SEARCH_CAPABILITIES_DESCRIPTION.into(),
-        input_schema: SEARCH_CAPABILITIES_SCHEMA.clone(),
+        name: "search_skills".into(),
+        description: SEARCH_SKILLS_DESCRIPTION.into(),
+        input_schema: SEARCH_SKILLS_SCHEMA.clone(),
+        parallel_safe: true,
+    }
+}
+
+pub fn build_search_tools_tool_definition() -> crate::domain::models::ToolDefinition {
+    crate::domain::models::ToolDefinition {
+        name: "search_tools".into(),
+        description: SEARCH_TOOLS_DESCRIPTION.into(),
+        input_schema: SEARCH_TOOLS_SCHEMA.clone(),
         parallel_safe: true,
     }
 }

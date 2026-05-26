@@ -5,6 +5,8 @@
 
 pub mod bm25_engine;
 pub mod merged_index;
+pub mod synonym_map;
 
 pub use bm25_engine::Bm25SearchEngine;
 pub use merged_index::{CachedProjection, MergedIndex};
+pub use synonym_map::{SYNONYMS, SynonymMap};

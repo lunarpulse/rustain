@@ -1,3 +1,12 @@
+#[cfg(feature = "meta-search")]
+pub mod eval_corpus;
+#[cfg(feature = "meta-search")]
+pub mod eval_partition;
+#[cfg(feature = "meta-search")]
+pub mod eval_report_writer;
+#[cfg(feature = "meta-search")]
+pub mod eval_types;
+
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 

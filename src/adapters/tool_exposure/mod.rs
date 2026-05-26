@@ -50,7 +50,7 @@ pub enum ExposurePayload {
     /// Phase A's only constructible variant.
     Tools(Vec<ToolDescriptor>),
     /// `MetaSearchExposure` — single `tool_search` (Phase B) or
-    /// `search_capabilities` (Story 9.7 unified surface per ADR-09-02 §Decision)
+    /// `search_tools` (Story 9.7 tool-side door per ADR-09-02 §Audience Split)
     /// meta-tool entry. RESERVED for Phase B; no Phase A code constructs it.
     MetaTool(ToolDescriptor),
 }

@@ -396,8 +396,8 @@ fn test_search_stub_payload_variant_reserved() {
     // Compile-only: verify SearchStub variant exists and can be named
     use rustain::domain::models::tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
     let stub_desc = ToolDescriptor {
-        id: ToolId("search_capabilities".into()),
-        name: "search_capabilities".into(),
+        id: ToolId("search_skills".into()),
+        name: "search_skills".into(),
         description: "Search available skills and tools by query".into(),
         input_schema: serde_json::json!({"type": "object"}),
         provider_id: "builtin".into(),

@@ -155,7 +155,8 @@ mod tests {
                     "activate_skill",
                     "exit_plan_mode",
                     "propose_plan",
-                    "search_capabilities",
+                    "search_skills",
+                    "search_tools",
                     "skill_view",
                 ]
             );

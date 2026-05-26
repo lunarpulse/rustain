@@ -26,8 +26,8 @@ use crate::domain::models::skill_catalog_delta::SkillCatalogDelta;
 /// # Phase B (Story 9.7 — DEFERRED per ADR-09-02 v1 §Phased Implementation)
 ///
 /// `MetaSearchExposure` will render
-/// `SkillExposurePayload::SearchStub(search_capabilities)` — the SAME
-/// `search_capabilities` meta-tool that `ToolExposurePort::MetaSearchExposure`
+/// `SkillExposurePayload::SearchStub(search_skills)` — the skill-side
+/// search door that `SkillExposurePort::MetaSearchExposure`
 /// renders — backed by the shared `MetaSearchEngine` trait + merged BM25
 /// corpus. Reindexing on `on_catalog_changed(delta)` with 250ms debounce.
 #[async_trait]

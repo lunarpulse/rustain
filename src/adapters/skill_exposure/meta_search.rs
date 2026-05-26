@@ -2,7 +2,7 @@
 //! §Phased Implementation. When `[search] skills = "on"` AND
 //! `[skill_exposure].kind = "meta-search"` AND the `meta-search` feature is
 //! compiled in, this adapter substitutes the per-turn skill metadata block
-//! with the single `search_capabilities` meta-tool entry. The LLM finds
+//! with the single `search_skills` meta-tool entry. The LLM finds
 //! skills via the meta-tool, not via prefix injection.
 
 use async_trait::async_trait;
@@ -29,7 +29,7 @@ impl MetaSearchExposure {
         Self {
             engine,
             meta_tool_descriptor:
-                crate::adapters::tool_exposure::meta_search::build_search_capabilities_descriptor(),
+                crate::adapters::tool_exposure::meta_search::build_search_skills_descriptor(),
         }
     }
 }

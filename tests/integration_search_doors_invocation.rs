@@ -1,8 +1,8 @@
 #![cfg(feature = "meta-search")]
 
-/// AC: 9-7b-8 — 10 End-to-end `search_capabilities` invocation scenarios
-/// exercising the `Bm25SearchEngine` surface directly (scenarios 1-5, 7-10)
-/// and the full `ToolSetAdapter::execute_search_capabilities` path (scenario 6).
+/// AC: 9-7b-8 + 9-7d-3 — 10 End-to-end `search_skills` / `search_tools` (router doors)
+/// invocation scenarios exercising the `Bm25SearchEngine` surface directly (scenarios 1-5, 7-10)
+/// and the full `ToolSetAdapter::execute_search_skills` path (scenario 6).
 ///
 /// Scenarios 1-5 + 7-10 call Bm25SearchEngine::search directly for speed.
 /// Scenario 6 drives the full adapter path to hit empty-query rejection.
@@ -76,7 +76,7 @@ fn tool_item(name: &str, desc: &str) -> ScenarioTestItem {
 
 /// AC: 9-7b-8 scenario 1
 #[tokio::test]
-async fn test_search_capabilities_kind_filter_skill_returns_only_skill_hits() {
+async fn test_search_door_kind_filter_skill_returns_only_skill_hits() {
     let items = vec![
         skill_item("format-python", "Format Python code with ruff and black."),
         tool_item("Bash", "Execute shell commands."),
@@ -104,8 +104,11 @@ async fn test_search_capabilities_kind_filter_skill_returns_only_skill_hits() {
 // ---------------------------------------------------------------------------
 
 /// AC: 9-7b-8 scenario 2
+/// Exercises the engine's `kind=None` path. NO router door exposes this
+/// path post-9-7d; this test verifies the engine-internal contract for
+/// future callers (e.g., `rustain catalog` in 9-8) that may pass `None`.
 #[tokio::test]
-async fn test_search_capabilities_kind_omitted_returns_mixed_kind_top_k() {
+async fn test_search_door_kind_omitted_returns_mixed_kind_top_k() {
     let items = vec![
         skill_item("format-python", "Format Python code with ruff and black."),
         tool_item("Bash", "Execute shell commands."),
@@ -133,7 +136,7 @@ async fn test_search_capabilities_kind_omitted_returns_mixed_kind_top_k() {
 
 /// AC: 9-7b-8 scenario 3
 #[tokio::test]
-async fn test_search_capabilities_top_k_one_returns_single_hit() {
+async fn test_search_door_top_k_one_returns_single_hit() {
     let items = vec![skill_item(
         "python-debugger",
         "Debug Python code with pdb and debugpy.",
@@ -154,7 +157,7 @@ async fn test_search_capabilities_top_k_one_returns_single_hit() {
 
 /// AC: 9-7b-8 scenario 4
 #[tokio::test]
-async fn test_search_capabilities_top_k_twenty_returns_at_most_twenty() {
+async fn test_search_door_top_k_twenty_returns_at_most_twenty() {
     // Build a corpus with many items
     let items: Vec<_> = (0..30)
         .map(|i| {
@@ -185,7 +188,7 @@ async fn test_search_capabilities_top_k_twenty_returns_at_most_twenty() {
 
 /// AC: 9-7b-8 scenario 5
 #[tokio::test]
-async fn test_search_capabilities_top_k_twenty_five_rejected_actionable_error() {
+async fn test_search_door_top_k_twenty_five_rejected_actionable_error() {
     let items = vec![skill_item(
         "test-skill",
         "A test skill for rejection testing.",
@@ -211,7 +214,7 @@ async fn test_search_capabilities_top_k_twenty_five_rejected_actionable_error() 
 /// Tests EmptyQuery rejection at the engine boundary.
 /// The adapter-level validation path is covered by conformance tests.
 #[tokio::test]
-async fn test_search_capabilities_empty_query_rejected() {
+async fn test_search_door_empty_query_rejected() {
     let items = vec![skill_item("test-skill", "A test skill.")];
     let index = build_test_index(items);
     let engine = Bm25SearchEngine::new(index);
@@ -232,7 +235,7 @@ async fn test_search_capabilities_empty_query_rejected() {
 
 /// AC: 9-7b-8 scenario 7
 #[tokio::test]
-async fn test_search_capabilities_no_match_returns_empty_hits() {
+async fn test_search_door_no_match_returns_empty_hits() {
     let items = vec![
         skill_item("format-python", "Format Python code."),
         tool_item("Bash", "Execute shell commands."),
@@ -257,12 +260,15 @@ async fn test_search_capabilities_no_match_returns_empty_hits() {
 // ---------------------------------------------------------------------------
 
 /// AC: 9-7b-8 scenario 8
+/// Exercises the engine's `kind=None` path. NO router door exposes this
+/// path post-9-7d; this test verifies the engine-internal contract for
+/// future callers that may pass `None`.
 /// Verifies search works with same-name items across different kinds.
 /// Provider disambiguation requires the name-collision detection to count
 /// per-name (ignoring kind), which is a Phase B architectural change
 /// tracked in conformance_meta_search.rs.
 #[tokio::test]
-async fn test_search_capabilities_provider_collision_populates_provider_field() {
+async fn test_search_door_provider_collision_populates_provider_field() {
     let items = vec![
         ScenarioTestItem {
             dk: DocKey::new(CapabilityKind::Tool, "query".to_string()),
@@ -306,7 +312,7 @@ async fn test_search_capabilities_provider_collision_populates_provider_field() 
 
 /// AC: 9-7b-8 scenario 9
 #[tokio::test]
-async fn test_search_capabilities_utf8_terse_boundary_edge_case() {
+async fn test_search_door_utf8_terse_boundary_edge_case() {
     // Create a fixture with multi-byte characters near the 120-char boundary
     let desc_120: String = "a".repeat(118) + "\u{03B1}\u{03B2}"; // Greek alpha, beta
     let item = ScenarioTestItem {
@@ -340,7 +346,7 @@ async fn test_search_capabilities_utf8_terse_boundary_edge_case() {
 
 /// AC: 9-7b-8 scenario 10
 #[tokio::test]
-async fn test_search_capabilities_score_tie_ordering_determinism_by_doc_key() {
+async fn test_search_door_score_tie_ordering_determinism_by_doc_key() {
     // Two items with identical searchable_text produce identical BM25 scores
     let items = vec![
         ScenarioTestItem {
