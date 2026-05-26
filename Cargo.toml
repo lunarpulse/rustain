@@ -116,7 +116,7 @@ rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Stor
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
 
 [features]
-default = ["anthropic", "openai", "ollama", "clipboard", "mcp"]
+default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses

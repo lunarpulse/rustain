@@ -1,0 +1,69 @@
+name: meta-search-flip-guard
+
+on:
+  pull_request:
+    paths:
+      - 'rustain/Cargo.toml'
+      - '_bmad-output/implementation-artifacts/9-7b-eval-report.json'
+      - 'rustain/src/infrastructure/search/synonyms.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'rustain/Cargo.toml'
+      - '_bmad-output/implementation-artifacts/9-7b-eval-report.json'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  eval-report-gate:
+    name: 9-7b-eval-report.json conjunctive A1 gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      - name: Assert overall_pass == true
+        run: |
+          test "$(jq -r '.overall_pass' _bmad-output/implementation-artifacts/9-7b-eval-report.json)" = "true"
+      - name: Assert generated_at within 7 days
+        run: |
+          GENERATED_AT="$(jq -r '.generated_at' _bmad-output/implementation-artifacts/9-7b-eval-report.json)"
+          NOW="$(date -u +%s)"
+          REPORT_TS="$(date -u -d "$GENERATED_AT" +%s)"
+          AGE_DAYS=$(( (NOW - REPORT_TS) / 86400 ))
+          test "$AGE_DAYS" -le 7
+      - name: Assert aggregate_holdout >= 0.85
+        run: |
+          test "$(jq '.aggregate_holdout >= 0.85' _bmad-output/implementation-artifacts/9-7b-eval-report.json)" = "true"
+      - name: Assert invocation_intent_holdout >= 0.60
+        run: |
+          test "$(jq '.a1_per_subcategory_holdout.invocation_intent >= 0.60' _bmad-output/implementation-artifacts/9-7b-eval-report.json)" = "true"
+      - name: Assert cross_kind_contamination_holdout >= 0.50
+        run: |
+          test "$(jq '.a1_per_subcategory_holdout.cross_kind_contamination >= 0.50' _bmad-output/implementation-artifacts/9-7b-eval-report.json)" = "true"
+      - name: Assert adversarial_paraphrase_holdout >= 0.50
+        run: |
+          test "$(jq '.a1_per_subcategory_holdout.adversarial_paraphrase_under_kind_omission >= 0.50' _bmad-output/implementation-artifacts/9-7b-eval-report.json)" = "true"
+      - name: Assert holdout_sha256 matches sealed partition
+        run: |
+          EXPECTED="53a7ed7d9852c74a3c518cd65efed8785de255556cbe759230d0239283426a1b"
+          ACTUAL="$(jq -r '.holdout_sha256' _bmad-output/implementation-artifacts/9-7b-eval-report.json)"
+          test "$ACTUAL" = "$EXPECTED"
+
+  default-feature-smoke:
+    name: cargo build with new default + opt-out path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build with default features (meta-search ON)
+        working-directory: rustain
+        run: cargo build
+      - name: Build with --no-default-features (opt-out path)
+        working-directory: rustain
+        run: cargo build --no-default-features
+      - name: Test with default features
+        working-directory: rustain
+        run: cargo test --no-fail-fast
