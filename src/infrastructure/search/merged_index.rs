@@ -156,6 +156,15 @@ impl MergedIndex {
         self.cached.is_empty()
     }
 
+    /// Iterate over all cached (DocKey, CachedProjection) entries in
+    /// BTreeMap-sorted DocKey order. Story 9-8 dev-tool inspection only.
+    ///
+    /// NOTE: This is a non-load-bearing dev-tool accessor (consumed by
+    /// `rustain catalog`); NOT to be called on hot paths.
+    pub fn iter_items(&self) -> impl Iterator<Item = (&DocKey, &CachedProjection)> + '_ {
+        self.cached.iter()
+    }
+
     /// Populate `provider` field on entries that share the same name across
     /// different providers. This is called after `from_items` to disambiguate
     /// colliding names.

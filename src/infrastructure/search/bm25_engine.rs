@@ -253,8 +253,14 @@ mod tests {
              with={:?}\nwithout={:?}",
             with_pos,
             without_pos,
-            hits_with.iter().map(|h| (&h.name, h.score)).collect::<Vec<_>>(),
-            hits_without.iter().map(|h| (&h.name, h.score)).collect::<Vec<_>>()
+            hits_with
+                .iter()
+                .map(|h| (&h.name, h.score))
+                .collect::<Vec<_>>(),
+            hits_without
+                .iter()
+                .map(|h| (&h.name, h.score))
+                .collect::<Vec<_>>()
         );
     }
 }

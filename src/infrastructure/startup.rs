@@ -455,6 +455,21 @@ pub async fn run() -> Result<()> {
         return Err(SubcommandExit.into());
     }
 
+    // Story 9.8 — Catalog dev-tool dispatch (before TUI initialization)
+    #[cfg(feature = "meta-search")]
+    if let Some(Command::Catalog { action }) = cli.command.clone() {
+        let workspace_path = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+        let exit_code =
+            crate::adapters::cli::catalog::run_catalog_action(action, &app_config, workspace_path)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("rustain catalog: {}", e);
+                    1
+                });
+        std::process::exit(exit_code);
+    }
+
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
     // CONFORMANCE_EXCEPTION_ENV_LAYER_BYPASS: legacy env-var, see Story 8.1 Decision Gate item 1.2

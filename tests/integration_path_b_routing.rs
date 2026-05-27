@@ -14,10 +14,10 @@
 
 use arc_swap::ArcSwap;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
+use rustain::domain::errors::ToolError;
 use rustain::domain::models::capability_kind::CapabilityKind;
 use rustain::domain::models::doc_key::DocKey;
 use rustain::domain::models::search_hit::SearchHit;
-use rustain::domain::errors::ToolError;
 use rustain::domain::ports::ToolSetPort;
 use rustain::domain::ports::search::{IndexableItem, MetaSearchEngine, MetaSearchError};
 use rustain::infrastructure::search::{Bm25SearchEngine, MergedIndex};

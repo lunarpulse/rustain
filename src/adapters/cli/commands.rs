@@ -73,7 +73,7 @@ pub struct Cli {
     pub sandbox_adapter: Option<String>,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Initialize rustain configuration
     Init,
@@ -123,15 +123,21 @@ pub enum Command {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    /// Inspect the merged BM25 capability index (developer tool — not a user feature; per ADR-09-02 v2 §Audience Split)
+    #[cfg(feature = "meta-search")]
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ConfigAction {
     /// Reload configuration in the running TUI (cross-process reload stub — see AC-9)
     Reload,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ProfileAction {
     /// List all available profiles
     List {
@@ -221,5 +227,45 @@ pub enum ProfileAction {
         /// Fail on AdapterFeatureGated instead of auto-flipping to preview = true
         #[arg(long)]
         strict_features: bool,
+    },
+}
+
+#[cfg(feature = "meta-search")]
+#[derive(Subcommand, Debug, Clone)]
+pub enum CatalogAction {
+    /// List all indexed capabilities (developer/CI tool)
+    List {
+        #[arg(long, value_parser = ["tool", "skill", "any"], default_value = "any")]
+        kind: String,
+        #[arg(long)]
+        json: bool,
+        /// Connect to MCP servers and include their tools (slower; default off)
+        #[arg(long)]
+        with_mcp: bool,
+    },
+    /// Print full profile of a single capability (developer/CI tool)
+    Explain {
+        /// DocKey in display form (tool::<name> or skill::<name>); optional provider prefix: tool::<provider>:<name>
+        doc_key: String,
+    },
+    /// Print index health metrics for CI consumption (developer/CI tool)
+    Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Dry-run a query against the index — exact SearchHit payload the LLM would receive (developer/CI tool)
+    Search {
+        /// Query string (must be non-empty)
+        query: String,
+        #[arg(long, value_parser = ["tool", "skill", "any"], default_value = "any")]
+        kind: String,
+        /// Top-K result count (1..=20)
+        #[arg(long, default_value = "5")]
+        top_k: usize,
+        #[arg(long)]
+        json: bool,
+        /// Disable matched_terms (LLM-prod-parity mode)
+        #[arg(long)]
+        no_matched_terms: bool,
     },
 }

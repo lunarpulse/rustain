@@ -18,10 +18,10 @@
 mod common;
 
 use common::eval_corpus::build_production_index;
-use common::eval_partition::{load_query_set_partitioned, Partition};
+use common::eval_partition::{Partition, load_query_set_partitioned};
 use proptest::prelude::*;
-use rustain::domain::ports::search::MetaSearchEngine;
 use rustain::domain::models::search_hit::SearchHit;
+use rustain::domain::ports::search::MetaSearchEngine;
 use rustain::infrastructure::search::{Bm25SearchEngine, SYNONYMS};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,7 +81,10 @@ fn top3_precision(hits: &[SearchHit], expected_top3: &[String]) -> f64 {
         return 1.0;
     }
     let hit_names: Vec<&str> = hits.iter().take(3).map(|h| h.name.as_str()).collect();
-    let matched = expected_top3.iter().filter(|e| hit_names.contains(&e.as_str())).count();
+    let matched = expected_top3
+        .iter()
+        .filter(|e| hit_names.contains(&e.as_str()))
+        .count();
     matched as f64 / expected_top3.len() as f64
 }
 
@@ -142,7 +145,10 @@ fn prop_synonym_expansion_does_not_degrade_top_k_with_coverage() {
     let mut all_queries: Vec<EvalQuery> = Vec::new();
     all_queries.extend(load_query_set_partitioned::<EvalQuery>(Partition::Dev));
     all_queries.extend(load_query_set_partitioned::<EvalQuery>(Partition::Holdout));
-    let labeled: Vec<&EvalQuery> = all_queries.iter().filter(|q| !q.expected_top3.is_empty()).collect();
+    let labeled: Vec<&EvalQuery> = all_queries
+        .iter()
+        .filter(|q| !q.expected_top3.is_empty())
+        .collect();
 
     let mut total_baseline_prec = 0.0;
     let mut total_expanded_prec = 0.0;
@@ -151,13 +157,11 @@ fn prop_synonym_expansion_does_not_degrade_top_k_with_coverage() {
     for q in &labeled {
         let (expanded, triggered) = SYNONYMS.expand_query(&q.query);
 
-        let baseline_hits = rt.block_on(async {
-            engine.search(&q.query, None, 3).await.unwrap_or_default()
-        });
+        let baseline_hits =
+            rt.block_on(async { engine.search(&q.query, None, 3).await.unwrap_or_default() });
 
-        let expanded_hits = rt.block_on(async {
-            engine.search(&expanded, None, 3).await.unwrap_or_default()
-        });
+        let expanded_hits =
+            rt.block_on(async { engine.search(&expanded, None, 3).await.unwrap_or_default() });
 
         let baseline_prec = top3_precision(&baseline_hits, &q.expected_top3);
         let expanded_prec = top3_precision(&expanded_hits, &q.expected_top3);
@@ -171,8 +175,12 @@ fn prop_synonym_expansion_does_not_degrade_top_k_with_coverage() {
             "Synonym expansion degraded top-3 precision for query='{}': \
              baseline={:.3} expanded={:.3} (ε=0.05).\n\
              baseline_hits={:?}\nexpanded_hits={:?}\nexpected={:?}",
-            q.query, baseline_prec, expanded_prec,
-            top3_names(&baseline_hits), top3_names(&expanded_hits), q.expected_top3
+            q.query,
+            baseline_prec,
+            expanded_prec,
+            top3_names(&baseline_hits),
+            top3_names(&expanded_hits),
+            q.expected_top3
         );
 
         // Also accumulate coverage here (belt-and-suspenders).
@@ -187,7 +195,9 @@ fn prop_synonym_expansion_does_not_degrade_top_k_with_coverage() {
         assert!(
             avg_expanded >= avg_baseline - 0.05,
             "Aggregate precision degraded: baseline={:.3} expanded={:.3} across {} queries",
-            avg_baseline, avg_expanded, count
+            avg_baseline,
+            avg_expanded,
+            count
         );
     }
 

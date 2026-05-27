@@ -1,3 +1,5 @@
+#[cfg(feature = "meta-search")]
+pub mod catalog;
 pub mod commands;
 pub mod config_cmd;
 pub mod doctor;
