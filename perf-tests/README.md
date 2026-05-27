@@ -14,6 +14,7 @@ Performance-regression tests for load-bearing runtime primitives. Each test lock
 | File | Subject | Baseline target | Source story |
 |---|---|---|---|
 | `scheduler_overhead.rs` | `ToolScheduler::schedule` vs direct `tools.execute` | P99 < 100 µs per call | Story 6-0b |
+| `subagent_spawn.rs` | Subagent spawn latency + cancellation + RSS + spool write | spawn p99 < 1 ms | Story 10-0 |
 | `event_bus_throughput.rs` | `EventBus::emit_domain` single-threaded throughput | > 100k events/sec | Story 6-0a |
 | `approval_runtime_fast_path.rs` | `ApprovalRuntime::request` with session-allow fast path | P99 < 10 µs | Story 6-0c |
 | `plan_injector_cadence.rs` | `DefaultPlanInjector::pre_turn` overhead | < 1 µs per call | Story 6-0d |

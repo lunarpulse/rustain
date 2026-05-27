@@ -109,8 +109,15 @@ async fn r5_prepare_detach_kills_running_non_persistent_mcp_child() {
     // Smoke-check: child is alive before detach.
     // (Optional — pgrep may not always find a freshly-spawned child on every OS.)
 
-    let composite =
-        CompositeToolsetAdapter::new(builtin, vec![client.clone()], vec![spec], true, None, None);
+    let composite = CompositeToolsetAdapter::new(
+        builtin,
+        vec![client.clone()],
+        vec![spec],
+        true,
+        None,
+        None,
+        None,
+    );
 
     composite
         .prepare_detach()
@@ -144,8 +151,15 @@ async fn r5_prepare_detach_does_not_kill_persistent_mcp_child() {
         "fake-mcp-server must connect"
     );
 
-    let composite =
-        CompositeToolsetAdapter::new(builtin, vec![client.clone()], vec![spec], true, None, None);
+    let composite = CompositeToolsetAdapter::new(
+        builtin,
+        vec![client.clone()],
+        vec![spec],
+        true,
+        None,
+        None,
+        None,
+    );
 
     composite
         .prepare_detach()
@@ -258,8 +272,15 @@ async fn r8_list_changed_keeps_catalog_populated_after_refresh() {
     // Composite-level: the same tools must surface on the LLM-facing catalog
     // with the `mcp__<server>__<tool>` projection.
     let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let composite =
-        CompositeToolsetAdapter::new(builtin, vec![client.clone()], vec![spec], true, None, None);
+    let composite = CompositeToolsetAdapter::new(
+        builtin,
+        vec![client.clone()],
+        vec![spec],
+        true,
+        None,
+        None,
+        None,
+    );
     let names: Vec<String> = composite
         .available_tools()
         .into_iter()

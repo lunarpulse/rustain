@@ -180,13 +180,14 @@ impl ToolScheduler {
 
         // Phase 3: Permission chain check
         let plan_file = self.plan_file.read().await.clone();
-        let decision_fut = permission_chain::check(
+        let decision_fut = permission_chain::check_with_source(
             self.security.as_ref(),
             &req.tool_name,
             &req.input,
             active_skills.as_deref(),
             plan_file.as_deref(),
             self.tools.as_ref(),
+            Some(&source),
         );
         let decision = tokio::select! {
             d = decision_fut => d,

@@ -288,6 +288,7 @@ pub fn build_tools(
                 ctx.include_builtin_tools,
                 ctx.domain_tx.clone(),
                 Some(ctx.skill_activator.clone()),
+                None, // SubagentProvider wired in main.rs for Story 10.0+
             );
             Ok(Arc::new(adapter))
         }

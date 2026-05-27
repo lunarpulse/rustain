@@ -48,6 +48,7 @@ async fn test_no_zombie_mcp_processes_after_swap() {
         true,
         None,
         None,
+        None,
     );
 
     let result = composite.prepare_detach().await;
@@ -82,6 +83,7 @@ async fn test_persistent_server_survives_profile_swap() {
         vec![client_persistent.clone(), client_ephemeral.clone()],
         vec![spec_persistent, spec_ephemeral],
         true,
+        None,
         None,
         None,
     );

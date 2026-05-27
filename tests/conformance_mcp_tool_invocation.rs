@@ -616,6 +616,7 @@ fn test_include_builtin_false_yields_mcp_only_catalog() {
         false, // include_builtin = false
         None,
         None,
+        None,
     );
 
     let tools = composite.available_tools();

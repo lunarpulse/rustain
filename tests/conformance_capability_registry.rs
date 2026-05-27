@@ -421,6 +421,7 @@ fn test_mcp_provider_discover_round_trip() {
             true,
             None,
             None,
+            None,
         );
 
         // Populate registry via McpProvider
@@ -503,7 +504,7 @@ async fn test_builtin_provider_discover_returns_expected_tools() {
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
     ));
-    let composite = CompositeToolsetAdapter::new(adapter, vec![], vec![], true, None, None);
+    let composite = CompositeToolsetAdapter::new(adapter, vec![], vec![], true, None, None, None);
 
     let _ = composite.populate_registry().await.unwrap();
     let snap = composite.capability_registry().snapshot();
@@ -748,6 +749,7 @@ async fn test_registry_holds_all_three_protocols() {
         true, // include_builtin
         None,
         Some(skill_activator),
+        None,
     );
 
     composite.populate_registry().await.unwrap();
@@ -792,7 +794,7 @@ async fn test_describe_returns_tool_descriptors() {
     let client = Arc::new(McpClientAdapter::new(spec.clone(), Some(tx)));
 
     let composite =
-        CompositeToolsetAdapter::new(builtin, vec![client], vec![spec], false, None, None);
+        CompositeToolsetAdapter::new(builtin, vec![client], vec![spec], false, None, None, None);
 
     // No registry population yet — describe should be empty
     let desc = composite.describe();
@@ -817,7 +819,7 @@ async fn test_catalog_delta_version_monotonic() {
     use rustain::domain::ports::ToolSetPort;
 
     let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let composite = CompositeToolsetAdapter::new(builtin, vec![], vec![], false, None, None);
+    let composite = CompositeToolsetAdapter::new(builtin, vec![], vec![], false, None, None, None);
 
     assert_eq!(composite.catalog_version(), 0);
 
@@ -839,7 +841,7 @@ async fn test_emit_catalog_delta_returns_ok_phase_a() {
     use rustain::domain::ports::ToolSetPort;
 
     let builtin: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let composite = CompositeToolsetAdapter::new(builtin, vec![], vec![], false, None, None);
+    let composite = CompositeToolsetAdapter::new(builtin, vec![], vec![], false, None, None, None);
 
     let result = composite.emit_catalog_delta().await;
     assert!(result.is_ok());
@@ -908,7 +910,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
     let summary = format_registry_summary(&snap);
     assert_eq!(
         summary,
-        Some("Registry: 4 capabilities (2 MCP, 1 builtin, 1 skill)".to_string())
+        Some("Registry: 4 capabilities (2 MCP, 1 builtin, 1 skill)".to_string()),
     );
 }
 
@@ -978,6 +980,7 @@ async fn test_catalog_delta_added_removed_correctness() {
         true, // include_builtin
         None,
         None, // no skill_activator
+        None,
     );
 
     // Initial populate: version=1, registry has 7 builtin (incl. skill_view from 9.6) + 2 MCP = 9 (10 with meta-search)
@@ -1046,4 +1049,110 @@ async fn test_catalog_delta_added_removed_correctness() {
         10 + 2 * cfg!(feature = "meta-search") as usize,
         "registry unchanged after delta emit"
     );
+}
+
+// Story 10.0 extension: SubagentProvider::discover() round-trip
+#[tokio::test]
+async fn test_subagent_provider_discover_round_trip() {
+    use rustain::adapters::agent_registry::AgentRegistry;
+    use rustain::adapters::subagent::SubagentProvider;
+    use rustain::domain::models::AgentDef;
+    use rustain::domain::ports::CapabilityProvider;
+
+    struct StubRunner;
+    #[async_trait::async_trait]
+    impl rustain::domain::ports::SubagentRunner for StubRunner {
+        async fn launch(
+            &self,
+            _spec: rustain::domain::models::AgentLaunchSpec,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<rustain::domain::models::TaskHandle, rustain::domain::models::SubagentError>
+        {
+            unimplemented!()
+        }
+    }
+    let runner = Arc::new(StubRunner) as Arc<dyn rustain::domain::ports::SubagentRunner>;
+    let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
+    let mut agent_reg = AgentRegistry::new();
+    agent_reg = AgentRegistry::from_agents(vec![
+        AgentDef {
+            name: "code-reviewer".into(),
+            description: "Reviews code for bugs".into(),
+            file: std::path::PathBuf::from("/tmp/code-reviewer.md"),
+            allowed_tools: Some(vec!["Read".into(), "Grep".into()]),
+            exclude_tools: None,
+            model: None,
+        },
+        AgentDef {
+            name: "test-writer".into(),
+            description: "Writes tests".into(),
+            file: std::path::PathBuf::from("/tmp/test-writer.md"),
+            allowed_tools: Some(vec!["Read".into(), "Write".into()]),
+            exclude_tools: None,
+            model: None,
+        },
+    ]);
+    let agent_registry = Arc::new(tokio::sync::RwLock::new(agent_reg));
+    struct StubInfo;
+    impl rustain::domain::ports::ProviderInfoPort for StubInfo {
+        fn active_delegate_id(&self) -> String {
+            "stub".into()
+        }
+        fn get_model(
+            &self,
+            _provider_id: &str,
+            _model_id: &str,
+        ) -> Option<rustain::domain::models::provider::ModelDescriptor> {
+            None
+        }
+        fn get_model_provider(&self, _model_id: &str, _prefer: Option<&str>) -> Option<String> {
+            None
+        }
+        fn list_providers(&self) -> Vec<rustain::domain::models::provider::ProviderDescriptor> {
+            Vec::new()
+        }
+        fn list_models_by_provider(
+            &self,
+            _provider_id: &str,
+        ) -> Vec<rustain::domain::models::provider::ModelDescriptor> {
+            Vec::new()
+        }
+        fn get_provider(
+            &self,
+            _provider_id: &str,
+        ) -> Option<Arc<dyn rustain::domain::ports::StreamingProvider>> {
+            None
+        }
+        fn set_active_provider(
+            &self,
+            _provider_id: &str,
+        ) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn now_unix(&self) -> i64 {
+            0
+        }
+        fn today_start_unix_ms(&self) -> i64 {
+            0
+        }
+    }
+    let model_router = Arc::new(StubInfo) as Arc<dyn rustain::domain::ports::ProviderInfoPort>;
+    let tmp = tempfile::tempdir().unwrap();
+    let spool = Arc::new(
+        rustain::infrastructure::subagent::SubagentSpool::new(tmp.path().join("spool"))
+            .await
+            .unwrap(),
+    );
+
+    let provider = SubagentProvider::new(runner, registry, agent_registry, model_router, spool);
+    let capabilities = provider.discover().await.unwrap();
+
+    assert_eq!(
+        capabilities.len(),
+        2,
+        "Expected 2 capabilities for 2 agent defs"
+    );
+    let names: Vec<String> = capabilities.iter().map(|c| c.name.clone()).collect();
+    assert!(names.contains(&"code-reviewer".to_string()));
+    assert!(names.contains(&"test-writer".to_string()));
 }

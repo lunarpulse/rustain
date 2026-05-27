@@ -48,6 +48,7 @@ fn test_mcp_sub_rows_appear_in_health_output() {
         true,
         None,
         None,
+        None,
     );
 
     let rows = composite.mcp_health_rows();

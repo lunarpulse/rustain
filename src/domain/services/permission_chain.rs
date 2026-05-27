@@ -90,6 +90,28 @@ pub async fn check(
     plan_file: Option<&std::path::Path>,
     tools_port: &dyn ToolSetPort,
 ) -> PermissionDecision {
+    check_with_source(
+        security,
+        tool_name,
+        input,
+        active_skills,
+        plan_file,
+        tools_port,
+        None,
+    )
+    .await
+}
+
+/// Check permission with an explicit approval source (for recursion guard).
+pub async fn check_with_source(
+    security: &dyn SecurityPort,
+    tool_name: &str,
+    input: &serde_json::Value,
+    active_skills: Option<&[ActiveSkill]>,
+    plan_file: Option<&std::path::Path>,
+    tools_port: &dyn ToolSetPort,
+    source: Option<&crate::domain::models::tool_call::ApprovalSource>,
+) -> PermissionDecision {
     // Step 0: exit_plan_mode short-circuit
     if tool_name == "exit_plan_mode" {
         return match security.current_mode() {
@@ -98,6 +120,18 @@ pub async fn check(
                 "exit_plan_mode is only available in Plan mode".to_string(),
             ),
         };
+    }
+
+    // Step 0.5: Recursion guard — subagents may not invoke the task tool
+    if tool_name.eq_ignore_ascii_case("task") {
+        if let Some(crate::domain::models::tool_call::ApprovalSource::ForegroundSubagent {
+            ..
+        }) = source
+        {
+            return PermissionDecision::Deny(
+                "recursion guard: subagent is not allowed to invoke the 'task' tool".to_string(),
+            );
+        }
     }
 
     // Step 1: Tool restriction (active skill allowed_tools)

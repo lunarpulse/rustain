@@ -1,5 +1,6 @@
 pub mod adapter_health;
 pub mod agent;
+pub mod agent_id;
 pub mod approval;
 pub mod autocomplete;
 pub mod budget;
@@ -33,16 +34,21 @@ pub mod provider_capabilities;
 pub mod router;
 pub mod sandbox;
 pub mod search_hit;
-mod session;
+pub mod session;
 pub mod session_meta;
 mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
 mod stream;
+pub mod subagent_error;
+pub mod subagent_status;
 pub mod tab;
+pub mod task_handle;
 pub mod tool_call;
 pub mod tool_descriptor;
+pub mod tool_policy;
 mod tools;
+pub mod trace_context;
 pub mod transaction;
 pub mod turn;
 pub mod usage;
@@ -112,12 +118,19 @@ pub use skill_catalog_delta::SkillCatalogDelta;
 pub use skill_metadata::SkillMetadata;
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
+pub use subagent_error::{SpawnLimitKind, SubagentError};
+pub use subagent_status::SubagentStatus;
+pub use subagent_status::SubagentStatus as SubagentRunStatus;
+pub use task_handle::{Op, TaskHandle};
+pub use tool_policy::ToolPolicy;
+pub use trace_context::TraceContext;
 // TODO(S16.4): remove these upward re-exports once consumers migrate to domain::services::reducer
 #[allow(unused_imports)]
 pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
 pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
+pub use agent_id::AgentId;
 #[allow(unused_imports)]
 pub use budget::BudgetConfig;
 pub use capability::{Capability, CapabilityError};

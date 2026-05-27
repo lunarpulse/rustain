@@ -19,7 +19,7 @@ pub enum ContentBlockType {
     PlanCard,
     PlanSummary,
     PlanDeviation,
-    SubagentStatus,
+    SubagentStatusBlock,
     AskUserQuestion,
     CompactBoundary,
     DiffBlock,

@@ -112,7 +112,9 @@ pub(crate) async fn build_offline_merged_index(
     // 3. Skills from disk.
     let home = dirs::home_dir();
     if home.is_none() {
-        tracing::warn!("catalog offline builder: $HOME not set — home-directory skill discovery skipped");
+        tracing::warn!(
+            "catalog offline builder: $HOME not set — home-directory skill discovery skipped"
+        );
     }
     let registry = tokio::task::spawn_blocking({
         let workspace = workspace.to_path_buf();

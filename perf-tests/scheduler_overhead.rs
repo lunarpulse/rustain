@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use rustain::domain::errors::{PermissionError, ToolError};
 use rustain::domain::models::tool_call::{ApprovalSource, ToolCallRequest};
 use rustain::domain::models::{
@@ -12,7 +13,6 @@ use rustain::domain::models::{
 };
 use rustain::domain::ports::{SecurityPort, ToolSetPort};
 use rustain::domain::services::tool_scheduler::ToolScheduler;
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 struct NoOpSecurity;

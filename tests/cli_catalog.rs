@@ -265,8 +265,13 @@ fn test_catalog_search_no_matched_terms_flag() {
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let arr = val.as_array().expect("search output should be a JSON array");
-    assert!(!arr.is_empty(), "search should return at least one result for 'review' query");
+    let arr = val
+        .as_array()
+        .expect("search output should be a JSON array");
+    assert!(
+        !arr.is_empty(),
+        "search should return at least one result for 'review' query"
+    );
     for item in arr {
         assert!(
             item.get("matched_terms").is_none() || item["matched_terms"].is_null(),

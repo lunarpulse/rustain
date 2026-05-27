@@ -22,6 +22,14 @@ test = true
 bench = false
 required-features = ["mcp"]
 
+[[test]]
+name = "scheduler_overhead"
+path = "perf-tests/scheduler_overhead.rs"
+
+[[test]]
+name = "subagent_spawn"
+path = "perf-tests/subagent_spawn.rs"
+
 [dependencies]
 # ── Async runtime ────────────────────────────────────────────────
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal"] }

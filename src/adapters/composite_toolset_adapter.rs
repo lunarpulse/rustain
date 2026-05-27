@@ -58,6 +58,8 @@ pub struct CompositeToolsetAdapter {
     #[cfg(feature = "meta-search")]
     catalog_broadcast:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>>,
+    /// Story 10.0 — optional subagent provider for agent dispatch.
+    subagent_provider: Option<Arc<crate::adapters::subagent::SubagentProvider>>,
 }
 
 impl CompositeToolsetAdapter {
@@ -68,6 +70,7 @@ impl CompositeToolsetAdapter {
         include_builtin: bool,
         event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
         skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
+        subagent_provider: Option<Arc<crate::adapters::subagent::SubagentProvider>>,
     ) -> Self {
         let capability_registry = Arc::new(CapabilityRegistry::new(event_tx));
         // P-15: Validate no duplicate server IDs
@@ -90,6 +93,7 @@ impl CompositeToolsetAdapter {
             catalog_version: AtomicU64::new(0),
             #[cfg(feature = "meta-search")]
             catalog_broadcast: std::sync::OnceLock::new(),
+            subagent_provider,
         }
     }
 
@@ -162,6 +166,18 @@ impl CompositeToolsetAdapter {
             {
                 Ok(h) => handles.extend(h),
                 Err(e) => errors.push(format!("mcp:{provider_id}: {e}")),
+            }
+        }
+
+        // 4. Subagent (Story 10.0)
+        if let Some(subagent_provider) = self.subagent_provider.as_ref() {
+            match self
+                .capability_registry
+                .discover_and_register_all(subagent_provider.as_ref(), "subagent")
+                .await
+            {
+                Ok(h) => handles.extend(h),
+                Err(e) => errors.push(format!("subagent: {e}")),
             }
         }
 

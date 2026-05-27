@@ -7934,15 +7934,6 @@ async fn start_turn_inner(
         tools: tool_defs,
     };
 
-    // Forward-compat: construct AgentLaunchSpec even though foreground path
-    // only consumes effective_model today (Story 10.7 will use the full struct).
-    let _launch_spec = crate::domain::models::AgentLaunchSpec {
-        prompt: system_prompt.clone(),
-        effective_model: resolved.model.clone(),
-        tools_allow: all_tool_names,
-        parent_ctx_tokens: 0,
-    };
-
     let session_id = conversation
         .session_id
         .clone()

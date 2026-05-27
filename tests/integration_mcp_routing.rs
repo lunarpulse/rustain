@@ -123,6 +123,7 @@ async fn build_composite(
         true, // include_builtin (irrelevant for our mcp__-prefixed calls)
         None, // event_tx — not needed for runtime tests
         None, // skill_activator
+        None, // subagent_provider
     ))
 }
 
@@ -228,7 +229,7 @@ async fn r2_scheduler_routes_mcp_tool_use_to_client_and_returns_result() {
             assert!(
                 result.output.contains('5'),
                 "expected fake-mcp-server to compute 2+3=5, got: {}",
-                result.output
+                result.output,
             );
             assert!(!result.is_error, "tool result should not be an error");
         }

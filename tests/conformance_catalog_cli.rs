@@ -80,10 +80,12 @@ mod catalog_conformance {
     /// Ratchet 4: No `/catalog` slash command registration.
     #[test]
     fn test_no_slash_command_registration() {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .unwrap_or_else(|_| ".".to_string());
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let slash_files = &[
-            format!("{}/src/adapters/tui/widgets/slash_commands.rs", manifest_dir),
+            format!(
+                "{}/src/adapters/tui/widgets/slash_commands.rs",
+                manifest_dir
+            ),
             format!("{}/src/adapters/tui/widgets/autocomplete.rs", manifest_dir),
         ];
         for file in slash_files {

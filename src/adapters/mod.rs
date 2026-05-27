@@ -23,6 +23,7 @@ pub mod skill_activation;
 pub mod skill_exposure;
 pub mod skill_provider;
 pub mod skill_registry;
+pub mod subagent;
 pub mod tool_exposure;
 pub mod toolset_adapter;
 pub mod tui;

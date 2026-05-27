@@ -25,6 +25,7 @@ pub mod plan_runtime;
 pub mod profile_loader;
 pub mod profile_serializer;
 pub mod reducer;
+pub mod sandbox_narrowing;
 pub mod search;
 pub mod session_index;
 pub mod skill_context;

@@ -37,6 +37,8 @@ mod skill_exposure;
 #[allow(unused_imports)]
 mod storage;
 #[allow(unused_imports)]
+mod subagent_runner;
+#[allow(unused_imports)]
 mod tool_exposure;
 #[allow(unused_imports)]
 mod toolset;
@@ -61,6 +63,7 @@ pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
 pub use session_port::SessionPort;
+pub use subagent_runner::SubagentRunner;
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};
 pub use skill_exposure::SkillExposurePort;
