@@ -13,6 +13,7 @@ pub struct TaskHandle {
     pub cancel: CancellationToken,                    // child token derived from parent
     pub task_id: String,                              // matches spool filename (nanoid 12 char)
     pub subagent_type: String,                        // threaded through from SubagentProvider
+    pub spawned_at: i64,                              // epoch millis from registry::register
 }
 
 /// Owner-issued operations on a running subagent. Story 10.4 consumes this; Story 10.2 wires panel keybinds.

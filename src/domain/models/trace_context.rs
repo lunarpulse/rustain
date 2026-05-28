@@ -50,21 +50,20 @@ mod tests {
 
     #[test]
     fn reject_non_hex_trace_id() {
-        assert!(TraceContext::new(
-            "gggggggggggggggggggggggggggggggg".into(),
-            "b7ad6b7169203331".into(),
-            0,
-        )
-        .is_err());
+        assert!(
+            TraceContext::new(
+                "gggggggggggggggggggggggggggggggg".into(),
+                "b7ad6b7169203331".into(),
+                0,
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn reject_short_span_id() {
-        assert!(TraceContext::new(
-            "0af7651916cd43dd8448eb211c80319c".into(),
-            "abc".into(),
-            0,
-        )
-        .is_err());
+        assert!(
+            TraceContext::new("0af7651916cd43dd8448eb211c80319c".into(), "abc".into(), 0,).is_err()
+        );
     }
 }

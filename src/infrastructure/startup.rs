@@ -1051,6 +1051,126 @@ pub async fn run() -> Result<()> {
     let persona: Arc<dyn PersonaPort> = Arc::clone(&*agent_core_inner.persona.load());
     let tools: Arc<dyn ToolSetPort> = Arc::clone(&*agent_core_inner.tools.load());
 
+    // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
+    {
+        use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
+        if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+            // Eager agent discovery (needed for SubagentProvider::discover)
+            let agent_registry = Arc::new(tokio::sync::RwLock::new(
+                crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),
+            ));
+
+            // Construct subagent infrastructure
+            let subagent_registry = Arc::new(
+                crate::infrastructure::subagent::SubagentRegistry::with_event_tx(
+                    domain_tx.clone(),
+                    Arc::new(|| chrono::Utc::now().timestamp_millis()),
+                ),
+            );
+            let spool = Arc::new(
+                crate::infrastructure::subagent::SubagentSpool::new(
+                    paths::data_dir()
+                        .unwrap_or_else(|_| workspace_path.join(".rustain"))
+                        .join("spool"),
+                )
+                .await
+                .expect("SubagentSpool creation failed"),
+            );
+
+            // Minimal ProviderInfoPort wrapper for SubagentProvider
+            struct StartupProviderInfo {
+                router: Arc<crate::adapters::provider::ProviderRouter>,
+                registry: Arc<crate::adapters::provider::ProviderRegistry>,
+            }
+            impl crate::domain::ports::ProviderInfoPort for StartupProviderInfo {
+                fn active_delegate_id(&self) -> String {
+                    self.router.active_delegate_id()
+                }
+                fn get_model(
+                    &self,
+                    provider_id: &str,
+                    model_id: &str,
+                ) -> Option<crate::domain::models::provider::ModelDescriptor> {
+                    self.registry.get_model(provider_id, model_id)
+                }
+                fn get_model_provider(
+                    &self,
+                    model_id: &str,
+                    prefer: Option<&str>,
+                ) -> Option<String> {
+                    self.registry.get_model_provider(model_id, prefer)
+                }
+                fn list_providers(
+                    &self,
+                ) -> Vec<crate::domain::models::provider::ProviderDescriptor> {
+                    self.registry.list_providers()
+                }
+                fn list_models_by_provider(
+                    &self,
+                    provider_id: &str,
+                ) -> Vec<crate::domain::models::provider::ModelDescriptor> {
+                    self.registry.list_models_by_provider(provider_id)
+                }
+                fn get_provider(
+                    &self,
+                    provider_id: &str,
+                ) -> Option<Arc<dyn crate::domain::ports::StreamingProvider>> {
+                    self.router.get_provider(provider_id)
+                }
+                fn set_active_provider(
+                    &self,
+                    provider_id: &str,
+                ) -> Result<(), crate::domain::errors::ProviderError> {
+                    self.router.set_active(provider_id)
+                }
+                fn now_unix(&self) -> i64 {
+                    crate::infrastructure::clock_util::now_unix()
+                }
+                fn today_start_unix_ms(&self) -> i64 {
+                    crate::infrastructure::clock_util::today_start_unix_ms()
+                }
+            }
+
+            let model_router: Arc<dyn crate::domain::ports::ProviderInfoPort> =
+                Arc::new(StartupProviderInfo {
+                    router: router.clone(),
+                    registry: provider_registry.clone(),
+                });
+
+            // ToolScheduler for the runner (child body is v0 no-op; scheduler unused until 10.7)
+            let subagent_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+                security.clone(),
+                _tools_direct.clone(),
+                approval_runtime.clone(),
+                1024,
+            );
+
+            let runner: Arc<dyn crate::domain::ports::SubagentRunner> =
+                Arc::new(crate::adapters::subagent::InProcessSubagentRunner::new(
+                    router.clone() as Arc<dyn crate::domain::ports::StreamingProvider>,
+                    tools_storage.clone(),
+                    security.clone(),
+                    _tools_direct.clone(),
+                    approval_runtime.clone(),
+                    subagent_scheduler,
+                    event_bus.clone(),
+                    subagent_registry.clone(),
+                    sandbox_policy_ref.clone(),
+                    spool.clone(),
+                ));
+
+            let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
+                runner,
+                subagent_registry.clone(),
+                agent_registry,
+                model_router,
+                spool.clone(),
+            ));
+
+            composite.set_subagent_provider(subagent_provider);
+        }
+    }
+
     // Deferred AppState::new — now that AgentCore is composed, create the runtime state
     // Story 9.5 — telemetry aggregator (7-day rolling window for active-ratio metrics).
     let telemetry = {

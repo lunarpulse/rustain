@@ -59,7 +59,8 @@ pub struct CompositeToolsetAdapter {
     catalog_broadcast:
         std::sync::OnceLock<tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>>,
     /// Story 10.0 — optional subagent provider for agent dispatch.
-    subagent_provider: Option<Arc<crate::adapters::subagent::SubagentProvider>>,
+    /// Uses OnceLock for two-phase wiring (adapter built first, then provider).
+    subagent_provider: std::sync::OnceLock<Arc<crate::adapters::subagent::SubagentProvider>>,
 }
 
 impl CompositeToolsetAdapter {
@@ -81,6 +82,10 @@ impl CompositeToolsetAdapter {
                 tracing::error!(server_id = %id, "Duplicate MCP server ID detected — routing will be nondeterministic");
             }
         }
+        let subagent_provider_cell = std::sync::OnceLock::new();
+        if let Some(p) = subagent_provider {
+            let _ = subagent_provider_cell.set(p);
+        }
         Self {
             builtin,
             mcp_clients,
@@ -93,7 +98,7 @@ impl CompositeToolsetAdapter {
             catalog_version: AtomicU64::new(0),
             #[cfg(feature = "meta-search")]
             catalog_broadcast: std::sync::OnceLock::new(),
-            subagent_provider,
+            subagent_provider: subagent_provider_cell,
         }
     }
 
@@ -110,6 +115,15 @@ impl CompositeToolsetAdapter {
         sender: tokio::sync::broadcast::Sender<crate::domain::models::CatalogDelta>,
     ) {
         let _ = self.catalog_broadcast.set(sender);
+    }
+
+    /// Story 10.2 — wire the subagent provider after composition.
+    /// Called after `SubagentProvider` is constructed in startup.rs.
+    pub fn set_subagent_provider(
+        &self,
+        provider: Arc<crate::adapters::subagent::SubagentProvider>,
+    ) {
+        let _ = self.subagent_provider.set(provider);
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
@@ -169,8 +183,8 @@ impl CompositeToolsetAdapter {
             }
         }
 
-        // 4. Subagent (Story 10.0)
-        if let Some(subagent_provider) = self.subagent_provider.as_ref() {
+        // 4. Subagent (Story 10.0 + 10.2)
+        if let Some(subagent_provider) = self.subagent_provider.get() {
             match self
                 .capability_registry
                 .discover_and_register_all(subagent_provider.as_ref(), "subagent")

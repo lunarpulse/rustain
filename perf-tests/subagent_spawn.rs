@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use serde_json::json;
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::noop::{NoOpApprovalPersistence, NoOpProvider};
 use rustain::adapters::sandbox::NoOpSandbox;
@@ -19,6 +18,7 @@ use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 const BASELINE_P99_MICROS: u64 = 1_000; // 1 ms = 30× headroom on NFR8's 30 ms ceiling
