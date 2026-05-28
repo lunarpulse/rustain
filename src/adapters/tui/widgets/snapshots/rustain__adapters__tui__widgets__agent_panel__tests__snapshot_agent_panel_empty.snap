@@ -1,0 +1,12 @@
+---
+source: src/adapters/tui/widgets/agent_panel.rs
+expression: text
+---
+┌ Agents ──────────────────────────────────────────────────┐
+│                                                          │
+│                    No agents running.                    │
+│Spawn one with `rustain spawn --agent <name>` or via plan │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘

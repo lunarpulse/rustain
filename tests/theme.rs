@@ -394,6 +394,7 @@ fn test_tui_renders_with_theme_colors() {
                 1,
                 false,
                 rustain::domain::models::visual::DensityMode::Focus,
+                false,
             ) {
                 status_bar::render(
                     frame,
@@ -421,6 +422,7 @@ fn test_tui_renders_with_theme_colors() {
                     None, // daily_budget (Story 7.5)
                     None,
                     rustain::domain::models::visual::DensityMode::Focus,
+                false,
                 );
             }
         })

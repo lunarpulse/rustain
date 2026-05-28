@@ -72,6 +72,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     None, // daily_budget (Story 7.5)
                     None,
                     DensityMode::Focus,
+                false,
                 );
                 input_box::render(
                     frame,

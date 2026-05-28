@@ -1,4 +1,6 @@
 pub mod adapter_status_panel;
+pub mod agent_inspector;
+pub mod agent_panel;
 pub mod ask_user_question;
 pub mod autocomplete_popup;
 pub mod bookmark_list;

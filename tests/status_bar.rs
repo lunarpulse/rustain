@@ -92,6 +92,7 @@ fn render_status_bar_ml(
                 None, // daily_budget (Story 7.5)
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();
@@ -321,6 +322,7 @@ fn test_status_bar_shows_active_agent() {
                 None, // daily_budget (Story 7.5)
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();
@@ -369,6 +371,7 @@ fn test_status_bar_hides_agent_when_none() {
                 None, // daily_budget (Story 7.5)
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();
@@ -417,6 +420,7 @@ fn test_status_bar_agent_name_truncated() {
                 None, // daily_budget (Story 7.5)
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();

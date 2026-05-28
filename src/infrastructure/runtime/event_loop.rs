@@ -159,6 +159,58 @@ fn reconcile_fold_toggle<F>(
 // Scroll-intent handler + dispatch_view_scroll helper extracted to
 // `crate::adapters::tui::handlers::scroll` per Story 8.0a Phase 4 Task 9 (scroll).
 
+fn get_subagent_provider(
+    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
+) -> Option<Arc<crate::adapters::subagent::SubagentProvider>> {
+    let tools_arc = agent_core.tools.load_full();
+    let any_ref: &dyn std::any::Any = (&*tools_arc).as_any();
+    let composite = any_ref
+        .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()?;
+    composite.subagent_provider().cloned()
+}
+
+async fn refresh_subagent_panel_cache(
+    state: &mut TuiState,
+    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
+) {
+    let Some(provider) = get_subagent_provider(agent_core) else {
+        state.agent_panel_state.cached_entries.clear();
+        return;
+    };
+    let registry = provider.registry();
+    let entries: Vec<crate::infrastructure::subagent::RegistryEntry> = registry.list().await;
+    state.agent_panel_state.cached_entries = entries
+        .into_iter()
+        .map(|e: crate::infrastructure::subagent::RegistryEntry| e.to_view())
+        .collect();
+}
+
+async fn refresh_spool_tail(
+    state: &mut TuiState,
+    agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
+    task_id: &str,
+) {
+    let Some(provider) = get_subagent_provider(agent_core) else {
+        return;
+    };
+    let spool = provider.spool();
+    if let Ok(tail) = spool.read_tail(task_id, 8192).await {
+        let agent_id = crate::domain::models::AgentId(task_id.to_string());
+        state
+            .agent_panel_state
+            .spool_tail_cache
+            .insert(agent_id, tail);
+    }
+    // Evict stale entries unconditionally on every refresh
+    state.agent_panel_state.spool_tail_cache.retain(|id, _| {
+        state
+            .agent_panel_state
+            .cached_entries
+            .iter()
+            .any(|e| &e.agent_id == id)
+    });
+}
+
 /// Run the 4-branch tokio::select! event loop.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -844,7 +896,163 @@ pub async fn run(
                                 }
                             }
 
+                            if state.sidebar_visible
+                                && matches!(state.focus, FocusState::Sidebar { .. })
+                                && state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents)
+                                && state.agent_panel_state.drill_down_agent.is_some()
+                            {
+                                // Block inspector owner controls when active tab is read-only
+                                if tab_manager.active_tab().read_only {
+                                    state.status = StatusState::Flash {
+                                        message: "Tab is read-only (subagent output view)".to_string(),
+                                        remaining_ms: 2000,
+                                    };
+                                    state.needs_redraw = true;
+                                } else if let crate::domain::events::DomainInputEvent::KeyPress(c) = domain_event {
+                                        let agent_id = state.agent_panel_state.drill_down_agent.clone().unwrap();
+                                        match c {
+                                            'p' => {
+                                                if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id).cloned() {
+                                                    let op = match entry.current_status {
+                                                        crate::domain::models::SubagentRunStatus::RunningFg | crate::domain::models::SubagentRunStatus::RunningBg => crate::domain::models::Op::Pause,
+                                                        _ => crate::domain::models::Op::Resume,
+                                                    };
+                                                    let _ = refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                                    if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                        let registry = provider.registry();
+                                                        let _ = registry.send_op(&agent_id, op).await;
+                                                    }
+                                                    state.needs_redraw = true;
+                                                }
+                                                continue;
+                                            }
+                                            'x' => {
+                                                state.agent_panel_state.pending_kill_confirm = Some(agent_id);
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'y' | '\r' | '\n' if state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id) => {
+                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                    let registry = provider.registry();
+                                                    match registry.cascade_kill(&agent_id, std::time::Duration::from_millis(500)).await {
+                                                        Ok(_) => {
+                                                            state.agent_panel_state.drill_down_agent = None;
+                                                            state.agent_panel_state.inspector_scroll_offset = 0;
+                                                            state.agent_panel_state.pending_kill_confirm = None;
+                                                        }
+                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
+                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: NoticeLevel::Warning,
+                                                                message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
+                                                            });
+                                                            state.agent_panel_state.drill_down_agent = None;
+                                                            state.agent_panel_state.inspector_scroll_offset = 0;
+                                                            state.agent_panel_state.pending_kill_confirm = None;
+                                                        }
+                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => {
+                                                            state.agent_panel_state.drill_down_agent = None;
+                                                            state.agent_panel_state.inspector_scroll_offset = 0;
+                                                            state.agent_panel_state.pending_kill_confirm = None;
+                                                        }
+                                                    }
+                                                } else {
+                                                    state.agent_panel_state.pending_kill_confirm = None;
+                                                    state.status = StatusState::Flash {
+                                                        message: "Kill unavailable".to_string(),
+                                                        remaining_ms: 2000,
+                                                    };
+                                                }
+                                                refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'n' if state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id) => {
+                                                state.agent_panel_state.pending_kill_confirm = None;
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'm' => {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "Change model: open model selector via Ctrl+P :sonnet etc. — Story 10.7 wires direct dispatch".to_string(),
+                                                });
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            't' => {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "Update tools: requires Story 10.7 child-state read accessor — deferred to Story 10.7 wiring".to_string(),
+                                                });
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'c' => {
+                                                let title = if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id) {
+                                                    format!("\u{1F441} {} (read-only)", entry.subagent_type)
+                                                } else {
+                                                    "\u{1F441} Agent (read-only)".to_string()
+                                                };
+                                                let body = state.agent_panel_state.spool_tail_cache.get(&agent_id).cloned().unwrap_or_default();
+                                                let body_text = if body.is_empty() { "(subagent has no output yet)".to_string() } else { body };
+                                                let conv = Conversation {
+                                                    id: generate_conversation_id(),
+                                                    title: title.clone(),
+                                                    messages: vec![crate::domain::models::conversation::ChatMessage {
+                                                        id: crate::domain::models::conversation::generate_message_id(),
+                                                        role: crate::domain::models::MessageRole::Assistant,
+                                                        content: body_text,
+                                                        content_blocks: vec![],
+                                                        tool_calls: vec![],
+                                                        created_at: crate::domain::models::session_meta::now_unix(),
+                                                        token_count: None,
+                                                        stop_reason: None,
+                                                        synthetic: true,
+                                                        images: vec![],
+                                                    }],
+                                                    turns: vec![],
+                                                    created_at: crate::domain::models::session_meta::now_unix(),
+                                                    updated_at: crate::domain::models::session_meta::now_unix(),
+                                                    last_response_at: None,
+                                                    session_id: Some(agent_id.0.clone()),
+                                                    usage: None,
+                                                    plans: std::collections::HashMap::new(),
+                                                    fork_source: None,
+                                                    compaction: None,
+                                                };
+                                                tab_manager.create_tab();
+                                                tab_manager.active_tab_mut().read_only = true;
+                                                tab_manager.active_tab_mut().conversation = conv;
+                                                state.focus = FocusState::Chat;
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'j' => {
+                                                state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_add(1);
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                            }
+
                             let action = handle_input(&mut state, &domain_event);
+
+                            // AC-10-4-10: Reject mutations on read-only tabs
+                            if tab_manager.active_tab().read_only && action.is_mutation() {
+                                state.input_buffer.clear();
+                                state.cursor_position = 0;
+                                state.status = StatusState::Flash {
+                                    message: "Tab is read-only (subagent output view)".to_string(),
+                                    remaining_ms: 2000,
+                                };
+                                state.needs_redraw = true;
+                                continue;
+                            }
 
                             // Update contextual hint whenever focus may have changed (UX-DR93)
                             if state.needs_redraw {
@@ -976,6 +1184,14 @@ pub async fn run(
                                     state.should_quit = true;
                                 }
                                 InputAction::CancelOrQuit => {
+                                    // AC-10-4-10: Esc from a read-only tab returns to the previous tab
+                                    if tab_manager.active_tab().read_only {
+                                        let prev_idx = tab_manager.active_tab_index().saturating_sub(1);
+                                        tab_manager.switch_to_index(prev_idx);
+                                        state.focus = FocusState::Chat;
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
                                     // Cancel active feedback input flow first (AC5)
                                     if let Some(fi) = state.pending_feedback_input.take() {
                                         let pending = fi.pending_permission;
@@ -3092,6 +3308,11 @@ pub async fn run(
                                             if state.sidebar_selected >= state.sidebar_entry_count {
                                                 state.sidebar_selected = 0;
                                             }
+                                        } else if panel_type == PanelType::Agents {
+                                            state.sidebar_entry_count = state.agent_panel_state.cached_entries.len();
+                                            if state.sidebar_selected >= state.sidebar_entry_count && state.sidebar_entry_count > 0 {
+                                                state.sidebar_selected = state.sidebar_entry_count - 1;
+                                            }
                                         }
                                         state.focus = FocusState::Sidebar {
                                             panel: panel_type,
@@ -3101,6 +3322,8 @@ pub async fn run(
                                     } else {
                                         let narrow_msg = if panel_type == PanelType::Adapters {
                                             "Adapter Status: terminal too narrow for sidebar — widen to ≥120 cols or use /memory|/persona|... slash commands".to_string()
+                                        } else if panel_type == PanelType::Agents {
+                                            "Subagent panel: terminal too narrow for sidebar — widen to ≥120 cols.".to_string()
                                         } else {
                                             "Panel requires terminal width >= 120 cols.".to_string()
                                         };
@@ -3112,6 +3335,15 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::OpenSidebarConversation => {
+                                    if state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents) {
+                                        if let Some(entry) = state.selected_agent().cloned() {
+                                            state.agent_panel_state.drill_down_agent = Some(entry.agent_id);
+                                            state.agent_panel_state.inspector_scroll_offset = 0;
+                                            state.agent_panel_state.pending_kill_confirm = None;
+                                            state.needs_redraw = true;
+                                        }
+                                        continue;
+                                    }
                                     // Resolve conversation ID from sidebar selection
                                     let resolved_id = session_index.entries()
                                         .get(state.sidebar_selected)
@@ -6814,8 +7046,30 @@ pub async fn run(
                             tool_count,
                         ).await;
                     }
-                    #[cfg(feature = "mcp")]
-                    AppEvent::CapabilityEvent(_) => {
+                    AppEvent::CapabilityEvent(ref ev) => {
+                        let protocol = match ev {
+                            crate::domain::events::CapabilityEvent::Registered { capability } => &capability.id.protocol,
+                            crate::domain::events::CapabilityEvent::Deregistered { capability } => &capability.id.protocol,
+                            crate::domain::events::CapabilityEvent::Updated { id, .. } => &id.protocol,
+                        };
+                        if protocol == "subagent" {
+                            refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                            let entry_count = state.agent_panel_state.cached_entries.len();
+                            if state.agent_panel_state.selected_index >= entry_count && entry_count > 0 {
+                                state.agent_panel_state.selected_index = entry_count - 1;
+                            }
+                            if entry_count == 0 {
+                                state.agent_panel_state.selected_index = 0;
+                            }
+                            if let Some(crate::domain::models::visual::PanelType::Agents) = state.sidebar_panel {
+                                state.sidebar_entry_count = entry_count;
+                            }
+                            if let crate::domain::events::CapabilityEvent::Updated { id, .. } = ev {
+                                if !id.tool.is_empty() {
+                                    refresh_spool_tail(&mut state, &app_state.agent_core, &id.tool).await;
+                                }
+                            }
+                        }
                         state.needs_redraw = true;
                     }
                     AppEvent::SessionAdapterOverridden {
@@ -8154,14 +8408,25 @@ fn render(
                             );
                         }
                         Some(crate::domain::models::visual::PanelType::Agents) => {
-                            use ratatui::widgets::Widget;
-                            let block = ratatui::widgets::Block::default()
-                                .title(" (panel deferred) ")
-                                .borders(ratatui::widgets::Borders::ALL)
-                                .border_style(
-                                    ratatui::style::Style::default().fg(theme.colors.fg_muted),
-                                );
-                            block.render(sidebar_area, frame.buffer_mut());
+                            use crate::adapters::tui::widgets::agent_panel;
+                            let is_focused = matches!(
+                                state.focus,
+                                FocusState::Sidebar {
+                                    panel: crate::domain::models::visual::PanelType::Agents,
+                                    ..
+                                }
+                            );
+                            let now_fn = || chrono::Utc::now().timestamp_millis();
+                            agent_panel::render(
+                                sidebar_area,
+                                frame.buffer_mut(),
+                                &state.agent_panel_state.cached_entries,
+                                state.sidebar_selected,
+                                is_focused,
+                                theme,
+                                &state.agent_panel_state.spool_tail_cache,
+                                &now_fn,
+                            );
                         }
                         Some(crate::domain::models::visual::PanelType::Adapters) => {
                             use crate::adapters::tui::widgets::adapter_status_panel;
@@ -8252,14 +8517,38 @@ fn render(
                             );
                         }
                         _ => {
-                            use ratatui::widgets::Widget;
-                            let block = ratatui::widgets::Block::default()
-                                .title(" (panel deferred) ")
-                                .borders(ratatui::widgets::Borders::ALL)
-                                .border_style(
-                                    ratatui::style::Style::default().fg(theme.colors.fg_muted),
+                            if let Some(crate::domain::models::visual::PanelType::Agents) =
+                                state.sidebar_panel
+                            {
+                                use crate::adapters::tui::widgets::agent_panel;
+                                let is_focused = matches!(
+                                    state.focus,
+                                    FocusState::Sidebar {
+                                        panel: crate::domain::models::visual::PanelType::Agents,
+                                        ..
+                                    }
                                 );
-                            block.render(panel_area, frame.buffer_mut());
+                                let now_fn = || chrono::Utc::now().timestamp_millis();
+                                agent_panel::render(
+                                    panel_area,
+                                    frame.buffer_mut(),
+                                    &state.agent_panel_state.cached_entries,
+                                    state.sidebar_selected,
+                                    is_focused,
+                                    theme,
+                                    &state.agent_panel_state.spool_tail_cache,
+                                    &now_fn,
+                                );
+                            } else {
+                                use ratatui::widgets::Widget;
+                                let block = ratatui::widgets::Block::default()
+                                    .title(" (panel deferred) ")
+                                    .borders(ratatui::widgets::Borders::ALL)
+                                    .border_style(
+                                        ratatui::style::Style::default().fg(theme.colors.fg_muted),
+                                    );
+                                block.render(panel_area, frame.buffer_mut());
+                            }
                         }
                     }
                 }
@@ -8403,6 +8692,32 @@ fn render(
                         state.task_panel_state.expanded_detail = false;
                         state.task_panel_state.detail_scroll_offset = 0;
                         state.task_panel_state.last_executed_plan_id = None;
+                    }
+                } else if let Some(agent_id) = state.agent_panel_state.drill_down_agent.clone() {
+                    use crate::adapters::tui::widgets::agent_inspector;
+                    let entry = state
+                        .agent_panel_state
+                        .cached_entries
+                        .iter()
+                        .find(|e| e.agent_id == agent_id)
+                        .cloned();
+                    if let Some(entry) = entry {
+                        agent_inspector::render(
+                            app_layout.chat_pane,
+                            frame.buffer_mut(),
+                            &entry,
+                            state.agent_panel_state.inspector_scroll_offset,
+                            state.agent_panel_state.pending_kill_confirm.as_ref(),
+                            theme,
+                            &state.agent_panel_state.spool_tail_cache,
+                            &state.agent_panel_state.cached_entries,
+                        );
+                        skip_chat_render = true;
+                    } else {
+                        state.agent_panel_state.drill_down_agent = None;
+                        state.agent_panel_state.inspector_scroll_offset = 0;
+                        state.agent_panel_state.pending_kill_confirm = None;
+                        state.needs_redraw = true;
                     }
                 }
                 if !skip_chat_render {
@@ -8793,6 +9108,7 @@ fn render(
                     state.daily_budget.as_ref(),
                     state.active_profile.as_ref(),
                     density_mode,
+                    tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
                 );
                 input_box::render(
                     frame,

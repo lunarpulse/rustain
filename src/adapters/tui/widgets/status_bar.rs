@@ -36,6 +36,7 @@ pub fn render(
     daily_budget: Option<&DailyBudgetState>,
     active_profile: Option<&ActiveProfileSnapshot>,
     density_mode: crate::domain::models::visual::DensityMode,
+    tab_read_only: bool,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -86,6 +87,15 @@ pub fn render(
                 .add_modifier(Modifier::BOLD),
         };
         left_spans.push(Span::styled(format!(" [{}]", indicator), indicator_style));
+    }
+
+    if tab_read_only {
+        left_spans.push(Span::styled(
+            " [READ-ONLY]".to_string(),
+            Style::default()
+                .fg(theme.colors.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
 
     if let Some(breadcrumb) = drill_down_breadcrumb {
@@ -428,6 +438,7 @@ mod tests {
                 None,
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();
@@ -481,6 +492,7 @@ mod tests {
                 Some(&db),
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();
@@ -537,6 +549,7 @@ mod tests {
                 Some(&db),
                 None,
                 DensityMode::Focus,
+                false,
             );
         })
         .unwrap();
@@ -604,5 +617,45 @@ mod tests {
             }
             .is_active()
         );
+    }
+
+    #[test]
+    fn status_bar_renders_read_only_badge() {
+        let backend = TestBackend::new(200, 1);
+        let mut t = Terminal::new(backend).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "sonnet-4-6",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                0,
+                false,
+                None,
+                false,
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                DensityMode::Focus,
+                true,
+            );
+        })
+        .unwrap();
+        let txt = buffer_text(&t);
+        assert!(txt.contains("READ-ONLY"), "READ-ONLY badge missing: {txt}");
     }
 }

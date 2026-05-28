@@ -376,6 +376,23 @@ pub enum InputAction {
     FeedbackBudgetPause,
 }
 
+impl InputAction {
+    pub fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            InputAction::SubmitMessage(_)
+                | InputAction::SubmitWithContext { .. }
+                | InputAction::PermissionAllow
+                | InputAction::PermissionDeny
+                | InputAction::PlanApproveNormal
+                | InputAction::PlanApproveAutoEdit
+                | InputAction::PlanReject
+                | InputAction::PlanCardApprove
+                | InputAction::PlanCardReject
+        )
+    }
+}
+
 /// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
 /// every new FeedbackAction variant must have a mapping arm here or the match
 /// won't compile — this is the adapter-layer half of the single-source-of-truth contract.
@@ -1315,6 +1332,22 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     state.focus = FocusState::Overlay(OverlayType::CrossSearch);
                     state.needs_redraw = true;
                     InputAction::OpenCrossSearch
+                }
+                '\u{1b}'
+                    if _panel == crate::domain::models::visual::PanelType::Agents
+                        && state.agent_panel_state.drill_down_agent.is_some() =>
+                {
+                    state.agent_panel_state.drill_down_agent = None;
+                    state.agent_panel_state.inspector_scroll_offset = 0;
+                    state.agent_panel_state.pending_kill_confirm = None;
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                'p' | 'm' | 't' | 'c' | 'y' | 'n'
+                    if _panel == crate::domain::models::visual::PanelType::Agents
+                        && state.agent_panel_state.drill_down_agent.is_some() =>
+                {
+                    InputAction::Consumed
                 }
                 'q' => InputAction::Quit,
                 _ => InputAction::Ignored,

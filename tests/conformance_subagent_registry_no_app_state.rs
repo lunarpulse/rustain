@@ -126,3 +126,48 @@ fn test_no_new_event_variants_for_subagent() {
         );
     }
 }
+
+#[test]
+fn test_subagent_panel_does_not_hold_registry() {
+    let widget_files = [
+        "src/adapters/tui/widgets/agent_panel.rs",
+        "src/adapters/tui/widgets/agent_inspector.rs",
+    ];
+    for path in &widget_files {
+        let content = fs::read_to_string(path)
+            .unwrap_or_else(|_| panic!("{} must exist for conformance check", path));
+        assert!(
+            !content.contains("SubagentRegistry"),
+            "Widget {} must not import SubagentRegistry — use AgentRowView instead (dependency rule)",
+            path
+        );
+    }
+}
+
+#[test]
+fn test_subagent_provider_access_only_via_composite() {
+    let tui_files = collect_tui_rs_files();
+    let forbidden_tokens = ["SubagentRegistry", "SubagentProvider"];
+    for file in &tui_files {
+        let fname = file.to_string_lossy();
+        let content = std::fs::read_to_string(file).unwrap_or_default();
+        for token in &forbidden_tokens {
+            assert!(
+                !content.contains(token),
+                "TUI file {} contains forbidden token '{}'. \
+                 Panel/inspector widgets must consume AgentRowView, never the registry/provider directly.",
+                fname,
+                token
+            );
+        }
+    }
+}
+
+fn collect_tui_rs_files() -> Vec<std::path::PathBuf> {
+    let dir = std::path::Path::new("src/adapters/tui");
+    let mut files = Vec::new();
+    if dir.is_dir() {
+        collect_rs_recursive(dir, &mut files);
+    }
+    files
+}

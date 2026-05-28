@@ -136,6 +136,43 @@ impl SubagentSpool {
         guard.get(task_id).map(|b| b.snapshot()).unwrap_or_default()
     }
 
+    pub async fn read_tail(
+        &self,
+        task_id: &str,
+        max_bytes: usize,
+    ) -> Result<String, std::io::Error> {
+        if max_bytes == 0 {
+            return Ok(String::new());
+        }
+        let data = self.tail(task_id).await;
+        let data = if data.len() > max_bytes {
+            data[data.len() - max_bytes..].to_vec()
+        } else {
+            data
+        };
+        Ok(String::from_utf8_lossy(&data).into_owned())
+    }
+
+    pub async fn read_full(&self, task_id: &str) -> Result<String, std::io::Error> {
+        let path = self.spool_dir.join(format!("{}.out", task_id));
+        match fs::metadata(&path).await {
+            Ok(meta) if meta.len() > 16 * 1024 * 1024 => {
+                // Cap at 16 MB to prevent OOM on massive spool files
+                tracing::warn!("Spool file {} exceeds 16 MB cap, returning head only", path.display());
+                let mut file = fs::File::open(&path).await?;
+                let mut buf = Vec::with_capacity(16 * 1024 * 1024);
+                use tokio::io::AsyncReadExt;
+                let _ = file.read_to_end(&mut buf).await?;
+                Ok(String::from_utf8_lossy(&buf).into_owned())
+            }
+            _ => match fs::read_to_string(&path).await {
+                Ok(s) => Ok(s),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
     /// Byte-range read from disk.
     /// Unix: `std::os::unix::fs::FileExt::read_at`. Windows: `std::os::windows::fs::FileExt::seek_read`.
     /// Per NFR33, Windows is P2 — implement Unix only in v0, gate the Windows arm behind

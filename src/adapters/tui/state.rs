@@ -691,6 +691,16 @@ impl Default for TaskPanelState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AgentPanelState {
+    pub selected_index: usize,
+    pub cached_entries: Vec<crate::domain::models::subagent_view::AgentRowView>,
+    pub drill_down_agent: Option<crate::domain::models::AgentId>,
+    pub inspector_scroll_offset: u16,
+    pub pending_kill_confirm: Option<crate::domain::models::AgentId>,
+    pub spool_tail_cache: std::collections::HashMap<crate::domain::models::AgentId, String>,
+}
+
 /// Story 6.4: pending skip cascade confirmation state (AC2).
 #[derive(Debug, Clone)]
 pub struct SkipCascadePending {
@@ -1324,7 +1334,7 @@ impl WhichKeyState {
         );
         chord_map.insert(
             's',
-            ChordAction::Noop("Subagent panel — Epic 10".to_string()),
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents),
         );
         chord_map.insert('l', ChordAction::Noop("Log panel — Epic 14".to_string()));
         chord_map.insert(
@@ -1597,6 +1607,7 @@ pub struct TuiState {
     pub sidebar_scroll_offset: usize,
     /// Story 6-3: state for the task panel sidebar and drill-down detail view.
     pub task_panel_state: TaskPanelState,
+    pub agent_panel_state: AgentPanelState,
     /// Story 6-3 (PD4): resolved value of `[layout.auto_panels] on_task_plan`.
     /// `"tasks"` (default) or `"none"`. Read by the `PlanExecutionStarted`
     /// event arm to decide whether to auto-open the Tasks panel.
@@ -1757,6 +1768,7 @@ impl TuiState {
             sidebar_entry_count: 0,
             sidebar_scroll_offset: 0,
             task_panel_state: TaskPanelState::default(),
+            agent_panel_state: AgentPanelState::default(),
             auto_open_on_task_plan: "tasks".to_string(),
             pending_delete: None,
             pending_fork_index: None,
@@ -1795,6 +1807,12 @@ impl TuiState {
 
     pub fn task_panel_max_index(&self) -> usize {
         self.task_panel_state.task_count.saturating_sub(1)
+    }
+
+    pub fn selected_agent(&self) -> Option<&crate::domain::models::subagent_view::AgentRowView> {
+        self.agent_panel_state
+            .cached_entries
+            .get(self.agent_panel_state.selected_index)
     }
 
     pub fn refresh_agent_suggestions(&mut self) {
@@ -2515,5 +2533,33 @@ mod tests {
         ms.recompute_filter();
         // After recompute, selected_model should be clamped to valid range
         assert_eq!(ms.selected_model, 0);
+    }
+
+    #[test]
+    fn agent_panel_state_default_empty() {
+        let state = AgentPanelState::default();
+        assert!(state.cached_entries.is_empty());
+        assert_eq!(state.selected_index, 0);
+        assert!(state.drill_down_agent.is_none());
+        assert!(state.pending_kill_confirm.is_none());
+        assert!(state.spool_tail_cache.is_empty());
+        assert_eq!(state.inspector_scroll_offset, 0);
+    }
+
+    #[test]
+    fn selected_agent_clamps() {
+        let mut tui = TuiState::new(80, 24);
+        tui.agent_panel_state.selected_index = 7;
+        assert!(tui.selected_agent().is_none());
+    }
+
+    #[test]
+    fn which_key_chord_s_maps_to_panel_agents() {
+        let wk = WhichKeyState::new();
+        let action = wk.chord_map.get(&'s').expect("'s' chord missing");
+        assert!(matches!(
+            action,
+            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents)
+        ));
     }
 }

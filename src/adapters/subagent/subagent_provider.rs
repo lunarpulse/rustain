@@ -16,6 +16,14 @@ pub struct SubagentProvider {
 }
 
 impl SubagentProvider {
+    pub fn registry(&self) -> &Arc<crate::infrastructure::subagent::SubagentRegistry> {
+        &self.registry
+    }
+
+    pub fn spool(&self) -> &Arc<crate::infrastructure::subagent::SubagentSpool> {
+        &self.spool
+    }
+
     pub fn new(
         runner: Arc<dyn crate::domain::ports::SubagentRunner>,
         registry: Arc<crate::infrastructure::subagent::SubagentRegistry>,

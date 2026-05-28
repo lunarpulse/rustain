@@ -49,6 +49,20 @@ pub struct RegistryEntry {
     pub current_status: SubagentRunStatus,
 }
 
+impl RegistryEntry {
+    pub fn to_view(&self) -> crate::domain::models::subagent_view::AgentRowView {
+        crate::domain::models::subagent_view::AgentRowView {
+            agent_id: self.agent_id.clone(),
+            parent_id: self.parent_id.clone(),
+            subagent_type: self.subagent_type.clone(),
+            spawned_at: self.spawned_at,
+            depth: self.depth,
+            current_status: self.current_status,
+            ownership: crate::domain::models::subagent_view::OwnershipKind::Owned,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CascadeKillError {
     #[error("not found in registry: {0:?}")]
@@ -58,6 +72,14 @@ pub enum CascadeKillError {
         killed: Vec<AgentId>,
         unresponsive: Vec<AgentId>,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OwnerCommandError {
+    #[error("agent not found: {0:?}")]
+    NotFound(AgentId),
+    #[error("agent command channel closed: {0:?}")]
+    Closed(AgentId),
 }
 
 impl SubagentRegistry {
@@ -462,6 +484,20 @@ impl SubagentRegistry {
         timeout_per_node: Duration,
     ) -> Result<Vec<AgentId>, CascadeKillError> {
         self.cascade_kill(agent_id, timeout_per_node).await
+    }
+
+    pub async fn send_op(&self, agent_id: &AgentId, op: Op) -> Result<(), OwnerCommandError> {
+        let command_tx = {
+            let guard = self.inner.read().await;
+            match guard.handles.get(agent_id) {
+                Some(handle) => handle.command_tx.clone(),
+                None => return Err(OwnerCommandError::NotFound(agent_id.clone())),
+            }
+        };
+        command_tx
+            .send(op)
+            .await
+            .map_err(|_| OwnerCommandError::Closed(agent_id.clone()))
     }
 }
 

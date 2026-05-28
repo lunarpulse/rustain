@@ -29,12 +29,16 @@ pub fn render_tab_bar(
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let title = if t.conversation.title.is_empty() {
+            let base_title = if t.conversation.title.is_empty() {
                 format!("Tab {}", i + 1)
             } else {
                 truncate_to_chars(&t.conversation.title, MAX_TITLE_CHARS)
             };
-            format!("[{}]", title)
+            if t.read_only {
+                format!("[\u{1F441} {}]", base_title)
+            } else {
+                format!("[{}]", base_title)
+            }
         })
         .collect();
 
@@ -227,5 +231,26 @@ mod tests {
         let id1 = tm.active_tab_id();
         let id2 = tm.create_tab();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_tab_bar_with_read_only_tab() {
+        let mut tm = TabManager::default();
+        tm.create_tab();
+        tm.active_tab_mut().read_only = true;
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        let theme = crate::adapters::tui::theme::Theme::for_capability(
+            crate::adapters::tui::color_detect::ColorCapability::TrueColor,
+        );
+        render_tab_bar(&tm, 1, area, &mut buf, &theme);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf.cell((x, 0)).map(|c| c.symbol()).unwrap_or(" "));
+        }
+        assert!(
+            text.contains("\u{1F441}"),
+            "read-only tab should contain eye glyph: {text}"
+        );
     }
 }

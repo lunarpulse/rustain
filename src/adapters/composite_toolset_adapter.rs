@@ -107,6 +107,10 @@ impl CompositeToolsetAdapter {
         &self.capability_registry
     }
 
+    pub fn subagent_provider(&self) -> Option<&Arc<crate::adapters::subagent::SubagentProvider>> {
+        self.subagent_provider.get()
+    }
+
     /// Story 9.7 Phase B — wire the catalog delta broadcast sender.
     /// Called after `CatalogObserverRegistry` is constructed.
     #[cfg(feature = "meta-search")]

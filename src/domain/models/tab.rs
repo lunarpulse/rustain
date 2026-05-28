@@ -52,8 +52,8 @@ pub struct TabState {
     pub turn_cancel: CancellationToken,
     /// Story 7.4: pending context carryover for fresh tab + summary injection.
     pub pending_context_carryover: Option<String>,
-    /// Story 7.4: highest context-warning tier already surfaced on this tab.
     pub context_warn_level: crate::adapters::tui::state::ContextWarnLevel,
+    pub read_only: bool,
 }
 
 /// Current unix timestamp in milliseconds.
@@ -132,6 +132,7 @@ impl TabState {
             turn_cancel,
             pending_context_carryover: None,
             context_warn_level: crate::adapters::tui::state::ContextWarnLevel::None,
+            read_only: false,
         }
     }
 
@@ -202,6 +203,7 @@ impl TabState {
             turn_cancel,
             pending_context_carryover: None,
             context_warn_level: crate::adapters::tui::state::ContextWarnLevel::None,
+            read_only: false,
         }
     }
 

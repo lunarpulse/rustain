@@ -235,7 +235,13 @@ async fn run_child(
     }
 
     // Emit RunningFg
-    emit_status(SubagentRunStatus::RunningFg, &status_tx, &bridge_tx, &child_state).await;
+    emit_status(
+        SubagentRunStatus::RunningFg,
+        &status_tx,
+        &bridge_tx,
+        &child_state,
+    )
+    .await;
 
     // v0 simplified child body — Story 10.7 will wire the full provider+scheduler loop.
     // For the foundation, we just wait for cancellation or owner commands.
