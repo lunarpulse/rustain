@@ -80,6 +80,11 @@ pub struct PlanTask {
     /// `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_to: Option<DelegationInfo>,
+    /// Story 10.6: Sub-tasks decomposed from this parent task.
+    /// Field is additive; pre-10.6 sessions deserialize with `[]` per
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_tasks: Vec<PlanSubTask>,
 }
 
 impl PlanTask {
@@ -90,6 +95,27 @@ impl PlanTask {
             let end = self.completed_at_ms.unwrap_or_else(now_unix_ms);
             (end - start).max(0)
         })
+    }
+
+    /// Story 10.6: `(completed_sub_tasks, total_sub_tasks)`.
+    pub fn sub_task_progress(&self) -> (usize, usize) {
+        let total = self.sub_tasks.len();
+        let completed = self
+            .sub_tasks
+            .iter()
+            .filter(|st| {
+                matches!(
+                    st.status,
+                    PlanTaskStatus::Completed | PlanTaskStatus::Skipped
+                )
+            })
+            .count();
+        (completed, total)
+    }
+
+    /// Story 10.6: true when this task carries at least one sub-task.
+    pub fn has_sub_tasks(&self) -> bool {
+        !self.sub_tasks.is_empty()
     }
 }
 
@@ -108,6 +134,44 @@ pub struct DelegationInfo {
     /// Populated when `TaskHandle.task_id` is captured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spool_task_id: Option<String>,
+}
+
+/// Story 10.6: A single-level sub-task decomposed from a parent `PlanTask`.
+/// Deliberately does NOT contain `sub_tasks` — decomposition is capped at one
+/// level in v0 (structurally bounded, well inside NFR15 depth-3 ceiling).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanSubTask {
+    /// Intra-parent 1-indexed display position.
+    pub number: u32,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default)]
+    pub status: PlanTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<i64>,
+    /// Captured result on Success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<TaskResult>,
+    /// Captured error on Failure or rationale on Skipped/Cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When `Some`, the sub-task is currently delegated (or was delegated then completed/failed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_to: Option<DelegationInfo>,
+}
+
+impl PlanSubTask {
+    /// Wall-clock elapsed ms (Running → terminal). `None` if not started.
+    pub fn elapsed_ms(&self) -> Option<i64> {
+        self.started_at_ms.map(|start| {
+            let end = self.completed_at_ms.unwrap_or_else(now_unix_ms);
+            (end - start).max(0)
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +271,7 @@ mod tests {
                 error: None,
                 waiting_on: vec![],
                 delegated_to: None,
+                sub_tasks: vec![],
             }],
             estimated_effort: Some(EffortEstimate {
                 tool_calls: Some(5),
@@ -239,6 +304,7 @@ mod tests {
                 error: None,
                 waiting_on: vec![],
                 delegated_to: None,
+                sub_tasks: vec![],
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,
@@ -287,6 +353,7 @@ mod tests {
                 error: None,
                 waiting_on: vec![],
                 delegated_to: None,
+                sub_tasks: vec![],
             }],
             estimated_effort: Some(EffortEstimate {
                 tool_calls: Some(1),
@@ -353,6 +420,7 @@ mod tests {
                 delegated_at_ms: 1700000000000,
                 spool_task_id: Some("spool-456".to_string()),
             }),
+            sub_tasks: vec![],
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(json.contains("\"delegatedTo\""));
@@ -423,6 +491,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         };
         assert_eq!(task.elapsed_ms(), None);
     }
@@ -441,6 +510,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         };
         assert!(task.elapsed_ms().unwrap() >= 0);
     }
@@ -459,6 +529,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         };
         assert_eq!(task.elapsed_ms(), Some(4000));
     }
@@ -497,11 +568,166 @@ mod tests {
                 error: None,
                 waiting_on: vec![],
                 delegated_to: None,
+                sub_tasks: vec![],
             }],
         };
         let json = serde_json::to_string(&kind).unwrap();
         assert!(json.contains("\"kind\":\"agentRevision\""));
         let back: PlanDeviationKind = serde_json::from_str(&json).unwrap();
         assert_eq!(back, kind);
+    }
+
+    // ─── Story 10.6: PlanSubTask tests ───
+
+    #[test]
+    fn plan_subtask_serde_round_trip() {
+        let plan = Plan {
+            id: "id".to_string(),
+            title: "t".to_string(),
+            tasks: vec![PlanTask {
+                number: 1,
+                title: "parent".to_string(),
+                description: String::new(),
+                depends_on: vec![],
+                status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
+                delegated_to: None,
+                sub_tasks: vec![
+                    PlanSubTask {
+                        number: 1,
+                        title: "sub-a".to_string(),
+                        description: "desc".to_string(),
+                        status: PlanTaskStatus::Completed,
+                        started_at_ms: Some(1000),
+                        completed_at_ms: Some(2000),
+                        result: Some(TaskResult {
+                            text: "done".to_string(),
+                            tool_call_count: 1,
+                            token_count: Some(50),
+                        }),
+                        error: None,
+                        delegated_to: None,
+                    },
+                    PlanSubTask {
+                        number: 2,
+                        title: "sub-b".to_string(),
+                        description: String::new(),
+                        status: PlanTaskStatus::Failed,
+                        started_at_ms: Some(3000),
+                        completed_at_ms: Some(4000),
+                        result: None,
+                        error: Some("oops".to_string()),
+                        delegated_to: None,
+                    },
+                ],
+            }],
+            estimated_effort: None,
+            status: PlanStatus::Pending,
+            created_at: 0,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(json.contains("\"subTasks\""), "{}", json);
+        assert!(json.contains("\"sub-a\""), "{}", json);
+        let back: Plan = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, plan);
+    }
+
+    #[test]
+    fn pre_10_6_json_deserializes_with_empty_sub_tasks() {
+        let json = r#"{
+            "id": "old-id",
+            "title": "Old Plan",
+            "tasks": [{
+                "number": 1,
+                "title": "Step",
+                "description": "",
+                "dependsOn": [],
+                "status": "completed"
+            }],
+            "status": "completed",
+            "createdAt": 1700000000
+        }"#;
+        let plan: Plan = serde_json::from_str(json).unwrap();
+        assert!(plan.tasks[0].sub_tasks.is_empty());
+    }
+
+    #[test]
+    fn sub_task_progress_counts_correctly() {
+        let task = PlanTask {
+            number: 1,
+            title: "t".to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Running,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+            sub_tasks: vec![
+                PlanSubTask {
+                    number: 1,
+                    title: "a".to_string(),
+                    description: String::new(),
+                    status: PlanTaskStatus::Completed,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    delegated_to: None,
+                },
+                PlanSubTask {
+                    number: 2,
+                    title: "b".to_string(),
+                    description: String::new(),
+                    status: PlanTaskStatus::Failed,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    delegated_to: None,
+                },
+                PlanSubTask {
+                    number: 3,
+                    title: "c".to_string(),
+                    description: String::new(),
+                    status: PlanTaskStatus::Skipped,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                    result: None,
+                    error: None,
+                    delegated_to: None,
+                },
+            ],
+        };
+        assert_eq!(task.sub_task_progress(), (2, 3));
+        assert!(task.has_sub_tasks());
+    }
+
+    #[test]
+    fn no_sub_tasks_progress_is_zero() {
+        let task = PlanTask {
+            number: 1,
+            title: "t".to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+            sub_tasks: vec![],
+        };
+        assert_eq!(task.sub_task_progress(), (0, 0));
+        assert!(!task.has_sub_tasks());
     }
 }

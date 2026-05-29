@@ -75,7 +75,8 @@ pub use config::AppConfig;
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
 pub use config::{
-    AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig, ToolProgressConfig,
+    AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig, SubTaskFailurePolicy,
+    ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
@@ -100,8 +101,8 @@ pub use permission::{
 };
 #[allow(unused_imports)]
 pub use plan::{
-    DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanTask, PlanTaskStatus,
-    TaskResult,
+    DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanSubTask, PlanTask,
+    PlanTaskStatus, TaskResult,
 };
 pub use sandbox::SandboxPolicy;
 #[allow(unused_imports)]

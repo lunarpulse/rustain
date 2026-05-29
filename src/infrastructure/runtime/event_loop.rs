@@ -6080,6 +6080,7 @@ pub async fn run(
                             &app_state.event_bus,
                             &agents_snapshot,
                             security.current_mode(),
+                            app_state.app_config.load().plan.subtask_failure_policy,
                         );
                         let term_width = state.terminal_width;
                         let auto_open_setting = state.auto_open_on_task_plan.clone();

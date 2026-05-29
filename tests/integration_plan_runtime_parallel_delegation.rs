@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus, SubTaskFailurePolicy,
     generate_conversation_id,
 };
 use rustain::domain::ports::EventEmitter;
@@ -52,6 +52,7 @@ fn make_task(number: u32, title: &str, description: &str, depends_on: Vec<u32>) 
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+    sub_tasks: vec![],
     }
 }
 
@@ -136,6 +137,7 @@ async fn diamond_delegation_requests_both_after_task1() {
         emitter.as_ref(),
         &agents,
         PermissionMode::Yolo,
+        SubTaskFailurePolicy::default(),
     );
 
     let events = emitter.take();

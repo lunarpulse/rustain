@@ -22,6 +22,7 @@ fn make_task(number: u32, title: &str, description: &str) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     }
 }
 
@@ -128,6 +129,7 @@ fn integration_find_all_eligible_returns_correct_set() {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         },
         PlanTask {
             number: 2,
@@ -141,6 +143,7 @@ fn integration_find_all_eligible_returns_correct_set() {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         },
         PlanTask {
             number: 3,
@@ -154,6 +157,7 @@ fn integration_find_all_eligible_returns_correct_set() {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         },
         PlanTask {
             number: 4,
@@ -167,6 +171,7 @@ fn integration_find_all_eligible_returns_correct_set() {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         },
     ]);
 

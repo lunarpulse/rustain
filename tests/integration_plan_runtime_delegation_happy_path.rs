@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus, SubTaskFailurePolicy,
     generate_conversation_id,
 };
 use rustain::domain::ports::EventEmitter;
@@ -31,6 +31,7 @@ fn make_task(number: u32, title: &str, description: &str) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     }
 }
 
@@ -112,6 +113,7 @@ async fn integration_plan_runtime_delegation_happy_path() {
         &CapturedEvents::new(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
     {
         let plan = conv.plans.get_mut(&plan_id).unwrap();

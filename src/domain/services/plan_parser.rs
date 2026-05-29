@@ -109,6 +109,46 @@ fn parse_plan_input_inner(input: &serde_json::Value, plan_id: &str) -> Result<Pl
             .transpose()?
             .unwrap_or_default();
 
+        let sub_tasks = t
+            .get("sub_tasks")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .map(|(j, st)| {
+                        let st_title = st
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                ToolError::InvalidInput(format!(
+                                    "propose_plan: task {}: sub_task {}: missing or non-string 'title'",
+                                    i + 1,
+                                    j + 1
+                                ))
+                            })?
+                            .to_string();
+                        let st_description = st
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Ok(crate::domain::models::plan::PlanSubTask {
+                            number: (j + 1) as u32,
+                            title: st_title,
+                            description: st_description,
+                            status: PlanTaskStatus::Pending,
+                            started_at_ms: None,
+                            completed_at_ms: None,
+                            result: None,
+                            error: None,
+                            delegated_to: None,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         tasks.push(PlanTask {
             number: (i + 1) as u32,
             title: task_title,
@@ -121,6 +161,7 @@ fn parse_plan_input_inner(input: &serde_json::Value, plan_id: &str) -> Result<Pl
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks,
         });
     }
 
@@ -198,6 +239,35 @@ pub fn validate_plan(plan: &Plan) -> Result<(), String> {
                 "task {} description exceeds {} characters",
                 task.number, MAX_TASK_DESCRIPTION_LEN
             ));
+        }
+        if task.sub_tasks.len() > crate::domain::services::delegation_decider::DelegationDecider::NFR15_CHILDREN_CAP {
+            return Err(format!(
+                "task {} has {} sub-tasks — max is {}",
+                task.number,
+                task.sub_tasks.len(),
+                crate::domain::services::delegation_decider::DelegationDecider::NFR15_CHILDREN_CAP
+            ));
+        }
+
+        for st in &task.sub_tasks {
+            if st.title.trim().is_empty() {
+                return Err(format!(
+                    "task {} has a sub-task with an empty title",
+                    task.number
+                ));
+            }
+            if st.title.len() > MAX_TASK_TITLE_LEN {
+                return Err(format!(
+                    "task {} sub-task title exceeds {} characters",
+                    task.number, MAX_TASK_TITLE_LEN
+                ));
+            }
+            if st.description.len() > MAX_TASK_DESCRIPTION_LEN {
+                return Err(format!(
+                    "task {} sub-task description exceeds {} characters",
+                    task.number, MAX_TASK_DESCRIPTION_LEN
+                ));
+            }
         }
 
         for dep in &task.depends_on {
@@ -420,6 +490,7 @@ mod tests {
                 error: None,
                 waiting_on: vec![],
                 delegated_to: None,
+                sub_tasks: vec![],
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,
@@ -429,5 +500,85 @@ mod tests {
         };
         let err = validate_plan(&plan).unwrap_err();
         assert!(err.contains("plan title cannot be empty"));
+    }
+
+    #[test]
+    fn validate_plan_rejects_more_than_10_sub_tasks() {
+        let plan = Plan {
+            id: "p".to_string(),
+            title: "T".to_string(),
+            tasks: vec![PlanTask {
+                number: 1,
+                title: "A".to_string(),
+                description: String::new(),
+                depends_on: vec![],
+                status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                waiting_on: vec![],
+                delegated_to: None,
+                sub_tasks: (1..=11)
+                    .map(|n| crate::domain::models::plan::PlanSubTask {
+                        number: n,
+                        title: format!("sub-{n}"),
+                        description: String::new(),
+                        status: crate::domain::models::plan::PlanTaskStatus::Pending,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        result: None,
+                        error: None,
+                        delegated_to: None,
+                    })
+                    .collect(),
+            }],
+            estimated_effort: None,
+            status: PlanStatus::Pending,
+            created_at: 0,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        let err = validate_plan(&plan).unwrap_err();
+        assert!(err.contains("has 11 sub-tasks"));
+        assert!(err.contains("max is 10"));
+    }
+
+    #[test]
+    fn parse_plan_with_sub_tasks() {
+        let input = serde_json::json!({
+            "title": "Refactor Auth",
+            "tasks": [
+                {
+                    "title": "Read code",
+                    "sub_tasks": [
+                        { "title": "Find auth module" },
+                        { "title": "List entry points" }
+                    ]
+                },
+                { "title": "Extract middleware", "depends_on": [1] },
+            ]
+        });
+        let plan = parse_plan_input(&input, "plan-1").unwrap();
+        assert_eq!(plan.tasks[0].sub_tasks.len(), 2);
+        assert_eq!(plan.tasks[0].sub_tasks[0].number, 1);
+        assert_eq!(plan.tasks[0].sub_tasks[0].title, "Find auth module");
+        assert_eq!(plan.tasks[0].sub_tasks[1].number, 2);
+        assert_eq!(plan.tasks[0].sub_tasks[1].title, "List entry points");
+        assert!(plan.tasks[1].sub_tasks.is_empty());
+    }
+
+    #[test]
+    fn parse_plan_without_sub_tasks_is_unchanged() {
+        let input = serde_json::json!({
+            "title": "Refactor Auth",
+            "tasks": [
+                { "title": "Read code" },
+                { "title": "Extract middleware", "depends_on": [1] },
+            ]
+        });
+        let plan = parse_plan_input(&input, "plan-1").unwrap();
+        assert!(plan.tasks[0].sub_tasks.is_empty());
+        assert!(plan.tasks[1].sub_tasks.is_empty());
     }
 }

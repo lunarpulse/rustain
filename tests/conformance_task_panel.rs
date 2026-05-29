@@ -31,6 +31,7 @@ fn make_task(number: u32, title: &str, status: PlanTaskStatus) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     }
 }
 

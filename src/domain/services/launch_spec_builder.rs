@@ -1,7 +1,7 @@
 use crate::domain::models::agent::AgentDef;
-use crate::domain::models::plan::PlanTask;
+use crate::domain::models::plan::{PlanSubTask, PlanTask};
 use crate::domain::models::{AgentLaunchSpec, ModelTier, ToolPolicy, TraceContext};
-use crate::domain::services::plan_runtime::format_task_prompt;
+use crate::domain::services::plan_runtime::{format_sub_task_prompt, format_task_prompt};
 
 pub struct LaunchSpecBuilder;
 
@@ -18,6 +18,43 @@ impl LaunchSpecBuilder {
         parent_trace: Option<TraceContext>,
     ) -> AgentLaunchSpec {
         let prompt = format_task_prompt(task);
+        let effective_model = agent_def
+            .model
+            .clone()
+            .unwrap_or_else(|| default_model.to_string());
+        let tier = ModelTier::CheapAgentic;
+        let tools_allow = match &agent_def.allowed_tools {
+            Some(allow) if !allow.is_empty() => ToolPolicy::Allowlist {
+                tools: allow.iter().cloned().collect(),
+            },
+            _ => match &agent_def.exclude_tools {
+                Some(deny) if !deny.is_empty() => ToolPolicy::Denylist {
+                    tools: deny.iter().cloned().collect(),
+                },
+                _ => ToolPolicy::InheritFromParent,
+            },
+        };
+        AgentLaunchSpec {
+            prompt,
+            effective_model,
+            tier,
+            tools_allow,
+            parent_ctx_tokens,
+            sandbox_override: None,
+            parent_trace,
+        }
+    }
+
+    /// Story 10.6: build a launch spec for a sub-task delegated to `agent_def`.
+    pub fn from_sub_task(
+        parent: &PlanTask,
+        sub_task: &PlanSubTask,
+        agent_def: &AgentDef,
+        default_model: &str,
+        parent_ctx_tokens: u32,
+        parent_trace: Option<TraceContext>,
+    ) -> AgentLaunchSpec {
+        let prompt = format_sub_task_prompt(parent, sub_task);
         let effective_model = agent_def
             .model
             .clone()
@@ -81,6 +118,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         }
     }
 

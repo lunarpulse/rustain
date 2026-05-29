@@ -11,8 +11,8 @@ use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
     ChatMessage, ContentBlockType, Conversation, MessageRole, NoticeLevel, PermissionMode, Plan,
-    PlanStatus, PlanTask, PlanTaskStatus, TaskResult, generate_conversation_id,
-    generate_message_id,
+    PlanStatus, PlanSubTask, PlanTask, PlanTaskStatus, SubTaskFailurePolicy, TaskResult,
+    generate_conversation_id, generate_message_id,
 };
 use rustain::domain::ports::{EventEmitter, StoragePort};
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
@@ -30,6 +30,7 @@ fn make_task(number: u32, title: &str) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     }
 }
 
@@ -46,6 +47,7 @@ fn make_task_with_deps(number: u32, title: &str, deps: Vec<u32>) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     }
 }
 
@@ -139,6 +141,7 @@ async fn ac1_runtime_dispatches_first_task() {
             captured.as_ref(),
             &[],
             PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
         );
 
         assert_eq!(
@@ -191,6 +194,7 @@ async fn ac2_per_task_turn_records_result() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
     add_assistant_msg(&mut conv, "Setup complete. Files created.");
 
@@ -245,6 +249,7 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -369,6 +374,7 @@ async fn ac3_dependency_chain_full_skip() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -418,6 +424,7 @@ async fn ac4_serde_round_trip_with_new_fields() {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     };
     let json = serde_json::to_string(&task).unwrap();
     let back: PlanTask = serde_json::from_str(&json).unwrap();
@@ -450,6 +457,7 @@ async fn ac5_skipped_emits_warning_notice() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -498,6 +506,7 @@ async fn ac6_summary_message_appended() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -549,6 +558,7 @@ async fn ac6_summary_aggregation_math() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -620,6 +630,7 @@ async fn ac7_events_fire_in_order() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -737,6 +748,7 @@ async fn ac9_cancelled_task_stops_walk() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -832,6 +844,7 @@ async fn fu3_stores_full_result_text_when_exceeds_legacy_cap() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     let big = "x".repeat(1_048_576);
@@ -937,6 +950,7 @@ async fn fu3_success_branch_no_length_mutation() {
             captured.as_ref(),
             &[],
             PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
         );
 
         let payload = "y".repeat(size);
@@ -997,6 +1011,7 @@ async fn ac10_5_default_no_delegation_is_no_op() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     // Walk should be byte-identical to pre-10.5 path
@@ -1087,6 +1102,7 @@ fn make_task_with_description(number: u32, title: &str, description: &str) -> Pl
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+        sub_tasks: vec![],
     }
 }
 
@@ -1167,4 +1183,167 @@ fn ac10_5_3_no_new_top_level_event_variants_for_delegation() {
         events_src.contains("PlanTaskDelegationCompleted"),
         "PlanTaskDelegationCompleted must exist"
     );
+}
+
+// ============================================================================
+// Story 10.6 conformance tests
+// ============================================================================
+
+/// AC-10-6-11 regression: a non-decomposed plan (no sub_tasks) has the same
+/// structural properties as before 10.6.
+#[test]
+fn ac10_6_regression_non_decomposed_plan_identical_walk() {
+    let plan = make_plan(vec![
+        make_task(1, "First"),
+        make_task(2, "Second"),
+        make_task(3, "Third"),
+    ]);
+
+    let task = &plan.tasks[0];
+    assert!(task.sub_tasks.is_empty());
+    assert!(!task.has_sub_tasks());
+    assert_eq!(task.sub_task_progress(), (0, 0));
+}
+
+/// AC-10-6-1: PlanSubTask serde round-trip + backward compatibility.
+#[test]
+fn ac10_6_sub_task_serde_round_trip() {
+    let sub = PlanSubTask {
+        number: 1,
+        title: "Sub-task A".to_string(),
+        description: "Desc".to_string(),
+        status: PlanTaskStatus::Completed,
+        started_at_ms: Some(1000),
+        completed_at_ms: Some(5000),
+        result: Some(TaskResult {
+            text: "result".to_string(),
+            tool_call_count: 2,
+            token_count: Some(50),
+        }),
+        error: None,
+        delegated_to: None,
+    };
+
+    let json = serde_json::to_string(&sub).unwrap();
+    let deserialized: PlanSubTask = serde_json::from_str(&json).unwrap();
+    assert_eq!(sub, deserialized);
+
+    // Backward compatibility: JSON without optional fields parses
+    let minimal = r#"{"number":1,"title":"Minimal"}"#;
+    let min_parsed: PlanSubTask = serde_json::from_str(minimal).unwrap();
+    assert_eq!(min_parsed.status, PlanTaskStatus::Pending);
+    assert!(min_parsed.result.is_none());
+}
+
+/// AC-10-6-1: PlanTask with sub-tasks parses correctly.
+#[test]
+fn ac10_6_task_with_sub_tasks_parses() {
+    let task = PlanTask {
+        number: 1,
+        title: "Parent".to_string(),
+        description: String::new(),
+        depends_on: vec![],
+        status: PlanTaskStatus::Pending,
+        started_at_ms: None,
+        completed_at_ms: None,
+        result: None,
+        error: None,
+        waiting_on: vec![],
+        delegated_to: None,
+        sub_tasks: vec![
+            PlanSubTask {
+                number: 1,
+                title: "Sub 1".to_string(),
+                description: String::new(),
+                status: PlanTaskStatus::Pending,
+                started_at_ms: None,
+                completed_at_ms: None,
+                result: None,
+                error: None,
+                delegated_to: None,
+            },
+            PlanSubTask {
+                number: 2,
+                title: "Sub 2".to_string(),
+                description: String::new(),
+                status: PlanTaskStatus::Completed,
+                started_at_ms: Some(1000),
+                completed_at_ms: Some(2000),
+                result: Some(TaskResult {
+                    text: "done".to_string(),
+                    tool_call_count: 1,
+                    token_count: None,
+                }),
+                error: None,
+                delegated_to: None,
+            },
+        ],
+    };
+
+    assert!(task.has_sub_tasks());
+    let (completed, total) = task.sub_task_progress();
+    assert_eq!(completed, 1);
+    assert_eq!(total, 2);
+}
+
+/// AC-10-6-8: SubTaskFailurePolicy default is FailFast.
+#[test]
+fn ac10_6_failure_policy_default_is_fail_fast() {
+    let policy: SubTaskFailurePolicy = Default::default();
+    assert!(
+        matches!(policy, SubTaskFailurePolicy::FailFast),
+        "Default sub-task failure policy must be FailFast"
+    );
+}
+
+/// AC-10-6-8: SubTaskFailurePolicy serde round-trip.
+#[test]
+fn ac10_6_failure_policy_serde_round_trip() {
+    let policy = SubTaskFailurePolicy::BestEffort;
+    let json = serde_json::to_string(&policy).unwrap();
+    assert_eq!(json, "\"best_effort\"");
+
+    let deserialized: SubTaskFailurePolicy = serde_json::from_str(&json).unwrap();
+    assert_eq!(policy, deserialized);
+
+    let fail_fast_json = "\"fail_fast\"";
+    let fail_fast: SubTaskFailurePolicy = serde_json::from_str(fail_fast_json).unwrap();
+    assert!(matches!(fail_fast, SubTaskFailurePolicy::FailFast));
+}
+
+/// AC-10-6-11: Verify no new std::sync locks added in 10.6 modified files.
+/// This is a lightweight grep-based guard complementing the existing
+/// conformance_no_std_sync_in_subagent_async.rs.
+#[test]
+fn ac10_6_no_new_std_sync_locks_in_async_modules() {
+    let files = [
+        "src/adapters/tui/widgets/task_panel.rs",
+        "src/adapters/tui/widgets/plan_card.rs",
+        "src/domain/services/plan_runtime.rs",
+        "src/domain/models/plan.rs",
+        "src/domain/models/config.rs",
+    ];
+
+    let forbidden = ["std::sync::Mutex", "std::sync::RwLock", "parking_lot::Mutex", "parking_lot::RwLock"];
+
+    for file in &files {
+        let content = std::fs::read_to_string(file).unwrap_or_else(|_| panic!("Failed to read {}", file));
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("// ") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                continue;
+            }
+            if trimmed.contains("CONFORMANCE_EXCEPTION_STD_SYNC_LOCK") {
+                continue;
+            }
+            for bad in &forbidden {
+                assert!(
+                    !trimmed.contains(bad),
+                    "File {} contains forbidden lock '{}'. Story 10.6 must not introduce std::sync locks in async modules.",
+                    file,
+                    bad
+                );
+            }
+        }
+    }
 }

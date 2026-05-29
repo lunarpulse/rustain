@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, PermissionMode, Plan, PlanStatus, PlanTask,
-    PlanTaskStatus, generate_conversation_id, generate_message_id,
+    PlanTaskStatus, SubTaskFailurePolicy, generate_conversation_id, generate_message_id,
 };
 use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
@@ -53,6 +53,7 @@ pub fn make_task(number: u32, title: &str) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
+    sub_tasks: vec![],
     }
 }
 
@@ -153,6 +154,7 @@ async fn whole_plan_cancel_intent_honored_on_natural_success() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     // Task 1 is now Running. User invokes `!cancel-plan`.
@@ -218,6 +220,7 @@ async fn whole_plan_cancel_intent_honored_on_natural_failure() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime.mark_whole_plan_cancel_pending(&plan_id).await;
@@ -268,6 +271,7 @@ async fn pause_pending_drained_after_natural_success() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
@@ -334,6 +338,7 @@ async fn pause_pending_drained_after_natural_failure() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
@@ -389,6 +394,7 @@ async fn on_turn_complete_ignores_mismatched_task_number() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
+            SubTaskFailurePolicy::default(),
     );
 
     // Running is task 1. Stale event arrives for task 3.

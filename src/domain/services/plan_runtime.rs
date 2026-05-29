@@ -42,6 +42,11 @@ pub struct PlanRuntimeState {
     pub whole_plan_cancel_pending: bool,
     /// Story 6.4: deviation pending reapproval. Blocks advance_after_task until resolved.
     pub pending_deviation: Option<PlanDeviationKind>,
+    /// Story 10.6: maps parent task_number → currently running sub-task number.
+    /// Used by `on_turn_complete` to route outcomes to the correct sub-task.
+    pub active_sub_tasks: BTreeMap<u32, u32>,
+    /// Story 10.6: sub-task failure policy for this plan execution.
+    pub subtask_failure_policy: crate::domain::models::SubTaskFailurePolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +87,7 @@ impl PlanRuntime {
         event_emitter: &dyn EventEmitter,
         agents: &[AgentDef],
         mode: crate::domain::models::PermissionMode,
+        subtask_failure_policy: crate::domain::models::SubTaskFailurePolicy,
     ) {
         tracing::debug!("PlanRuntime::start: plan={plan_id} conv={conversation_id}");
         // Story 6.4 reload normalization: flip Paused → Pending.
@@ -139,6 +145,8 @@ impl PlanRuntime {
             pause_pending_tasks: HashSet::new(),
             whole_plan_cancel_pending: false,
             pending_deviation: None,
+            active_sub_tasks: BTreeMap::new(),
+            subtask_failure_policy,
         };
 
         {
@@ -152,19 +160,92 @@ impl PlanRuntime {
         };
 
         if let Some(task_number) = next_number {
-            // Story 10.5: check delegation before flipping to Running
-            {
-                let plan = conversation.plans.get(&plan_id).unwrap();
-                let task = &plan.tasks[(task_number - 1) as usize];
-                if let Some(suggestion) = DelegationDecider::suggest(plan, task, agents, mode) {
-                    event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
-                        conversation_id: conversation_id.clone(),
-                        plan_id: plan_id.clone(),
-                        task_number,
-                        suggestion,
-                    });
-                    return;
+            let plan = conversation.plans.get(&plan_id).unwrap();
+            let task = &plan.tasks[(task_number - 1) as usize];
+
+            if task.has_sub_tasks() {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                {
+                    let plan = conversation.plans.get_mut(&plan_id).unwrap();
+                    let parent = &mut plan.tasks[(task_number - 1) as usize];
+                    parent.status = PlanTaskStatus::Running;
+                    parent.started_at_ms = Some(now_ms);
                 }
+                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                    conversation_id: conversation_id.clone(),
+                    plan_id: plan_id.clone(),
+                    task_number,
+                    status: PlanTaskStatus::Running,
+                });
+
+                // Find first pending sub-task
+                let next_sub = {
+                    let plan = conversation.plans.get(&plan_id).unwrap();
+                    let parent = &plan.tasks[(task_number - 1) as usize];
+                    parent.sub_tasks.iter().find(|st| st.status == PlanTaskStatus::Pending).map(|st| st.number)
+                };
+
+                if let Some(sub_number) = next_sub {
+                    let synthetic_task = {
+                        let plan = conversation.plans.get(&plan_id).unwrap();
+                        let parent = &plan.tasks[(task_number - 1) as usize];
+                        let sub = &parent.sub_tasks[(sub_number - 1) as usize];
+                        PlanTask {
+                            number: sub.number,
+                            title: sub.title.clone(),
+                            description: sub.description.clone(),
+                            depends_on: vec![],
+                            status: sub.status,
+                            started_at_ms: sub.started_at_ms,
+                            completed_at_ms: sub.completed_at_ms,
+                            result: sub.result.clone(),
+                            error: sub.error.clone(),
+                            waiting_on: vec![],
+                            delegated_to: sub.delegated_to.clone(),
+                            sub_tasks: vec![],
+                        }
+                    };
+                    let plan = conversation.plans.get(&plan_id).unwrap();
+                    if let Some(suggestion) = DelegationDecider::suggest(plan, &synthetic_task, agents, mode) {
+                        {
+                            let mut plans = self.plans.write().unwrap();
+                            if let Some(state) = plans.get_mut(&plan_id) {
+                                state.active_sub_tasks.insert(task_number, sub_number);
+                            }
+                        }
+                        event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
+                            conversation_id: conversation_id.clone(),
+                            plan_id: plan_id.clone(),
+                            task_number,
+                            suggestion,
+                        });
+                    } else {
+                        self.dispatch_sub_task(
+                            &conversation_id, &plan_id, conversation, event_emitter, task_number, sub_number,
+                        );
+                    }
+                } else {
+                    // All sub-tasks already terminal — finalize parent immediately
+                    self.finalize_parent_task(
+                        &conversation_id, &plan_id, conversation, event_emitter, task_number,
+                        crate::domain::models::SubTaskFailurePolicy::default(),
+                    );
+                    self.advance_after_task(
+                        &conversation_id, &plan_id, conversation, event_emitter, agents, mode, None,
+                    );
+                }
+                return;
+            }
+
+            // Story 10.5: check delegation before flipping to Running
+            if let Some(suggestion) = DelegationDecider::suggest(plan, task, agents, mode) {
+                event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
+                    conversation_id: conversation_id.clone(),
+                    plan_id: plan_id.clone(),
+                    task_number,
+                    suggestion,
+                });
+                return;
             }
 
             self.dispatch_single_task(
@@ -216,6 +297,27 @@ impl PlanRuntime {
             if let Some(state) = plans.get_mut(plan_id) {
                 state.task_cancels.remove(&task_number);
             }
+        }
+
+        // Story 10.6: route outcome to active sub-task if present
+        if let Some(sub_number) = {
+            let plans = self.plans.read().unwrap();
+            plans.get(plan_id).and_then(|s| s.active_sub_tasks.get(&task_number).copied())
+        } {
+            self.handle_sub_task_outcome(
+                conversation_id,
+                plan_id,
+                task_number,
+                sub_number,
+                outcome,
+                conversation,
+                event_emitter,
+                agents,
+                mode,
+                now_ms,
+            )
+            .await;
+            return;
         }
 
         match outcome {
@@ -538,6 +640,165 @@ impl PlanRuntime {
         }
     }
 
+    /// Story 10.6: apply a turn outcome to the active sub-task of `parent_number`,
+    /// then finalize the parent when all sub-tasks are terminal.
+    async fn handle_sub_task_outcome(
+        &self,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        parent_number: u32,
+        sub_number: u32,
+        outcome: TaskTurnOutcome,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: &dyn EventEmitter,
+        agents: &[AgentDef],
+        mode: crate::domain::models::PermissionMode,
+        now_ms: i64,
+    ) {
+        let parent_idx = (parent_number - 1) as usize;
+        let sub_idx = (sub_number - 1) as usize;
+
+        // Apply outcome to sub-task
+        match &outcome {
+            TaskTurnOutcome::Success { result_text, tool_call_count, token_count } => {
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                let sub_task = &mut plan.tasks[parent_idx].sub_tasks[sub_idx];
+                sub_task.status = PlanTaskStatus::Completed;
+                sub_task.completed_at_ms = Some(now_ms);
+                sub_task.result = Some(TaskResult {
+                    text: result_text.clone(),
+                    tool_call_count: *tool_call_count,
+                    token_count: *token_count,
+                });
+            }
+            TaskTurnOutcome::Failure { error } => {
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                let sub_task = &mut plan.tasks[parent_idx].sub_tasks[sub_idx];
+                sub_task.status = PlanTaskStatus::Failed;
+                sub_task.completed_at_ms = Some(now_ms);
+                sub_task.error = Some(error.clone());
+            }
+            TaskTurnOutcome::Cancelled { reason } => {
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                let sub_task = &mut plan.tasks[parent_idx].sub_tasks[sub_idx];
+                sub_task.status = PlanTaskStatus::Cancelled;
+                sub_task.completed_at_ms = Some(now_ms);
+                sub_task.error = Some(reason.clone());
+            }
+        }
+
+        // Story 10.6: read failure policy
+        let policy = {
+            let plans = self.plans.read().unwrap();
+            plans.get(plan_id).map(|s| s.subtask_failure_policy).unwrap_or_default()
+        };
+
+        // If fail_fast and this sub-task failed, skip remaining pending siblings
+        if matches!(policy, crate::domain::models::SubTaskFailurePolicy::FailFast) {
+            if let TaskTurnOutcome::Failure { .. } = outcome {
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                let parent = &mut plan.tasks[parent_idx];
+                for st in parent.sub_tasks.iter_mut() {
+                    if st.status == PlanTaskStatus::Pending {
+                        st.status = PlanTaskStatus::Skipped;
+                        st.completed_at_ms = Some(now_ms);
+                        st.error = Some(format!("skipped: sibling sub-task {}.{} failed", parent_number, sub_number));
+                    }
+                }
+            }
+        }
+
+        // Clear active sub-task
+        {
+            let mut plans = self.plans.write().unwrap();
+            if let Some(state) = plans.get_mut(plan_id) {
+                state.active_sub_tasks.remove(&parent_number);
+            }
+        }
+
+        // Check if all sub-tasks are terminal
+        let all_terminal = {
+            let plan = conversation.plans.get(plan_id).unwrap();
+            let parent = &plan.tasks[parent_idx];
+            parent.sub_tasks.iter().all(|st| is_terminal(st.status))
+        };
+
+        if all_terminal {
+            self.finalize_parent_task(conversation_id, plan_id, conversation, event_emitter, parent_number, policy);
+
+            // Failure cascade if parent failed (only under fail_fast)
+            let parent_failed = {
+                let plan = conversation.plans.get(plan_id).unwrap();
+                plan.tasks[parent_idx].status == PlanTaskStatus::Failed
+            };
+
+            if parent_failed {
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                skip_blocked_tasks(conversation_id, plan_id, parent_number, plan, event_emitter);
+            }
+
+            self.advance_after_task(
+                conversation_id,
+                plan_id,
+                conversation,
+                event_emitter,
+                agents,
+                mode,
+                None,
+            );
+        } else {
+            // More sub-tasks pending — dispatch next sub-task directly.
+            // Cannot route through advance_after_task because the parent is
+            // already Running and find_all_eligible filters out Running tasks.
+            let next_sub = {
+                let plan = conversation.plans.get(plan_id).unwrap();
+                let parent = &plan.tasks[parent_idx];
+                parent.sub_tasks.iter().find(|st| st.status == PlanTaskStatus::Pending).map(|st| st.number)
+            };
+
+            if let Some(sub_number) = next_sub {
+                let synthetic_task = {
+                    let plan = conversation.plans.get(plan_id).unwrap();
+                    let parent = &plan.tasks[parent_idx];
+                    let sub = &parent.sub_tasks[(sub_number - 1) as usize];
+                    PlanTask {
+                        number: sub.number,
+                        title: sub.title.clone(),
+                        description: sub.description.clone(),
+                        depends_on: vec![],
+                        status: sub.status,
+                        started_at_ms: sub.started_at_ms,
+                        completed_at_ms: sub.completed_at_ms,
+                        result: sub.result.clone(),
+                        error: sub.error.clone(),
+                        waiting_on: vec![],
+                        delegated_to: sub.delegated_to.clone(),
+                        sub_tasks: vec![],
+                    }
+                };
+                let plan = conversation.plans.get(plan_id).unwrap();
+                if let Some(suggestion) = DelegationDecider::suggest(plan, &synthetic_task, agents, mode) {
+                    {
+                        let mut plans = self.plans.write().unwrap();
+                        if let Some(state) = plans.get_mut(plan_id) {
+                            state.active_sub_tasks.insert(parent_number, sub_number);
+                        }
+                    }
+                    event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.to_string(),
+                        task_number: parent_number,
+                        suggestion,
+                    });
+                } else {
+                    self.dispatch_sub_task(
+                        conversation_id, plan_id, conversation, event_emitter, parent_number, sub_number,
+                    );
+                }
+            }
+        }
+    }
+
     pub fn advance_after_task(
         &self,
         conversation_id: &ConversationId,
@@ -610,6 +871,83 @@ impl PlanRuntime {
         for task_number in eligible.iter().take(bound) {
             let plan = conversation.plans.get(plan_id).unwrap();
             let task = &plan.tasks[(*task_number - 1) as usize];
+
+            // Story 10.6: task with sub-tasks drives its own sub-task execution.
+            if task.has_sub_tasks() {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                {
+                    let plan = conversation.plans.get_mut(plan_id).unwrap();
+                    let parent = &mut plan.tasks[(*task_number - 1) as usize];
+                    if parent.status != PlanTaskStatus::Running {
+                        parent.status = PlanTaskStatus::Running;
+                        parent.started_at_ms = Some(now_ms);
+                        event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                            conversation_id: conversation_id.clone(),
+                            plan_id: plan_id.to_string(),
+                            task_number: *task_number,
+                            status: PlanTaskStatus::Running,
+                        });
+                    }
+                }
+
+                // Find first pending sub-task
+                let next_sub = {
+                    let plan = conversation.plans.get(plan_id).unwrap();
+                    let parent = &plan.tasks[(*task_number - 1) as usize];
+                    parent.sub_tasks.iter().find(|st| st.status == PlanTaskStatus::Pending).map(|st| st.number)
+                };
+
+                if let Some(sub_number) = next_sub {
+                    // Check delegation for sub-task (synthetic PlanTask for decider)
+                    let synthetic_task = {
+                        let plan = conversation.plans.get(plan_id).unwrap();
+                        let parent = &plan.tasks[(*task_number - 1) as usize];
+                        let sub = &parent.sub_tasks[(sub_number - 1) as usize];
+                        PlanTask {
+                            number: sub.number,
+                            title: sub.title.clone(),
+                            description: sub.description.clone(),
+                            depends_on: vec![],
+                            status: sub.status,
+                            started_at_ms: sub.started_at_ms,
+                            completed_at_ms: sub.completed_at_ms,
+                            result: sub.result.clone(),
+                            error: sub.error.clone(),
+                            waiting_on: vec![],
+                            delegated_to: sub.delegated_to.clone(),
+                            sub_tasks: vec![],
+                        }
+                    };
+                    let plan = conversation.plans.get(plan_id).unwrap();
+                    if let Some(suggestion) = DelegationDecider::suggest(plan, &synthetic_task, agents, mode) {
+                        {
+                            let mut plans = self.plans.write().unwrap();
+                            if let Some(state) = plans.get_mut(plan_id) {
+                                state.active_sub_tasks.insert(*task_number, sub_number);
+                            }
+                        }
+                        event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
+                            conversation_id: conversation_id.clone(),
+                            plan_id: plan_id.to_string(),
+                            task_number: *task_number,
+                            suggestion,
+                        });
+                    } else if !local_dispatched {
+                        self.dispatch_sub_task(
+                            conversation_id, plan_id, conversation, event_emitter, *task_number, sub_number,
+                        );
+                        local_dispatched = true;
+                    }
+                } else {
+                    // All sub-tasks already terminal — finalize parent immediately
+                    self.finalize_parent_task(
+                        conversation_id, plan_id, conversation, event_emitter, *task_number,
+                        crate::domain::models::SubTaskFailurePolicy::default(),
+                    );
+                }
+                continue;
+            }
+
             if let Some(suggestion) = DelegationDecider::suggest(plan, task, agents, mode) {
                 event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
                     conversation_id: conversation_id.clone(),
@@ -662,6 +1000,145 @@ impl PlanRuntime {
         });
     }
 
+    /// Story 10.6 — dispatch a single sub-task inside a parent task.
+    fn dispatch_sub_task(
+        &self,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: &dyn EventEmitter,
+        parent_number: u32,
+        sub_number: u32,
+    ) {
+        let prompt = {
+            let plan = conversation.plans.get(plan_id).unwrap();
+            let parent = &plan.tasks[(parent_number - 1) as usize];
+            let sub_task = &parent.sub_tasks[(sub_number - 1) as usize];
+            format_sub_task_prompt(parent, sub_task)
+        };
+
+        {
+            let plan = conversation.plans.get_mut(plan_id).unwrap();
+            let parent = &mut plan.tasks[(parent_number - 1) as usize];
+            let sub_task = &mut parent.sub_tasks[(sub_number - 1) as usize];
+            sub_task.status = PlanTaskStatus::Running;
+            sub_task.started_at_ms = Some(chrono::Utc::now().timestamp_millis());
+        }
+
+        {
+            let mut plans = self.plans.write().unwrap();
+            if let Some(state) = plans.get_mut(plan_id) {
+                state.active_sub_tasks.insert(parent_number, sub_number);
+                state
+                    .task_cancels
+                    .insert(parent_number * 1000 + sub_number, CancellationToken::new());
+            }
+        }
+
+        event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+            conversation_id: conversation_id.clone(),
+            plan_id: plan_id.to_string(),
+            task_number: parent_number,
+            status: PlanTaskStatus::Running,
+        });
+        event_emitter.emit(AppEvent::AgentThenSubmit {
+            conversation_id: conversation_id.clone(),
+            text: prompt,
+            synthetic: true,
+        });
+    }
+
+    /// Story 10.6 — aggregate sub-task results into a parent `TaskResult`.
+    pub fn aggregate_sub_task_results(parent: &crate::domain::models::plan::PlanTask) -> TaskResult {
+        let mut lines = Vec::with_capacity(parent.sub_tasks.len());
+        let mut total_tool_calls = 0u32;
+        let mut total_tokens = 0u32;
+
+        for st in &parent.sub_tasks {
+            let icon = match st.status {
+                PlanTaskStatus::Completed => "✅",
+                PlanTaskStatus::Failed => "❌",
+                PlanTaskStatus::Skipped => "⏭️",
+                PlanTaskStatus::Cancelled => "🚫",
+                _ => "⏳",
+            };
+            let first_line = st
+                .result
+                .as_ref()
+                .map(|r| {
+                    total_tool_calls += r.tool_call_count;
+                    if let Some(tc) = r.token_count {
+                        total_tokens += tc;
+                    }
+                    r.text.lines().next().unwrap_or("(no output)").to_string()
+                })
+                .or_else(|| st.error.as_ref().map(|e| e.lines().next().unwrap_or("(error)").to_string()))
+                .unwrap_or_else(|| "(no output)".to_string());
+            let mut line = format!("- [{}] Sub-task {}.{}: {} — {}", icon, parent.number, st.number, st.title, first_line);
+            if let Some(ref info) = st.delegated_to {
+                if let Some(ref task_id) = info.spool_task_id {
+                    line.push_str(&format!(" (full output: read_task_output(\"{}\"))", task_id));
+                }
+            }
+            lines.push(line);
+        }
+
+        TaskResult {
+            text: lines.join("\n"),
+            tool_call_count: total_tool_calls,
+            token_count: if total_tokens > 0 { Some(total_tokens) } else { None },
+        }
+    }
+
+    /// Story 10.6 — finalize a parent task once all sub-tasks are terminal.
+    fn finalize_parent_task(
+        &self,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: &dyn EventEmitter,
+        parent_number: u32,
+        policy: crate::domain::models::SubTaskFailurePolicy,
+    ) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let new_status = {
+            let plan = conversation.plans.get_mut(plan_id).unwrap();
+            let parent = &mut plan.tasks[(parent_number - 1) as usize];
+            let all_terminal = parent.sub_tasks.iter().all(|st| is_terminal(st.status));
+            if !all_terminal {
+                tracing::warn!("finalize_parent_task called before all sub-tasks terminal");
+                return;
+            }
+            let any_failed = parent.sub_tasks.iter().any(|st| st.status == PlanTaskStatus::Failed);
+            let status = if any_failed {
+                match policy {
+                    crate::domain::models::SubTaskFailurePolicy::FailFast => PlanTaskStatus::Failed,
+                    crate::domain::models::SubTaskFailurePolicy::BestEffort => PlanTaskStatus::Completed,
+                }
+            } else {
+                PlanTaskStatus::Completed
+            };
+            let failed_count = parent.sub_tasks.iter().filter(|st| st.status == PlanTaskStatus::Failed).count();
+            let error = if failed_count > 0 {
+                Some(format!("{}/{} sub-tasks failed", failed_count, parent.sub_tasks.len()))
+            } else {
+                None
+            };
+            parent.status = status;
+            parent.completed_at_ms = Some(now_ms);
+            parent.error = error;
+            parent.result = Some(Self::aggregate_sub_task_results(parent));
+            status
+        };
+
+        event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+            conversation_id: conversation_id.clone(),
+            plan_id: plan_id.to_string(),
+            task_number: parent_number,
+            status: new_status,
+        });
+    }
+
     /// Story 10.5 — spawn a subagent for the named task, await terminal status,
     /// then route the outcome through `on_turn_complete` so the 6-2a FSM
     /// (Running → Completed/Failed/Cancelled) and the unified `PlanSummary`
@@ -681,7 +1158,12 @@ impl PlanRuntime {
         event_emitter: Arc<dyn EventEmitter>,
         default_model: &str,
     ) -> Result<(), DelegateTaskError> {
-        // 1. Validate plan/task exist and task is Pending
+        // Story 10.6: check if this task_number has an active sub-task
+        let active_sub = {
+            let plans = self.plans.read().unwrap();
+            plans.get(plan_id).and_then(|s| s.active_sub_tasks.get(&task_number).copied())
+        };
+
         let plan =
             conversation
                 .plans
@@ -691,33 +1173,69 @@ impl PlanRuntime {
                     task_number,
                 })?;
         let idx = (task_number - 1) as usize;
-        if idx >= plan.tasks.len() || plan.tasks[idx].status != PlanTaskStatus::Pending {
+        if idx >= plan.tasks.len() {
             return Err(DelegateTaskError::NotFound {
                 plan_id: plan_id.to_string(),
                 task_number,
             });
         }
 
-        // 2. Construct AgentLaunchSpec
-        let spec = LaunchSpecBuilder::from_plan_task(
-            &plan.tasks[idx],
-            agent_def,
-            default_model,
-            0,    // Story 10.5: parent_ctx_tokens = 0 (budget guard is Story 10.7)
-            None, // Story 10.5: parent_trace = None (W3C seam for Story 10.7)
-        );
-
-        // 3. Mutate state: set delegated_to, flip to Running, emit status change
         let now_ms = chrono::Utc::now().timestamp_millis();
         let agent_name = agent_def.name.clone();
-        plan.tasks[idx].delegated_to = Some(DelegationInfo {
-            agent_name: agent_name.clone(),
-            agent_id: None,
-            delegated_at_ms: now_ms,
-            spool_task_id: None,
-        });
-        plan.tasks[idx].status = PlanTaskStatus::Running;
-        plan.tasks[idx].started_at_ms = Some(now_ms);
+
+        let (spec, is_sub_task) = if let Some(sub_number) = active_sub {
+            // Delegating a sub-task
+            let sub_idx = (sub_number - 1) as usize;
+            if sub_idx >= plan.tasks[idx].sub_tasks.len()
+                || plan.tasks[idx].sub_tasks[sub_idx].status != PlanTaskStatus::Pending
+            {
+                return Err(DelegateTaskError::NotFound {
+                    plan_id: plan_id.to_string(),
+                    task_number,
+                });
+            }
+            let spec = LaunchSpecBuilder::from_sub_task(
+                &plan.tasks[idx],
+                &plan.tasks[idx].sub_tasks[sub_idx],
+                agent_def,
+                default_model,
+                0,
+                None,
+            );
+            plan.tasks[idx].sub_tasks[sub_idx].delegated_to = Some(DelegationInfo {
+                agent_name: agent_name.clone(),
+                agent_id: None,
+                delegated_at_ms: now_ms,
+                spool_task_id: None,
+            });
+            plan.tasks[idx].sub_tasks[sub_idx].status = PlanTaskStatus::Running;
+            plan.tasks[idx].sub_tasks[sub_idx].started_at_ms = Some(now_ms);
+            (spec, true)
+        } else {
+            // Delegating a top-level task
+            if plan.tasks[idx].status != PlanTaskStatus::Pending {
+                return Err(DelegateTaskError::NotFound {
+                    plan_id: plan_id.to_string(),
+                    task_number,
+                });
+            }
+            let spec = LaunchSpecBuilder::from_plan_task(
+                &plan.tasks[idx],
+                agent_def,
+                default_model,
+                0,
+                None,
+            );
+            plan.tasks[idx].delegated_to = Some(DelegationInfo {
+                agent_name: agent_name.clone(),
+                agent_id: None,
+                delegated_at_ms: now_ms,
+                spool_task_id: None,
+            });
+            plan.tasks[idx].status = PlanTaskStatus::Running;
+            plan.tasks[idx].started_at_ms = Some(now_ms);
+            (spec, false)
+        };
 
         {
             let mut plans = self.plans.write().unwrap();
@@ -751,9 +1269,24 @@ impl PlanRuntime {
             Err(e) => {
                 // Revert on launch failure
                 let plan = conversation.plans.get_mut(plan_id).unwrap();
-                plan.tasks[idx].delegated_to = None;
-                plan.tasks[idx].status = PlanTaskStatus::Pending;
-                plan.tasks[idx].started_at_ms = None;
+                if is_sub_task {
+                    if let Some(sub_number) = active_sub {
+                        let sub_idx = (sub_number - 1) as usize;
+                        plan.tasks[idx].sub_tasks[sub_idx].delegated_to = None;
+                        plan.tasks[idx].sub_tasks[sub_idx].status = PlanTaskStatus::Pending;
+                        plan.tasks[idx].sub_tasks[sub_idx].started_at_ms = None;
+                    }
+                    {
+                        let mut plans = self.plans.write().unwrap();
+                        if let Some(state) = plans.get_mut(plan_id) {
+                            state.active_sub_tasks.remove(&task_number);
+                        }
+                    }
+                } else {
+                    plan.tasks[idx].delegated_to = None;
+                    plan.tasks[idx].status = PlanTaskStatus::Pending;
+                    plan.tasks[idx].started_at_ms = None;
+                }
                 event_emitter.emit(AppEvent::PlanTaskStatusChanged {
                     conversation_id: conversation_id.clone(),
                     plan_id: plan_id.to_string(),
@@ -767,19 +1300,36 @@ impl PlanRuntime {
         // 5. Update delegated_to with agent_id and spool_task_id
         {
             let plan = conversation.plans.get_mut(plan_id).unwrap();
-            if let Some(ref mut info) = plan.tasks[idx].delegated_to {
+            if is_sub_task {
+                if let Some(sub_number) = active_sub {
+                    let sub_idx = (sub_number - 1) as usize;
+                    if let Some(ref mut info) = plan.tasks[idx].sub_tasks[sub_idx].delegated_to {
+                        info.agent_id = Some(task_handle.agent_id.0.clone());
+                        info.spool_task_id = Some(task_handle.task_id.clone());
+                    }
+                }
+            } else if let Some(ref mut info) = plan.tasks[idx].delegated_to {
                 info.agent_id = Some(task_handle.agent_id.0.clone());
                 info.spool_task_id = Some(task_handle.task_id.clone());
             }
         }
 
         // 6. Emit live-progress notice
+        let delegated_title = if let Some(sub_number) = active_sub {
+            let sub_idx = (sub_number - 1) as usize;
+            format!(
+                "{}.{} {}",
+                task_number, sub_number, conversation.plans[plan_id].tasks[idx].sub_tasks[sub_idx].title
+            )
+        } else {
+            conversation.plans[plan_id].tasks[idx].title.clone()
+        };
         event_emitter.emit(AppEvent::SystemNotice {
             conversation_id: Some(conversation_id.clone()),
             level: NoticeLevel::Info,
             message: format!(
                 "⏳ Delegated to {}: \"{}\"",
-                agent_name, conversation.plans[plan_id].tasks[idx].title
+                agent_name, delegated_title
             ),
         });
 
@@ -865,6 +1415,8 @@ impl PlanRuntime {
             pause_pending_tasks: s.pause_pending_tasks.clone(),
             whole_plan_cancel_pending: s.whole_plan_cancel_pending,
             pending_deviation: s.pending_deviation.clone(),
+            active_sub_tasks: s.active_sub_tasks.clone(),
+            subtask_failure_policy: s.subtask_failure_policy,
         })
     }
 
@@ -1160,20 +1712,28 @@ pub(crate) fn finish_plan(
             plan.status = PlanStatus::Completed;
         }
 
-        let snapshot = plan
-            .tasks
-            .iter()
-            .map(|t| {
-                (
-                    t.number,
-                    t.title.clone(),
-                    t.status,
-                    t.elapsed_ms(),
-                    t.error.clone(),
-                    t.result.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut snapshot = Vec::new();
+        for t in &plan.tasks {
+            snapshot.push((
+                t.number,
+                t.title.clone(),
+                t.status,
+                t.elapsed_ms(),
+                t.error.clone(),
+                t.result.clone(),
+            ));
+            for st in &t.sub_tasks {
+            let sub_title = st.title.clone();
+            snapshot.push((
+                    t.number * 1000 + st.number,
+                    sub_title,
+                    st.status,
+                    st.elapsed_ms(),
+                    st.error.clone(),
+                    st.result.clone(),
+                ));
+            }
+        }
 
         (
             plan.title.clone(),
@@ -1254,7 +1814,44 @@ fn build_summary_markdown(
 
     md.push_str("| # | Task | Status | Elapsed |\n");
     md.push_str("|---|------|--------|---------|\n");
-    for (number, title, status, elapsed, error, _result) in tasks {
+    for (i, (number, title, status, elapsed, error, _result)) in tasks.iter().enumerate() {
+        if *number >= 1000 {
+            // Sub-task row: number format is parent * 1000 + sub
+            let parent_num = number / 1000;
+            let sub_num = number % 1000;
+            let status_str = match status {
+                PlanTaskStatus::Completed => "✓".to_string(),
+                PlanTaskStatus::Failed => format!(
+                    "✗ {}",
+                    error.as_deref().unwrap_or("error").lines().next().unwrap_or("")
+                ),
+                PlanTaskStatus::Skipped => format!(
+                    "⏭ {}",
+                    error.as_deref().unwrap_or("skipped").lines().next().unwrap_or("")
+                ),
+                _ => format!("{:?}", status),
+            };
+            let elapsed_str = match *elapsed {
+                Some(ms) => format_elapsed_ms(ms),
+                None => "—".to_string(),
+            };
+            md.push_str(&format!(
+                "| {}.{} | {} | {} | {} |\n",
+                parent_num, sub_num, title, status_str, elapsed_str
+            ));
+            continue;
+        }
+
+        // Count sub-tasks for this parent
+        let sub_count = tasks[i + 1..].iter().take_while(|(n, _, _, _, _, _)| *n >= 1000 && *n / 1000 == *number).count();
+        let completed_subs = tasks[i + 1..].iter().take_while(|(n, _, _, _, _, _)| *n >= 1000 && *n / 1000 == *number).filter(|(_, _, s, _, _, _)| *s == PlanTaskStatus::Completed || *s == PlanTaskStatus::Skipped).count();
+
+        let title_with_fraction = if sub_count > 0 {
+            format!("{} ({}/{} sub-tasks)", title, completed_subs, sub_count)
+        } else {
+            title.clone()
+        };
+
         let status_str = match status {
             PlanTaskStatus::Completed => "✓".to_string(),
             PlanTaskStatus::Failed => format!(
@@ -1283,11 +1880,15 @@ fn build_summary_markdown(
         };
         md.push_str(&format!(
             "| {} | {} | {} | {} |\n",
-            number, title, status_str, elapsed_str
+            number, title_with_fraction, status_str, elapsed_str
         ));
     }
 
     for (number, _title, status, _elapsed, _error, result) in tasks {
+        // Skip sub-task rows — their results are aggregated into the parent
+        if *number >= 1000 {
+            continue;
+        }
         if *status == PlanTaskStatus::Completed {
             if let Some(r) = result {
                 if !r.text.is_empty() {
@@ -1332,6 +1933,21 @@ pub fn format_task_prompt(task: &PlanTask) -> String {
         format!(
             "Now executing task {}: {}.\n\n{}",
             task.number, task.title, task.description
+        )
+    }
+}
+
+/// Story 10.6: format a sub-task prompt carrying the parent task's title as context.
+pub fn format_sub_task_prompt(parent: &PlanTask, sub_task: &crate::domain::models::plan::PlanSubTask) -> String {
+    if sub_task.description.is_empty() {
+        format!(
+            "(Sub-task {}.{} of task {}: {}) {}",
+            parent.number, sub_task.number, parent.number, parent.title, sub_task.title
+        )
+    } else {
+        format!(
+            "(Sub-task {}.{} of task {}: {}) {}\n\n{}",
+            parent.number, sub_task.number, parent.number, parent.title, sub_task.title, sub_task.description
         )
     }
 }
@@ -1478,6 +2094,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         };
         let prompt = format_task_prompt(&task);
         assert!(prompt.starts_with("Now executing task 2: Extract middleware."));
@@ -1498,6 +2115,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         };
         let prompt = format_task_prompt(&task);
         assert_eq!(prompt, "Now executing task 1: Setup.");
@@ -1674,6 +2292,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         }
     }
 }

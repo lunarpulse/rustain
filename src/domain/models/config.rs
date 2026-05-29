@@ -87,6 +87,21 @@ pub struct RuntimeConfig {
     pub event_bus: EventBusConfig,
 }
 
+/// Story 10.6: sub-task failure handling policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SubTaskFailurePolicy {
+    #[serde(rename = "fail_fast")]
+    FailFast,
+    #[serde(rename = "best_effort")]
+    BestEffort,
+}
+
+impl Default for SubTaskFailurePolicy {
+    fn default() -> Self {
+        SubTaskFailurePolicy::FailFast
+    }
+}
+
 /// Plan execution configuration (Story 10.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanConfig {
@@ -94,6 +109,9 @@ pub struct PlanConfig {
     /// Default: 4. Bounded by NFR15 children cap (10).
     #[serde(default = "PlanConfig::default_concurrent_tasks_max")]
     pub concurrent_tasks_max: usize,
+    /// Story 10.6: how to handle sub-task failures.
+    #[serde(default)]
+    pub subtask_failure_policy: SubTaskFailurePolicy,
 }
 
 impl PlanConfig {
@@ -113,6 +131,7 @@ impl Default for PlanConfig {
     fn default() -> Self {
         Self {
             concurrent_tasks_max: Self::default_concurrent_tasks_max(),
+            subtask_failure_policy: SubTaskFailurePolicy::default(),
         }
     }
 }

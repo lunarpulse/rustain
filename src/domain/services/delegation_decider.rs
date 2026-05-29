@@ -184,6 +184,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         }
     }
 

@@ -47,7 +47,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState},
 };
 
-use crate::domain::models::plan::{Plan, PlanStatus, PlanTaskStatus};
+use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
 use super::sidebar::truncate_to_width;
@@ -115,6 +115,71 @@ fn task_icon_for(
             suffix: " (paused)".to_string(),
         },
     }
+}
+
+/// Build a ratatui `Line` for a single sub-task, indented under its parent.
+/// Reuses the same status glyph + delegation badge + elapsed formatting as
+/// top-level tasks (Story 10.6, AC-9).
+fn sub_task_line_for(
+    sub: &PlanSubTask,
+    theme: &crate::adapters::tui::theme::Theme,
+    max_width: u16,
+) -> Line<'static> {
+    let elapsed = sub.elapsed_ms().unwrap_or(0);
+    let icon = task_icon_for(sub.status, theme, elapsed, &[]);
+
+    let mut spans: Vec<Span> = vec![
+        Span::styled("    ".to_string(), Style::default()),
+        Span::styled(
+            format!("{}. ", sub.number),
+            Style::default().fg(theme.colors.fg_secondary),
+        ),
+        Span::styled(icon.symbol.to_string(), Style::default().fg(icon.color)),
+        Span::styled(
+            format!(" {}", sub.title),
+            Style::default().fg(theme.colors.fg_primary),
+        ),
+        Span::styled(
+            icon.suffix.clone(),
+            Style::default().fg(theme.colors.fg_muted),
+        ),
+    ];
+
+    if let Some(ref info) = sub.delegated_to {
+        let name = if info.agent_name.chars().count() > 12 {
+            format!("{}…", info.agent_name.chars().take(12).collect::<String>())
+        } else {
+            info.agent_name.clone()
+        };
+        spans.push(Span::styled(
+            format!(" [delegated → {}]", name),
+            Style::default().fg(theme.colors.accent),
+        ));
+    }
+
+    let mut line = Line::from(spans);
+    let display_width = line.width();
+    let max_w = max_width as usize;
+    if display_width > max_w {
+        let composed = format!(
+            "    {}. {} {}{}",
+            sub.number,
+            icon.symbol,
+            sub.title,
+            if let Some(ref info) = sub.delegated_to {
+                format!(" → {}", info.agent_name)
+            } else {
+                String::new()
+            },
+        );
+        let truncated = truncate_to_width(&composed, max_w);
+        line = Line::from(Span::styled(
+            truncated,
+            Style::default().fg(theme.colors.fg_primary),
+        ));
+    }
+
+    line
 }
 
 pub fn render_task_panel(
@@ -214,102 +279,140 @@ pub fn render_task_panel(
                 return;
             }
 
-            let items: Vec<ListItem> = plan
-                .tasks
-                .iter()
-                .enumerate()
-                .take(available_height)
-                .map(|(i, task)| {
-                    let elapsed = task.elapsed_ms().unwrap_or(0);
-                    let icon = task_icon_for(task.status, theme, elapsed, &task.waiting_on);
+            let mut items: Vec<ListItem> = Vec::new();
+            let max_w = inner_area.width as usize;
 
-                    let mut spans: Vec<Span> = vec![
-                        Span::styled(
-                            format!("{}. ", task.number),
-                            Style::default().fg(theme.colors.fg_secondary),
-                        ),
-                        Span::styled(icon.symbol.to_string(), Style::default().fg(icon.color)),
-                        Span::styled(
-                            format!(" {}", task.title),
-                            Style::default().fg(theme.colors.fg_primary),
-                        ),
-                        Span::styled(
-                            icon.suffix.clone(),
-                            Style::default().fg(theme.colors.fg_muted),
-                        ),
-                    ];
+            for (i, task) in plan.tasks.iter().enumerate() {
+                if items.len() >= available_height {
+                    break;
+                }
 
-                    if let Some(ref info) = task.delegated_to {
-                        let name = if info.agent_name.chars().count() > 12 {
-                            format!("{}…", info.agent_name.chars().take(12).collect::<String>())
+                let elapsed = task.elapsed_ms().unwrap_or(0);
+                let icon = task_icon_for(task.status, theme, elapsed, &task.waiting_on);
+
+                let mut spans: Vec<Span> = vec![
+                    Span::styled(
+                        format!("{}. ", task.number),
+                        Style::default().fg(theme.colors.fg_secondary),
+                    ),
+                    Span::styled(icon.symbol.to_string(), Style::default().fg(icon.color)),
+                    Span::styled(
+                        format!(" {}", task.title),
+                        Style::default().fg(theme.colors.fg_primary),
+                    ),
+                    Span::styled(
+                        icon.suffix.clone(),
+                        Style::default().fg(theme.colors.fg_muted),
+                    ),
+                ];
+
+                if let Some(ref info) = task.delegated_to {
+                    let name = if info.agent_name.chars().count() > 12 {
+                        format!("{}…", info.agent_name.chars().take(12).collect::<String>())
+                    } else {
+                        info.agent_name.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!(" [delegated → {}]", name),
+                        Style::default().fg(theme.colors.accent),
+                    ));
+                }
+
+                if !task.depends_on.is_empty() {
+                    let deps: Vec<String> =
+                        task.depends_on.iter().map(|d| d.to_string()).collect();
+                    spans.push(Span::styled(
+                        format!(" deps: {}", deps.join(", ")),
+                        Style::default().fg(theme.colors.fg_muted),
+                    ));
+                }
+
+                // 10.6: show (k/n sub-tasks) progress fraction on parent
+                if task.has_sub_tasks() {
+                    let (completed, total) = task.sub_task_progress();
+                    spans.push(Span::styled(
+                        format!(" ({}/{} sub-tasks)", completed, total),
+                        Style::default().fg(theme.colors.fg_muted),
+                    ));
+                }
+
+                let mut parent_line = Line::from(spans);
+                let display_width = parent_line.width();
+                if display_width > max_w {
+                    let composed = format!(
+                        "{}. {} {}{}{}{}{}",
+                        task.number,
+                        icon.symbol,
+                        task.title,
+                        icon.suffix,
+                        if let Some(ref info) = task.delegated_to {
+                            format!(" → {}", info.agent_name)
                         } else {
-                            info.agent_name.clone()
-                        };
-                        spans.push(Span::styled(
-                            format!(" [delegated → {}]", name),
-                            Style::default().fg(theme.colors.accent),
-                        ));
+                            String::new()
+                        },
+                        if task.depends_on.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                " deps: {}",
+                                task.depends_on
+                                    .iter()
+                                    .map(|d| d.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        },
+                        if task.has_sub_tasks() {
+                            let (completed, total) = task.sub_task_progress();
+                            format!(" ({}/{} sub-tasks)", completed, total)
+                        } else {
+                            String::new()
+                        },
+                    );
+                    let truncated = truncate_to_width(&composed, max_w);
+                    parent_line = Line::from(Span::styled(
+                        truncated,
+                        Style::default().fg(theme.colors.fg_primary),
+                    ));
+                }
+
+                // Build multi-line Text when sub-tasks exist so they render indented
+                // under the parent within the same ListItem (preserves 1:1
+                // parent-to-selected_index mapping).
+                let item = if task.has_sub_tasks() {
+                    let mut lines = vec![parent_line];
+                    for sub in &task.sub_tasks {
+                        if lines.len() >= available_height.saturating_sub(items.len()) {
+                            break;
+                        }
+                        lines.push(sub_task_line_for(sub, theme, inner_area.width));
                     }
-
-                    if !task.depends_on.is_empty() {
-                        let deps: Vec<String> =
-                            task.depends_on.iter().map(|d| d.to_string()).collect();
-                        spans.push(Span::styled(
-                            format!(" deps: {}", deps.join(", ")),
-                            Style::default().fg(theme.colors.fg_muted),
-                        ));
+                    let text = Text::from(lines);
+                    if i == selected_index && is_focused {
+                        ListItem::new(text.style(
+                            Style::default()
+                                .fg(theme.colors.fg_primary)
+                                .add_modifier(Modifier::REVERSED),
+                        ))
+                    } else {
+                        ListItem::new(text)
                     }
-
-                    // 10.6: render sub-tasks indented; show (k/n) progress fraction on parent
-
-                    let mut line = Line::from(spans);
-                    let display_width = line.width();
-                    let max_w = inner_area.width as usize;
-                    if display_width > max_w {
-                        let composed = format!(
-                            "{}. {} {}{}{}{}",
-                            task.number,
-                            icon.symbol,
-                            task.title,
-                            icon.suffix,
-                            if let Some(ref info) = task.delegated_to {
-                                format!(" → {}", info.agent_name)
-                            } else {
-                                String::new()
-                            },
-                            if task.depends_on.is_empty() {
-                                String::new()
-                            } else {
-                                format!(
-                                    " deps: {}",
-                                    task.depends_on
-                                        .iter()
-                                        .map(|d| d.to_string())
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )
-                            }
-                        );
-                        let truncated = truncate_to_width(&composed, max_w);
-                        line = Line::from(Span::styled(
-                            truncated,
-                            Style::default().fg(theme.colors.fg_primary),
-                        ));
-                    }
-
+                } else {
                     if i == selected_index && is_focused {
                         ListItem::new(
-                            line.style(
+                            parent_line.style(
                                 Style::default()
                                     .fg(theme.colors.fg_primary)
                                     .add_modifier(Modifier::REVERSED),
                             ),
                         )
                     } else {
-                        ListItem::new(line)
+                        ListItem::new(parent_line)
                     }
-                })
-                .collect();
+                };
+
+                items.push(item);
+            }
 
             if !items.is_empty() {
                 let list_area = Rect {
@@ -398,6 +501,7 @@ mod tests {
             error: None,
             waiting_on: vec![],
             delegated_to: None,
+            sub_tasks: vec![],
         }
     }
 

@@ -792,7 +792,7 @@ impl ToolSetPort for ToolSetAdapter {
             },
             ToolDefinition {
                 name: "propose_plan".to_string(),
-                description: "Propose a structured multi-step plan to the user for approval before any execution. Use this when the request requires multiple distinct steps. Each step should have a clear title and brief description. Provide an effort estimate when you have a reasonable basis.".to_string(),
+                description: "Propose a structured multi-step plan to the user for approval before any execution. Use this when the request requires multiple distinct steps. Each step should have a clear title and brief description. Provide an effort estimate when you have a reasonable basis.\n\nDecomposition guidance (Story 10.6): A task may contain sub-tasks when it is genuinely multi-part. Simple fact-finding (≈1 unit / 3-10 tool calls) → no decomposition. Comparison work (≈2-4 sub-tasks / 10-15 calls each) or complex multi-part work → emit sub-tasks, capped at 10 per parent.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -810,6 +810,19 @@ impl ToolSetPort for ToolSetAdapter {
                                         "type": "array",
                                         "items": { "type": "integer", "minimum": 1 },
                                         "description": "1-indexed task numbers that must complete before this task starts. Must reference earlier tasks."
+                                    },
+                                    "sub_tasks": {
+                                        "type": "array",
+                                        "maxItems": 10,
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "title": { "type": "string", "description": "Sub-task title (≤120 chars)." },
+                                                "description": { "type": "string", "description": "Optional one-paragraph description." }
+                                            },
+                                            "required": ["title"]
+                                        },
+                                        "description": "Optional sub-tasks for multi-part work. Capped at 10."
                                     }
                                 },
                                 "required": ["title"]

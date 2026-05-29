@@ -1,8 +1,118 @@
 use ratatui::prelude::*;
 use ratatui::widgets::BorderType;
 
-use crate::domain::models::plan::{Plan, PlanStatus, PlanTaskStatus};
+use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
+
+/// Render a single sub-task line indented inside the plan card border.
+fn render_sub_task_card_line(
+    sub: &PlanSubTask,
+    theme: &crate::adapters::tui::theme::Theme,
+    vertical_char: &str,
+    inner_width: usize,
+    is_pending: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    let max_title_chars = inner_width.saturating_sub(11);
+    let title_display = if sub.title.chars().count() > max_title_chars {
+        let truncated: String = sub.title.chars().take(max_title_chars).collect();
+        format!("{}...", truncated)
+    } else {
+        sub.title.clone()
+    };
+
+    let (icon_str, icon_color) = if !is_pending && sub.started_at_ms.is_some() {
+        match sub.status {
+            PlanTaskStatus::Pending => (String::new(), theme.colors.fg_muted),
+            PlanTaskStatus::Running => ("●".to_string(), theme.colors.tool_status_executing),
+            PlanTaskStatus::Waiting => ("⧖".to_string(), theme.colors.tool_status_awaiting),
+            PlanTaskStatus::Completed => ("✓".to_string(), theme.colors.tool_status_success),
+            PlanTaskStatus::Failed => ("✗".to_string(), theme.colors.tool_status_error),
+            PlanTaskStatus::Skipped => ("⏭".to_string(), theme.colors.tool_status_cancelled),
+            PlanTaskStatus::Cancelled => ("⊘".to_string(), theme.colors.tool_status_cancelled),
+            PlanTaskStatus::Paused => ("⏸".to_string(), theme.colors.tool_status_awaiting),
+        }
+    } else {
+        (String::new(), theme.colors.fg_muted)
+    };
+
+    let elapsed_str = if !is_pending && sub.started_at_ms.is_some() {
+        match sub.elapsed_ms() {
+            Some(ms) => {
+                let formatted = format_elapsed_ms(ms);
+                if sub.status == PlanTaskStatus::Running {
+                    format!("(running {})", formatted)
+                } else {
+                    format!("({})", formatted)
+                }
+            }
+            None => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
+    let mut spans: Vec<Span<'static>> = vec![
+        Span::styled(vertical_char.to_string(), Style::default().fg(theme.colors.decision_border)),
+        Span::styled(
+            format!("    {}. {}", sub.number, title_display),
+            Style::default().fg(theme.colors.fg_primary),
+        ),
+    ];
+
+    if !icon_str.is_empty() {
+        spans.push(Span::styled(
+            format!(" {}", icon_str),
+            Style::default().fg(icon_color),
+        ));
+    }
+    if !elapsed_str.is_empty() {
+        spans.push(Span::styled(
+            format!(" {}", elapsed_str),
+            Style::default().fg(theme.colors.fg_muted),
+        ));
+    }
+    if let Some(ref info) = sub.delegated_to {
+        spans.push(Span::styled(
+            format!(" [delegated → {}]", info.agent_name),
+            Style::default().fg(theme.colors.accent),
+        ));
+    }
+
+    let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let padding = inner_width.saturating_sub(content_len);
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.push(Span::styled(
+        vertical_char.to_string(),
+        Style::default().fg(theme.colors.decision_border),
+    ));
+    lines.push(Line::from(spans));
+
+    // Render sub-task description if present
+    if !sub.description.is_empty() {
+        let desc_lines = wrap_description(&sub.description, inner_width.saturating_sub(8));
+        for desc_line in desc_lines {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    vertical_char.to_string(),
+                    Style::default().fg(theme.colors.decision_border),
+                ),
+                Span::styled(
+                    format!("        {}", desc_line),
+                    Style::default().fg(theme.colors.fg_muted),
+                ),
+                Span::raw(" ".repeat(inner_width.saturating_sub(8 + desc_line.len()))),
+                Span::styled(
+                    vertical_char.to_string(),
+                    Style::default().fg(theme.colors.decision_border),
+                ),
+            ]));
+        }
+    }
+
+    lines
+}
 
 pub fn render_plan_card_lines<'a>(
     plan: &Plan,
@@ -211,6 +321,15 @@ pub fn render_plan_card_lines<'a>(
                         Style::default().fg(theme.colors.decision_border),
                     ),
                 ]));
+            }
+        }
+
+        // Story 10.6: render sub-tasks indented under parent
+        if task.has_sub_tasks() {
+            for sub in &task.sub_tasks {
+                lines.extend(render_sub_task_card_line(
+                    sub, theme, vertical_char, inner_width, is_pending,
+                ));
             }
         }
     }
@@ -432,6 +551,7 @@ mod tests {
                     error: None,
                     waiting_on: vec![],
                     delegated_to: None,
+                    sub_tasks: vec![],
                 },
                 PlanTask {
                     number: 2,
@@ -445,6 +565,7 @@ mod tests {
                     error: None,
                     waiting_on: vec![],
                     delegated_to: None,
+                    sub_tasks: vec![],
                 },
             ],
             estimated_effort: Some(EffortEstimate {
@@ -677,6 +798,7 @@ mod tests {
                     error: None,
                     waiting_on: vec![],
                     delegated_to: None,
+                    sub_tasks: vec![],
                 },
                 PlanTask {
                     number: 2,
@@ -690,6 +812,7 @@ mod tests {
                     error: None,
                     waiting_on: vec![],
                     delegated_to: None,
+                    sub_tasks: vec![],
                 },
                 PlanTask {
                     number: 3,
@@ -703,6 +826,7 @@ mod tests {
                     error: None,
                     waiting_on: vec![],
                     delegated_to: None,
+                    sub_tasks: vec![],
                 },
                 PlanTask {
                     number: 4,
@@ -716,6 +840,7 @@ mod tests {
                     error: None,
                     waiting_on: vec![],
                     delegated_to: None,
+                    sub_tasks: vec![],
                 },
             ],
             estimated_effort: None,
