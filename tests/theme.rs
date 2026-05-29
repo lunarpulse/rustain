@@ -394,7 +394,6 @@ fn test_tui_renders_with_theme_colors() {
                 1,
                 false,
                 rustain::domain::models::visual::DensityMode::Focus,
-                false,
             ) {
                 status_bar::render(
                     frame,

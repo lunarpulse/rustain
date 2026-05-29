@@ -234,7 +234,6 @@ impl ToolSetAdapter {
         self.plan_manager = Some(plan_manager);
     }
 
-    #[allow(dead_code)]
     pub fn set_event_tx(&mut self, event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>) {
         self.event_tx = Some(event_tx);
     }

@@ -238,6 +238,13 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_slot),
                 Arc::clone(&ctx.sandbox_policy),
             );
+            // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
+            // can emit PlanProposed / PlanApprovalRequested. Without this the
+            // composed adapter's event_tx stays None and plan approval cards
+            // are silently dropped. `None` (headless/eval) stays valid.
+            if let Some(ref tx) = ctx.domain_tx {
+                adapter.set_event_tx(tx.clone());
+            }
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
                 adapter.set_meta_search_engine(Arc::clone(engine));
@@ -252,6 +259,14 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_policy),
             );
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
+            // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
+            // can emit PlanProposed / PlanApprovalRequested. Without this the
+            // composed adapter's event_tx stays None and plan approval cards
+            // are silently dropped. `None` (headless/eval) stays valid.
+            // `composite` reuses this profile, so it inherits the wiring.
+            if let Some(ref tx) = ctx.domain_tx {
+                adapter.set_event_tx(tx.clone());
+            }
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
                 adapter.set_meta_search_engine(Arc::clone(engine));

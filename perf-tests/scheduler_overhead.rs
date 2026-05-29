@@ -9,9 +9,10 @@ use async_trait::async_trait;
 use rustain::domain::errors::{PermissionError, ToolError};
 use rustain::domain::models::tool_call::{ApprovalSource, ToolCallRequest};
 use rustain::domain::models::{
-    ApprovalDecision, FileOperation, PathAccessType, PermissionMode, ToolDefinition, ToolResult,
+    FileOperation, PathAccessType, PermissionMode, ToolDefinition, ToolResult,
 };
 use rustain::domain::ports::{SecurityPort, ToolSetPort};
+use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use tokio_util::sync::CancellationToken;
 
@@ -28,13 +29,6 @@ impl SecurityPort for NoOpSecurity {
         _op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
         Ok(PathAccessType::Workspace)
-    }
-    async fn request_permission(
-        &self,
-        _tool_name: &str,
-        _tool_input: &serde_json::Value,
-    ) -> Result<ApprovalDecision, PermissionError> {
-        Ok(ApprovalDecision::Allow)
     }
     fn current_mode(&self) -> PermissionMode {
         PermissionMode::Yolo
@@ -73,7 +67,9 @@ impl ToolSetPort for NoOpToolSet {
 async fn scheduler_overhead_p99() {
     let security: Arc<dyn SecurityPort> = Arc::new(NoOpSecurity);
     let tools: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let sched = ToolScheduler::new(security, tools, 1024);
+    let approval_runtime =
+        ApprovalRuntime::new(1024, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let sched = ToolScheduler::new(security, tools, approval_runtime, 1024);
 
     let batch_size = 1;
     let iterations = 10_000;

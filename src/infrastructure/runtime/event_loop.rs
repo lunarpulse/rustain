@@ -9053,6 +9053,7 @@ fn render(
                             theme,
                             &state.agent_panel_state.spool_tail_cache,
                             &state.agent_panel_state.cached_entries,
+                            crate::domain::models::session_meta::now_unix(),
                         );
                         skip_chat_render = true;
                     } else {

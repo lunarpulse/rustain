@@ -116,6 +116,7 @@ async-trait = "0.1"
 # - insta: TUI snapshot testing for widgets (story 6-0d PlanApprovalCard; future widgets)
 insta = { version = "1.41", features = ["yaml"] }
 procfs = "0.17"
+libc = "0.2"  # perf-tests/subagent_spawn.rs: sysconf(_SC_PAGESIZE) for RSS-per-agent measurement
 wiremock = "0.6"
 assert_cmd = "2.0"
 predicates = "3"

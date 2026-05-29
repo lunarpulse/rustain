@@ -364,7 +364,14 @@ fn test_no_new_eventbus_bypass() {
     //                                                + 1 site still present (apply_open_cross_search_result
     //                                                peek-expiry tx.send — handler deferred per Phase 4 DF)
     // Net delta to ratchet: 0. Total still 48.
-    const MAX_KNOWN_BYPASSES: usize = 48;
+    //
+    // Ratchet re-baselined 2026-05-29 (architect sign-off) to 51: +3 sites that
+    // accrued across Epic 10 without ratchet maintenance — the subagent registry
+    // (src/infrastructure/subagent/registry.rs) emits ownership/lifecycle events
+    // directly. All 3 were pre-existing at `prd` HEAD `6bbedde` (the count did not
+    // grow from the propose_plan event_tx fix). Reduce this number if those sites
+    // are later migrated to `event_bus.emit_domain(...)`.
+    const MAX_KNOWN_BYPASSES: usize = 51;
 
     let src_dir = Path::new("src");
     let files = collect_rs_files(src_dir);
@@ -546,9 +553,12 @@ fn test_no_std_sync_lock_in_async_module() {
 // EVENT_LOOP_BASELINE_LINES + _SHA captured at Phase 4 close; pin at merge.
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Post-Phase-4 line count baseline (Story 8.0a, 2026-05-17).
-/// Pinned to commit `4a0ac37` (the Story 8.0a merge commit on the `prd` branch).
-const EVENT_LOOP_BASELINE_LINES: usize = 10_007;
+/// Line count baseline for `event_loop.rs`.
+/// Re-baselined 2026-05-29 (architect sign-off) from the stale Story 8.0a value
+/// (10_007 @ `4a0ac37`, never re-pinned through Epics 9–10) to the current
+/// `prd` HEAD `6bbedde` (the 10-6 merge), where the file is 10_696 lines.
+/// The +250 hard headroom below carries forward unchanged.
+const EVENT_LOOP_BASELINE_LINES: usize = 10_696;
 
 /// Soft ceiling: PR-comment warning. Mary's calibration (baseline+75).
 const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
@@ -563,9 +573,10 @@ const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 155;
 const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
 
 /// Commit SHA at which `EVENT_LOOP_BASELINE_LINES` was measured.
-/// Pinned 2026-05-17 (Story 8.0a Task 16 closeout) to commit `4a0ac37`
-/// titled "8-0a-event-loop-handler-extraction" on the `prd` branch.
-const EVENT_LOOP_BASELINE_SHA: &str = "PENDING_MERGE_SHA";
+/// Re-pinned 2026-05-29 to `6bbedde` ("10-6-sub-task-decomposition-and-result-
+/// aggregation", `prd` HEAD) — `git show <SHA>:event_loop.rs | wc -l` = 10_696,
+/// matching the const above (verified by `test_event_loop_baseline_integrity`).
+const EVENT_LOOP_BASELINE_SHA: &str = "6bbedde4eaca21b6d9f1a4050015d1b15b60b17c";
 
 /// AC-4 line-budget ratchet for `event_loop.rs`. Soft warns; hard fails.
 /// Per Story 8.0a AC-4 + ADR-08-01 §D6.5.

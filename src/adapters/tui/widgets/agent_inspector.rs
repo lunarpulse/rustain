@@ -17,6 +17,7 @@ pub fn render(
     theme: &crate::adapters::tui::theme::Theme,
     spool_tail_cache: &HashMap<crate::domain::models::AgentId, String>,
     cached_entries: &[AgentRowView],
+    now_unix: i64,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -48,7 +49,7 @@ pub fn render(
         Style::default().fg(theme.colors.fg_muted),
     )));
     let spawned_elapsed = crate::domain::services::plan_runtime::format_elapsed_ms(
-        (crate::domain::models::session_meta::now_unix() - entry.spawned_at).max(0),
+        (now_unix - entry.spawned_at).max(0),
     );
     lines.push(Line::from(Span::styled(
         format!("Spawned: {} ago", spawned_elapsed),
@@ -233,6 +234,11 @@ mod tests {
         }
     }
 
+    /// Fixed clock so the "Spawned: … ago" line is deterministic in snapshots.
+    /// With `make_entry`'s `spawned_at: 0`, this renders a stable elapsed value
+    /// (the widget no longer reads the wall clock — `now` is injected).
+    const MOCK_NOW_UNIX: i64 = 7_200_000;
+
     fn render_to_text(
         entry: &AgentRowView,
         pending_kill: Option<&AgentId>,
@@ -243,7 +249,17 @@ mod tests {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        render(area, &mut buf, entry, 0, pending_kill, &theme, cache, &[]);
+        render(
+            area,
+            &mut buf,
+            entry,
+            0,
+            pending_kill,
+            &theme,
+            cache,
+            &[],
+            MOCK_NOW_UNIX,
+        );
         let mut text = String::new();
         for y in 0..area.height {
             let mut line = String::new();
