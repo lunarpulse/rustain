@@ -15,12 +15,16 @@ pub mod import;
 pub mod message_builder;
 pub mod meta_search;
 pub use meta_search::compute_terse;
+pub mod delegation_decider;
 pub mod model_router;
 pub mod permission_chain;
 pub mod plan_effort;
 pub mod plan_manager;
 pub mod plan_mode_injector;
 pub mod plan_parser;
+pub use delegation_decider::{DelegationDecider, DelegationReason, DelegationSuggestion};
+pub mod launch_spec_builder;
+pub use launch_spec_builder::LaunchSpecBuilder;
 pub mod plan_runtime;
 pub mod profile_loader;
 pub mod profile_serializer;
@@ -33,7 +37,7 @@ pub mod streaming_collect;
 pub mod summary_labeler;
 pub mod swap_tier;
 pub mod tool_scheduler;
-pub use plan_runtime::{PlanRuntime, PlanRuntimeState, TaskTurnOutcome};
+pub use plan_runtime::{PlanRuntime, PlanRuntimeState, TaskTurnOutcome, format_task_prompt};
 pub mod turn_queue;
 
 #[cfg(feature = "skills-validation")]

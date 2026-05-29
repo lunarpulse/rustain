@@ -181,6 +181,34 @@ pub enum AppEvent {
         plan_id: String,
         edited_plan: Option<crate::domain::models::Plan>,
     },
+    /// Plan-time delegation suggestion — present the modal card. Emitted by
+    /// `PlanRuntime::on_task_dispatch` BEFORE flipping the task to Running,
+    /// only when `DelegationDecider::suggest()` returns `Some(s)` with
+    /// `s.auto_proceed == false`.
+    PlanTaskDelegationRequested {
+        conversation_id: ConversationId,
+        plan_id: String,
+        task_number: u32,
+        suggestion: crate::domain::services::delegation_decider::DelegationSuggestion,
+    },
+    /// User (or YOLO short-circuit) resolved the delegation card.
+    PlanTaskDelegationResolved {
+        conversation_id: ConversationId,
+        plan_id: String,
+        task_number: u32,
+        decision: DelegationDecision,
+        agent_name: String,
+    },
+    /// Runtime-internal bridge: spool-tail-reader task → event-loop
+    /// `on_turn_complete` call site.  Holds `TaskTurnOutcome` by value
+    /// because `&mut Conversation` cannot cross a detached `tokio::spawn`.
+    PlanTaskDelegationCompleted {
+        conversation_id: ConversationId,
+        plan_id: String,
+        task_number: u32,
+        outcome: crate::domain::services::plan_runtime::TaskTurnOutcome,
+    },
+
     PlanExecutionStarted {
         conversation_id: ConversationId,
         plan_id: String,
@@ -282,6 +310,16 @@ pub enum AppEvent {
     /// nested enum to keep the top-level surface lean and group related events
     /// for the event_loop dispatcher.
     CapabilityEvent(CapabilityEvent),
+}
+
+/// User decision for a delegation suggestion (AC-10-5-3).
+/// Emitted by the TUI modal card (`[d]` Delegate / `[l]` Run locally).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DelegationDecision {
+    /// Spawn the suggested agent and dispatch the task to it.
+    Delegate,
+    /// Skip delegation; fall through to local sequential execution.
+    RunLocally,
 }
 
 /// Capability lifecycle events emitted by the CapabilityRegistry.

@@ -295,7 +295,7 @@ impl TestHarness {
                         None, // daily_budget (Story 7.5)
                         None,
                         DensityMode::Focus,
-                false,
+                        false,
                     );
 
                     input_box::render(

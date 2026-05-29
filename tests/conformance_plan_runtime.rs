@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    ChatMessage, ContentBlockType, Conversation, MessageRole, NoticeLevel, Plan, PlanStatus,
-    PlanTask, PlanTaskStatus, TaskResult, generate_conversation_id, generate_message_id,
+    ChatMessage, ContentBlockType, Conversation, MessageRole, NoticeLevel, PermissionMode, Plan,
+    PlanStatus, PlanTask, PlanTaskStatus, TaskResult, generate_conversation_id,
+    generate_message_id,
 };
 use rustain::domain::ports::{EventEmitter, StoragePort};
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
@@ -28,6 +29,7 @@ fn make_task(number: u32, title: &str) -> PlanTask {
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -43,6 +45,7 @@ fn make_task_with_deps(number: u32, title: &str, deps: Vec<u32>) -> PlanTask {
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -134,6 +137,8 @@ async fn ac1_runtime_dispatches_first_task() {
             plan_id.clone(),
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         );
 
         assert_eq!(
@@ -184,6 +189,8 @@ async fn ac2_per_task_turn_records_result() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
     add_assistant_msg(&mut conv, "Setup complete. Files created.");
 
@@ -199,6 +206,8 @@ async fn ac2_per_task_turn_records_result() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -234,6 +243,8 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -248,6 +259,8 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -261,6 +274,8 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -281,7 +296,14 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
     // resolved. Clear it and resume.
     runtime.clear_deviation_pending(&plan_id).await;
     runtime
-        .resume_advance(&conv_id, &plan_id, &mut conv, captured.as_ref())
+        .resume_advance(
+            &conv_id,
+            &plan_id,
+            &mut conv,
+            captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
+        )
         .await;
 
     // Task 4 depends on task 1 (completed), so it gets dispatched next
@@ -308,6 +330,8 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -343,6 +367,8 @@ async fn ac3_dependency_chain_full_skip() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -355,6 +381,8 @@ async fn ac3_dependency_chain_full_skip() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -389,6 +417,7 @@ async fn ac4_serde_round_trip_with_new_fields() {
         }),
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     };
     let json = serde_json::to_string(&task).unwrap();
     let back: PlanTask = serde_json::from_str(&json).unwrap();
@@ -419,6 +448,8 @@ async fn ac5_skipped_emits_warning_notice() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -431,6 +462,8 @@ async fn ac5_skipped_emits_warning_notice() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -463,6 +496,8 @@ async fn ac6_summary_message_appended() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -477,6 +512,8 @@ async fn ac6_summary_message_appended() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -510,6 +547,8 @@ async fn ac6_summary_aggregation_math() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -524,6 +563,8 @@ async fn ac6_summary_aggregation_math() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -537,6 +578,8 @@ async fn ac6_summary_aggregation_math() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -544,7 +587,14 @@ async fn ac6_summary_aggregation_math() {
     // stalling plan completion. Clear it and resume to finish the plan.
     runtime.clear_deviation_pending(&plan_id).await;
     runtime
-        .resume_advance(&conv_id, &plan_id, &mut conv, captured.as_ref())
+        .resume_advance(
+            &conv_id,
+            &plan_id,
+            &mut conv,
+            captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
+        )
         .await;
 
     let last_msg = conv.messages.last().unwrap();
@@ -568,6 +618,8 @@ async fn ac7_events_fire_in_order() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -582,6 +634,8 @@ async fn ac7_events_fire_in_order() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -597,6 +651,8 @@ async fn ac7_events_fire_in_order() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -679,6 +735,8 @@ async fn ac9_cancelled_task_stops_walk() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime
@@ -693,6 +751,8 @@ async fn ac9_cancelled_task_stops_walk() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -706,6 +766,8 @@ async fn ac9_cancelled_task_stops_walk() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -768,6 +830,8 @@ async fn fu3_stores_full_result_text_when_exceeds_legacy_cap() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     let big = "x".repeat(1_048_576);
@@ -783,6 +847,8 @@ async fn fu3_stores_full_result_text_when_exceeds_legacy_cap() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -869,6 +935,8 @@ async fn fu3_success_branch_no_length_mutation() {
             plan_id.clone(),
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         );
 
         let payload = "y".repeat(size);
@@ -884,6 +952,8 @@ async fn fu3_success_branch_no_length_mutation() {
                 },
                 &mut conv,
                 captured.as_ref(),
+                &[],
+                PermissionMode::Normal,
             )
             .await;
 
@@ -903,4 +973,198 @@ async fn fu3_success_branch_no_length_mutation() {
             size
         );
     }
+}
+
+// Story 10.5: AC-10-5-10 — default no delegation is no-op
+#[tokio::test]
+async fn ac10_5_default_no_delegation_is_no_op() {
+    let plan = make_plan(vec![
+        make_task(1, "Setup"),
+        make_task(2, "Build"),
+        make_task(3, "Test"),
+    ]);
+    let plan_id = plan.id.clone();
+    let mut conv = make_conv_with_plan(plan);
+    let captured = CapturedEvents::new();
+    let runtime = PlanRuntime::new();
+    let conv_id = conv.id.clone();
+
+    // Start with empty agents slice → DelegationDecider returns None
+    runtime.clone().start(
+        conv_id.clone(),
+        plan_id.clone(),
+        &mut conv,
+        captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
+    );
+
+    // Walk should be byte-identical to pre-10.5 path
+    assert_eq!(
+        conv.plans[&plan_id].tasks[0].status,
+        PlanTaskStatus::Running
+    );
+    assert_eq!(
+        conv.plans[&plan_id].tasks[1].status,
+        PlanTaskStatus::Pending
+    );
+    assert_eq!(
+        conv.plans[&plan_id].tasks[2].status,
+        PlanTaskStatus::Pending
+    );
+
+    // No delegation events emitted
+    let events = captured.take();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AppEvent::PlanTaskDelegationRequested { .. })),
+        "no delegation request with empty agents"
+    );
+
+    // No delegated_to set on any task
+    for task in &conv.plans[&plan_id].tasks {
+        assert!(
+            task.delegated_to.is_none(),
+            "task {} should not be delegated",
+            task.number
+        );
+    }
+}
+
+#[test]
+fn ac10_5_decider_explicit_mention_beats_keyword() {
+    use rustain::domain::models::AgentDef;
+    use rustain::domain::services::delegation_decider::{DelegationDecider, DelegationReason};
+
+    let plan = make_plan(vec![make_task_with_description(
+        1,
+        "Security check",
+        "Run auditor on auth module",
+    )]);
+
+    let agents = vec![
+        AgentDef {
+            name: "auditor".to_string(),
+            description: "Security auditor".to_string(),
+            file: std::path::PathBuf::from("/dev/null"),
+            model: None,
+            allowed_tools: None,
+            exclude_tools: None,
+        },
+        AgentDef {
+            name: "reviewer".to_string(),
+            description: "Code reviewer for auth modules and security checks".to_string(),
+            file: std::path::PathBuf::from("/dev/null"),
+            model: None,
+            allowed_tools: None,
+            exclude_tools: None,
+        },
+    ];
+
+    let suggestion =
+        DelegationDecider::suggest(&plan, &plan.tasks[0], &agents, PermissionMode::Normal);
+
+    assert!(
+        suggestion.is_some(),
+        "should suggest an agent for explicit mention"
+    );
+    let s = suggestion.unwrap();
+    assert_eq!(s.agent_name, "auditor");
+    assert_eq!(s.reason, DelegationReason::ExplicitAgentMention);
+}
+
+fn make_task_with_description(number: u32, title: &str, description: &str) -> PlanTask {
+    PlanTask {
+        number,
+        title: title.to_string(),
+        description: description.to_string(),
+        depends_on: vec![],
+        status: PlanTaskStatus::Pending,
+        started_at_ms: None,
+        completed_at_ms: None,
+        result: None,
+        error: None,
+        waiting_on: vec![],
+        delegated_to: None,
+    }
+}
+
+#[test]
+fn ac10_5_decider_yolo_auto_proceed() {
+    use rustain::domain::models::AgentDef;
+    use rustain::domain::services::delegation_decider::DelegationDecider;
+
+    let plan = make_plan(vec![make_task_with_description(
+        1,
+        "Build",
+        "Compile the rust project",
+    )]);
+
+    let agents = vec![AgentDef {
+        name: "builder".to_string(),
+        description: "Build agent".to_string(),
+        file: std::path::PathBuf::from("/dev/null"),
+        model: None,
+        allowed_tools: None,
+        exclude_tools: None,
+    }];
+
+    let suggestion =
+        DelegationDecider::suggest(&plan, &plan.tasks[0], &agents, PermissionMode::Yolo);
+
+    assert!(suggestion.is_some());
+    assert!(suggestion.unwrap().auto_proceed);
+}
+
+#[test]
+fn ac10_5_fan_out_bound_nfr15_cap_binds() {
+    use rustain::domain::services::delegation_decider::DelegationDecider;
+
+    assert_eq!(
+        DelegationDecider::fan_out_bound(20, 15),
+        10,
+        "NFR15 cap should bind at 10"
+    );
+}
+
+/// AC-10-5-3: Verify no forbidden delegation event variant names exist.
+/// Whitelist: PlanTaskDelegationRequested, PlanTaskDelegationResolved, PlanTaskDelegationCompleted.
+#[test]
+fn ac10_5_3_no_new_top_level_event_variants_for_delegation() {
+    let events_src = include_str!("../src/domain/events.rs");
+
+    let forbidden = [
+        "DelegationStarted",
+        "DelegationCompleted",
+        "DelegationFailed",
+        "SubagentDelegated",
+        "TaskDelegated",
+    ];
+
+    for token in &forbidden {
+        // Check that the forbidden token does NOT appear as a standalone variant name.
+        // The whitelisted variants (PlanTaskDelegation*) contain these substrings,
+        // so we verify the exact variant name is not present.
+        let pattern = format!("    {} {{", token);
+        assert!(
+            !events_src.contains(&pattern),
+            "Forbidden event variant '{}' found in events.rs — use PlanTaskDelegation* prefix instead",
+            token
+        );
+    }
+
+    // Verify the whitelisted variants ARE present
+    assert!(
+        events_src.contains("PlanTaskDelegationRequested"),
+        "PlanTaskDelegationRequested must exist"
+    );
+    assert!(
+        events_src.contains("PlanTaskDelegationResolved"),
+        "PlanTaskDelegationResolved must exist"
+    );
+    assert!(
+        events_src.contains("PlanTaskDelegationCompleted"),
+        "PlanTaskDelegationCompleted must exist"
+    );
 }

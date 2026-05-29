@@ -99,6 +99,12 @@ pub enum InputAction {
     PlanCardReject,
     /// Plan card (6-1a): user pressed e (edit in external editor).
     PlanCardEdit,
+    /// Story 10.5: Delegation card — user pressed d (delegate to agent).
+    DelegateTask,
+    /// Story 10.5: Delegation card — user pressed l (run task locally).
+    RunTaskLocally,
+    /// Story 10.5: Delegation card — user pressed Esc (cancel plan at this task).
+    DelegationCardCancel,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -673,6 +679,15 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'y' => return InputAction::PlanCardApprove,
             'n' => return InputAction::PlanCardReject,
             'e' => return InputAction::PlanCardEdit,
+            _ => {}
+        }
+    }
+
+    // Story 10.5: Delegation card key intercept (d/l/Esc)
+    if state.pending_delegation_card.is_some() {
+        match c {
+            'd' => return InputAction::DelegateTask,
+            'l' => return InputAction::RunTaskLocally,
             _ => {}
         }
     }
@@ -1774,6 +1789,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 };
                 state.needs_redraw = true;
                 return InputAction::Consumed;
+            }
+            // Story 10.5: Esc on delegation card → cancel plan at this task
+            if state.pending_delegation_card.is_some() {
+                return InputAction::DelegationCardCancel;
             }
             state.focus = match state.focus {
                 FocusState::Input => FocusState::Chat,

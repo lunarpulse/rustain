@@ -36,6 +36,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         }
     }
 

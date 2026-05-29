@@ -239,6 +239,18 @@ pub fn render_task_panel(
                         ),
                     ];
 
+                    if let Some(ref info) = task.delegated_to {
+                        let name = if info.agent_name.chars().count() > 12 {
+                            format!("{}…", info.agent_name.chars().take(12).collect::<String>())
+                        } else {
+                            info.agent_name.clone()
+                        };
+                        spans.push(Span::styled(
+                            format!(" [delegated → {}]", name),
+                            Style::default().fg(theme.colors.accent),
+                        ));
+                    }
+
                     if !task.depends_on.is_empty() {
                         let deps: Vec<String> =
                             task.depends_on.iter().map(|d| d.to_string()).collect();
@@ -255,11 +267,16 @@ pub fn render_task_panel(
                     let max_w = inner_area.width as usize;
                     if display_width > max_w {
                         let composed = format!(
-                            "{}. {} {}{}{}",
+                            "{}. {} {}{}{}{}",
                             task.number,
                             icon.symbol,
                             task.title,
                             icon.suffix,
+                            if let Some(ref info) = task.delegated_to {
+                                format!(" → {}", info.agent_name)
+                            } else {
+                                String::new()
+                            },
                             if task.depends_on.is_empty() {
                                 String::new()
                             } else {
@@ -380,6 +397,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         }
     }
 
@@ -505,5 +523,29 @@ mod tests {
         let result = resolve_panel_plan(&conv, Some("nonexistent"));
         assert!(result.is_some());
         assert_eq!(result.unwrap().tasks[0].title, "B");
+    }
+
+    #[test]
+    fn snapshot_task_panel_with_delegation_badge() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 20));
+        let area = Rect::new(0, 0, 50, 20);
+        let mut task = make_task(2, "Review code", PlanTaskStatus::Running);
+        task.delegated_to = Some(crate::domain::models::plan::DelegationInfo {
+            agent_name: "code-reviewer".to_string(),
+            agent_id: None,
+            delegated_at_ms: 1_700_000_000,
+            spool_task_id: None,
+        });
+        let plan = make_plan(
+            PlanStatus::Executing,
+            vec![
+                make_task(1, "Setup", PlanTaskStatus::Completed),
+                task,
+                make_task(3, "Build", PlanTaskStatus::Pending),
+            ],
+        );
+        render_task_panel(area, &mut buf, Some(&plan), 1, true, &test_theme());
+        let content = collect_buffer(&buf, area);
+        insta::assert_snapshot!(content);
     }
 }

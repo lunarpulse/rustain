@@ -74,6 +74,12 @@ pub struct PlanTask {
     /// Stored so 6.3's panel can render dep tags consistently.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_on: Vec<u32>,
+    /// Story 10.5: When `Some`, the task is currently delegated (or was delegated
+    /// then completed/failed). `None` means local sequential execution per 6-2a.
+    /// Field is additive; pre-10.5 sessions deserialize with `None` per
+    /// `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_to: Option<DelegationInfo>,
 }
 
 impl PlanTask {
@@ -85,6 +91,23 @@ impl PlanTask {
             (end - start).max(0)
         })
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegationInfo {
+    /// Agent definition name (e.g., "code-reviewer"). Matches `AgentDef.name`.
+    pub agent_name: String,
+    /// AgentId of the spawned subagent (matches `SubagentRegistry`).
+    /// `None` while the spawn is pending; set as soon as `launch()` returns Ok.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Wall-clock ms when the delegation was approved (or auto-accepted via YOLO).
+    pub delegated_at_ms: i64,
+    /// Spool task_id for `read_task_output` retrieval (matches Story 10-0 spool).
+    /// Populated when `TaskHandle.task_id` is captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spool_task_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +206,7 @@ mod tests {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
             estimated_effort: Some(EffortEstimate {
                 tool_calls: Some(5),
@@ -214,6 +238,7 @@ mod tests {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,
@@ -261,6 +286,7 @@ mod tests {
                 }),
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
             estimated_effort: Some(EffortEstimate {
                 tool_calls: Some(1),
@@ -304,7 +330,38 @@ mod tests {
         assert_eq!(plan.tasks[0].result, None);
         assert_eq!(plan.tasks[0].error, None);
         assert!(plan.tasks[0].waiting_on.is_empty());
+        assert_eq!(plan.tasks[0].delegated_to, None);
         assert_eq!(plan.tasks[0].status, PlanTaskStatus::Completed);
+    }
+
+    #[test]
+    fn delegation_info_round_trip() {
+        let task = PlanTask {
+            number: 1,
+            title: "Step".to_string(),
+            description: String::new(),
+            depends_on: vec![],
+            status: PlanTaskStatus::Pending,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: Some(DelegationInfo {
+                agent_name: "code-reviewer".to_string(),
+                agent_id: Some("agent-123".to_string()),
+                delegated_at_ms: 1700000000000,
+                spool_task_id: Some("spool-456".to_string()),
+            }),
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"delegatedTo\""));
+        assert!(json.contains("\"agentName\":\"code-reviewer\""));
+        assert!(json.contains("\"agentId\":\"agent-123\""));
+        assert!(json.contains("\"delegatedAtMs\":1700000000000"));
+        assert!(json.contains("\"spoolTaskId\":\"spool-456\""));
+        let back: PlanTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, task);
     }
 
     #[test]
@@ -365,6 +422,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         };
         assert_eq!(task.elapsed_ms(), None);
     }
@@ -382,6 +440,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         };
         assert!(task.elapsed_ms().unwrap() >= 0);
     }
@@ -399,6 +458,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         };
         assert_eq!(task.elapsed_ms(), Some(4000));
     }
@@ -436,6 +496,7 @@ mod tests {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
         };
         let json = serde_json::to_string(&kind).unwrap();

@@ -45,6 +45,7 @@ use crate::adapters::tui::widgets::{
     which_key_bar,
 };
 use crate::domain::services::session_index::SessionIndex;
+use ratatui::layout::Rect;
 
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
@@ -1394,6 +1395,94 @@ pub async fn run(
                                         });
                                     }
                                 }
+                                // Story 10.5: Delegation card key handlers
+                                InputAction::DelegateTask => {
+                                    if let Some(ref pending) = state.pending_delegation_card {
+                                        let conversation_id = conversation.id.clone();
+                                        let plan_id = pending.plan_id.clone();
+                                        let task_number = pending.task_number;
+                                        let agent_name = pending.suggestion.agent_name.clone();
+                                        state.pending_delegation_card = None;
+                                        state.needs_redraw = true;
+                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                            conversation_id,
+                                            plan_id,
+                                            task_number,
+                                            decision: crate::domain::events::DelegationDecision::Delegate,
+                                            agent_name,
+                                        });
+                                    }
+                                }
+                                InputAction::RunTaskLocally => {
+                                    if let Some(ref pending) = state.pending_delegation_card {
+                                        let conversation_id = conversation.id.clone();
+                                        let plan_id = pending.plan_id.clone();
+                                        let task_number = pending.task_number;
+                                        let agent_name = pending.suggestion.agent_name.clone();
+                                        state.pending_delegation_card = None;
+                                        state.needs_redraw = true;
+                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                            conversation_id,
+                                            plan_id,
+                                            task_number,
+                                            decision: crate::domain::events::DelegationDecision::RunLocally,
+                                            agent_name,
+                                        });
+                                    }
+                                }
+                                InputAction::DelegationCardCancel => {
+                                    if let Some(ref pending) = state.pending_delegation_card {
+                                        let conv_id = conversation.id.clone();
+                                        let plan_id = pending.plan_id.clone();
+                                        let task_number = pending.task_number;
+                                        state.pending_delegation_card = None;
+                                        let plan = match conversation.plans.get_mut(&plan_id) {
+                                            Some(p) => p,
+                                            None => {
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        };
+                                        if plan.status != PlanStatus::Executing {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message: "Plan already finished.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
+                                        let now_ms = chrono::Utc::now().timestamp_millis();
+                                        for task in &mut plan.tasks {
+                                            if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
+                                                task.status = PlanTaskStatus::Cancelled;
+                                                task.completed_at_ms = Some(now_ms);
+                                                task.error = Some("Plan cancelled by user".to_string());
+                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                    conversation_id: conv_id.clone(),
+                                                    plan_id: plan_id.clone(),
+                                                    task_number: task.number,
+                                                    status: PlanTaskStatus::Cancelled,
+                                                });
+                                            }
+                                        }
+                                        plan.status = PlanStatus::Cancelled;
+                                        let _ = plan;
+                                        app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                            conversation_id: conv_id.clone(),
+                                            plan_id: plan_id.clone(),
+                                            cancelled_at_task: Some(task_number),
+                                        });
+                                        crate::domain::services::plan_runtime::finish_plan(
+                                            &conv_id,
+                                            &plan_id,
+                                            &mut conversation,
+                                            app_state.event_bus.as_ref(),
+                                        );
+                                        plan_runtime.remove_plan(&plan_id).await;
+                                    }
+                                    state.needs_redraw = true;
+                                }
                                 InputAction::FeedbackInputChar(c) => {
                                     if let Some(ref mut fi) = state.pending_feedback_input {
                                         // Cap feedback buffer to prevent unbounded paste into
@@ -2203,12 +2292,22 @@ pub async fn run(
                                     }
                                     if should_advance {
                                         let conv_id = conversation.id.clone();
+                                        let agents_snapshot = {
+                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                let guard = provider.agent_registry().read().await;
+                                                guard.agents().to_vec()
+                                            } else {
+                                                vec![]
+                                            }
+                                        };
                                         plan_runtime.resume_advance(
                                             &conv_id,
                                             &plan_id,
                                             &mut conversation,
                                             app_state.event_bus.as_ref(),
-                                        ).await;
+                                        &agents_snapshot,
+                                        security.current_mode(),
+                                    ).await;
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -2258,12 +2357,22 @@ pub async fn run(
                                     let should_advance = state.task_panel_state.skip_cascade_pending.is_none();
                                     if should_advance {
                                         let conv_id = conversation.id.clone();
+                                        let agents_snapshot = {
+                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                let guard = provider.agent_registry().read().await;
+                                                guard.agents().to_vec()
+                                            } else {
+                                                vec![]
+                                            }
+                                        };
                                         plan_runtime.resume_advance(
                                             &conv_id,
                                             &plan_id,
                                             &mut conversation,
                                             app_state.event_bus.as_ref(),
-                                        ).await;
+                                        &agents_snapshot,
+                                        security.current_mode(),
+                                    ).await;
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -2309,12 +2418,22 @@ pub async fn run(
                                             message: format!("Retrying Task {}.", n),
                                         });
                                         let conv_id = conversation.id.clone();
+                                        let agents_snapshot = {
+                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                let guard = provider.agent_registry().read().await;
+                                                guard.agents().to_vec()
+                                            } else {
+                                                vec![]
+                                            }
+                                        };
                                         plan_runtime.resume_advance(
                                             &conv_id,
                                             &plan_id,
                                             &mut conversation,
                                             app_state.event_bus.as_ref(),
-                                        ).await;
+                                        &agents_snapshot,
+                                        security.current_mode(),
+                                    ).await;
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -2428,12 +2547,22 @@ pub async fn run(
                                                             });
                                                             state.task_panel_state.drill_down_task = None;
                                                             let conv_id = conversation.id.clone();
+                                                            let agents_snapshot = {
+                                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                                    let guard = provider.agent_registry().read().await;
+                                                                    guard.agents().to_vec()
+                                                                } else {
+                                                                    vec![]
+                                                                }
+                                                            };
                                                             plan_runtime.resume_advance(
                                                                 &conv_id,
                                                                 &plan_id,
                                                                 &mut conversation,
                                                                 app_state.event_bus.as_ref(),
-                                                            ).await;
+                                                             &agents_snapshot,
+                                                             security.current_mode(),
+                                                         ).await;
                                                         }
                                                     }
                                                 }
@@ -2528,12 +2657,22 @@ pub async fn run(
                                             message: format!("Resumed {} task(s).", count),
                                         });
                                         let conv_id = conversation.id.clone();
+                                        let agents_snapshot = {
+                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                let guard = provider.agent_registry().read().await;
+                                                guard.agents().to_vec()
+                                            } else {
+                                                vec![]
+                                            }
+                                        };
                                         plan_runtime.resume_advance(
                                             &conv_id,
                                             &plan_id,
                                             &mut conversation,
                                             app_state.event_bus.as_ref(),
-                                        ).await;
+                                        &agents_snapshot,
+                                        security.current_mode(),
+                                    ).await;
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -2656,6 +2795,14 @@ pub async fn run(
                                     };
                                     let plan_id = skip_pending.plan_id.clone();
                                     let conv_id = conversation.id.clone();
+                                    let agents_snapshot = {
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let guard = provider.agent_registry().read().await;
+                                            guard.agents().to_vec()
+                                        } else {
+                                            vec![]
+                                        }
+                                    };
                                     match choice {
                                         crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip => {
                                             {
@@ -2687,7 +2834,9 @@ pub async fn run(
                                                 &plan_id,
                                                 &mut conversation,
                                                 app_state.event_bus.as_ref(),
-                                            ).await;
+                                            &agents_snapshot,
+                                            security.current_mode(),
+                                        ).await;
                                         }
                                         crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway => {
                                             plan_runtime.resume_advance(
@@ -2695,7 +2844,9 @@ pub async fn run(
                                                 &plan_id,
                                                 &mut conversation,
                                                 app_state.event_bus.as_ref(),
-                                            ).await;
+                                            &agents_snapshot,
+                                            security.current_mode(),
+                                        ).await;
                                         }
                                         crate::adapters::tui::state::SkipCascadeChoice::CancelSkip => {
                                             {
@@ -2733,12 +2884,22 @@ pub async fn run(
                                         PlanDecision::Approve => {
                                             plan_runtime.clear_deviation_pending(&plan_id).await;
                                             state.task_panel_state.pending_deviation = None;
+                                            let agents_snapshot = {
+                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                    let guard = provider.agent_registry().read().await;
+                                                    guard.agents().to_vec()
+                                                } else {
+                                                    vec![]
+                                                }
+                                            };
                                             plan_runtime.resume_advance(
                                                 &conv_id,
                                                 &plan_id,
                                                 &mut conversation,
                                                 app_state.event_bus.as_ref(),
-                                            ).await;
+                                            &agents_snapshot,
+                                            security.current_mode(),
+                                        ).await;
                                         }
                                         PlanDecision::Edit => {
                                             app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -5904,11 +6065,21 @@ pub async fn run(
                         }
                     }
                     AppEvent::PlanExecutionStarted { conversation_id, plan_id } => {
+                        let agents_snapshot = {
+                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                let guard = provider.agent_registry().read().await;
+                                guard.agents().to_vec()
+                            } else {
+                                vec![]
+                            }
+                        };
                         plan_runtime.clone().start(
                             conversation_id.clone(),
                             plan_id.clone(),
                             &mut conversation,
                             &app_state.event_bus,
+                            &agents_snapshot,
+                            security.current_mode(),
                         );
                         let term_width = state.terminal_width;
                         let auto_open_setting = state.auto_open_on_task_plan.clone();
@@ -5992,6 +6163,156 @@ pub async fn run(
                                 });
                             }
                         }
+                    // Story 10.5: Delegation events
+                    AppEvent::PlanTaskDelegationRequested { conversation_id, plan_id, task_number, suggestion } => {
+                        if conversation_id == conversation.id {
+                            let yolo = security.current_mode() == PermissionMode::Yolo;
+                            if suggestion.auto_proceed || yolo {
+                                // YOLO auto-accept: emit resolved immediately
+                                let agent_name = suggestion.agent_name.clone();
+                                app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                    conversation_id,
+                                    plan_id,
+                                    task_number,
+                                    decision: crate::domain::events::DelegationDecision::Delegate,
+                                    agent_name,
+                                });
+                                if yolo {
+                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        conversation_id: Some(conversation.id.clone()),
+                                        level: NoticeLevel::Info,
+                                        message: format!("YOLO: auto-delegated Task {} to {}", task_number, suggestion.agent_name),
+                                    });
+                                }
+                            } else {
+                                // Normal mode: show delegation card
+                                state.pending_delegation_card = Some(crate::adapters::tui::state::PendingDelegationCard {
+                                    conversation_id,
+                                    plan_id,
+                                    task_number,
+                                    suggestion,
+                                });
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                    AppEvent::PlanTaskDelegationResolved { conversation_id, plan_id, task_number, decision, agent_name } => {
+                        if conversation_id == conversation.id {
+                            match decision {
+                                crate::domain::events::DelegationDecision::Delegate => {
+                                    // Attempt to delegate the task
+                                    if let Some(subagent_provider) = get_subagent_provider(&app_state.agent_core) {
+                                        let agent_def_opt = {
+                                            let guard = subagent_provider.agent_registry().read().await;
+                                            guard.find(&agent_name).cloned()
+                                        };
+                                        if let Some(agent_def) = agent_def_opt {
+                                            let result = plan_runtime.clone().delegate_task(
+                                                &conversation_id,
+                                                &plan_id,
+                                                task_number,
+                                                &agent_def,
+                                                Arc::clone(subagent_provider.runner()),
+                                                Arc::clone(subagent_provider.spool()),
+                                                &mut conversation,
+                                                Arc::clone(&app_state.event_bus) as Arc<dyn crate::domain::ports::EventEmitter>,
+                                                &config.model,
+                                            ).await;
+                                            if let Err(e) = result {
+                                                tracing::warn!("Delegation failed for task {}: {}", task_number, e);
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: NoticeLevel::Warning,
+                                                    message: format!("⚠ Could not delegate Task {} ({}). Running locally.", task_number, e),
+                                                });
+                                                // Fallback: re-emit RunLocally so the Resolved arm handles it
+                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                                    conversation_id,
+                                                    plan_id,
+                                                    task_number,
+                                                    decision: crate::domain::events::DelegationDecision::RunLocally,
+                                                    agent_name,
+                                                });
+                                            }
+                                        } else {
+                                            tracing::warn!("Agent {} not found in registry", agent_name);
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message: format!("⚠ Agent '{}' not found. Running Task {} locally.", agent_name, task_number),
+                                            });
+                                            // Fallback: re-emit RunLocally
+                                            app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                                conversation_id,
+                                                plan_id,
+                                                task_number,
+                                                decision: crate::domain::events::DelegationDecision::RunLocally,
+                                                agent_name,
+                                            });
+                                        }
+                                    } else {
+                                        tracing::warn!("No subagent provider available for delegation");
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Warning,
+                                            message: format!("⚠ No subagent provider available. Running Task {} locally.", task_number),
+                                        });
+                                        // Fallback: re-emit RunLocally
+                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                            conversation_id,
+                                            plan_id,
+                                            task_number,
+                                            decision: crate::domain::events::DelegationDecision::RunLocally,
+                                            agent_name,
+                                        });
+                                    }
+                                }
+                                crate::domain::events::DelegationDecision::RunLocally => {
+                                    // Run locally: dispatch the specific task, skipping delegation re-check
+                                    let agents_snapshot = {
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let guard = provider.agent_registry().read().await;
+                                            guard.agents().to_vec()
+                                        } else {
+                                            vec![]
+                                        }
+                                    };
+                                    plan_runtime.advance_after_task(
+                                        &conversation_id,
+                                        &plan_id,
+                                        &mut conversation,
+                                        &app_state.event_bus,
+                                        &agents_snapshot,
+                                        security.current_mode(),
+                                        Some(task_number),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    AppEvent::PlanTaskDelegationCompleted { conversation_id, plan_id, task_number, outcome } => {
+                        if conversation_id == conversation.id {
+                            let agents_snapshot = {
+                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                    let guard = provider.agent_registry().read().await;
+                                    guard.agents().to_vec()
+                                } else {
+                                    vec![]
+                                }
+                            };
+                            let current_mode = security.current_mode();
+                            plan_runtime.on_turn_complete(
+                                &conversation_id,
+                                &plan_id,
+                                task_number,
+                                outcome,
+                                &mut conversation,
+                                &app_state.event_bus,
+                                &agents_snapshot,
+                                current_mode,
+                            ).await;
+                        }
+                    }
                         AppEvent::PlanDeviation { conversation_id: cid, plan_id: pid, deviation_kind, original_step_count: _, current_step_count: _, changed_steps: _, summary } => {
                             let yolo = security.current_mode() == PermissionMode::Yolo;
                             if yolo {
@@ -6002,12 +6323,22 @@ pub async fn run(
                                 });
                                 plan_runtime.clear_deviation_pending(&pid).await;
                                 if cid == conversation.id {
+                                    let agents_snapshot = {
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let guard = provider.agent_registry().read().await;
+                                            guard.agents().to_vec()
+                                        } else {
+                                            vec![]
+                                        }
+                                    };
                                     plan_runtime.resume_advance(
                                         &cid,
                                         &pid,
                                         &mut conversation,
                                         app_state.event_bus.as_ref(),
-                                    ).await;
+                                    &agents_snapshot,
+                                    security.current_mode(),
+                                ).await;
                                 }
                             } else if cid == conversation.id {
                                 state.task_panel_state.pending_deviation = Some((pid, deviation_kind));
@@ -7328,6 +7659,14 @@ pub async fn run(
                                                 }
                                                 other => other.clone(),
                                             };
+                                            let agents_snapshot_tc = {
+                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                    let guard = provider.agent_registry().read().await;
+                                                    guard.agents().to_vec()
+                                                } else {
+                                                    vec![]
+                                                }
+                                            };
                                             plan_runtime.on_turn_complete(
                                                 &conv_id,
                                                 &pid,
@@ -7335,6 +7674,8 @@ pub async fn run(
                                                 outcome,
                                                 &mut conversation,
                                                 &app_state.event_bus,
+                                                &agents_snapshot_tc,
+                                                security.current_mode(),
                                             ).await;
                                         }
                                     }
@@ -8777,6 +9118,26 @@ fn render(
                     msg_bounds = result.message_boundaries;
                     user_msg_bounds = result.user_message_boundaries;
                     focused_tool_id = result.focused_tool_id;
+                }
+
+                // Story 10.5: render delegation suggestion card as a centered popup over chat pane
+                if let Some(ref card) = state.pending_delegation_card {
+                    let card_width = 60u16.min(app_layout.chat_pane.width);
+                    let card_height = 6u16.min(app_layout.chat_pane.height);
+                    let card_area = Rect {
+                        x: app_layout.chat_pane.x
+                            + (app_layout.chat_pane.width.saturating_sub(card_width)) / 2,
+                        y: app_layout.chat_pane.y
+                            + (app_layout.chat_pane.height.saturating_sub(card_height)) / 2,
+                        width: card_width,
+                        height: card_height,
+                    };
+                    crate::adapters::tui::widgets::delegation_card::render(
+                        card_area,
+                        frame.buffer_mut(),
+                        card,
+                        theme,
+                    );
                 }
 
                 // Story 4-4 AC1: render the search bar widget into its reserved slot.

@@ -30,6 +30,7 @@ fn make_task(number: u32, title: &str) -> PlanTask {
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn make_task_with_desc(number: u32, title: &str, desc: &str) -> PlanTask {
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -131,6 +133,7 @@ fn ac1_plan_serde_round_trip() {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             },
         ],
         estimated_effort: Some(EffortEstimate {
@@ -454,6 +457,7 @@ fn ac7_edit_round_trip_toml() {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             },
             PlanTask {
                 number: 2,
@@ -466,6 +470,7 @@ fn ac7_edit_round_trip_toml() {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             },
         ],
         estimated_effort: Some(EffortEstimate {
@@ -604,6 +609,7 @@ fn ac10_export_renders_plan() {
                     result: None,
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
             ],
             estimated_effort: Some(EffortEstimate {
@@ -730,6 +736,7 @@ fn ac10_search_indexes_plan() {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,

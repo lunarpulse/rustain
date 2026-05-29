@@ -6,12 +6,15 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::ContentBlockType;
 use crate::domain::models::MessageRole;
 use crate::domain::models::NoticeLevel;
+use crate::domain::models::agent::AgentDef;
 use crate::domain::models::conversation::{ChatMessage, generate_message_id};
 use crate::domain::models::plan::{
-    Plan, PlanDeviationKind, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
+    DelegationInfo, Plan, PlanDeviationKind, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
 };
 use crate::domain::models::tab::ConversationId;
 use crate::domain::ports::EventEmitter;
+use crate::domain::services::delegation_decider::DelegationDecider;
+use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
 
 type TaskSummary = (
     u32,
@@ -56,6 +59,14 @@ pub enum TaskTurnOutcome {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DelegateTaskError {
+    #[error("subagent runner failed: {0}")]
+    LaunchFailed(#[from] crate::domain::models::SubagentError),
+    #[error("plan {plan_id} or task {task_number} not found at delegate_task call site")]
+    NotFound { plan_id: String, task_number: u32 },
+}
+
 impl PlanRuntime {
     pub fn new() -> Arc<Self> {
         Arc::new(PlanRuntime {
@@ -69,6 +80,8 @@ impl PlanRuntime {
         plan_id: String,
         conversation: &mut crate::domain::models::Conversation,
         event_emitter: &dyn EventEmitter,
+        agents: &[AgentDef],
+        mode: crate::domain::models::PermissionMode,
     ) {
         tracing::debug!("PlanRuntime::start: plan={plan_id} conv={conversation_id}");
         // Story 6.4 reload normalization: flip Paused → Pending.
@@ -139,36 +152,24 @@ impl PlanRuntime {
         };
 
         if let Some(task_number) = next_number {
-            let plan = conversation.plans.get_mut(&plan_id).unwrap();
-            let task = &mut plan.tasks[(task_number - 1) as usize];
-            let prompt = format_task_prompt(task);
-            task.status = PlanTaskStatus::Running;
-            task.started_at_ms = Some(chrono::Utc::now().timestamp_millis());
-
+            // Story 10.5: check delegation before flipping to Running
             {
-                let mut plans = self.plans.write().unwrap();
-                if let Some(state) = plans.get_mut(&plan_id) {
-                    state
-                        .task_cancels
-                        .insert(task_number, CancellationToken::new());
+                let plan = conversation.plans.get(&plan_id).unwrap();
+                let task = &plan.tasks[(task_number - 1) as usize];
+                if let Some(suggestion) = DelegationDecider::suggest(plan, task, agents, mode) {
+                    event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
+                        conversation_id: conversation_id.clone(),
+                        plan_id: plan_id.clone(),
+                        task_number,
+                        suggestion,
+                    });
+                    return;
                 }
             }
 
-            // G1-P2: emit Running status BEFORE AgentThenSubmit (Critical Invariant 7)
-            event_emitter.emit(AppEvent::PlanTaskStatusChanged {
-                conversation_id: conversation_id.clone(),
-                plan_id: plan_id.clone(),
-                task_number,
-                status: PlanTaskStatus::Running,
-            });
-            tracing::debug!(
-                "PlanRuntime::start emitting AgentThenSubmit task={task_number} plan={plan_id}"
+            self.dispatch_single_task(
+                &conversation_id, &plan_id, conversation, event_emitter, task_number,
             );
-            event_emitter.emit(AppEvent::AgentThenSubmit {
-                conversation_id: conversation_id.clone(),
-                text: prompt,
-                synthetic: true,
-            });
         }
     }
 
@@ -180,6 +181,8 @@ impl PlanRuntime {
         outcome: TaskTurnOutcome,
         conversation: &mut crate::domain::models::Conversation,
         event_emitter: &dyn EventEmitter,
+        agents: &[AgentDef],
+        mode: crate::domain::models::PermissionMode,
     ) {
         // G1-P3 + G6-P20: validate plan state and task_number before mutating
         {
@@ -290,7 +293,15 @@ impl PlanRuntime {
                     return;
                 }
 
-                self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
+                self.advance_after_task(
+                    conversation_id,
+                    plan_id,
+                    conversation,
+                    event_emitter,
+                    agents,
+                    mode,
+                    None,
+                );
             }
             TaskTurnOutcome::Failure { error } => {
                 {
@@ -405,7 +416,15 @@ impl PlanRuntime {
                 }
 
                 if !self.has_pending_deviation(plan_id).await {
-                    self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
+                    self.advance_after_task(
+                        conversation_id,
+                        plan_id,
+                        conversation,
+                        event_emitter,
+                        agents,
+                        mode,
+                        None,
+                    );
                 }
             }
             TaskTurnOutcome::Cancelled { reason } => {
@@ -519,58 +538,37 @@ impl PlanRuntime {
         }
     }
 
-    fn advance_after_task(
+    pub fn advance_after_task(
         &self,
         conversation_id: &ConversationId,
         plan_id: &str,
         conversation: &mut crate::domain::models::Conversation,
         event_emitter: &dyn EventEmitter,
+        agents: &[AgentDef],
+        mode: crate::domain::models::PermissionMode,
+        force_task_number: Option<u32>,
     ) {
-        let next_number = {
+        if let Some(task_number) = force_task_number {
+            self.dispatch_single_task(
+                conversation_id, plan_id, conversation, event_emitter, task_number,
+            );
+            return;
+        }
+
+        let eligible: Vec<u32> = {
             let plan = conversation.plans.get(plan_id).unwrap();
-            find_next_eligible(plan).map(|t| t.number)
+            find_all_eligible(plan).iter().map(|t| t.number).collect()
         };
 
-        if let Some(task_number) = next_number {
-            let plan = conversation.plans.get_mut(plan_id).unwrap();
-            let task = &mut plan.tasks[(task_number - 1) as usize];
-            let prompt = format_task_prompt(task);
-            task.status = PlanTaskStatus::Running;
-            task.started_at_ms = Some(chrono::Utc::now().timestamp_millis());
-
-            {
-                let mut plans = self.plans.write().unwrap();
-                if let Some(state) = plans.get_mut(plan_id) {
-                    state
-                        .task_cancels
-                        .insert(task_number, CancellationToken::new());
-                }
-            }
-
-            // G1-P2: emit Running status BEFORE AgentThenSubmit (Critical Invariant 7)
-            event_emitter.emit(AppEvent::PlanTaskStatusChanged {
-                conversation_id: conversation_id.clone(),
-                plan_id: plan_id.to_string(),
-                task_number,
-                status: PlanTaskStatus::Running,
-            });
-            event_emitter.emit(AppEvent::AgentThenSubmit {
-                conversation_id: conversation_id.clone(),
-                text: prompt,
-                synthetic: true,
-            });
-        } else {
+        if eligible.is_empty() {
             let all_terminal = {
                 let plan = conversation.plans.get(plan_id).unwrap();
                 plan.tasks.iter().all(|t| is_terminal(t.status))
             };
             if all_terminal {
                 finish_plan(conversation_id, plan_id, conversation, event_emitter);
-                // G6-P19: clean up runtime state after plan walk completes
                 self.plans.write().unwrap().remove(plan_id);
             } else {
-                // G1-P1: AC3 step 5 — no eligible task but non-terminal tasks remain
-                // (all remaining tasks are blocked by upstream failures/cancellations)
                 let blocker_list = {
                     let plan = conversation.plans.get(plan_id).unwrap();
                     plan.tasks
@@ -601,10 +599,259 @@ impl PlanRuntime {
                     }
                 }
                 finish_plan(conversation_id, plan_id, conversation, event_emitter);
-                // G6-P19: clean up runtime state
                 self.plans.write().unwrap().remove(plan_id);
             }
+            return;
         }
+
+        let bound = DelegationDecider::fan_out_bound(eligible.len(), 4);
+        let mut local_dispatched = false;
+
+        for task_number in eligible.iter().take(bound) {
+            let plan = conversation.plans.get(plan_id).unwrap();
+            let task = &plan.tasks[(*task_number - 1) as usize];
+            if let Some(suggestion) = DelegationDecider::suggest(plan, task, agents, mode) {
+                event_emitter.emit(AppEvent::PlanTaskDelegationRequested {
+                    conversation_id: conversation_id.clone(),
+                    plan_id: plan_id.to_string(),
+                    task_number: *task_number,
+                    suggestion,
+                });
+            } else if !local_dispatched {
+                self.dispatch_single_task(
+                    conversation_id, plan_id, conversation, event_emitter, *task_number,
+                );
+                local_dispatched = true;
+            }
+        }
+    }
+
+    fn dispatch_single_task(
+        &self,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: &dyn EventEmitter,
+        task_number: u32,
+    ) {
+        let plan = conversation.plans.get_mut(plan_id).unwrap();
+        let task = &mut plan.tasks[(task_number - 1) as usize];
+        let prompt = format_task_prompt(task);
+        task.status = PlanTaskStatus::Running;
+        task.started_at_ms = Some(chrono::Utc::now().timestamp_millis());
+
+        {
+            let mut plans = self.plans.write().unwrap();
+            if let Some(state) = plans.get_mut(plan_id) {
+                state
+                    .task_cancels
+                    .insert(task_number, CancellationToken::new());
+            }
+        }
+
+        event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+            conversation_id: conversation_id.clone(),
+            plan_id: plan_id.to_string(),
+            task_number,
+            status: PlanTaskStatus::Running,
+        });
+        event_emitter.emit(AppEvent::AgentThenSubmit {
+            conversation_id: conversation_id.clone(),
+            text: prompt,
+            synthetic: true,
+        });
+    }
+
+    /// Story 10.5 — spawn a subagent for the named task, await terminal status,
+    /// then route the outcome through `on_turn_complete` so the 6-2a FSM
+    /// (Running → Completed/Failed/Cancelled) and the unified `PlanSummary`
+    /// contract remain intact.
+    ///
+    /// On `Err(SubagentError)` returns immediately with `Err(...)` so the
+    /// caller can fall back to local sequential execution.
+    pub async fn delegate_task(
+        self: Arc<Self>,
+        conversation_id: &ConversationId,
+        plan_id: &str,
+        task_number: u32,
+        agent_def: &AgentDef,
+        runner: Arc<dyn crate::domain::ports::SubagentRunner>,
+        spool: Arc<crate::infrastructure::subagent::SubagentSpool>,
+        conversation: &mut crate::domain::models::Conversation,
+        event_emitter: Arc<dyn EventEmitter>,
+        default_model: &str,
+    ) -> Result<(), DelegateTaskError> {
+        // 1. Validate plan/task exist and task is Pending
+        let plan =
+            conversation
+                .plans
+                .get_mut(plan_id)
+                .ok_or_else(|| DelegateTaskError::NotFound {
+                    plan_id: plan_id.to_string(),
+                    task_number,
+                })?;
+        let idx = (task_number - 1) as usize;
+        if idx >= plan.tasks.len() || plan.tasks[idx].status != PlanTaskStatus::Pending {
+            return Err(DelegateTaskError::NotFound {
+                plan_id: plan_id.to_string(),
+                task_number,
+            });
+        }
+
+        // 2. Construct AgentLaunchSpec
+        let spec = LaunchSpecBuilder::from_plan_task(
+            &plan.tasks[idx],
+            agent_def,
+            default_model,
+            0,    // Story 10.5: parent_ctx_tokens = 0 (budget guard is Story 10.7)
+            None, // Story 10.5: parent_trace = None (W3C seam for Story 10.7)
+        );
+
+        // 3. Mutate state: set delegated_to, flip to Running, emit status change
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let agent_name = agent_def.name.clone();
+        plan.tasks[idx].delegated_to = Some(DelegationInfo {
+            agent_name: agent_name.clone(),
+            agent_id: None,
+            delegated_at_ms: now_ms,
+            spool_task_id: None,
+        });
+        plan.tasks[idx].status = PlanTaskStatus::Running;
+        plan.tasks[idx].started_at_ms = Some(now_ms);
+
+        {
+            let mut plans = self.plans.write().unwrap();
+            if let Some(state) = plans.get_mut(plan_id) {
+                state
+                    .task_cancels
+                    .insert(task_number, CancellationToken::new());
+            }
+        }
+
+        event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+            conversation_id: conversation_id.clone(),
+            plan_id: plan_id.to_string(),
+            task_number,
+            status: PlanTaskStatus::Running,
+        });
+
+        // 4. Spawn the runner
+        let child_cancel = {
+            let plans = self.plans.read().unwrap();
+            plans
+                .get(plan_id)
+                .and_then(|s| s.task_cancels.get(&task_number))
+                .cloned()
+                .unwrap_or_default()
+                .child_token()
+        };
+
+        let task_handle = match runner.launch(spec, child_cancel).await {
+            Ok(handle) => handle,
+            Err(e) => {
+                // Revert on launch failure
+                let plan = conversation.plans.get_mut(plan_id).unwrap();
+                plan.tasks[idx].delegated_to = None;
+                plan.tasks[idx].status = PlanTaskStatus::Pending;
+                plan.tasks[idx].started_at_ms = None;
+                event_emitter.emit(AppEvent::PlanTaskStatusChanged {
+                    conversation_id: conversation_id.clone(),
+                    plan_id: plan_id.to_string(),
+                    task_number,
+                    status: PlanTaskStatus::Pending,
+                });
+                return Err(DelegateTaskError::LaunchFailed(e));
+            }
+        };
+
+        // 5. Update delegated_to with agent_id and spool_task_id
+        {
+            let plan = conversation.plans.get_mut(plan_id).unwrap();
+            if let Some(ref mut info) = plan.tasks[idx].delegated_to {
+                info.agent_id = Some(task_handle.agent_id.0.clone());
+                info.spool_task_id = Some(task_handle.task_id.clone());
+            }
+        }
+
+        // 6. Emit live-progress notice
+        event_emitter.emit(AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id.clone()),
+            level: NoticeLevel::Info,
+            message: format!(
+                "⏳ Delegated to {}: \"{}\"",
+                agent_name, conversation.plans[plan_id].tasks[idx].title
+            ),
+        });
+
+        // 7. Spawn background task to await terminal status and emit bridge event
+        let conversation_id_clone = conversation_id.clone();
+        let plan_id_string = plan_id.to_string();
+        let task_number_clone = task_number;
+        let spool_clone = spool.clone();
+        let event_emitter_clone = event_emitter.clone();
+
+        let mut terminal_received = false;
+        let cid_for_fallback = conversation_id_clone.clone();
+        let pid_for_fallback = plan_id_string.clone();
+        tokio::spawn(async move {
+            let mut status_rx = task_handle.status_rx;
+            while let Some(status) = status_rx.recv().await {
+                if matches!(
+                    status,
+                    crate::domain::models::SubagentRunStatus::Completed
+                        | crate::domain::models::SubagentRunStatus::Failed
+                        | crate::domain::models::SubagentRunStatus::Killed
+                ) {
+                    terminal_received = true;
+                    let tail = spool_clone
+                        .read_tail(&task_handle.task_id, 8192)
+                        .await
+                        .unwrap_or_default();
+                    let outcome = match status {
+                        crate::domain::models::SubagentRunStatus::Completed => {
+                            TaskTurnOutcome::Success {
+                                result_text: tail,
+                                tool_call_count: 0,
+                                token_count: None,
+                            }
+                        }
+                        crate::domain::models::SubagentRunStatus::Failed => {
+                            let error =
+                                tail.lines().last().unwrap_or("(no error tail)").to_string();
+                            TaskTurnOutcome::Failure {
+                                error: format!("Subagent failed: {}", error),
+                            }
+                        }
+                        crate::domain::models::SubagentRunStatus::Killed => {
+                            TaskTurnOutcome::Cancelled {
+                                reason: "Delegated subagent killed".into(),
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+
+                    let _ = event_emitter_clone.emit(AppEvent::PlanTaskDelegationCompleted {
+                        conversation_id: conversation_id_clone,
+                        plan_id: plan_id_string,
+                        task_number: task_number_clone,
+                        outcome,
+                    });
+                    break;
+                }
+            }
+            if !terminal_received {
+                let _ = event_emitter_clone.emit(AppEvent::PlanTaskDelegationCompleted {
+                    conversation_id: cid_for_fallback,
+                    plan_id: pid_for_fallback,
+                    task_number: task_number_clone,
+                    outcome: TaskTurnOutcome::Failure {
+                        error: "Subagent status channel closed unexpectedly".to_string(),
+                    },
+                });
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn snapshot(&self, plan_id: &str) -> Option<PlanRuntimeState> {
@@ -673,6 +920,8 @@ impl PlanRuntime {
         plan_id: &str,
         conversation: &mut crate::domain::models::Conversation,
         event_emitter: &dyn EventEmitter,
+        agents: &[AgentDef],
+        mode: crate::domain::models::PermissionMode,
     ) {
         if self.has_pending_deviation(plan_id).await {
             tracing::debug!(
@@ -680,7 +929,15 @@ impl PlanRuntime {
             );
             return;
         }
-        self.advance_after_task(conversation_id, plan_id, conversation, event_emitter);
+        self.advance_after_task(
+            conversation_id,
+            plan_id,
+            conversation,
+            event_emitter,
+            agents,
+            mode,
+            None,
+        );
     }
 
     /// Returns true if the running task for this plan has received a new assistant
@@ -755,6 +1012,29 @@ fn find_next_eligible(plan: &Plan) -> Option<&PlanTask> {
         // G1-P1: the caller (advance_after_task) handles the deadlock case.
     }
     None
+}
+
+/// Story 10.5: return ALL tasks eligible for parallel delegation.
+/// A task is eligible when:
+/// - Its status is not terminal and not Running
+/// - All its `depends_on` entries are Completed
+pub fn find_all_eligible(plan: &Plan) -> Vec<&PlanTask> {
+    let statuses: Vec<PlanTaskStatus> = plan.tasks.iter().map(|t| t.status).collect();
+    plan.tasks
+        .iter()
+        .filter(|task| {
+            if is_terminal(task.status) || task.status == PlanTaskStatus::Running {
+                return false;
+            }
+            task.depends_on.iter().all(|dep| {
+                if *dep == 0 {
+                    return false;
+                }
+                let idx = (*dep - 1) as usize;
+                idx < statuses.len() && statuses[idx] == PlanTaskStatus::Completed
+            })
+        })
+        .collect()
 }
 
 fn skip_blocked_tasks(
@@ -1045,7 +1325,7 @@ pub fn format_elapsed_ms(ms: i64) -> String {
     }
 }
 
-fn format_task_prompt(task: &PlanTask) -> String {
+pub fn format_task_prompt(task: &PlanTask) -> String {
     if task.description.is_empty() {
         format!("Now executing task {}: {}.", task.number, task.title)
     } else {
@@ -1197,6 +1477,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         };
         let prompt = format_task_prompt(&task);
         assert!(prompt.starts_with("Now executing task 2: Extract middleware."));
@@ -1216,6 +1497,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         };
         let prompt = format_task_prompt(&task);
         assert_eq!(prompt, "Now executing task 1: Setup.");
@@ -1306,5 +1588,92 @@ mod tests {
             "entry must remain bounded; got {} bytes",
             entry.len()
         );
+    }
+
+    #[test]
+    fn find_all_eligible_linear_deps_returns_one() {
+        let plan = Plan {
+            id: "p".to_string(),
+            title: "Linear".to_string(),
+            tasks: vec![
+                make_task_with_status(1, "T1", PlanTaskStatus::Completed, vec![]),
+                make_task_with_status(2, "T2", PlanTaskStatus::Pending, vec![1]),
+                make_task_with_status(3, "T3", PlanTaskStatus::Pending, vec![2]),
+            ],
+            estimated_effort: None,
+            status: PlanStatus::Executing,
+            created_at: 0,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        let eligible = find_all_eligible(&plan);
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].number, 2);
+    }
+
+    #[test]
+    fn find_all_eligible_diamond_returns_two() {
+        let plan = Plan {
+            id: "p".to_string(),
+            title: "Diamond".to_string(),
+            tasks: vec![
+                make_task_with_status(1, "T1", PlanTaskStatus::Completed, vec![]),
+                make_task_with_status(2, "T2", PlanTaskStatus::Pending, vec![1]),
+                make_task_with_status(3, "T3", PlanTaskStatus::Pending, vec![1]),
+                make_task_with_status(4, "T4", PlanTaskStatus::Pending, vec![2, 3]),
+            ],
+            estimated_effort: None,
+            status: PlanStatus::Executing,
+            created_at: 0,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        let eligible = find_all_eligible(&plan);
+        assert_eq!(eligible.len(), 2);
+        let numbers: Vec<u32> = eligible.iter().map(|t| t.number).collect();
+        assert!(numbers.contains(&2));
+        assert!(numbers.contains(&3));
+    }
+
+    #[test]
+    fn find_all_eligible_respects_running() {
+        let plan = Plan {
+            id: "p".to_string(),
+            title: "Mixed".to_string(),
+            tasks: vec![
+                make_task_with_status(1, "T1", PlanTaskStatus::Completed, vec![]),
+                make_task_with_status(2, "T2", PlanTaskStatus::Running, vec![1]),
+                make_task_with_status(3, "T3", PlanTaskStatus::Pending, vec![1]),
+            ],
+            estimated_effort: None,
+            status: PlanStatus::Executing,
+            created_at: 0,
+            resolved_at: None,
+            host_message_id: None,
+        };
+        let eligible = find_all_eligible(&plan);
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].number, 3);
+    }
+
+    fn make_task_with_status(
+        number: u32,
+        title: &str,
+        status: PlanTaskStatus,
+        depends_on: Vec<u32>,
+    ) -> PlanTask {
+        PlanTask {
+            number,
+            title: title.to_string(),
+            description: String::new(),
+            depends_on,
+            status,
+            started_at_ms: None,
+            completed_at_ms: None,
+            result: None,
+            error: None,
+            waiting_on: vec![],
+            delegated_to: None,
+        }
     }
 }

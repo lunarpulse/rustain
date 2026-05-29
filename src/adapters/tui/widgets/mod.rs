@@ -8,6 +8,7 @@ pub mod cancel_plan_confirm_card;
 pub mod chat_pane;
 pub mod command_palette;
 pub mod cross_search;
+pub mod delegation_card;
 pub mod fork_confirm;
 pub mod model_selector;
 pub mod rewind_confirm;

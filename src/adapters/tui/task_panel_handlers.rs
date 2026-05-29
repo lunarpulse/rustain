@@ -611,6 +611,7 @@ mod tests {
                 }),
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
             estimated_effort: None,
             status: PlanStatus::Completed,

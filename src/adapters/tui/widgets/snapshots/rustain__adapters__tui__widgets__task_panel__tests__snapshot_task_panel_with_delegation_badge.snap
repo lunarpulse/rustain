@@ -1,0 +1,5 @@
+---
+source: src/adapters/tui/widgets/task_panel.rs
+expression: content
+---
+┌ Tasks · Test Plan ─────────────────────────────┐│1. ✓ Setup (0s)                                 ││2. ● Review code (running 0s) → code-reviewer   ││3. ⏳  Build                                     ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                ││                                                │└────────────────────────────────────────────────┘

@@ -6,6 +6,7 @@ pub mod eval_partition;
 pub mod eval_report_writer;
 #[cfg(feature = "meta-search")]
 pub mod eval_types;
+pub mod stub_subagent;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;

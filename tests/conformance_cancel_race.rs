@@ -32,8 +32,8 @@ use std::sync::{Arc, Mutex};
 
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    ChatMessage, Conversation, MessageRole, Plan, PlanStatus, PlanTask, PlanTaskStatus,
-    generate_conversation_id, generate_message_id,
+    ChatMessage, Conversation, MessageRole, PermissionMode, Plan, PlanStatus, PlanTask,
+    PlanTaskStatus, generate_conversation_id, generate_message_id,
 };
 use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
@@ -52,6 +52,7 @@ pub fn make_task(number: u32, title: &str) -> PlanTask {
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -150,6 +151,8 @@ async fn whole_plan_cancel_intent_honored_on_natural_success() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     // Task 1 is now Running. User invokes `!cancel-plan`.
@@ -170,6 +173,8 @@ async fn whole_plan_cancel_intent_honored_on_natural_success() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -211,6 +216,8 @@ async fn whole_plan_cancel_intent_honored_on_natural_failure() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime.mark_whole_plan_cancel_pending(&plan_id).await;
@@ -226,6 +233,8 @@ async fn whole_plan_cancel_intent_honored_on_natural_failure() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -257,6 +266,8 @@ async fn pause_pending_drained_after_natural_success() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
@@ -283,6 +294,8 @@ async fn pause_pending_drained_after_natural_success() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -319,6 +332,8 @@ async fn pause_pending_drained_after_natural_failure() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
@@ -334,6 +349,8 @@ async fn pause_pending_drained_after_natural_failure() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 
@@ -370,6 +387,8 @@ async fn on_turn_complete_ignores_mismatched_task_number() {
         plan_id.clone(),
         &mut conv,
         captured.as_ref(),
+        &[],
+        PermissionMode::Normal,
     );
 
     // Running is task 1. Stale event arrives for task 3.
@@ -385,6 +404,8 @@ async fn on_turn_complete_ignores_mismatched_task_number() {
             },
             &mut conv,
             captured.as_ref(),
+            &[],
+            PermissionMode::Normal,
         )
         .await;
 

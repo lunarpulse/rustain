@@ -158,7 +158,10 @@ impl SubagentSpool {
         match fs::metadata(&path).await {
             Ok(meta) if meta.len() > 16 * 1024 * 1024 => {
                 // Cap at 16 MB to prevent OOM on massive spool files
-                tracing::warn!("Spool file {} exceeds 16 MB cap, returning head only", path.display());
+                tracing::warn!(
+                    "Spool file {} exceeds 16 MB cap, returning head only",
+                    path.display()
+                );
                 let mut file = fs::File::open(&path).await?;
                 let mut buf = Vec::with_capacity(16 * 1024 * 1024);
                 use tokio::io::AsyncReadExt;
@@ -169,7 +172,7 @@ impl SubagentSpool {
                 Ok(s) => Ok(s),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
                 Err(e) => Err(e),
-            }
+            },
         }
     }
 

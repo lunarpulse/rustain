@@ -87,6 +87,36 @@ pub struct RuntimeConfig {
     pub event_bus: EventBusConfig,
 }
 
+/// Plan execution configuration (Story 10.5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanConfig {
+    /// Maximum number of tasks to delegate in parallel.
+    /// Default: 4. Bounded by NFR15 children cap (10).
+    #[serde(default = "PlanConfig::default_concurrent_tasks_max")]
+    pub concurrent_tasks_max: usize,
+}
+
+impl PlanConfig {
+    fn default_concurrent_tasks_max() -> usize {
+        4
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.concurrent_tasks_max == 0 {
+            return Err("plan.concurrent_tasks_max must be >= 1".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl Default for PlanConfig {
+    fn default() -> Self {
+        Self {
+            concurrent_tasks_max: Self::default_concurrent_tasks_max(),
+        }
+    }
+}
+
 /// Auto-open behavior for sidebar panels triggered by domain events.
 ///
 /// Story 6.3 (PD4): `on_task_plan` controls whether the Tasks panel auto-opens
@@ -475,6 +505,9 @@ pub struct AppConfig {
     /// Figment chooses which port indexes when the feature is compiled).
     #[serde(default)]
     pub search: SearchConfig,
+    /// Plan execution configuration (Story 10.5).
+    #[serde(default)]
+    pub plan: PlanConfig,
 }
 
 impl AppConfig {
@@ -651,6 +684,7 @@ impl Default for AppConfig {
             skill_exposure: SkillExposureConfig::default(),
             sandbox: SandboxConfig::default(),
             search: SearchConfig::default(),
+            plan: PlanConfig::default(),
         }
     }
 }
@@ -1116,5 +1150,25 @@ active_profile = "personal-assistant"
         let json = r#"{"model":"test","activeProfile":"base"}"#;
         let config: AppConfig = serde_json::from_str(json).expect("deserialize");
         assert_eq!(config.active_profile, "base");
+    }
+
+    #[test]
+    fn plan_config_defaults_to_concurrent_tasks_max_4() {
+        let toml = r#"
+model = "test-model"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.plan.concurrent_tasks_max, 4);
+    }
+
+    #[test]
+    fn plan_config_override_concurrent_tasks_max() {
+        let toml = r#"
+model = "test-model"
+[plan]
+concurrent_tasks_max = 8
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.plan.concurrent_tasks_max, 8);
     }
 }

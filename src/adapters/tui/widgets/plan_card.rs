@@ -180,6 +180,12 @@ pub fn render_plan_card_lines<'a>(
                 Style::default().fg(theme.colors.fg_muted),
             ));
         }
+        if let Some(ref info) = task.delegated_to {
+            spans.push(Span::styled(
+                format!(" [delegated → {}]", info.agent_name),
+                Style::default().fg(theme.colors.accent),
+            ));
+        }
         spans.push(Span::raw(" ".repeat(padding)));
         spans.push(Span::styled(
             vertical_char,
@@ -425,6 +431,7 @@ mod tests {
                     result: None,
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
                 PlanTask {
                     number: 2,
@@ -437,6 +444,7 @@ mod tests {
                     result: None,
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
             ],
             estimated_effort: Some(EffortEstimate {
@@ -668,6 +676,7 @@ mod tests {
                     }),
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
                 PlanTask {
                     number: 2,
@@ -680,6 +689,7 @@ mod tests {
                     result: None,
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
                 PlanTask {
                     number: 3,
@@ -692,6 +702,7 @@ mod tests {
                     result: None,
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
                 PlanTask {
                     number: 4,
@@ -704,6 +715,7 @@ mod tests {
                     result: None,
                     error: None,
                     waiting_on: vec![],
+                    delegated_to: None,
                 },
             ],
             estimated_effort: None,
@@ -745,6 +757,27 @@ mod tests {
         plan.tasks[3].status = PlanTaskStatus::Skipped;
         plan.tasks[3].error = Some("Skipped — blocked by upstream task(s) 2".to_string());
         plan.tasks[3].completed_at_ms = Some(1700000010001);
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines = render_plan_card_lines(&plan, &theme, 80, false);
+        let text: String = lines
+            .iter()
+            .map(|l| {
+                let row: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                row + "\n"
+            })
+            .collect();
+        insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn snapshot_plan_card_with_delegation_badge() {
+        let mut plan = make_plan_executing();
+        plan.tasks[1].delegated_to = Some(crate::domain::models::plan::DelegationInfo {
+            agent_name: "code-reviewer".to_string(),
+            agent_id: None,
+            delegated_at_ms: 1_700_000_000,
+            spool_task_id: None,
+        });
         let theme = crate::adapters::tui::theme::Theme::dark();
         let lines = render_plan_card_lines(&plan, &theme, 80, false);
         let text: String = lines

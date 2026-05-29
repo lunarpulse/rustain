@@ -106,6 +106,18 @@ pub fn render(
         y += 1;
     }
 
+    if let Some(ref info) = task.delegated_to {
+        if y < max_y {
+            buf.set_string(
+                inner.x,
+                y,
+                format!("Delegated to: {}", info.agent_name),
+                Style::default().fg(theme.colors.accent),
+            );
+            y += 1;
+        }
+    }
+
     if y < max_y {
         y += 1;
     }
@@ -301,6 +313,7 @@ mod tests {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         }
     }
 

@@ -98,8 +98,13 @@ pub fn render(
                 .and_then(|s| s.lines().last().map(|l| l.to_string()))
                 .unwrap_or_default();
 
-            let prefix_width =
-                icon_sym.chars().count() + 1 + glyph.chars().count() + 1 + indent.chars().count() + entry.subagent_type.chars().count() + 2;
+            let prefix_width = icon_sym.chars().count()
+                + 1
+                + glyph.chars().count()
+                + 1
+                + indent.chars().count()
+                + entry.subagent_type.chars().count()
+                + 2;
             let max_task_width = (inner_area.width as usize).saturating_sub(prefix_width + 12);
             let truncated_task = if task_summary.len() > max_task_width && max_task_width > 3 {
                 truncate_to_width(&task_summary, max_task_width)

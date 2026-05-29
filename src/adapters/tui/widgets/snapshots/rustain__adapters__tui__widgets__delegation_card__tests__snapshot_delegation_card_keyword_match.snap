@@ -1,0 +1,5 @@
+---
+source: src/adapters/tui/widgets/delegation_card.rs
+expression: text
+---
+┌ Delegate Task 2? ────────────────────────────────────────┐│  → code-reviewer  (keyword match (score 3))              ││  [d] Delegate    [l] Run locally    [Esc] Cancel plan    ││                                                          ││                                                          │└──────────────────────────────────────────────────────────┘

@@ -57,6 +57,14 @@ pub struct PendingPlanCard {
     pub plan_snapshot: crate::domain::models::Plan,
 }
 
+/// Story 10.5: pending delegation suggestion card awaiting user d/l response.
+pub struct PendingDelegationCard {
+    pub conversation_id: crate::domain::models::tab::ConversationId,
+    pub plan_id: String,
+    pub task_number: u32,
+    pub suggestion: crate::domain::services::delegation_decider::DelegationSuggestion,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -1666,6 +1674,8 @@ pub struct TuiState {
     pub pending_plan_approval: Option<PendingPlanApproval>,
     /// Pending inline PlanCard awaiting user resolution (Story 6-1a).
     pub pending_plan_card: Option<PendingPlanCard>,
+    /// Story 10.5: pending delegation suggestion card awaiting user d/l response.
+    pub pending_delegation_card: Option<PendingDelegationCard>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -1787,6 +1797,7 @@ impl TuiState {
             pending_agent_activation: None,
             pending_plan_approval: None,
             pending_plan_card: None,
+            pending_delegation_card: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

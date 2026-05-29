@@ -434,6 +434,7 @@ mod tests {
                         result: None,
                         error: None,
                         waiting_on: vec![],
+                        delegated_to: None,
                     },
                     PlanTask {
                         number: 2,
@@ -446,6 +447,7 @@ mod tests {
                         result: None,
                         error: None,
                         waiting_on: vec![],
+                        delegated_to: None,
                     },
                 ],
                 estimated_effort: Some(EffortEstimate {

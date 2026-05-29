@@ -120,6 +120,7 @@ fn parse_plan_input_inner(input: &serde_json::Value, plan_id: &str) -> Result<Pl
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         });
     }
 
@@ -418,6 +419,7 @@ mod tests {
                 result: None,
                 error: None,
                 waiting_on: vec![],
+                delegated_to: None,
             }],
             estimated_effort: None,
             status: PlanStatus::Pending,

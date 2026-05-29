@@ -26,6 +26,7 @@ fn make_task(number: u32, title: &str, status: PlanTaskStatus) -> PlanTask {
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -46,6 +47,7 @@ fn make_task_with_deps(
         result: None,
         error: None,
         waiting_on: vec![],
+        delegated_to: None,
     }
 }
 
@@ -189,6 +191,7 @@ fn ac1_resume_was_running_resets_started_at_ms() {
             result: None,
             error: None,
             waiting_on: vec![],
+            delegated_to: None,
         }],
     );
     let (mut conv, mut state) = make_conv(plan);
@@ -282,6 +285,7 @@ fn ac2_skip_failed_preserves_prior_status_in_cascade() {
                 result: None,
                 error: Some("fail".into()),
                 waiting_on: vec![],
+                delegated_to: None,
             },
             make_task_with_deps(2, "T2", PlanTaskStatus::Pending, vec![1]),
         ],

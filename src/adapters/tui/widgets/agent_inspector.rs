@@ -48,7 +48,7 @@ pub fn render(
         Style::default().fg(theme.colors.fg_muted),
     )));
     let spawned_elapsed = crate::domain::services::plan_runtime::format_elapsed_ms(
-        (crate::domain::models::session_meta::now_unix() - entry.spawned_at).max(0)
+        (crate::domain::models::session_meta::now_unix() - entry.spawned_at).max(0),
     );
     lines.push(Line::from(Span::styled(
         format!("Spawned: {} ago", spawned_elapsed),
@@ -211,8 +211,7 @@ pub fn render(
         .take(content_height)
         .collect();
 
-    let para = Paragraph::new(visible_lines)
-        .wrap(Wrap { trim: false });
+    let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     para.render(inner, buf);
 }
 

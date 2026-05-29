@@ -100,7 +100,8 @@ pub use permission::{
 };
 #[allow(unused_imports)]
 pub use plan::{
-    EffortEstimate, Plan, PlanDecision, PlanStatus, PlanTask, PlanTaskStatus, TaskResult,
+    DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanTask, PlanTaskStatus,
+    TaskResult,
 };
 pub use sandbox::SandboxPolicy;
 #[allow(unused_imports)]

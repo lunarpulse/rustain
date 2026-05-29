@@ -24,6 +24,16 @@ impl SubagentProvider {
         &self.spool
     }
 
+    pub fn runner(&self) -> &Arc<dyn crate::domain::ports::SubagentRunner> {
+        &self.runner
+    }
+
+    pub fn agent_registry(
+        &self,
+    ) -> &Arc<tokio::sync::RwLock<crate::adapters::agent_registry::AgentRegistry>> {
+        &self.agent_registry
+    }
+
     pub fn new(
         runner: Arc<dyn crate::domain::ports::SubagentRunner>,
         registry: Arc<crate::infrastructure::subagent::SubagentRegistry>,
