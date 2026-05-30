@@ -54,7 +54,12 @@ def pytest_configure(config):
         "story_9_4: Story 9-4 — Tool Exposure Strategy",
         "story_9_5: Story 9-5 — Sandbox Policy (Landlock)",
         "story_9_6: Story 9-6 — Skill Exposure Port",
+        "story_10_4: Story 10-4 — Subagent Panel & Agent Inspector",
+        "story_10_5: Story 10-5 — Task Delegation to Subagents",
+        "story_10_7: Story 10-7 — `task` Tool & Subagent Dispatch",
+        "story_10_x: Story 10-x — Live-LLM subagent / task-tool smoke",
         "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
+        "subagent: Tests that exercise in-process subagent spawning / the task tool",
     ]
     for marker in markers:
         config.addinivalue_line("markers", marker)
@@ -120,6 +125,36 @@ def tui(build_binary):
 
 
 @pytest.fixture
+def tui_monitor(build_binary):
+    """Provide a fresh RustainTUI with ``density_mode = "monitor"``.
+
+    The default ``tui`` fixture leaves density at the layout default, which
+    hides sidebars regardless of ``state.sidebar_visible`` (same reason
+    ``tui_with_mcp`` sets monitor density). Sidebar-panel tests — History,
+    Tasks, Agents — need the sidebar to actually render, so use this fixture.
+    """
+    tmp = tempfile.TemporaryDirectory(prefix="rustain_monitor_test_")
+    ws = Path(tmp.name)
+    allow_list = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    config_dir = ws / ".rustain"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "[permissions]\n"
+        f"always_tools = {json.dumps(allow_list)}\n"
+        "\n"
+        "[layout]\n"
+        'density_mode = "monitor"\n'
+    )
+    harness = RustainTUI(fresh=True, build=False, workspace=ws, allowed_tools=allow_list)
+    harness.start()
+    try:
+        yield harness
+    finally:
+        harness.stop()
+        tmp.cleanup()
+
+
+@pytest.fixture
 def tui_in_project(build_binary):
     """Provide a RustainTUI running inside the actual project workspace.
 
@@ -170,7 +205,7 @@ def _reset_tui_state(request):
     still available during teardown — after the ``tui`` fixture's own
     finalizer has run, ``request.getfixturevalue()`` raises AssertionError.
     """
-    tui_fixtures = {"tui", "tui_in_project", "tui_strict"}
+    tui_fixtures = {"tui", "tui_monitor", "tui_in_project", "tui_strict"}
     active = tui_fixtures.intersection(request.fixturenames)
     tui_instance = None
     if active:
@@ -335,6 +370,109 @@ def tui_with_mcp(build_binary, request):
         workspace=ws,
         allowed_tools=allowed_tools,
         env_overrides={"RUSTAIN_PROFILE": "tests-mcp"},
+    )
+    harness.start()
+    try:
+        yield harness
+    finally:
+        harness.stop()
+        tmp.cleanup()
+
+
+# ── Subagent fixtures (Epic 10) ───────────────────────────────────────────────
+
+def _write_subagent_provider_config(config_dir: Path, allowed_tools: list[str]) -> None:
+    """Write config.toml registering an anthropic provider (env-var auth) plus
+    the composite tools adapter so the SubagentProvider + `task` tool are wired.
+
+    Mirrors the provider block in ``tui_with_mcp``: the default test build lacks
+    the ``openai`` feature, so any user-inherited ``[provider.openrouter]`` is
+    disabled to avoid poisoning the registry, and the anthropic provider is
+    registered from ``ANTHROPIC_AUTH_TOKEN`` (loaded by the harness from .env).
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(
+        "[permissions]\n"
+        f"always_tools = {json.dumps(allowed_tools)}\n"
+        "\n"
+        "[layout]\n"
+        'density_mode = "monitor"\n'
+        "\n"
+        "[provider.openrouter]\n"
+        "enabled = false\n"
+        'provider_id = "openrouter"\n'
+        'model_id = "unused"\n'
+        'api_key_env = "OPENROUTER_API_KEY"\n'
+        "\n"
+        "[provider.anthropic]\n"
+        'provider_id = "anthropic"\n'
+        'model_id = "glm-4.7"\n'
+        'api_key_env = "ANTHROPIC_AUTH_TOKEN"\n'
+        "enabled = true\n"
+        'kind = "anthropic"\n'
+    )
+
+
+def _write_subagent_profile(config_dir: Path, profile_name: str = "tests-subagent") -> None:
+    """Write a profile selecting the composite tools adapter so the
+    SubagentProvider (and therefore the `task` tool) is registered. The default
+    'coding' profile uses 'builtin-full' which short-circuits subagent dispatch.
+    """
+    profiles_dir = config_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / f"{profile_name}.toml").write_text(
+        f'name = "{profile_name}"\n'
+        'description = "Test profile — composite tools adapter for subagent E2E tests."\n'
+        'extends = "coding"\n'
+        "\n"
+        "[tools]\n"
+        'adapter = "composite"\n'
+    )
+
+
+@pytest.fixture
+def tui_with_subagent(build_binary):
+    """Provide a RustainTUI wired so a live LLM can delegate to a subagent.
+
+    Behavior:
+      * Isolated temp workspace (auto-cleaned).
+      * A custom agent ``.claude/agents/echo-agent.md`` is pre-populated so the
+        SubagentProvider discovers a delegation target named ``echo-agent``.
+      * A ``tests-subagent`` profile with ``[tools] adapter = "composite"`` is
+        written into ``RUSTAIN_CONFIG_DIR/profiles/`` and selected via
+        ``RUSTAIN_PROFILE`` so the `task` tool is registered.
+      * An ``anthropic`` provider is registered from env-var auth so the
+        live-LLM ``@requires_api`` tests can reach a model (skip cleanly if not).
+    """
+    import tempfile as _tempfile
+
+    from fixtures.agents import write_custom_agent
+
+    allowed_tools = ["Read", "Glob", "Grep", "task"]
+
+    tmp = _tempfile.TemporaryDirectory(prefix="rustain_subagent_test_")
+    ws = Path(tmp.name)
+
+    # Delegation target: a minimal, deterministic echo-style agent.
+    write_custom_agent(
+        ws,
+        "echo-agent",
+        "Echoes back a single requested word for E2E smoke testing.",
+        body="You are a deterministic echo agent. Reply with exactly the word "
+        "the caller asks for and nothing else.\n",
+        allowed_tools=["Read"],
+    )
+
+    config_dir = ws / ".rustain"
+    _write_subagent_provider_config(config_dir, allowed_tools)
+    _write_subagent_profile(config_dir, profile_name="tests-subagent")
+
+    harness = RustainTUI(
+        fresh=True,
+        build=False,
+        workspace=ws,
+        allowed_tools=allowed_tools,
+        env_overrides={"RUSTAIN_PROFILE": "tests-subagent"},
     )
     harness.start()
     try:
