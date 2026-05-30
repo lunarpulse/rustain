@@ -95,6 +95,20 @@ impl std::fmt::Display for AgentValidationError {
 
 impl std::error::Error for AgentValidationError {}
 
+impl AgentDef {
+    /// Story 10.7 — synthetic default worker agent definition.
+    pub fn default_worker() -> Self {
+        Self {
+            name: "default".to_string(),
+            description: "Default worker agent".to_string(),
+            file: PathBuf::new(),
+            allowed_tools: None,
+            exclude_tools: None,
+            model: None,
+        }
+    }
+}
+
 pub fn validate_agent_frontmatter(
     name: &str,
     description: &str,

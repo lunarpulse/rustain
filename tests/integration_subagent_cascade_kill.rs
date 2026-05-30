@@ -3,19 +3,56 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use futures::{StreamExt, stream::BoxStream};
 use rustain::adapters::subagent::InProcessSubagentRunner;
 use rustain::domain::models::{
-    AgentId, AgentLaunchSpec, Op, SandboxPolicy, SubagentRunStatus, ToolPolicy,
+    AgentId, AgentLaunchSpec, Op, SandboxPolicy, StreamChunk, SubagentRunStatus, ToolPolicy,
 };
-use rustain::domain::ports::SubagentRunner;
+use rustain::domain::ports::{StreamingProvider, SubagentRunner};
 use rustain::infrastructure::subagent::{AgentHandle, CascadeKillError, SubagentRegistry};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+struct HangingProvider;
+
+#[async_trait]
+impl StreamingProvider for HangingProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<rustain::domain::models::Message>,
+        _options: rustain::domain::models::CompletionOptions,
+    ) -> Result<BoxStream<'static, StreamChunk>, rustain::domain::errors::ProviderError> {
+        let chunks = vec![StreamChunk::Text {
+            content: "working...".into(),
+            parent_tool_use_id: None,
+        }];
+        let stream = futures::stream::iter(chunks)
+            .chain(futures::stream::pending());
+        Ok(Box::pin(stream))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "hanging".into()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::provider::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+}
+
 async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let provider = Arc::new(rustain::adapters::noop::NoOpProvider)
-        as Arc<dyn rustain::domain::ports::StreamingProvider>;
+    let provider = Arc::new(HangingProvider)
+        as Arc<dyn StreamingProvider>;
     let storage = Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(
         tmp.path().to_path_buf(),
     )) as Arc<dyn rustain::domain::ports::StoragePort>;

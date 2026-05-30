@@ -47,6 +47,7 @@ pub async fn run_turn(
     resolved: ResolvedModel,
     step_kind: Option<StepKind>,
     parent_ctx_tokens: u32,
+    parent_trace: Option<crate::domain::models::TraceContext>,
     session_id: String,
 ) {
     // Persist the conversation before the first API call so that
@@ -263,6 +264,9 @@ pub async fn run_turn(
                                 checkpoint,
                                 caller_depth,
                             )
+                            .await;
+                        tools
+                            .set_parent_context(parent_ctx_tokens, parent_trace.clone())
                             .await;
 
                         let indexed: Vec<(usize, ToolCallInfo)> =

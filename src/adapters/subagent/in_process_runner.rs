@@ -109,6 +109,8 @@ impl SubagentRunner for InProcessSubagentRunner {
         let bridge_tx_for_spawn = bridge_tx.clone();
         let bridge_tx_for_panic = bridge_tx.clone();
 
+        let tools = self.tools.clone();
+        let security = self.security.clone();
         let _handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(run_child(
                 spec,
@@ -117,6 +119,8 @@ impl SubagentRunner for InProcessSubagentRunner {
                 approval,
                 event_bus,
                 spool,
+                tools,
+                security,
                 status_tx,
                 bridge_tx_for_spawn,
                 command_rx,
@@ -204,20 +208,29 @@ impl SubagentRunner for InProcessSubagentRunner {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_child(
-    _spec: AgentLaunchSpec,
-    _provider: Arc<dyn crate::domain::ports::StreamingProvider>,
-    _scheduler: Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
+    spec: AgentLaunchSpec,
+    provider: Arc<dyn crate::domain::ports::StreamingProvider>,
+    scheduler: Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
     _approval: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
     _event_bus: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
-    _spool: Arc<SubagentSpool>,
+    spool: Arc<SubagentSpool>,
+    tools: Arc<dyn crate::domain::ports::ToolSetPort>,
+    _security: Arc<dyn crate::domain::ports::SecurityPort>,
     status_tx: mpsc::Sender<SubagentRunStatus>,
     bridge_tx: mpsc::Sender<SubagentRunStatus>,
     mut command_rx: mpsc::Receiver<Op>,
     cancel: CancellationToken,
     agent_id: AgentId,
-    _task_id: String,
+    task_id: String,
     child_state: Arc<crate::adapters::subagent::ChildState>,
 ) {
+    use crate::domain::models::{
+        CompletionOptions, Message, MessageRole, StopReason, StreamChunk, ToolCallInfo,
+        ToolCallRequest, ToolResultMessage, ToolUseMessage,
+    };
+    use crate::domain::models::tool_call::ApprovalSource;
+    use futures::StreamExt;
+
     // Helper: emit status to both channels + update ChildState watch sender
     async fn emit_status(
         s: SubagentRunStatus,
@@ -243,56 +256,293 @@ async fn run_child(
     )
     .await;
 
-    // v0 simplified child body — Story 10.7 will wire the full provider+scheduler loop.
-    // For the foundation, we just wait for cancellation or owner commands.
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
-                break;
-            }
-            Some(op) = command_rx.recv() => {
-                match op {
-                    Op::Kill => {
-                        emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
-                        break;
-                    }
-                    Op::Pause => {
-                        child_state.paused.store(true, std::sync::atomic::Ordering::Release);
-                        emit_status(SubagentRunStatus::Idle, &status_tx, &bridge_tx, &child_state).await;
-                        tracing::info!(agent_id = %agent_id.0, "Subagent paused");
-                    }
-                    Op::Resume => {
-                        child_state.paused.store(false, std::sync::atomic::Ordering::Release);
-                        emit_status(SubagentRunStatus::RunningFg, &status_tx, &bridge_tx, &child_state).await;
-                        tracing::info!(agent_id = %agent_id.0, "Subagent resumed");
-                    }
-                    Op::ChangeModel(new_model) => {
-                        child_state.effective_model.store(Arc::new(new_model.clone()));
-                        tracing::info!(agent_id = %agent_id.0, model = %new_model, "Subagent model changed");
-                    }
-                    Op::UpdateTools(allowlist) => {
-                        let policy = crate::domain::models::ToolPolicy::Allowlist {
-                            tools: allowlist.into_iter().collect(),
-                        };
-                        child_state.tools_allow.store(Arc::new(policy));
-                        tracing::info!(agent_id = %agent_id.0, "Subagent tools updated");
-                    }
-                    Op::ReportFull => {
-                        let current = *child_state.status.borrow();
-                        emit_status(current, &status_tx, &bridge_tx, &child_state).await;
-                        tracing::info!(agent_id = %agent_id.0, status = ?current, "Subagent ReportFull");
+    // Build initial messages from the prompt
+    let mut messages = vec![Message {
+        role: MessageRole::User,
+        content: spec.prompt.clone(),
+        images: vec![],
+        tool_results: vec![],
+        tool_uses: vec![],
+        context_prefix: None,
+        reasoning_content: None,
+    }];
+
+    let max_iterations = 10;
+
+    for _iteration in 0..max_iterations {
+        // Check cancellation first
+        if cancel.is_cancelled() {
+            emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+            return;
+        }
+
+        // Wait if paused
+        while child_state.paused.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                    return;
+                }
+                Some(op) = command_rx.recv() => {
+                    match op {
+                        Op::Resume => {
+                            child_state.paused.store(false, std::sync::atomic::Ordering::Release);
+                            emit_status(SubagentRunStatus::RunningFg, &status_tx, &bridge_tx, &child_state).await;
+                        }
+                        Op::Kill => {
+                            emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                            return;
+                        }
+                        _ => {}
                     }
                 }
+                else => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                }
             }
-            else => {
-                // Channels closed — exit
+        }
+
+        // Poll for owner commands without blocking
+        loop {
+            match command_rx.try_recv() {
+                Ok(Op::Kill) => {
+                    emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                    return;
+                }
+                Ok(Op::Pause) => {
+                    child_state.paused.store(true, std::sync::atomic::Ordering::Release);
+                    emit_status(SubagentRunStatus::Idle, &status_tx, &bridge_tx, &child_state).await;
+                    break;
+                }
+                Ok(Op::ChangeModel(new_model)) => {
+                    child_state.effective_model.store(Arc::new(new_model));
+                }
+                Ok(Op::UpdateTools(allowlist)) => {
+                    let policy = crate::domain::models::ToolPolicy::Allowlist {
+                        tools: allowlist.into_iter().collect(),
+                    };
+                    child_state.tools_allow.store(Arc::new(policy));
+                }
+                Ok(Op::ReportFull) => {
+                    let current = *child_state.status.borrow();
+                    emit_status(current, &status_tx, &bridge_tx, &child_state).await;
+                }
+                Ok(Op::Resume) => {
+                    child_state.paused.store(false, std::sync::atomic::Ordering::Release);
+                    emit_status(SubagentRunStatus::RunningFg, &status_tx, &bridge_tx, &child_state).await;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    emit_status(SubagentRunStatus::Completed, &status_tx, &bridge_tx, &child_state).await;
+                    return;
+                }
+            }
+        }
+
+        if child_state.paused.load(std::sync::atomic::Ordering::Acquire) {
+            continue; // Go back to pause wait loop
+        }
+
+        // Build completion options from ChildState
+        let model = (*child_state.effective_model.load_full()).clone();
+        // P9 fix: filter available tools by the current ToolPolicy from ChildState
+        let all_tools = tools.available_tools();
+        let policy = child_state.tools_allow.load_full();
+        let filtered_tools = match (*policy).clone() {
+            crate::domain::models::ToolPolicy::Allowlist { tools: allowed } => {
+                all_tools.into_iter().filter(|t| allowed.contains(&t.name)).collect()
+            }
+            crate::domain::models::ToolPolicy::Denylist { tools: denied } => {
+                all_tools.into_iter().filter(|t| !denied.contains(&t.name)).collect()
+            }
+            crate::domain::models::ToolPolicy::InheritFromParent => all_tools,
+        };
+        let options = CompletionOptions {
+            model,
+            max_tokens: 4096,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: filtered_tools,
+        };
+
+        // Stream completion
+        let stream_result = provider.stream_completion(messages.clone(), options).await;
+        let mut stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("Provider error: {}", e);
+                if let Err(spool_err) = spool.append(&task_id, msg.as_bytes()).await {
+                    tracing::warn!(task_id = %task_id, error = %spool_err, "Spool append failed for provider error");
+                }
+                emit_status(SubagentRunStatus::Failed, &status_tx, &bridge_tx, &child_state).await;
+                return;
+            }
+        };
+
+        let mut accumulated_text = String::new();
+        let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+        let mut received_turn_complete = false;
+        let mut stop_reason = StopReason::EndTurn;
+
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                    return;
+                }
+                maybe_chunk = stream.next() => {
+                    match maybe_chunk {
+                        Some(c) => c,
+                        None => break,
+                    }
+                }
+            };
+
+            match &chunk {
+                StreamChunk::TurnComplete { stop_reason: sr } => {
+                    received_turn_complete = true;
+                    stop_reason = sr.clone();
+                }
+                StreamChunk::ToolUse { id, name, input } => {
+                    tool_calls.push(ToolCallInfo {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        result: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        status: None,
+                    });
+                }
+                StreamChunk::Text { content, .. } => {
+                    accumulated_text.push_str(content);
+                    if let Err(e) = spool.append(&task_id, content.as_bytes()).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for text chunk");
+                    }
+                }
+                StreamChunk::Thinking { content, .. } => {
+                    if let Err(e) = spool.append(&task_id, content.as_bytes()).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for thinking chunk");
+                    }
+                }
+                StreamChunk::Error { content } => {
+                    if let Err(e) = spool.append(&task_id, format!("ERROR: {}", content).as_bytes()).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for error chunk");
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !received_turn_complete {
+            tracing::warn!(agent_id = %agent_id.0, "Provider stream ended without TurnComplete");
+            emit_status(SubagentRunStatus::Failed, &status_tx, &bridge_tx, &child_state).await;
+            return;
+        }
+
+        match stop_reason {
+            StopReason::ToolUse => {
+                if tool_calls.is_empty() {
+                    emit_status(SubagentRunStatus::Completed, &status_tx, &bridge_tx, &child_state).await;
+                    return;
+                }
+
+                // Build assistant message with tool uses
+                let tool_use_msgs: Vec<ToolUseMessage> = tool_calls
+                    .iter()
+                    .map(|tc| ToolUseMessage {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        input: tc.input.clone(),
+                    })
+                    .collect();
+                messages.push(Message {
+                    role: MessageRole::Assistant,
+                    content: std::mem::take(&mut accumulated_text),
+                    images: vec![],
+                    tool_results: vec![],
+                    tool_uses: tool_use_msgs,
+                    context_prefix: None,
+                    reasoning_content: None,
+                });
+
+                // Dispatch tool calls through scheduler with ForegroundSubagent source
+                let requests: Vec<ToolCallRequest> = tool_calls
+                    .drain(..)
+                    .map(|tc| ToolCallRequest {
+                        id: tc.id,
+                        tool_name: tc.name,
+                        input: tc.input,
+                    })
+                    .collect();
+
+                let source = ApprovalSource::ForegroundSubagent {
+                    conversation_id: agent_id.0.clone(),
+                    parent_tool_call_id: task_id.clone(),
+                    subagent_type: "in-process".to_string(),
+                };
+
+                let terminal = scheduler
+                    .clone()
+                    .schedule(source, requests, cancel.clone(), None)
+                    .await;
+
+                let mut tool_result_messages: Vec<ToolResultMessage> = Vec::new();
+                for call in terminal {
+                    let (id, content, is_error) = match call {
+                        crate::domain::models::ToolCall::Success { id, result, .. } => {
+                            (id, result.output, result.is_error)
+                        }
+                        crate::domain::models::ToolCall::Error { id, error, .. } => {
+                            (id, error, true)
+                        }
+                        crate::domain::models::ToolCall::Cancelled { id, reason, .. } => {
+                            (id, format!("Tool execution cancelled: {}", reason), true)
+                        }
+                        _ => continue,
+                    };
+                    tool_result_messages.push(ToolResultMessage {
+                        tool_use_id: id,
+                        content: content.clone(),
+                        is_error,
+                    });
+                    if let Err(e) = spool.append(&task_id, format!("\n[tool result]: {}\n", content).as_bytes()).await {
+                        tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for tool result");
+                    }
+                }
+
+                // Append tool results as user message
+                messages.push(Message {
+                    role: MessageRole::User,
+                    content: String::new(),
+                    images: vec![],
+                    tool_results: tool_result_messages,
+                    tool_uses: vec![],
+                    context_prefix: None,
+                    reasoning_content: None,
+                });
+
+                // Loop back for next turn
+                continue;
+            }
+            StopReason::EndTurn | StopReason::MaxTokens => {
+                // P1 fix: text was already appended per-chunk during streaming; no redundant write
                 emit_status(SubagentRunStatus::Completed, &status_tx, &bridge_tx, &child_state).await;
-                break;
+                return;
+            }
+            StopReason::Cancelled => {
+                emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                return;
             }
         }
     }
+
+    // P5 fix: Max iterations reached — emit Failed, not Completed
+    tracing::warn!(agent_id = %agent_id.0, "Subagent reached max tool iterations");
+    let _ = spool.append(&task_id, b"WARNING: max tool iterations reached\n").await;
+    emit_status(SubagentRunStatus::Failed, &status_tx, &bridge_tx, &child_state).await;
 }
 
 #[cfg(test)]
@@ -303,15 +553,98 @@ mod tests {
     use crate::adapters::sandbox::NoOpSandbox;
     use crate::adapters::security_adapter::SecurityAdapter;
     use crate::adapters::toolset_adapter::ToolSetAdapter;
+    use crate::domain::models::{
+        CompletionOptions, Message, ModelDescriptor, StreamChunk,
+    };
+    use crate::domain::ports::StreamingProvider;
     use crate::domain::services::approval_runtime::ApprovalRuntime;
     use crate::domain::services::tool_scheduler::ToolScheduler;
     use crate::infrastructure::runtime::event_bus::EventBus;
     use arc_swap::ArcSwap;
+    use futures::{StreamExt, stream::BoxStream};
     use std::path::PathBuf;
+
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for HangingProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let chunks = vec![StreamChunk::Text {
+                content: "working...".into(),
+                parent_tool_use_id: None,
+            }];
+            let stream = futures::stream::iter(chunks)
+                .chain(futures::stream::pending());
+            Ok(Box::pin(stream))
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "hanging".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+    }
 
     async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
-        let provider = Arc::new(NoOpProvider) as Arc<dyn crate::domain::ports::StreamingProvider>;
+        let provider = Arc::new(NoOpProvider) as Arc<dyn StreamingProvider>;
+        let storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let security = Arc::new(SecurityAdapter::new(PathBuf::from(".")))
+            as Arc<dyn crate::domain::ports::SecurityPort>;
+        let sandbox = Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
+        ));
+        let tools = Arc::new(ToolSetAdapter::new(
+            PathBuf::from("."),
+            storage.clone(),
+            sandbox,
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+        )) as Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = ApprovalRuntime::new(1024, Arc::new(NoOpApprovalPersistence));
+        let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
+        let (event_bus, _event_rx) = EventBus::new(1024);
+        let event_bus = Arc::new(event_bus);
+        let registry = Arc::new(SubagentRegistry::new());
+        let parent_sandbox = Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage,
+            security,
+            tools,
+            approval,
+            scheduler,
+            event_bus,
+            registry,
+            parent_sandbox,
+            spool,
+        );
+        (runner, tmp)
+    }
+
+    async fn make_hanging_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(HangingProvider) as Arc<dyn StreamingProvider>;
         let storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
             as Arc<dyn crate::domain::ports::StoragePort>;
         let security = Arc::new(SecurityAdapter::new(PathBuf::from(".")))
@@ -409,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_pause_sets_atomic() {
-        let (runner, _tmp) = make_runner().await;
+        let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
             effective_model: String::from("test-model"),
@@ -437,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_resume_clears_atomic() {
-        let (runner, _tmp) = make_runner().await;
+        let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
             effective_model: String::from("test-model"),
@@ -464,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_change_model_swaps() {
-        let (runner, _tmp) = make_runner().await;
+        let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
             effective_model: String::from("test-model"),
@@ -486,7 +819,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_update_tools_swaps() {
-        let (runner, _tmp) = make_runner().await;
+        let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
             effective_model: String::from("test-model"),
@@ -510,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_report_full_emits_status() {
-        let (runner, _tmp) = make_runner().await;
+        let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
             effective_model: String::from("test-model"),

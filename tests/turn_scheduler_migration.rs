@@ -244,6 +244,7 @@ async fn turn_scheduler_migration() {
         },
         None,
         0,
+        None,
         "sess-test".into(),
     )
     .await;

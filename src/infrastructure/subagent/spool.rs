@@ -170,7 +170,6 @@ impl SubagentSpool {
             }
             _ => match fs::read_to_string(&path).await {
                 Ok(s) => Ok(s),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
                 Err(e) => Err(e),
             },
         }

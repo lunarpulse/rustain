@@ -25,6 +25,7 @@ static COMPOSITE_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::domain::errors::{ToolError, TransitionError};
 use crate::domain::events::{AppEvent, ToolProgressEvent};
+use crate::domain::ports::CapabilityProvider;
 use crate::domain::models::{
     CheckpointId, HealthSummary, McpConnectionState, McpHealthRow, McpServerSpec, ToolDefinition,
     ToolResult, TransitionState, capability_registry::CapabilityRegistry,
@@ -47,7 +48,7 @@ pub struct CompositeToolsetAdapter {
     subscription_handles: TokioMutex<Vec<RegisterHandle>>,
     /// Story 9.3b — optional skill activator for `SkillsProvider` registration.
     skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
-    /// Story 9.3b — previous catalog snapshot for delta computation.
+    /// Story 10.3b — previous catalog snapshot for delta computation.
     prev_catalog: TokioMutex<Vec<crate::domain::models::tool_descriptor::ToolDescriptor>>,
     /// Story 9.3b — monotonic version counter for catalog deltas.
     catalog_version: AtomicU64,
@@ -61,6 +62,9 @@ pub struct CompositeToolsetAdapter {
     /// Story 10.0 — optional subagent provider for agent dispatch.
     /// Uses OnceLock for two-phase wiring (adapter built first, then provider).
     subagent_provider: std::sync::OnceLock<Arc<crate::adapters::subagent::SubagentProvider>>,
+    /// D1 fix: per-turn context stored here, injected into subagent input JSON at dispatch.
+    parent_ctx: Arc<tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>>,
+    conversation_id: Arc<tokio::sync::RwLock<String>>,
 }
 
 impl CompositeToolsetAdapter {
@@ -99,6 +103,8 @@ impl CompositeToolsetAdapter {
             #[cfg(feature = "meta-search")]
             catalog_broadcast: std::sync::OnceLock::new(),
             subagent_provider: subagent_provider_cell,
+            parent_ctx: Arc::new(tokio::sync::RwLock::new(None)),
+            conversation_id: Arc::new(tokio::sync::RwLock::new(String::new())),
         }
     }
 
@@ -394,6 +400,20 @@ impl ToolSetPort for CompositeToolsetAdapter {
             }
         }
 
+        // Story 10.7 — include subagent capabilities from the registry snapshot.
+        // The registry holds capabilities discovered from all providers; subagent
+        // tools (task, read_task_output) are advertised via SubagentProvider::discover().
+        for cap in self.capability_registry.snapshot() {
+            if cap.protocol == "subagent" {
+                out.push(ToolDefinition {
+                    name: cap.name.clone(),
+                    description: cap.description.clone(),
+                    input_schema: cap.input_schema.clone(),
+                    parallel_safe: cap.parallel_safe,
+                });
+            }
+        }
+
         out
     }
 
@@ -515,6 +535,30 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 .dispatch_mcp_call(client, tool_name_inner, input, cancel, synthetic_id, None)
                 .await;
         }
+
+        // Story 10.7 — route subagent capabilities to SubagentProvider::invoke().
+        // D1 fix: inject per-turn context into input JSON before dispatch.
+        if let Some(subagent_provider) = self.subagent_provider.get() {
+            for cap in self.capability_registry.snapshot() {
+                if cap.protocol == "subagent" && cap.name == tool_name {
+                    let mut enriched_input = input;
+                    if let Some(obj) = enriched_input.as_object_mut() {
+                        let ctx = self.parent_ctx.read().await;
+                        if let Some(ref ctx) = *ctx {
+                            obj.insert("__parent_ctx_tokens".into(), serde_json::json!(ctx.parent_ctx_tokens));
+                            obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
+                        }
+                        let conv_id = self.conversation_id.read().await;
+                        obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
+                    }
+                    return subagent_provider
+                        .invoke(&cap.id, enriched_input, cancel)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
+                }
+            }
+        }
+
         self.builtin.execute(tool_name, input, cancel).await
     }
 
@@ -548,6 +592,31 @@ impl ToolSetPort for CompositeToolsetAdapter {
                 )
                 .await;
         }
+
+        // Story 10.7 — route subagent capabilities to SubagentProvider::invoke().
+        // D1 fix: inject per-turn context into input JSON before dispatch.
+        if let Some(subagent_provider) = self.subagent_provider.get() {
+            for cap in self.capability_registry.snapshot() {
+                if cap.protocol == "subagent" && cap.name == tool_name {
+                    let _ = (tool_use_id, progress_tx);
+                    let mut enriched_input = input;
+                    if let Some(obj) = enriched_input.as_object_mut() {
+                        let ctx = self.parent_ctx.read().await;
+                        if let Some(ref ctx) = *ctx {
+                            obj.insert("__parent_ctx_tokens".into(), serde_json::json!(ctx.parent_ctx_tokens));
+                            obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
+                        }
+                        let conv_id = self.conversation_id.read().await;
+                        obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
+                    }
+                    return subagent_provider
+                        .invoke(&cap.id, enriched_input, cancel)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(e.to_string()));
+                }
+            }
+        }
+
         self.builtin
             .execute_with_id(tool_name, tool_use_id, input, cancel, progress_tx)
             .await
@@ -691,8 +760,24 @@ impl ToolSetPort for CompositeToolsetAdapter {
         checkpoint: CheckpointId,
         activation_depth: u8,
     ) {
+        // P3 fix: store conversation_id on CTA for subagent context injection
+        *self.conversation_id.write().await = conversation_id.clone();
         self.builtin
             .set_execution_context(conversation_id, checkpoint, activation_depth)
             .await;
+    }
+
+    async fn set_parent_context(
+        &self,
+        parent_ctx_tokens: u32,
+        parent_trace: Option<crate::domain::models::TraceContext>,
+    ) {
+        // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time
+        *self.parent_ctx.write().await = Some(crate::adapters::subagent::subagent_provider::TaskToolContext {
+            conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
+            parent_ctx_tokens,
+            parent_trace: parent_trace.clone(),
+        });
+        self.builtin.set_parent_context(parent_ctx_tokens, parent_trace).await;
     }
 }

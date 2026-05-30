@@ -8542,6 +8542,21 @@ async fn start_turn_inner(
     streaming.is_streaming = true;
     streaming.phase = crate::domain::models::StreamingPhase::AccumulatingText;
 
+    // Story 10.7 — rough parent context token estimate (1 token ≈ 4 chars)
+    let parent_ctx_tokens: u32 = conversation
+        .messages
+        .iter()
+        .map(|m| m.content.len() as u32 / 4)
+        .sum();
+
+    // Story 10.7 — generate W3C Trace Context for subagent propagation
+    let parent_trace = {
+        let ts = chrono::Utc::now().timestamp_millis();
+        let trace_id = format!("{:032x}", ts.wrapping_mul(31));
+        let span_id = format!("{:016x}", (ts.wrapping_mul(17) as u64) & 0xFFFF_FFFF_FFFF_FFFF_u64);
+        crate::domain::models::TraceContext::new(trace_id, span_id, 1).ok()
+    };
+
     let handle = tokio::spawn(turn::run_turn(
         provider.clone(),
         messages,
@@ -8558,7 +8573,8 @@ async fn start_turn_inner(
         usage_ledger.clone(),
         resolved,
         None,
-        0,
+        parent_ctx_tokens,
+        parent_trace,
         session_id,
     ));
     *active_turn = Some(handle);

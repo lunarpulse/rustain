@@ -298,21 +298,21 @@ fn test_status_panel_shows_registry_count() {
 
     let cap = test_capability("mcp", "postgres", "query");
     rt.block_on(async {
-        let _handle = registry.register(cap).await.unwrap();
+        let handle = registry.register(cap).await.unwrap();
+
+        let snap = registry.snapshot();
+        assert_eq!(snap.len(), 1, "registry should have 1 capability");
+
+        let summary = format_registry_summary(&snap);
+        assert_eq!(
+            summary,
+            Some("Registry: 1 capabilities (1 MCP, 0 builtin, 0 skill)".to_string()),
+            "panel should render correct registry summary"
+        );
+
+        drop(handle);
     });
 
-    let snap = registry.snapshot();
-    assert_eq!(snap.len(), 1, "registry should have 1 capability");
-
-    // Test the actual panel formatting function
-    let summary = format_registry_summary(&snap);
-    assert_eq!(
-        summary,
-        Some("Registry: 1 capabilities (1 MCP, 0 builtin, 0 skill)".to_string()),
-        "panel should render correct registry summary"
-    );
-
-    // Empty snapshot returns None
     let empty: Vec<RegisteredCapability> = vec![];
     assert_eq!(format_registry_summary(&empty), None);
 }
@@ -1073,8 +1073,7 @@ async fn test_subagent_provider_discover_round_trip() {
     }
     let runner = Arc::new(StubRunner) as Arc<dyn rustain::domain::ports::SubagentRunner>;
     let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
-    let mut agent_reg = AgentRegistry::new();
-    agent_reg = AgentRegistry::from_agents(vec![
+    let agent_reg = AgentRegistry::from_agents(vec![
         AgentDef {
             name: "code-reviewer".into(),
             description: "Reviews code for bugs".into(),
@@ -1149,10 +1148,11 @@ async fn test_subagent_provider_discover_round_trip() {
 
     assert_eq!(
         capabilities.len(),
-        2,
-        "Expected 2 capabilities for 2 agent defs"
+        4,
+        "Expected 4 capabilities: task + read_task_output for each of 2 agents"
     );
     let names: Vec<String> = capabilities.iter().map(|c| c.name.clone()).collect();
     assert!(names.contains(&"code-reviewer".to_string()));
     assert!(names.contains(&"test-writer".to_string()));
+    assert!(names.contains(&"read_task_output".to_string()));
 }

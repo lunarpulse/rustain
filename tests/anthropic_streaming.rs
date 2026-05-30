@@ -754,6 +754,7 @@ data: {\"type\":\"message_stop\"}\n\
             },
             None,
             0,
+            None,
             "sess-test".into(),
         )
         .await;

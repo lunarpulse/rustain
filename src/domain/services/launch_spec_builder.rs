@@ -45,6 +45,41 @@ impl LaunchSpecBuilder {
         }
     }
 
+    /// Story 10.7: build a launch spec for the `task` tool path.
+    pub fn from_task_tool(
+        prompt: &str,
+        agent_def: &AgentDef,
+        resolved_model: &str,
+        tier: crate::domain::models::ModelTier,
+        parent_ctx_tokens: u32,
+        parent_trace: Option<TraceContext>,
+    ) -> AgentLaunchSpec {
+        let effective_model = agent_def
+            .model
+            .clone()
+            .unwrap_or_else(|| resolved_model.to_string());
+        let tools_allow = match &agent_def.allowed_tools {
+            Some(allow) if !allow.is_empty() => ToolPolicy::Allowlist {
+                tools: allow.iter().cloned().collect(),
+            },
+            _ => match &agent_def.exclude_tools {
+                Some(deny) if !deny.is_empty() => ToolPolicy::Denylist {
+                    tools: deny.iter().cloned().collect(),
+                },
+                _ => ToolPolicy::InheritFromParent,
+            },
+        };
+        AgentLaunchSpec {
+            prompt: prompt.to_string(),
+            effective_model,
+            tier,
+            tools_allow,
+            parent_ctx_tokens,
+            sandbox_override: None,
+            parent_trace,
+        }
+    }
+
     /// Story 10.6: build a launch spec for a sub-task delegated to `agent_def`.
     pub fn from_sub_task(
         parent: &PlanTask,
