@@ -319,8 +319,7 @@ pub fn render_task_panel(
                 }
 
                 if !task.depends_on.is_empty() {
-                    let deps: Vec<String> =
-                        task.depends_on.iter().map(|d| d.to_string()).collect();
+                    let deps: Vec<String> = task.depends_on.iter().map(|d| d.to_string()).collect();
                     spans.push(Span::styled(
                         format!(" deps: {}", deps.join(", ")),
                         Style::default().fg(theme.colors.fg_muted),
@@ -389,11 +388,13 @@ pub fn render_task_panel(
                     }
                     let text = Text::from(lines);
                     if i == selected_index && is_focused {
-                        ListItem::new(text.style(
-                            Style::default()
-                                .fg(theme.colors.fg_primary)
-                                .add_modifier(Modifier::REVERSED),
-                        ))
+                        ListItem::new(
+                            text.style(
+                                Style::default()
+                                    .fg(theme.colors.fg_primary)
+                                    .add_modifier(Modifier::REVERSED),
+                            ),
+                        )
                     } else {
                         ListItem::new(text)
                     }

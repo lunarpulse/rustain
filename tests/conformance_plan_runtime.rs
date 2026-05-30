@@ -194,7 +194,7 @@ async fn ac2_per_task_turn_records_result() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
     add_assistant_msg(&mut conv, "Setup complete. Files created.");
 
@@ -249,7 +249,7 @@ async fn ac3_dependency_blocks_downstream_on_failure() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -374,7 +374,7 @@ async fn ac3_dependency_chain_full_skip() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -457,7 +457,7 @@ async fn ac5_skipped_emits_warning_notice() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -506,7 +506,7 @@ async fn ac6_summary_message_appended() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -558,7 +558,7 @@ async fn ac6_summary_aggregation_math() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -630,7 +630,7 @@ async fn ac7_events_fire_in_order() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -748,7 +748,7 @@ async fn ac9_cancelled_task_stops_walk() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime
@@ -844,7 +844,7 @@ async fn fu3_stores_full_result_text_when_exceeds_legacy_cap() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     let big = "x".repeat(1_048_576);
@@ -1011,7 +1011,7 @@ async fn ac10_5_default_no_delegation_is_no_op() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     // Walk should be byte-identical to pre-10.5 path
@@ -1324,13 +1324,22 @@ fn ac10_6_no_new_std_sync_locks_in_async_modules() {
         "src/domain/models/config.rs",
     ];
 
-    let forbidden = ["std::sync::Mutex", "std::sync::RwLock", "parking_lot::Mutex", "parking_lot::RwLock"];
+    let forbidden = [
+        "std::sync::Mutex",
+        "std::sync::RwLock",
+        "parking_lot::Mutex",
+        "parking_lot::RwLock",
+    ];
 
     for file in &files {
-        let content = std::fs::read_to_string(file).unwrap_or_else(|_| panic!("Failed to read {}", file));
+        let content =
+            std::fs::read_to_string(file).unwrap_or_else(|_| panic!("Failed to read {}", file));
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("// ") || trimmed.starts_with("///") || trimmed.starts_with("//!") {
+            if trimmed.starts_with("// ")
+                || trimmed.starts_with("///")
+                || trimmed.starts_with("//!")
+            {
                 continue;
             }
             if trimmed.contains("CONFORMANCE_EXCEPTION_STD_SYNC_LOCK") {

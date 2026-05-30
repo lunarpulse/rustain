@@ -75,8 +75,8 @@ pub use config::AppConfig;
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
 pub use config::{
-    AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig, SubTaskFailurePolicy,
-    ToolProgressConfig,
+    AutoApprovePolicy, AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig,
+    SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::ContentBlockType;

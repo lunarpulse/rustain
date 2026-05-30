@@ -140,7 +140,10 @@ async fn propose_plan_rejects_invalid_input_without_emitting() {
             CancellationToken::new(),
         )
         .await;
-    assert!(result.is_err(), "empty tasks must be rejected as InvalidInput");
+    assert!(
+        result.is_err(),
+        "empty tasks must be rejected as InvalidInput"
+    );
     assert!(
         rx.try_recv().is_err(),
         "no PlanProposed event on invalid input"

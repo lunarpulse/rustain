@@ -2,9 +2,7 @@
 //!
 //! Verifies result aggregation and failure policies for decomposed parent tasks.
 
-use rustain::domain::models::{
-    DelegationInfo, PlanSubTask, PlanTask, PlanTaskStatus, TaskResult,
-};
+use rustain::domain::models::{DelegationInfo, PlanSubTask, PlanTask, PlanTaskStatus, TaskResult};
 use rustain::domain::services::plan_runtime::PlanRuntime;
 
 fn make_task(number: u32, title: &str) -> PlanTask {
@@ -35,8 +33,7 @@ fn make_sub_task(number: u32, title: &str, status: PlanTaskStatus) -> PlanSubTas
         } else {
             Some(1000)
         },
-        completed_at_ms: if status == PlanTaskStatus::Running || status == PlanTaskStatus::Pending
-        {
+        completed_at_ms: if status == PlanTaskStatus::Running || status == PlanTaskStatus::Pending {
             None
         } else {
             Some(5000)

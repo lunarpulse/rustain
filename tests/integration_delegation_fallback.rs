@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus, SubTaskFailurePolicy,
-    generate_conversation_id,
+    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+    SubTaskFailurePolicy, generate_conversation_id,
 };
 use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::plan_runtime::PlanRuntime;
@@ -110,7 +110,7 @@ async fn integration_delegation_fallback_on_failed_launch() {
         &CapturedEvents::new(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
     {
         let plan = conv.plans.get_mut(&plan_id).unwrap();

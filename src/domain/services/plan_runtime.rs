@@ -182,7 +182,11 @@ impl PlanRuntime {
                 let next_sub = {
                     let plan = conversation.plans.get(&plan_id).unwrap();
                     let parent = &plan.tasks[(task_number - 1) as usize];
-                    parent.sub_tasks.iter().find(|st| st.status == PlanTaskStatus::Pending).map(|st| st.number)
+                    parent
+                        .sub_tasks
+                        .iter()
+                        .find(|st| st.status == PlanTaskStatus::Pending)
+                        .map(|st| st.number)
                 };
 
                 if let Some(sub_number) = next_sub {
@@ -206,7 +210,9 @@ impl PlanRuntime {
                         }
                     };
                     let plan = conversation.plans.get(&plan_id).unwrap();
-                    if let Some(suggestion) = DelegationDecider::suggest(plan, &synthetic_task, agents, mode) {
+                    if let Some(suggestion) =
+                        DelegationDecider::suggest(plan, &synthetic_task, agents, mode)
+                    {
                         {
                             let mut plans = self.plans.write().unwrap();
                             if let Some(state) = plans.get_mut(&plan_id) {
@@ -221,17 +227,32 @@ impl PlanRuntime {
                         });
                     } else {
                         self.dispatch_sub_task(
-                            &conversation_id, &plan_id, conversation, event_emitter, task_number, sub_number,
+                            &conversation_id,
+                            &plan_id,
+                            conversation,
+                            event_emitter,
+                            task_number,
+                            sub_number,
                         );
                     }
                 } else {
                     // All sub-tasks already terminal — finalize parent immediately
                     self.finalize_parent_task(
-                        &conversation_id, &plan_id, conversation, event_emitter, task_number,
+                        &conversation_id,
+                        &plan_id,
+                        conversation,
+                        event_emitter,
+                        task_number,
                         crate::domain::models::SubTaskFailurePolicy::default(),
                     );
                     self.advance_after_task(
-                        &conversation_id, &plan_id, conversation, event_emitter, agents, mode, None,
+                        &conversation_id,
+                        &plan_id,
+                        conversation,
+                        event_emitter,
+                        agents,
+                        mode,
+                        None,
                     );
                 }
                 return;
@@ -249,7 +270,11 @@ impl PlanRuntime {
             }
 
             self.dispatch_single_task(
-                &conversation_id, &plan_id, conversation, event_emitter, task_number,
+                &conversation_id,
+                &plan_id,
+                conversation,
+                event_emitter,
+                task_number,
             );
         }
     }
@@ -302,7 +327,9 @@ impl PlanRuntime {
         // Story 10.6: route outcome to active sub-task if present
         if let Some(sub_number) = {
             let plans = self.plans.read().unwrap();
-            plans.get(plan_id).and_then(|s| s.active_sub_tasks.get(&task_number).copied())
+            plans
+                .get(plan_id)
+                .and_then(|s| s.active_sub_tasks.get(&task_number).copied())
         } {
             self.handle_sub_task_outcome(
                 conversation_id,
@@ -660,7 +687,11 @@ impl PlanRuntime {
 
         // Apply outcome to sub-task
         match &outcome {
-            TaskTurnOutcome::Success { result_text, tool_call_count, token_count } => {
+            TaskTurnOutcome::Success {
+                result_text,
+                tool_call_count,
+                token_count,
+            } => {
                 let plan = conversation.plans.get_mut(plan_id).unwrap();
                 let sub_task = &mut plan.tasks[parent_idx].sub_tasks[sub_idx];
                 sub_task.status = PlanTaskStatus::Completed;
@@ -690,11 +721,17 @@ impl PlanRuntime {
         // Story 10.6: read failure policy
         let policy = {
             let plans = self.plans.read().unwrap();
-            plans.get(plan_id).map(|s| s.subtask_failure_policy).unwrap_or_default()
+            plans
+                .get(plan_id)
+                .map(|s| s.subtask_failure_policy)
+                .unwrap_or_default()
         };
 
         // If fail_fast and this sub-task failed, skip remaining pending siblings
-        if matches!(policy, crate::domain::models::SubTaskFailurePolicy::FailFast) {
+        if matches!(
+            policy,
+            crate::domain::models::SubTaskFailurePolicy::FailFast
+        ) {
             if let TaskTurnOutcome::Failure { .. } = outcome {
                 let plan = conversation.plans.get_mut(plan_id).unwrap();
                 let parent = &mut plan.tasks[parent_idx];
@@ -702,7 +739,10 @@ impl PlanRuntime {
                     if st.status == PlanTaskStatus::Pending {
                         st.status = PlanTaskStatus::Skipped;
                         st.completed_at_ms = Some(now_ms);
-                        st.error = Some(format!("skipped: sibling sub-task {}.{} failed", parent_number, sub_number));
+                        st.error = Some(format!(
+                            "skipped: sibling sub-task {}.{} failed",
+                            parent_number, sub_number
+                        ));
                     }
                 }
             }
@@ -724,7 +764,14 @@ impl PlanRuntime {
         };
 
         if all_terminal {
-            self.finalize_parent_task(conversation_id, plan_id, conversation, event_emitter, parent_number, policy);
+            self.finalize_parent_task(
+                conversation_id,
+                plan_id,
+                conversation,
+                event_emitter,
+                parent_number,
+                policy,
+            );
 
             // Failure cascade if parent failed (only under fail_fast)
             let parent_failed = {
@@ -753,7 +800,11 @@ impl PlanRuntime {
             let next_sub = {
                 let plan = conversation.plans.get(plan_id).unwrap();
                 let parent = &plan.tasks[parent_idx];
-                parent.sub_tasks.iter().find(|st| st.status == PlanTaskStatus::Pending).map(|st| st.number)
+                parent
+                    .sub_tasks
+                    .iter()
+                    .find(|st| st.status == PlanTaskStatus::Pending)
+                    .map(|st| st.number)
             };
 
             if let Some(sub_number) = next_sub {
@@ -777,7 +828,9 @@ impl PlanRuntime {
                     }
                 };
                 let plan = conversation.plans.get(plan_id).unwrap();
-                if let Some(suggestion) = DelegationDecider::suggest(plan, &synthetic_task, agents, mode) {
+                if let Some(suggestion) =
+                    DelegationDecider::suggest(plan, &synthetic_task, agents, mode)
+                {
                     {
                         let mut plans = self.plans.write().unwrap();
                         if let Some(state) = plans.get_mut(plan_id) {
@@ -792,7 +845,12 @@ impl PlanRuntime {
                     });
                 } else {
                     self.dispatch_sub_task(
-                        conversation_id, plan_id, conversation, event_emitter, parent_number, sub_number,
+                        conversation_id,
+                        plan_id,
+                        conversation,
+                        event_emitter,
+                        parent_number,
+                        sub_number,
                     );
                 }
             }
@@ -811,7 +869,11 @@ impl PlanRuntime {
     ) {
         if let Some(task_number) = force_task_number {
             self.dispatch_single_task(
-                conversation_id, plan_id, conversation, event_emitter, task_number,
+                conversation_id,
+                plan_id,
+                conversation,
+                event_emitter,
+                task_number,
             );
             return;
         }
@@ -894,7 +956,11 @@ impl PlanRuntime {
                 let next_sub = {
                     let plan = conversation.plans.get(plan_id).unwrap();
                     let parent = &plan.tasks[(*task_number - 1) as usize];
-                    parent.sub_tasks.iter().find(|st| st.status == PlanTaskStatus::Pending).map(|st| st.number)
+                    parent
+                        .sub_tasks
+                        .iter()
+                        .find(|st| st.status == PlanTaskStatus::Pending)
+                        .map(|st| st.number)
                 };
 
                 if let Some(sub_number) = next_sub {
@@ -919,7 +985,9 @@ impl PlanRuntime {
                         }
                     };
                     let plan = conversation.plans.get(plan_id).unwrap();
-                    if let Some(suggestion) = DelegationDecider::suggest(plan, &synthetic_task, agents, mode) {
+                    if let Some(suggestion) =
+                        DelegationDecider::suggest(plan, &synthetic_task, agents, mode)
+                    {
                         {
                             let mut plans = self.plans.write().unwrap();
                             if let Some(state) = plans.get_mut(plan_id) {
@@ -934,14 +1002,23 @@ impl PlanRuntime {
                         });
                     } else if !local_dispatched {
                         self.dispatch_sub_task(
-                            conversation_id, plan_id, conversation, event_emitter, *task_number, sub_number,
+                            conversation_id,
+                            plan_id,
+                            conversation,
+                            event_emitter,
+                            *task_number,
+                            sub_number,
                         );
                         local_dispatched = true;
                     }
                 } else {
                     // All sub-tasks already terminal — finalize parent immediately
                     self.finalize_parent_task(
-                        conversation_id, plan_id, conversation, event_emitter, *task_number,
+                        conversation_id,
+                        plan_id,
+                        conversation,
+                        event_emitter,
+                        *task_number,
                         crate::domain::models::SubTaskFailurePolicy::default(),
                     );
                 }
@@ -957,7 +1034,11 @@ impl PlanRuntime {
                 });
             } else if !local_dispatched {
                 self.dispatch_single_task(
-                    conversation_id, plan_id, conversation, event_emitter, *task_number,
+                    conversation_id,
+                    plan_id,
+                    conversation,
+                    event_emitter,
+                    *task_number,
                 );
                 local_dispatched = true;
             }
@@ -1049,7 +1130,9 @@ impl PlanRuntime {
     }
 
     /// Story 10.6 — aggregate sub-task results into a parent `TaskResult`.
-    pub fn aggregate_sub_task_results(parent: &crate::domain::models::plan::PlanTask) -> TaskResult {
+    pub fn aggregate_sub_task_results(
+        parent: &crate::domain::models::plan::PlanTask,
+    ) -> TaskResult {
         let mut lines = Vec::with_capacity(parent.sub_tasks.len());
         let mut total_tool_calls = 0u32;
         let mut total_tokens = 0u32;
@@ -1072,12 +1155,22 @@ impl PlanRuntime {
                     }
                     r.text.lines().next().unwrap_or("(no output)").to_string()
                 })
-                .or_else(|| st.error.as_ref().map(|e| e.lines().next().unwrap_or("(error)").to_string()))
+                .or_else(|| {
+                    st.error
+                        .as_ref()
+                        .map(|e| e.lines().next().unwrap_or("(error)").to_string())
+                })
                 .unwrap_or_else(|| "(no output)".to_string());
-            let mut line = format!("- [{}] Sub-task {}.{}: {} — {}", icon, parent.number, st.number, st.title, first_line);
+            let mut line = format!(
+                "- [{}] Sub-task {}.{}: {} — {}",
+                icon, parent.number, st.number, st.title, first_line
+            );
             if let Some(ref info) = st.delegated_to {
                 if let Some(ref task_id) = info.spool_task_id {
-                    line.push_str(&format!(" (full output: read_task_output(\"{}\"))", task_id));
+                    line.push_str(&format!(
+                        " (full output: read_task_output(\"{}\"))",
+                        task_id
+                    ));
                 }
             }
             lines.push(line);
@@ -1086,7 +1179,11 @@ impl PlanRuntime {
         TaskResult {
             text: lines.join("\n"),
             tool_call_count: total_tool_calls,
-            token_count: if total_tokens > 0 { Some(total_tokens) } else { None },
+            token_count: if total_tokens > 0 {
+                Some(total_tokens)
+            } else {
+                None
+            },
         }
     }
 
@@ -1109,18 +1206,31 @@ impl PlanRuntime {
                 tracing::warn!("finalize_parent_task called before all sub-tasks terminal");
                 return;
             }
-            let any_failed = parent.sub_tasks.iter().any(|st| st.status == PlanTaskStatus::Failed);
+            let any_failed = parent
+                .sub_tasks
+                .iter()
+                .any(|st| st.status == PlanTaskStatus::Failed);
             let status = if any_failed {
                 match policy {
                     crate::domain::models::SubTaskFailurePolicy::FailFast => PlanTaskStatus::Failed,
-                    crate::domain::models::SubTaskFailurePolicy::BestEffort => PlanTaskStatus::Completed,
+                    crate::domain::models::SubTaskFailurePolicy::BestEffort => {
+                        PlanTaskStatus::Completed
+                    }
                 }
             } else {
                 PlanTaskStatus::Completed
             };
-            let failed_count = parent.sub_tasks.iter().filter(|st| st.status == PlanTaskStatus::Failed).count();
+            let failed_count = parent
+                .sub_tasks
+                .iter()
+                .filter(|st| st.status == PlanTaskStatus::Failed)
+                .count();
             let error = if failed_count > 0 {
-                Some(format!("{}/{} sub-tasks failed", failed_count, parent.sub_tasks.len()))
+                Some(format!(
+                    "{}/{} sub-tasks failed",
+                    failed_count,
+                    parent.sub_tasks.len()
+                ))
             } else {
                 None
             };
@@ -1161,7 +1271,9 @@ impl PlanRuntime {
         // Story 10.6: check if this task_number has an active sub-task
         let active_sub = {
             let plans = self.plans.read().unwrap();
-            plans.get(plan_id).and_then(|s| s.active_sub_tasks.get(&task_number).copied())
+            plans
+                .get(plan_id)
+                .and_then(|s| s.active_sub_tasks.get(&task_number).copied())
         };
 
         let plan =
@@ -1319,7 +1431,9 @@ impl PlanRuntime {
             let sub_idx = (sub_number - 1) as usize;
             format!(
                 "{}.{} {}",
-                task_number, sub_number, conversation.plans[plan_id].tasks[idx].sub_tasks[sub_idx].title
+                task_number,
+                sub_number,
+                conversation.plans[plan_id].tasks[idx].sub_tasks[sub_idx].title
             )
         } else {
             conversation.plans[plan_id].tasks[idx].title.clone()
@@ -1327,10 +1441,7 @@ impl PlanRuntime {
         event_emitter.emit(AppEvent::SystemNotice {
             conversation_id: Some(conversation_id.clone()),
             level: NoticeLevel::Info,
-            message: format!(
-                "⏳ Delegated to {}: \"{}\"",
-                agent_name, delegated_title
-            ),
+            message: format!("⏳ Delegated to {}: \"{}\"", agent_name, delegated_title),
         });
 
         // 7. Spawn background task to await terminal status and emit bridge event
@@ -1723,8 +1834,8 @@ pub(crate) fn finish_plan(
                 t.result.clone(),
             ));
             for st in &t.sub_tasks {
-            let sub_title = st.title.clone();
-            snapshot.push((
+                let sub_title = st.title.clone();
+                snapshot.push((
                     t.number * 1000 + st.number,
                     sub_title,
                     st.status,
@@ -1823,11 +1934,21 @@ fn build_summary_markdown(
                 PlanTaskStatus::Completed => "✓".to_string(),
                 PlanTaskStatus::Failed => format!(
                     "✗ {}",
-                    error.as_deref().unwrap_or("error").lines().next().unwrap_or("")
+                    error
+                        .as_deref()
+                        .unwrap_or("error")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
                 ),
                 PlanTaskStatus::Skipped => format!(
                     "⏭ {}",
-                    error.as_deref().unwrap_or("skipped").lines().next().unwrap_or("")
+                    error
+                        .as_deref()
+                        .unwrap_or("skipped")
+                        .lines()
+                        .next()
+                        .unwrap_or("")
                 ),
                 _ => format!("{:?}", status),
             };
@@ -1843,8 +1964,17 @@ fn build_summary_markdown(
         }
 
         // Count sub-tasks for this parent
-        let sub_count = tasks[i + 1..].iter().take_while(|(n, _, _, _, _, _)| *n >= 1000 && *n / 1000 == *number).count();
-        let completed_subs = tasks[i + 1..].iter().take_while(|(n, _, _, _, _, _)| *n >= 1000 && *n / 1000 == *number).filter(|(_, _, s, _, _, _)| *s == PlanTaskStatus::Completed || *s == PlanTaskStatus::Skipped).count();
+        let sub_count = tasks[i + 1..]
+            .iter()
+            .take_while(|(n, _, _, _, _, _)| *n >= 1000 && *n / 1000 == *number)
+            .count();
+        let completed_subs = tasks[i + 1..]
+            .iter()
+            .take_while(|(n, _, _, _, _, _)| *n >= 1000 && *n / 1000 == *number)
+            .filter(|(_, _, s, _, _, _)| {
+                *s == PlanTaskStatus::Completed || *s == PlanTaskStatus::Skipped
+            })
+            .count();
 
         let title_with_fraction = if sub_count > 0 {
             format!("{} ({}/{} sub-tasks)", title, completed_subs, sub_count)
@@ -1938,7 +2068,10 @@ pub fn format_task_prompt(task: &PlanTask) -> String {
 }
 
 /// Story 10.6: format a sub-task prompt carrying the parent task's title as context.
-pub fn format_sub_task_prompt(parent: &PlanTask, sub_task: &crate::domain::models::plan::PlanSubTask) -> String {
+pub fn format_sub_task_prompt(
+    parent: &PlanTask,
+    sub_task: &crate::domain::models::plan::PlanSubTask,
+) -> String {
     if sub_task.description.is_empty() {
         format!(
             "(Sub-task {}.{} of task {}: {}) {}",
@@ -1947,7 +2080,12 @@ pub fn format_sub_task_prompt(parent: &PlanTask, sub_task: &crate::domain::model
     } else {
         format!(
             "(Sub-task {}.{} of task {}: {}) {}\n\n{}",
-            parent.number, sub_task.number, parent.number, parent.title, sub_task.title, sub_task.description
+            parent.number,
+            sub_task.number,
+            parent.number,
+            parent.title,
+            sub_task.title,
+            sub_task.description
         )
     }
 }

@@ -224,11 +224,11 @@ async fn run_child(
     task_id: String,
     child_state: Arc<crate::adapters::subagent::ChildState>,
 ) {
+    use crate::domain::models::tool_call::ApprovalSource;
     use crate::domain::models::{
         CompletionOptions, Message, MessageRole, StopReason, StreamChunk, ToolCallInfo,
         ToolCallRequest, ToolResultMessage, ToolUseMessage,
     };
-    use crate::domain::models::tool_call::ApprovalSource;
     use futures::StreamExt;
 
     // Helper: emit status to both channels + update ChildState watch sender
@@ -272,12 +272,21 @@ async fn run_child(
     for _iteration in 0..max_iterations {
         // Check cancellation first
         if cancel.is_cancelled() {
-            emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+            emit_status(
+                SubagentRunStatus::Killed,
+                &status_tx,
+                &bridge_tx,
+                &child_state,
+            )
+            .await;
             return;
         }
 
         // Wait if paused
-        while child_state.paused.load(std::sync::atomic::Ordering::Acquire) {
+        while child_state
+            .paused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -307,12 +316,26 @@ async fn run_child(
         loop {
             match command_rx.try_recv() {
                 Ok(Op::Kill) => {
-                    emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                    emit_status(
+                        SubagentRunStatus::Killed,
+                        &status_tx,
+                        &bridge_tx,
+                        &child_state,
+                    )
+                    .await;
                     return;
                 }
                 Ok(Op::Pause) => {
-                    child_state.paused.store(true, std::sync::atomic::Ordering::Release);
-                    emit_status(SubagentRunStatus::Idle, &status_tx, &bridge_tx, &child_state).await;
+                    child_state
+                        .paused
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    emit_status(
+                        SubagentRunStatus::Idle,
+                        &status_tx,
+                        &bridge_tx,
+                        &child_state,
+                    )
+                    .await;
                     break;
                 }
                 Ok(Op::ChangeModel(new_model)) => {
@@ -329,18 +352,35 @@ async fn run_child(
                     emit_status(current, &status_tx, &bridge_tx, &child_state).await;
                 }
                 Ok(Op::Resume) => {
-                    child_state.paused.store(false, std::sync::atomic::Ordering::Release);
-                    emit_status(SubagentRunStatus::RunningFg, &status_tx, &bridge_tx, &child_state).await;
+                    child_state
+                        .paused
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    emit_status(
+                        SubagentRunStatus::RunningFg,
+                        &status_tx,
+                        &bridge_tx,
+                        &child_state,
+                    )
+                    .await;
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    emit_status(SubagentRunStatus::Completed, &status_tx, &bridge_tx, &child_state).await;
+                    emit_status(
+                        SubagentRunStatus::Completed,
+                        &status_tx,
+                        &bridge_tx,
+                        &child_state,
+                    )
+                    .await;
                     return;
                 }
             }
         }
 
-        if child_state.paused.load(std::sync::atomic::Ordering::Acquire) {
+        if child_state
+            .paused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             continue; // Go back to pause wait loop
         }
 
@@ -350,12 +390,14 @@ async fn run_child(
         let all_tools = tools.available_tools();
         let policy = child_state.tools_allow.load_full();
         let filtered_tools = match (*policy).clone() {
-            crate::domain::models::ToolPolicy::Allowlist { tools: allowed } => {
-                all_tools.into_iter().filter(|t| allowed.contains(&t.name)).collect()
-            }
-            crate::domain::models::ToolPolicy::Denylist { tools: denied } => {
-                all_tools.into_iter().filter(|t| !denied.contains(&t.name)).collect()
-            }
+            crate::domain::models::ToolPolicy::Allowlist { tools: allowed } => all_tools
+                .into_iter()
+                .filter(|t| allowed.contains(&t.name))
+                .collect(),
+            crate::domain::models::ToolPolicy::Denylist { tools: denied } => all_tools
+                .into_iter()
+                .filter(|t| !denied.contains(&t.name))
+                .collect(),
             crate::domain::models::ToolPolicy::InheritFromParent => all_tools,
         };
         let options = CompletionOptions {
@@ -375,7 +417,13 @@ async fn run_child(
                 if let Err(spool_err) = spool.append(&task_id, msg.as_bytes()).await {
                     tracing::warn!(task_id = %task_id, error = %spool_err, "Spool append failed for provider error");
                 }
-                emit_status(SubagentRunStatus::Failed, &status_tx, &bridge_tx, &child_state).await;
+                emit_status(
+                    SubagentRunStatus::Failed,
+                    &status_tx,
+                    &bridge_tx,
+                    &child_state,
+                )
+                .await;
                 return;
             }
         };
@@ -428,7 +476,10 @@ async fn run_child(
                     }
                 }
                 StreamChunk::Error { content } => {
-                    if let Err(e) = spool.append(&task_id, format!("ERROR: {}", content).as_bytes()).await {
+                    if let Err(e) = spool
+                        .append(&task_id, format!("ERROR: {}", content).as_bytes())
+                        .await
+                    {
                         tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for error chunk");
                     }
                 }
@@ -438,14 +489,26 @@ async fn run_child(
 
         if !received_turn_complete {
             tracing::warn!(agent_id = %agent_id.0, "Provider stream ended without TurnComplete");
-            emit_status(SubagentRunStatus::Failed, &status_tx, &bridge_tx, &child_state).await;
+            emit_status(
+                SubagentRunStatus::Failed,
+                &status_tx,
+                &bridge_tx,
+                &child_state,
+            )
+            .await;
             return;
         }
 
         match stop_reason {
             StopReason::ToolUse => {
                 if tool_calls.is_empty() {
-                    emit_status(SubagentRunStatus::Completed, &status_tx, &bridge_tx, &child_state).await;
+                    emit_status(
+                        SubagentRunStatus::Completed,
+                        &status_tx,
+                        &bridge_tx,
+                        &child_state,
+                    )
+                    .await;
                     return;
                 }
 
@@ -508,7 +571,13 @@ async fn run_child(
                         content: content.clone(),
                         is_error,
                     });
-                    if let Err(e) = spool.append(&task_id, format!("\n[tool result]: {}\n", content).as_bytes()).await {
+                    if let Err(e) = spool
+                        .append(
+                            &task_id,
+                            format!("\n[tool result]: {}\n", content).as_bytes(),
+                        )
+                        .await
+                    {
                         tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for tool result");
                     }
                 }
@@ -529,11 +598,23 @@ async fn run_child(
             }
             StopReason::EndTurn | StopReason::MaxTokens => {
                 // P1 fix: text was already appended per-chunk during streaming; no redundant write
-                emit_status(SubagentRunStatus::Completed, &status_tx, &bridge_tx, &child_state).await;
+                emit_status(
+                    SubagentRunStatus::Completed,
+                    &status_tx,
+                    &bridge_tx,
+                    &child_state,
+                )
+                .await;
                 return;
             }
             StopReason::Cancelled => {
-                emit_status(SubagentRunStatus::Killed, &status_tx, &bridge_tx, &child_state).await;
+                emit_status(
+                    SubagentRunStatus::Killed,
+                    &status_tx,
+                    &bridge_tx,
+                    &child_state,
+                )
+                .await;
                 return;
             }
         }
@@ -541,8 +622,16 @@ async fn run_child(
 
     // P5 fix: Max iterations reached — emit Failed, not Completed
     tracing::warn!(agent_id = %agent_id.0, "Subagent reached max tool iterations");
-    let _ = spool.append(&task_id, b"WARNING: max tool iterations reached\n").await;
-    emit_status(SubagentRunStatus::Failed, &status_tx, &bridge_tx, &child_state).await;
+    let _ = spool
+        .append(&task_id, b"WARNING: max tool iterations reached\n")
+        .await;
+    emit_status(
+        SubagentRunStatus::Failed,
+        &status_tx,
+        &bridge_tx,
+        &child_state,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -553,9 +642,7 @@ mod tests {
     use crate::adapters::sandbox::NoOpSandbox;
     use crate::adapters::security_adapter::SecurityAdapter;
     use crate::adapters::toolset_adapter::ToolSetAdapter;
-    use crate::domain::models::{
-        CompletionOptions, Message, ModelDescriptor, StreamChunk,
-    };
+    use crate::domain::models::{CompletionOptions, Message, ModelDescriptor, StreamChunk};
     use crate::domain::ports::StreamingProvider;
     use crate::domain::services::approval_runtime::ApprovalRuntime;
     use crate::domain::services::tool_scheduler::ToolScheduler;
@@ -577,8 +664,7 @@ mod tests {
                 content: "working...".into(),
                 parent_tool_use_id: None,
             }];
-            let stream = futures::stream::iter(chunks)
-                .chain(futures::stream::pending());
+            let stream = futures::stream::iter(chunks).chain(futures::stream::pending());
             Ok(Box::pin(stream))
         }
 

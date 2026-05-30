@@ -67,8 +67,10 @@ impl ToolSetPort for NoOpToolSet {
 async fn scheduler_overhead_p99() {
     let security: Arc<dyn SecurityPort> = Arc::new(NoOpSecurity);
     let tools: Arc<dyn ToolSetPort> = Arc::new(NoOpToolSet);
-    let approval_runtime =
-        ApprovalRuntime::new(1024, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval_runtime = ApprovalRuntime::new(
+        1024,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let sched = ToolScheduler::new(security, tools, approval_runtime, 1024);
 
     let batch_size = 1;

@@ -1,23 +1,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use futures::StreamExt;
 use rustain::adapters::sandbox::NoOpSandbox;
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
-use rustain::domain::models::{
-    CompletionOptions, Message, StopReason, StreamChunk,
-};
+use rustain::domain::models::{CompletionOptions, Message, StopReason, StreamChunk};
 use rustain::domain::ports::{CapabilityProvider, StreamingProvider};
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
-use arc_swap::ArcSwap;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
-
 
 /// Provider that emits one chunk then hangs, so the child is mid-stream.
 struct HangingProvider;
@@ -32,14 +29,11 @@ impl StreamingProvider for HangingProvider {
         std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>>,
         rustain::domain::errors::ProviderError,
     > {
-        let chunks = vec![
-            StreamChunk::Text {
-                content: "working...".into(),
-                parent_tool_use_id: None,
-            },
-        ];
-        let stream = futures::stream::iter(chunks)
-            .chain(futures::stream::pending());
+        let chunks = vec![StreamChunk::Text {
+            content: "working...".into(),
+            parent_tool_use_id: None,
+        }];
+        let stream = futures::stream::iter(chunks).chain(futures::stream::pending());
         Ok(Box::pin(stream))
     }
 
@@ -67,8 +61,9 @@ async fn make_provider() -> (
 ) {
     let tmp = tempfile::tempdir().unwrap();
     let provider = Arc::new(HangingProvider) as Arc<dyn StreamingProvider>;
-    let storage = Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().to_path_buf()))
-        as Arc<dyn rustain::domain::ports::StoragePort>;
+    let storage = Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(
+        tmp.path().to_path_buf(),
+    )) as Arc<dyn rustain::domain::ports::StoragePort>;
     let security = Arc::new(SecurityAdapter::new(PathBuf::from(".")))
         as Arc<dyn rustain::domain::ports::SecurityPort>;
     let sandbox = Arc::new(ArcSwap::from_pointee(
@@ -82,7 +77,10 @@ async fn make_provider() -> (
             rustain::domain::models::SandboxPolicy::Permissive,
         )),
     )) as Arc<dyn rustain::domain::ports::ToolSetPort>;
-    let approval = ApprovalRuntime::new(1024, Arc::new(rustain::adapters::noop::NoOpApprovalPersistence));
+    let approval = ApprovalRuntime::new(
+        1024,
+        Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+    );
     let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
     let (event_bus, _event_rx) = EventBus::new(1024);
     let event_bus = Arc::new(event_bus);
@@ -111,15 +109,46 @@ async fn make_provider() -> (
 
     struct TestRouter;
     impl rustain::domain::ports::ProviderInfoPort for TestRouter {
-        fn active_delegate_id(&self) -> String { "noop".into() }
-        fn get_model(&self, _provider_id: &str, _model_id: &str) -> Option<rustain::domain::models::provider::ModelDescriptor> { None }
-        fn get_model_provider(&self, _model_id: &str, _prefer: Option<&str>) -> Option<String> { None }
-        fn list_providers(&self) -> Vec<rustain::domain::models::provider::ProviderDescriptor> { vec![] }
-        fn list_models_by_provider(&self, _provider_id: &str) -> Vec<rustain::domain::models::provider::ModelDescriptor> { vec![] }
-        fn get_provider(&self, _provider_id: &str) -> Option<Arc<dyn rustain::domain::ports::StreamingProvider>> { None }
-        fn set_active_provider(&self, _provider_id: &str) -> Result<(), rustain::domain::errors::ProviderError> { Ok(()) }
-        fn now_unix(&self) -> i64 { chrono::Utc::now().timestamp() }
-        fn today_start_unix_ms(&self) -> i64 { chrono::Utc::now().timestamp_millis() }
+        fn active_delegate_id(&self) -> String {
+            "noop".into()
+        }
+        fn get_model(
+            &self,
+            _provider_id: &str,
+            _model_id: &str,
+        ) -> Option<rustain::domain::models::provider::ModelDescriptor> {
+            None
+        }
+        fn get_model_provider(&self, _model_id: &str, _prefer: Option<&str>) -> Option<String> {
+            None
+        }
+        fn list_providers(&self) -> Vec<rustain::domain::models::provider::ProviderDescriptor> {
+            vec![]
+        }
+        fn list_models_by_provider(
+            &self,
+            _provider_id: &str,
+        ) -> Vec<rustain::domain::models::provider::ModelDescriptor> {
+            vec![]
+        }
+        fn get_provider(
+            &self,
+            _provider_id: &str,
+        ) -> Option<Arc<dyn rustain::domain::ports::StreamingProvider>> {
+            None
+        }
+        fn set_active_provider(
+            &self,
+            _provider_id: &str,
+        ) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn now_unix(&self) -> i64 {
+            chrono::Utc::now().timestamp()
+        }
+        fn today_start_unix_ms(&self) -> i64 {
+            chrono::Utc::now().timestamp_millis()
+        }
     }
 
     let model_router: Arc<dyn rustain::domain::ports::ProviderInfoPort> = Arc::new(TestRouter);
@@ -154,7 +183,8 @@ async fn cancellation_teardown_within_200ms() {
         let provider = provider.clone();
         let cap_id = cap_id.clone();
         async move {
-            CapabilityProvider::invoke(provider.as_ref(), &cap_id, input, child_cancel.clone()).await
+            CapabilityProvider::invoke(provider.as_ref(), &cap_id, input, child_cancel.clone())
+                .await
         }
     });
 
@@ -182,7 +212,9 @@ async fn cancellation_teardown_within_200ms() {
 
     // Should be killed or have some error status
     assert!(
-        tool_result.is_error || tool_result.content.contains("Killed") || tool_result.content.contains("cancelled"),
+        tool_result.is_error
+            || tool_result.content.contains("Killed")
+            || tool_result.content.contains("cancelled"),
         "Expected error or killed after cancel, got: {}",
         tool_result.content
     );
@@ -200,5 +232,8 @@ async fn cancellation_teardown_within_200ms() {
         .unwrap()
         .filter_map(|e| e.ok())
         .collect();
-    assert!(!spool_files.is_empty(), "Spool file should be preserved after cancel");
+    assert!(
+        !spool_files.is_empty(),
+        "Spool file should be preserved after cancel"
+    );
 }

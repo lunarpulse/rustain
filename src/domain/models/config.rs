@@ -102,6 +102,38 @@ impl Default for SubTaskFailurePolicy {
     }
 }
 
+/// Story 10.X-AUTO: subagent tool-call approval routing policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AutoApprovePolicy {
+    #[serde(rename = "ask")]
+    Ask,
+    #[serde(rename = "deny")]
+    Deny,
+    #[serde(rename = "allow")]
+    Allow,
+}
+
+impl Default for AutoApprovePolicy {
+    fn default() -> Self {
+        AutoApprovePolicy::Ask
+    }
+}
+
+/// Subagent configuration (Story 10.X-AUTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentsConfig {
+    #[serde(default)]
+    pub auto_approve: AutoApprovePolicy,
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        Self {
+            auto_approve: AutoApprovePolicy::default(),
+        }
+    }
+}
+
 /// Plan execution configuration (Story 10.5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanConfig {
@@ -527,6 +559,9 @@ pub struct AppConfig {
     /// Plan execution configuration (Story 10.5).
     #[serde(default)]
     pub plan: PlanConfig,
+    /// Subagent approval routing policy (Story 10.X-AUTO).
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
 }
 
 impl AppConfig {
@@ -704,6 +739,7 @@ impl Default for AppConfig {
             sandbox: SandboxConfig::default(),
             search: SearchConfig::default(),
             plan: PlanConfig::default(),
+            subagents: SubagentsConfig::default(),
         }
     }
 }
@@ -1189,5 +1225,28 @@ concurrent_tasks_max = 8
 "#;
         let config: AppConfig = toml::from_str(toml).expect("deserialize");
         assert_eq!(config.plan.concurrent_tasks_max, 8);
+    }
+
+    #[test]
+    fn subagents_config_defaults_to_ask() {
+        let config = AppConfig::default();
+        assert_eq!(config.subagents.auto_approve, AutoApprovePolicy::Ask);
+    }
+
+    #[test]
+    fn subagents_config_toml_roundtrip() {
+        let toml = r#"
+model = "test-model"
+[subagents]
+auto_approve = "deny"
+"#;
+        let config: AppConfig = toml::from_str(toml).expect("deserialize");
+        assert_eq!(config.subagents.auto_approve, AutoApprovePolicy::Deny);
+
+        let serialized = toml::to_string(&config).expect("serialize");
+        assert!(
+            serialized.contains("auto_approve = \"deny\""),
+            "serialized TOML must contain auto_approve = deny"
+        );
     }
 }

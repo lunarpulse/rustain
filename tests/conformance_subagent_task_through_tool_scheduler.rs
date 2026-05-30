@@ -140,7 +140,12 @@ fn test_no_new_app_event_variant_for_task() {
     // AC-10-7-8: assert no new Task* / Subagent*Dispatch* event variant was introduced.
     // The easiest way is to grep the events.rs source for forbidden patterns.
     let events_src = include_str!("../src/domain/events.rs");
-    let forbidden = ["TaskSpawned", "TaskCompleted", "SubagentDispatch", "SubagentTool"];
+    let forbidden = [
+        "TaskSpawned",
+        "TaskCompleted",
+        "SubagentDispatch",
+        "SubagentTool",
+    ];
     for pat in &forbidden {
         assert!(
             !events_src.contains(pat),

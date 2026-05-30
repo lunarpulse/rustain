@@ -16,7 +16,7 @@ use crate::adapters::tui::terminal;
 use crate::domain::errors::ProviderError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
-use crate::domain::models::{PermissionMode, ProviderConfig, SandboxPolicy};
+use crate::domain::models::{AutoApprovePolicy, PermissionMode, ProviderConfig, SandboxPolicy};
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProfileResolver, SecurityPort, StoragePort, StreamingProvider,
     ToolSetPort,
@@ -518,7 +518,16 @@ pub async fn run() -> Result<()> {
         user_config.clone(),
         workspace_rules.clone(),
     ));
-    let approval_runtime = ApprovalRuntime::new(raw_capacity, persistence);
+    let approval_runtime = ApprovalRuntime::new_with_subagent_policy(
+        raw_capacity,
+        persistence,
+        app_config.subagents.auto_approve,
+    );
+    if app_config.subagents.auto_approve == AutoApprovePolicy::Allow {
+        let msg = "⚠ subagents.auto_approve = 'allow' — subagent tool calls bypass user approval. Use only on trusted workloads.";
+        tracing::warn!("{}", msg);
+        accumulated_notices.push(msg.to_string());
+    }
     approval_runtime.load_session().await;
     if let Ok(ruleset) = permission_rules::load_rules(&user_config, &workspace_rules) {
         let seed = ruleset.seed_session();

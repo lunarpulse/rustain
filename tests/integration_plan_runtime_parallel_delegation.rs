@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus, SubTaskFailurePolicy,
-    generate_conversation_id,
+    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+    SubTaskFailurePolicy, generate_conversation_id,
 };
 use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::delegation_decider::DelegationDecider;
@@ -52,7 +52,7 @@ fn make_task(number: u32, title: &str, description: &str, depends_on: Vec<u32>) 
         error: None,
         waiting_on: vec![],
         delegated_to: None,
-    sub_tasks: vec![],
+        sub_tasks: vec![],
     }
 }
 
@@ -100,8 +100,18 @@ fn fan_out_bound_caps_at_nfr15() {
 async fn diamond_delegation_requests_both_after_task1() {
     let plan = make_plan(vec![
         make_task(1, "Setup", "Initial setup task", vec![]),
-        make_task(2, "Review auth", "Review authentication module for security issues", vec![1]),
-        make_task(3, "Write tests", "Write unit tests for the api layer", vec![1]),
+        make_task(
+            2,
+            "Review auth",
+            "Review authentication module for security issues",
+            vec![1],
+        ),
+        make_task(
+            3,
+            "Write tests",
+            "Write unit tests for the api layer",
+            vec![1],
+        ),
         make_task(4, "Finalize", "Final integration and cleanup", vec![2, 3]),
     ]);
     let mut conv = make_conv_with_plan(plan);
@@ -111,7 +121,8 @@ async fn diamond_delegation_requests_both_after_task1() {
     let agents = vec![
         AgentDef {
             name: "code-reviewer".to_string(),
-            description: "Security-focused code reviewer for authentication and authorization".to_string(),
+            description: "Security-focused code reviewer for authentication and authorization"
+                .to_string(),
             file: std::path::PathBuf::from("/dev/null"),
             model: None,
             allowed_tools: None,
@@ -152,7 +163,8 @@ async fn diamond_delegation_requests_both_after_task1() {
         .filter(|e| matches!(e, AppEvent::PlanTaskDelegationRequested { .. }))
         .collect();
     assert_eq!(
-        delegation_requests.len(), 0,
+        delegation_requests.len(),
+        0,
         "Task 1 has no matching agent (setup), so no delegation request"
     );
 
@@ -162,7 +174,16 @@ async fn diamond_delegation_requests_both_after_task1() {
         token_count: None,
     };
     runtime
-        .on_turn_complete(&conv_id, &plan_id, 1, outcome, &mut conv, emitter.as_ref(), &agents, PermissionMode::Yolo)
+        .on_turn_complete(
+            &conv_id,
+            &plan_id,
+            1,
+            outcome,
+            &mut conv,
+            emitter.as_ref(),
+            &agents,
+            PermissionMode::Yolo,
+        )
         .await;
 
     let events_after = emitter.take();
@@ -175,7 +196,8 @@ async fn diamond_delegation_requests_both_after_task1() {
         .collect();
 
     assert_eq!(
-        delegation_reqs.len(), 2,
+        delegation_reqs.len(),
+        2,
         "Both task 2 and task 3 should receive delegation requests via fan-out"
     );
     assert!(

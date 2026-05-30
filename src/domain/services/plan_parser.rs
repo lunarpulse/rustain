@@ -240,7 +240,9 @@ pub fn validate_plan(plan: &Plan) -> Result<(), String> {
                 task.number, MAX_TASK_DESCRIPTION_LEN
             ));
         }
-        if task.sub_tasks.len() > crate::domain::services::delegation_decider::DelegationDecider::NFR15_CHILDREN_CAP {
+        if task.sub_tasks.len()
+            > crate::domain::services::delegation_decider::DelegationDecider::NFR15_CHILDREN_CAP
+        {
             return Err(format!(
                 "task {} has {} sub-tasks — max is {}",
                 task.number,

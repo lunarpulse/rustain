@@ -198,7 +198,11 @@ impl SubagentProvider {
             .unwrap_or("")
             .to_string();
         // Remove internal fields before they pollute the tool payload
-        let _ = input.as_object_mut().map(|m| { m.remove("__parent_ctx_tokens"); m.remove("__parent_trace"); m.remove("__conversation_id"); });
+        let _ = input.as_object_mut().map(|m| {
+            m.remove("__parent_ctx_tokens");
+            m.remove("__parent_trace");
+            m.remove("__conversation_id");
+        });
 
         // 1. Parse input
         let description = input
@@ -214,7 +218,10 @@ impl SubagentProvider {
                 CapabilityError::InvocationFailed("subagent".into(), "Missing 'prompt'".into())
             })?;
         let subagent_type = input.get("subagent_type").and_then(|v| v.as_str());
-        let task_id_opt = input.get("task_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let task_id_opt = input
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let tier_hint = input.get("tier_hint").and_then(|v| v.as_str());
 
         let _ = description;
@@ -278,7 +285,10 @@ impl SubagentProvider {
                         self.running_tasks.write().await.remove(task_id);
                         return Ok(ToolResult {
                             tool_use_id: String::new(),
-                            content: format!("Task '{}' is tracked but no longer in registry — it may have been evicted", task_id),
+                            content: format!(
+                                "Task '{}' is tracked but no longer in registry — it may have been evicted",
+                                task_id
+                            ),
                             is_error: true,
                         });
                     }
@@ -299,7 +309,10 @@ impl SubagentProvider {
                     }
                 };
 
-                let is_error = !matches!(last_status, crate::domain::models::SubagentRunStatus::Completed);
+                let is_error = !matches!(
+                    last_status,
+                    crate::domain::models::SubagentRunStatus::Completed
+                );
                 let content = match self.spool.read_tail(&generated_task_id, 8192).await {
                     Ok(text) if !text.is_empty() => text,
                     Ok(_) => {
@@ -323,7 +336,8 @@ impl SubagentProvider {
                 self.running_tasks.write().await.remove(task_id);
 
                 // D2: check for structured JSON bypass
-                let final_content = apply_structured_json_bypass(&content, &generated_task_id, &self.spool).await;
+                let final_content =
+                    apply_structured_json_bypass(&content, &generated_task_id, &self.spool).await;
 
                 return Ok(ToolResult {
                     tool_use_id: String::new(),
@@ -345,10 +359,13 @@ impl SubagentProvider {
         {
             let mut running_guard = self.running_tasks.write().await;
             let key = task_id_opt.unwrap_or_else(|| handle.task_id.clone());
-            running_guard.insert(key, RunningTask {
-                agent_id: handle.agent_id.clone(),
-                generated_task_id: handle.task_id.clone(),
-            });
+            running_guard.insert(
+                key,
+                RunningTask {
+                    agent_id: handle.agent_id.clone(),
+                    generated_task_id: handle.task_id.clone(),
+                },
+            );
         }
 
         // 8. Await terminal status
@@ -414,7 +431,8 @@ impl SubagentProvider {
 
         // D2: structured JSON bypass — if the spool tail contains structured JSON,
         // return a pointer instead of the truncated tail
-        let final_content = apply_structured_json_bypass(&content, &handle.task_id, &self.spool).await;
+        let final_content =
+            apply_structured_json_bypass(&content, &handle.task_id, &self.spool).await;
 
         // Record per-call TokenUsage to ledger (P3 fix: uses conversation_id from input)
         {
@@ -462,10 +480,7 @@ impl SubagentProvider {
             .get("task_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                CapabilityError::InvocationFailed(
-                    "subagent".into(),
-                    "Missing 'task_id'".into(),
-                )
+                CapabilityError::InvocationFailed("subagent".into(), "Missing 'task_id'".into())
             })?;
 
         let range = input.get("range").and_then(|v| v.as_str());
@@ -568,8 +583,11 @@ async fn resolve_model(
                 lower.contains("opus") || lower.contains("flagship") || lower.contains("gpt-4")
             }
             crate::domain::models::ModelTier::CheapAgentic => {
-                lower.contains("sonnet") || lower.contains("haiku") || lower.contains("cheap")
-                || lower.contains("mini") || lower.contains("flash")
+                lower.contains("sonnet")
+                    || lower.contains("haiku")
+                    || lower.contains("cheap")
+                    || lower.contains("mini")
+                    || lower.contains("flash")
             }
         }
     };
@@ -598,8 +616,15 @@ async fn resolve_model(
 /// Map SubagentError variants to an actionable ToolResult.
 fn map_subagent_error(e: crate::domain::models::SubagentError) -> ToolResult {
     let content = match e {
-        crate::domain::models::SubagentError::SpawnLimitExceeded { kind, limit, attempted } => {
-            format!("Spawn limit exceeded: {:?} limit={}, attempted={}", kind, limit, attempted)
+        crate::domain::models::SubagentError::SpawnLimitExceeded {
+            kind,
+            limit,
+            attempted,
+        } => {
+            format!(
+                "Spawn limit exceeded: {:?} limit={}, attempted={}",
+                kind, limit, attempted
+            )
         }
         crate::domain::models::SubagentError::PolicyWidensParent { .. } => {
             "Subagent sandbox policy would widen parent policy".into()
@@ -641,7 +666,10 @@ async fn apply_structured_json_bypass(
         Err(_) => return tail_content.to_string(),
     };
     if full_size > 8192 {
-        format!("📄 Structured output ({} bytes) — use read_task_output(task_id='{}') to retrieve full payload.", full_size, task_id)
+        format!(
+            "📄 Structured output ({} bytes) — use read_task_output(task_id='{}') to retrieve full payload.",
+            full_size, task_id
+        )
     } else {
         tail_content.to_string()
     }
@@ -655,7 +683,10 @@ fn parse_byte_range(s: &str) -> Result<(u64, usize), CapabilityError> {
     if parts.len() != 2 {
         return Err(CapabilityError::InvocationFailed(
             "subagent".into(),
-            format!("Invalid range format: '{}' (expected 'start-end' or 'start-')", s),
+            format!(
+                "Invalid range format: '{}' (expected 'start-end' or 'start-')",
+                s
+            ),
         ));
     }
     let start: u64 = parts[0].parse().map_err(|_| {

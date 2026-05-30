@@ -53,7 +53,7 @@ pub fn make_task(number: u32, title: &str) -> PlanTask {
         error: None,
         waiting_on: vec![],
         delegated_to: None,
-    sub_tasks: vec![],
+        sub_tasks: vec![],
     }
 }
 
@@ -154,7 +154,7 @@ async fn whole_plan_cancel_intent_honored_on_natural_success() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     // Task 1 is now Running. User invokes `!cancel-plan`.
@@ -220,7 +220,7 @@ async fn whole_plan_cancel_intent_honored_on_natural_failure() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime.mark_whole_plan_cancel_pending(&plan_id).await;
@@ -271,7 +271,7 @@ async fn pause_pending_drained_after_natural_success() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
@@ -338,7 +338,7 @@ async fn pause_pending_drained_after_natural_failure() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     runtime.mark_pause_pending(&plan_id, 1).await;
@@ -394,7 +394,7 @@ async fn on_turn_complete_ignores_mismatched_task_number() {
         captured.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     // Running is task 1. Stale event arrives for task 3.

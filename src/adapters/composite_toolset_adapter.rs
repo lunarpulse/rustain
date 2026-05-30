@@ -25,12 +25,12 @@ static COMPOSITE_TOOL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use crate::domain::errors::{ToolError, TransitionError};
 use crate::domain::events::{AppEvent, ToolProgressEvent};
-use crate::domain::ports::CapabilityProvider;
 use crate::domain::models::{
     CheckpointId, HealthSummary, McpConnectionState, McpHealthRow, McpServerSpec, ToolDefinition,
     ToolResult, TransitionState, capability_registry::CapabilityRegistry,
     capability_registry::RegisterHandle, capability_registry::RegistryError,
 };
+use crate::domain::ports::CapabilityProvider;
 use crate::domain::ports::ToolSetPort;
 use crate::domain::services::swap_tier::SwapTier;
 
@@ -63,7 +63,9 @@ pub struct CompositeToolsetAdapter {
     /// Uses OnceLock for two-phase wiring (adapter built first, then provider).
     subagent_provider: std::sync::OnceLock<Arc<crate::adapters::subagent::SubagentProvider>>,
     /// D1 fix: per-turn context stored here, injected into subagent input JSON at dispatch.
-    parent_ctx: Arc<tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>>,
+    parent_ctx: Arc<
+        tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>,
+    >,
     conversation_id: Arc<tokio::sync::RwLock<String>>,
 }
 
@@ -545,8 +547,14 @@ impl ToolSetPort for CompositeToolsetAdapter {
                     if let Some(obj) = enriched_input.as_object_mut() {
                         let ctx = self.parent_ctx.read().await;
                         if let Some(ref ctx) = *ctx {
-                            obj.insert("__parent_ctx_tokens".into(), serde_json::json!(ctx.parent_ctx_tokens));
-                            obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
+                            obj.insert(
+                                "__parent_ctx_tokens".into(),
+                                serde_json::json!(ctx.parent_ctx_tokens),
+                            );
+                            obj.insert(
+                                "__parent_trace".into(),
+                                serde_json::json!(ctx.parent_trace),
+                            );
                         }
                         let conv_id = self.conversation_id.read().await;
                         obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
@@ -603,8 +611,14 @@ impl ToolSetPort for CompositeToolsetAdapter {
                     if let Some(obj) = enriched_input.as_object_mut() {
                         let ctx = self.parent_ctx.read().await;
                         if let Some(ref ctx) = *ctx {
-                            obj.insert("__parent_ctx_tokens".into(), serde_json::json!(ctx.parent_ctx_tokens));
-                            obj.insert("__parent_trace".into(), serde_json::json!(ctx.parent_trace));
+                            obj.insert(
+                                "__parent_ctx_tokens".into(),
+                                serde_json::json!(ctx.parent_ctx_tokens),
+                            );
+                            obj.insert(
+                                "__parent_trace".into(),
+                                serde_json::json!(ctx.parent_trace),
+                            );
                         }
                         let conv_id = self.conversation_id.read().await;
                         obj.insert("__conversation_id".into(), serde_json::json!(*conv_id));
@@ -773,11 +787,15 @@ impl ToolSetPort for CompositeToolsetAdapter {
         parent_trace: Option<crate::domain::models::TraceContext>,
     ) {
         // D1 fix: store context on CTA (not SubagentProvider), injected at dispatch time
-        *self.parent_ctx.write().await = Some(crate::adapters::subagent::subagent_provider::TaskToolContext {
-            conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
-            parent_ctx_tokens,
-            parent_trace: parent_trace.clone(),
-        });
-        self.builtin.set_parent_context(parent_ctx_tokens, parent_trace).await;
+        *self.parent_ctx.write().await = Some(
+            crate::adapters::subagent::subagent_provider::TaskToolContext {
+                conversation_id: String::new(), // populated from set_execution_context via self.conversation_id
+                parent_ctx_tokens,
+                parent_trace: parent_trace.clone(),
+            },
+        );
+        self.builtin
+            .set_parent_context(parent_ctx_tokens, parent_trace)
+            .await;
     }
 }

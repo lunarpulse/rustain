@@ -27,8 +27,7 @@ impl StreamingProvider for HangingProvider {
             content: "working...".into(),
             parent_tool_use_id: None,
         }];
-        let stream = futures::stream::iter(chunks)
-            .chain(futures::stream::pending());
+        let stream = futures::stream::iter(chunks).chain(futures::stream::pending());
         Ok(Box::pin(stream))
     }
 
@@ -51,8 +50,7 @@ impl StreamingProvider for HangingProvider {
 
 async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
-    let provider = Arc::new(HangingProvider)
-        as Arc<dyn StreamingProvider>;
+    let provider = Arc::new(HangingProvider) as Arc<dyn StreamingProvider>;
     let storage = Arc::new(rustain::adapters::filesystem::FileSystemStorage::new(
         tmp.path().to_path_buf(),
     )) as Arc<dyn rustain::domain::ports::StoragePort>;

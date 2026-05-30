@@ -54,7 +54,10 @@ fn render_sub_task_card_line(
     };
 
     let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(vertical_char.to_string(), Style::default().fg(theme.colors.decision_border)),
+        Span::styled(
+            vertical_char.to_string(),
+            Style::default().fg(theme.colors.decision_border),
+        ),
         Span::styled(
             format!("    {}. {}", sub.number, title_display),
             Style::default().fg(theme.colors.fg_primary),
@@ -328,7 +331,11 @@ pub fn render_plan_card_lines<'a>(
         if task.has_sub_tasks() {
             for sub in &task.sub_tasks {
                 lines.extend(render_sub_task_card_line(
-                    sub, theme, vertical_char, inner_width, is_pending,
+                    sub,
+                    theme,
+                    vertical_char,
+                    inner_width,
+                    is_pending,
                 ));
             }
         }

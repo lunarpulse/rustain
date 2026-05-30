@@ -16,7 +16,7 @@ use tokio::sync::{RwLock, broadcast, oneshot};
 
 use crate::domain::models::ToolRisk;
 use crate::domain::models::tool_call::{ApprovalSource, RequestId};
-use crate::domain::models::{ApprovalOutcome, ApprovalScope};
+use crate::domain::models::{ApprovalOutcome, ApprovalScope, AutoApprovePolicy};
 use crate::domain::ports::ApprovalPersistencePort;
 
 /// In-memory session-level auto-allow set.
@@ -127,11 +127,22 @@ pub struct ApprovalRuntime {
     events: broadcast::Sender<ApprovalRuntimeEvent>,
     session: Arc<RwLock<SessionApprovalSet>>,
     persistence: Arc<dyn ApprovalPersistencePort>,
+    subagent_auto_approve: AutoApprovePolicy,
 }
 
 impl ApprovalRuntime {
     /// Construct a new runtime. `event_capacity` defaults to 1024 when 0.
+    /// Defaults `subagent_auto_approve` to `Ask` (preserves existing behavior).
     pub fn new(event_capacity: usize, persistence: Arc<dyn ApprovalPersistencePort>) -> Arc<Self> {
+        Self::new_with_subagent_policy(event_capacity, persistence, AutoApprovePolicy::Ask)
+    }
+
+    /// Construct a new runtime with an explicit subagent auto-approve policy.
+    pub fn new_with_subagent_policy(
+        event_capacity: usize,
+        persistence: Arc<dyn ApprovalPersistencePort>,
+        subagent_auto_approve: AutoApprovePolicy,
+    ) -> Arc<Self> {
         let cap = if event_capacity == 0 {
             tracing::warn!("ApprovalRuntime event_capacity was 0, falling back to 1024");
             1024
@@ -144,6 +155,7 @@ impl ApprovalRuntime {
             events,
             session: Arc::new(RwLock::new(SessionApprovalSet::default())),
             persistence,
+            subagent_auto_approve,
         })
     }
 
@@ -163,6 +175,38 @@ impl ApprovalRuntime {
         server_id: Option<&str>,
         path_hint: Option<&str>,
     ) -> (Option<RequestId>, oneshot::Receiver<ApprovalOutcome>) {
+        // Story 10.X-AUTO: subagent auto-approve policy short-circuit.
+        // Placed BEFORE the session fast-path so "deny" wins over session-allow.
+        match &source {
+            ApprovalSource::ForegroundSubagent { .. } | ApprovalSource::BackgroundAgent { .. } => {
+                match self.subagent_auto_approve {
+                    AutoApprovePolicy::Deny => {
+                        tracing::info!(tool = %tool, "subagent_auto_approve=deny: rejecting subagent tool call");
+                        let (tx, rx) = oneshot::channel();
+                        let _ = tx.send(ApprovalOutcome::Reject {
+                            feedback: Some("subagent_auto_approve=deny".into()),
+                        });
+                        return (None, rx);
+                    }
+                    AutoApprovePolicy::Allow => {
+                        tracing::debug!(tool = %tool, "subagent_auto_approve=allow: auto-approving subagent tool call");
+                        let (tx, rx) = oneshot::channel();
+                        let _ = tx.send(ApprovalOutcome::Once);
+                        return (None, rx);
+                    }
+                    AutoApprovePolicy::Ask => {
+                        // fall through to existing behavior
+                    }
+                }
+            }
+            ApprovalSource::ForegroundTurn { .. } => {
+                // Root user: never short-circuit (AC-10-X-4)
+            }
+            _ => {
+                tracing::debug!(tool = %tool, "subagent_auto_approve: unknown ApprovalSource variant, falling through to existing behavior");
+            }
+        }
+
         {
             let mut set = self.session.write().await;
             if set.is_auto_approved(&tool, server_id, path_hint) {
@@ -493,5 +537,208 @@ mod tests {
         .await;
         assert_eq!(rx2.await.unwrap(), ApprovalOutcome::Cancel);
         assert!(!rt.pending.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn subagent_deny_returns_none_and_reject() {
+        let rt = ApprovalRuntime::new_with_subagent_policy(
+            1024,
+            Arc::new(NoOpPersistence),
+            AutoApprovePolicy::Deny,
+        );
+        let mut events = rt.subscribe();
+        let (id, rx) = rt
+            .request(
+                ApprovalSource::ForegroundSubagent {
+                    conversation_id: "c1".into(),
+                    parent_tool_call_id: "t1".into(),
+                    subagent_type: "code-reviewer".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        assert!(id.is_none(), "deny should return None id");
+        assert_eq!(
+            rx.await.unwrap(),
+            ApprovalOutcome::Reject {
+                feedback: Some("subagent_auto_approve=deny".into()),
+            }
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "deny must NOT broadcast Requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_allow_returns_none_and_once() {
+        let rt = ApprovalRuntime::new_with_subagent_policy(
+            1024,
+            Arc::new(NoOpPersistence),
+            AutoApprovePolicy::Allow,
+        );
+        let mut events = rt.subscribe();
+        let (id, rx) = rt
+            .request(
+                ApprovalSource::ForegroundSubagent {
+                    conversation_id: "c1".into(),
+                    parent_tool_call_id: "t1".into(),
+                    subagent_type: "code-reviewer".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        assert!(id.is_none(), "allow should return None id");
+        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "allow must NOT broadcast Requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_ask_returns_some_and_broadcasts() {
+        let rt = ApprovalRuntime::new_with_subagent_policy(
+            1024,
+            Arc::new(NoOpPersistence),
+            AutoApprovePolicy::Ask,
+        );
+        let mut events = rt.subscribe();
+        let (id, _rx) = rt
+            .request(
+                ApprovalSource::ForegroundSubagent {
+                    conversation_id: "c1".into(),
+                    parent_tool_call_id: "t1".into(),
+                    subagent_type: "code-reviewer".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        assert!(id.is_some(), "ask should return Some id");
+        let ev = events.recv().await.unwrap();
+        assert!(
+            matches!(ev, ApprovalRuntimeEvent::Requested { .. }),
+            "ask must broadcast Requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_turn_ignores_deny_policy() {
+        let rt = ApprovalRuntime::new_with_subagent_policy(
+            1024,
+            Arc::new(NoOpPersistence),
+            AutoApprovePolicy::Deny,
+        );
+        let mut events = rt.subscribe();
+        let (id, _rx) = rt
+            .request(
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            id.is_some(),
+            "ForegroundTurn with deny must still return Some id"
+        );
+        let ev = events.recv().await.unwrap();
+        assert!(
+            matches!(ev, ApprovalRuntimeEvent::Requested { .. }),
+            "ForegroundTurn must still broadcast Requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_agent_deny_returns_none_and_reject() {
+        let rt = ApprovalRuntime::new_with_subagent_policy(
+            1024,
+            Arc::new(NoOpPersistence),
+            AutoApprovePolicy::Deny,
+        );
+        let mut events = rt.subscribe();
+        let (id, rx) = rt
+            .request(
+                ApprovalSource::BackgroundAgent {
+                    conversation_id: "c1".into(),
+                    task_id: "task-1".into(),
+                    subagent_type: "background-worker".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        assert!(id.is_none(), "deny should return None id for BackgroundAgent");
+        assert_eq!(
+            rx.await.unwrap(),
+            ApprovalOutcome::Reject {
+                feedback: Some("subagent_auto_approve=deny".into()),
+            }
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "deny must NOT broadcast Requested for BackgroundAgent"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_agent_allow_returns_none_and_once() {
+        let rt = ApprovalRuntime::new_with_subagent_policy(
+            1024,
+            Arc::new(NoOpPersistence),
+            AutoApprovePolicy::Allow,
+        );
+        let mut events = rt.subscribe();
+        let (id, rx) = rt
+            .request(
+                ApprovalSource::BackgroundAgent {
+                    conversation_id: "c1".into(),
+                    task_id: "task-1".into(),
+                    subagent_type: "background-worker".into(),
+                },
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+                ToolRisk::Elevated,
+                None,
+                None,
+            )
+            .await;
+        assert!(id.is_none(), "allow should return None id for BackgroundAgent");
+        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "allow must NOT broadcast Requested for BackgroundAgent"
+        );
     }
 }

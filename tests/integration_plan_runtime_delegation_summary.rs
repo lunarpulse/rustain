@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
-    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus, SubTaskFailurePolicy,
-    generate_conversation_id,
+    AgentDef, Conversation, PermissionMode, Plan, PlanStatus, PlanTask, PlanTaskStatus,
+    SubTaskFailurePolicy, generate_conversation_id,
 };
 use rustain::domain::ports::EventEmitter;
 use rustain::domain::services::plan_runtime::{PlanRuntime, TaskTurnOutcome};
@@ -110,7 +110,7 @@ async fn integration_plan_runtime_delegation_summary() {
         emitter.as_ref(),
         &[],
         PermissionMode::Normal,
-            SubTaskFailurePolicy::default(),
+        SubTaskFailurePolicy::default(),
     );
 
     let plan = conv.plans.get_mut(&plan_id).unwrap();
@@ -160,7 +160,16 @@ async fn integration_plan_runtime_delegation_summary() {
         token_count: None,
     };
     runtime
-        .on_turn_complete(&conv_id, &plan_id, 2, outcome_t2, &mut conv, emitter.as_ref(), &[], PermissionMode::Normal)
+        .on_turn_complete(
+            &conv_id,
+            &plan_id,
+            2,
+            outcome_t2,
+            &mut conv,
+            emitter.as_ref(),
+            &[],
+            PermissionMode::Normal,
+        )
         .await;
 
     {
@@ -183,7 +192,16 @@ async fn integration_plan_runtime_delegation_summary() {
         plan.tasks[0].started_at_ms = Some(chrono::Utc::now().timestamp_millis());
     }
     runtime
-        .on_turn_complete(&conv_id, &plan_id, 1, outcome_t1, &mut conv, emitter.as_ref(), &[], PermissionMode::Normal)
+        .on_turn_complete(
+            &conv_id,
+            &plan_id,
+            1,
+            outcome_t1,
+            &mut conv,
+            emitter.as_ref(),
+            &[],
+            PermissionMode::Normal,
+        )
         .await;
 
     let outcome_t3 = TaskTurnOutcome::Success {
@@ -197,12 +215,22 @@ async fn integration_plan_runtime_delegation_summary() {
         plan.tasks[2].started_at_ms = Some(chrono::Utc::now().timestamp_millis());
     }
     runtime
-        .on_turn_complete(&conv_id, &plan_id, 3, outcome_t3, &mut conv, emitter.as_ref(), &[], PermissionMode::Normal)
+        .on_turn_complete(
+            &conv_id,
+            &plan_id,
+            3,
+            outcome_t3,
+            &mut conv,
+            emitter.as_ref(),
+            &[],
+            PermissionMode::Normal,
+        )
         .await;
 
-    let summary_msg = conv.messages.iter().find(|m| {
-        m.content.contains("Plan complete:")
-    });
+    let summary_msg = conv
+        .messages
+        .iter()
+        .find(|m| m.content.contains("Plan complete:"));
     assert!(
         summary_msg.is_some(),
         "A PlanSummary ChatMessage should be added to conversation.messages"

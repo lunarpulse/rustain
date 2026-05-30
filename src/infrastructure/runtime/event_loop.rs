@@ -8553,7 +8553,10 @@ async fn start_turn_inner(
     let parent_trace = {
         let ts = chrono::Utc::now().timestamp_millis();
         let trace_id = format!("{:032x}", ts.wrapping_mul(31));
-        let span_id = format!("{:016x}", (ts.wrapping_mul(17) as u64) & 0xFFFF_FFFF_FFFF_FFFF_u64);
+        let span_id = format!(
+            "{:016x}",
+            (ts.wrapping_mul(17) as u64) & 0xFFFF_FFFF_FFFF_FFFF_u64
+        );
         crate::domain::models::TraceContext::new(trace_id, span_id, 1).ok()
     };
 
