@@ -31,6 +31,7 @@ pub mod profile_serializer;
 pub mod reducer;
 pub mod sandbox_narrowing;
 pub mod search;
+pub mod secret_scan;
 pub mod session_index;
 pub mod skill_context;
 pub mod streaming_collect;

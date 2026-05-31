@@ -13,12 +13,32 @@
 // 2026-05-31 — Story 11.1 lit up the v1.0 store/recent/search surface as
 // defaulted methods (additive-with-defaults). NoOpMemory and every existing
 // adapter keep compiling untouched; DailyLogMemory is the first real override.
+// 2026-05-31 — Story 11.2 added remember_fact(MemoryFact) with a default no-op,
+// following the same additive-with-defaults discipline. The curated long-term
+// tier (LongTermMemory → {workspace}/.rustain/MEMORY.md) and the project-scoped
+// composite override it; NoOpMemory and DailyLogMemory keep compiling untouched
+// (the default no-op covers them — DailyLogMemory deliberately ignores durable
+// facts, which belong in MEMORY.md, not the append-only daily log).
 #[async_trait::async_trait]
 pub trait MemoryPort: Send + Sync {
     /// Append a notable entry to durable memory. Default is a no-op (NoOpMemory).
     async fn store(
         &self,
         _entry: crate::domain::models::MemoryEntry,
+    ) -> Result<(), crate::domain::errors::MemoryError> {
+        Ok(())
+    }
+
+    /// Curate a durable fact into the long-term tier (`MEMORY.md`), upserting by
+    /// topic. Default is a no-op so `NoOpMemory`, `DailyLogMemory`, and every
+    /// existing adapter keep compiling untouched (additive-with-defaults, Story
+    /// 11.2). Only `LongTermMemory` and the `project-scoped` composite override
+    /// it. AC2's "updated / removed" is satisfied by human-editing + reload plus
+    /// this method's upsert semantics — there are deliberately no separate
+    /// `update_fact` / `remove_fact` trait methods (Q1).
+    async fn remember_fact(
+        &self,
+        _fact: crate::domain::models::MemoryFact,
     ) -> Result<(), crate::domain::errors::MemoryError> {
         Ok(())
     }

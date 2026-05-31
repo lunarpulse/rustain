@@ -195,21 +195,38 @@ pub fn build_memory(
         "daily-log" => Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(
             &ctx.workspace_path,
         )),
-        // `project-scoped` becomes the daily-log + long-term MEMORY.md composite
-        // in Story 11.2 — stays NoOp until then.
+        // Story 11.2 — the real daily-log + long-term MEMORY.md composite. Wire
+        // `domain_tx` into the long-term child so the >20KB size warning (AC3)
+        // surfaces as a SystemNotice; `None` (headless/eval) skips it silently.
         "project-scoped" => {
-            tracing::warn!(
-                port = ?PortDimension::Memory,
-                adapter = %name,
-                "project-scoped composite (daily-log + long-term) deferred to Story 11.2 — using NoOpMemory"
+            let mut composite = crate::adapters::project_scoped_memory::ProjectScopedMemory::new(
+                &ctx.workspace_path,
             );
-            Arc::new(NoOpMemory)
+            if let Some(ref tx) = ctx.domain_tx {
+                composite.set_event_tx(tx.clone());
+            }
+            Arc::new(composite)
+        }
+        // Story 11.2 — standalone curated long-term tier (for `/memory long-term`
+        // overrides and isolated tests). Same size-warning wiring as the composite.
+        "long-term" => {
+            let mut long_term =
+                crate::adapters::long_term_memory::LongTermMemory::new(&ctx.workspace_path);
+            if let Some(ref tx) = ctx.domain_tx {
+                long_term.set_event_tx(tx.clone());
+            }
+            Arc::new(long_term)
         }
         other => {
             return Err(AdapterCompositionError::UnknownAdapter {
                 port: PortDimension::Memory,
                 name: other.to_string(),
-                available: vec!["noop".into(), "project-scoped".into(), "daily-log".into()],
+                available: vec![
+                    "noop".into(),
+                    "project-scoped".into(),
+                    "daily-log".into(),
+                    "long-term".into(),
+                ],
             });
         }
     };
@@ -838,10 +855,67 @@ mod tests {
         );
     }
 
+    // Story 11.2 — project-scoped composes a REAL composite: a `remember_fact`'d
+    // fact AND a `store`'d entry are both retrievable via `recent` (test 13).
     #[tokio::test]
-    async fn test_build_memory_project_scoped_stays_noop() {
-        let ctx = test_compose_ctx();
+    async fn test_build_memory_project_scoped_is_real_composite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_compose_ctx();
+        ctx.workspace_path = tmp.path().to_path_buf();
+
         let mem = build_memory("project-scoped", None, &ctx).expect("project-scoped builds");
+        mem.remember_fact(crate::domain::models::MemoryFact {
+            category: "Database".into(),
+            fact: "PostgreSQL 15".into(),
+            detail: None,
+        })
+        .await
+        .unwrap();
+        mem.store(crate::domain::models::MemoryEntry {
+            timestamp: chrono::Local::now(),
+            summary: "daily decision".into(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+        let recent = mem.recent(10).await.unwrap();
+        let summaries: Vec<&str> = recent.iter().map(|e| e.summary.as_str()).collect();
+        assert!(
+            summaries.contains(&"PostgreSQL 15"),
+            "long-term fact retrievable"
+        );
+        assert!(
+            summaries.contains(&"daily decision"),
+            "daily entry retrievable"
+        );
+        // Long-term first (AC6).
+        assert_eq!(recent[0].summary, "PostgreSQL 15");
+
+        // MEMORY.md was written by remember_fact (the real long-term child).
+        assert!(tmp.path().join(".rustain").join("MEMORY.md").exists());
+        // The composed port was published into the shared slot.
+        let slot = ctx.memory_slot.load_full();
+        assert!(!slot.recent(10).await.unwrap().is_empty());
+    }
+
+    // Story 11.2 — the standalone `long-term` arm builds a real LongTermMemory.
+    #[tokio::test]
+    async fn test_build_memory_long_term_is_real() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_compose_ctx();
+        ctx.workspace_path = tmp.path().to_path_buf();
+
+        let mem = build_memory("long-term", None, &ctx).expect("long-term builds");
+        mem.remember_fact(crate::domain::models::MemoryFact {
+            category: "Preferences".into(),
+            fact: "prefers snake_case".into(),
+            detail: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(mem.recent(10).await.unwrap().len(), 1, "long-term persists");
+        // store is a no-op on the standalone long-term tier.
         mem.store(crate::domain::models::MemoryEntry {
             timestamp: chrono::Local::now(),
             summary: "ignored".into(),
@@ -849,9 +923,10 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(
-            mem.recent(10).await.unwrap().is_empty(),
-            "project-scoped is NoOp until Story 11.2"
+        assert_eq!(
+            mem.recent(10).await.unwrap().len(),
+            1,
+            "store does not add to the long-term tier"
         );
     }
 
@@ -872,6 +947,32 @@ mod tests {
         );
         assert!(m.recent(5).await.unwrap().is_empty());
         assert!(m.search("q", 5).await.unwrap().is_empty());
+    }
+
+    // Story 11.2 — additive-with-defaults regression (test 15): the new
+    // `remember_fact` default no-op covers NoOpMemory (untouched) and
+    // DailyLogMemory (inherited default — durable facts belong in MEMORY.md, not
+    // the append-only daily log, so it stores nothing and creates NO MEMORY.md).
+    #[tokio::test]
+    async fn test_remember_fact_additive_defaults() {
+        use crate::adapters::noop::NoOpMemory;
+        let fact = crate::domain::models::MemoryFact {
+            category: "Cat".into(),
+            fact: "durable".into(),
+            detail: None,
+        };
+        assert!(NoOpMemory.remember_fact(fact.clone()).await.is_ok());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let daily = crate::adapters::daily_log_memory::DailyLogMemory::new(tmp.path());
+        assert!(
+            daily.remember_fact(fact).await.is_ok(),
+            "DailyLogMemory inherits the remember_fact default no-op"
+        );
+        assert!(
+            !tmp.path().join(".rustain").join("MEMORY.md").exists(),
+            "daily-log's remember_fact default creates no MEMORY.md"
+        );
     }
 
     #[test]

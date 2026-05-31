@@ -1984,6 +1984,31 @@ pub async fn run(
                                         }
                                     } else if cmd_name == "config" {
                                         handlers::config_slash::handle_config_slash(&mut state, cmd_arg, &app_state.event_bus);
+                                    } else if cmd_name == "memory"
+                                        && cmd_arg.map(str::trim) == Some("consolidate")
+                                    {
+                                        // Story 11.2 Task 8 — `/memory consolidate` is intercepted
+                                        // HERE, BEFORE the adapter-override path below; otherwise
+                                        // `port_dimension_from_command_name("memory")` would route
+                                        // it into handle_apply_adapter_override and error as
+                                        // "unknown adapter 'consolidate'". The full propose→confirm
+                                        // consolidation flow (AC4) is split to fast-follow 11.2a per
+                                        // the story's STOP-and-flag clause: the structured model
+                                        // sub-turn + a new proposal-review approval card/handler
+                                        // materially exceed "reuse the approval card + one new
+                                        // event/handler", and shipping a half-wired flow is worse
+                                        // than a clean split. Durable capture already works via the
+                                        // risk-Safe `remember_fact` tool and by editing
+                                        // `.rustain/MEMORY.md` directly (the user owns the record).
+                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: None,
+                                            level: crate::domain::models::NoticeLevel::Info,
+                                            message: "/memory consolidate (propose→confirm) ships in 11.2a. \
+                                                      Durable facts are captured today via the agent's \
+                                                      `remember_fact` tool and by editing .rustain/MEMORY.md."
+                                                .to_string(),
+                                        });
+                                        state.needs_redraw = true;
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         let cmd_arg = cmd_arg;

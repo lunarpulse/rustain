@@ -874,6 +874,36 @@ impl ToolSetPort for ToolSetAdapter {
                 }),
                 parallel_safe: true,
             },
+            ToolDefinition {
+                name: "remember_fact".to_string(),
+                // Disambiguates from `remember` (day-to-day events): this is the
+                // DURABLE, topic-organized long-term tier (MEMORY.md). Story 11.2.
+                description: "Record a DURABLE fact, preference, or piece of project knowledge to \
+                              long-term memory (MEMORY.md), organized by topic. Use this for things \
+                              that should persist indefinitely (e.g. 'the user prefers snake_case', \
+                              'the DB is PostgreSQL 15') — NOT for day-to-day events (use `remember` \
+                              for those). Provide a short `category` (topic) and the `fact`."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "description": "Short topic/category this fact belongs under (e.g. 'Preferences', 'Database')."
+                        },
+                        "fact": {
+                            "type": "string",
+                            "description": "The durable fact to record (one short statement)."
+                        },
+                        "detail": {
+                            "type": "string",
+                            "description": "Optional supporting detail or rationale."
+                        }
+                    },
+                    "required": ["category", "fact"]
+                }),
+                parallel_safe: true,
+            },
             #[cfg(feature = "meta-search")]
             crate::adapters::tool_exposure::meta_search::build_search_skills_tool_definition(),
             #[cfg(feature = "meta-search")]
@@ -918,6 +948,7 @@ impl ToolSetPort for ToolSetAdapter {
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             "propose_plan" => self.execute_propose_plan(&input).await,
             "remember" => self.execute_remember(&input).await,
+            "remember_fact" => self.execute_remember_fact(&input).await,
             #[cfg(feature = "meta-search")]
             "search_skills" => self.execute_search_skills(&input, "", cancel).await,
             #[cfg(feature = "meta-search")]
@@ -1054,14 +1085,29 @@ impl ToolSetAdapter {
                 "remember: summary must not be empty".into(),
             ));
         }
-        let context = input
-            .get("context")
-            .filter(|v| !v.is_null())
-            .map(|v| {
-                v.as_str()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| v.to_string())
+        let context = input.get("context").filter(|v| !v.is_null()).map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string())
+        });
+
+        // Story 11.2 Task 7 (RETROFIT) — secret-pattern pre-write gate. Closes
+        // the daily-log capture gap 11.1 shipped without: scan each field
+        // individually AFTER validation, BEFORE store (DF-4 code review fix:
+        // per-field scan catches secrets split across field boundaries that
+        // `\n`-joining would break). Block-and-report (no silent redaction)
+        // so the model knows the capture failed and can rephrase.
+        let scan = crate::domain::services::secret_scan::scan_for_secrets;
+        if let Some(pattern) = scan(summary).or(context.as_ref().and_then(|c| scan(c))) {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!(
+                    "Blocked: input looks like a secret ({pattern}); nothing stored. \
+                     Redact the secret and retry."
+                ),
+                is_error: true,
             });
+        }
 
         let Some(ref slot) = self.memory else {
             // No memory port wired (e.g. headless/eval) — don't fail the turn.
@@ -1089,6 +1135,104 @@ impl ToolSetAdapter {
             Err(e) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Failed to remember: {e}"),
+                is_error: true,
+            }),
+        }
+    }
+
+    /// Story 11.2 — `remember_fact` builtin: upsert a DURABLE fact into the
+    /// curated long-term tier (`MEMORY.md`) via `MemoryPort::remember_fact`.
+    /// Risk-Safe / auto-approve (see `risk_for_builtin`). Parallel to
+    /// `execute_remember`; gated by the same secret-pattern pre-write check.
+    ///
+    /// Note (Q5): in daily-log-only / noop profiles the composed port has no
+    /// long-term child, so this hits the trait DEFAULT no-op and the fact is not
+    /// persisted (the tool still reports success — it cannot tell). That is a
+    /// profile-configuration choice, not an adapter bug.
+    async fn execute_remember_fact(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
+        // `category` (required) — coerce non-string JSON defensively (11.1 patch).
+        let category = match input.get("category") {
+            Some(v) if v.is_string() => v.as_str().unwrap_or_default().to_string(),
+            Some(v) if !v.is_null() => v.to_string(),
+            _ => {
+                return Err(ToolError::InvalidInput(
+                    "remember_fact: missing 'category'".into(),
+                ));
+            }
+        };
+        if category.trim().is_empty() {
+            return Err(ToolError::InvalidInput(
+                "remember_fact: category must not be empty".into(),
+            ));
+        }
+        // `fact` (required) — same defensive coercion.
+        let fact_text = match input.get("fact") {
+            Some(v) if v.is_string() => v.as_str().unwrap_or_default().to_string(),
+            Some(v) if !v.is_null() => v.to_string(),
+            _ => {
+                return Err(ToolError::InvalidInput(
+                    "remember_fact: missing 'fact'".into(),
+                ));
+            }
+        };
+        if fact_text.trim().is_empty() {
+            return Err(ToolError::InvalidInput(
+                "remember_fact: fact must not be empty".into(),
+            ));
+        }
+        // `detail` (optional) — coerce non-string JSON defensively.
+        let detail = input.get("detail").filter(|v| !v.is_null()).map(|v| {
+            v.as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| v.to_string())
+        });
+
+        // Secret-pattern pre-write gate (Task 7) — per-field scan (DF-4 code
+        // review fix: catches secrets split across field boundaries).
+        let scan = crate::domain::services::secret_scan::scan_for_secrets;
+        if let Some(pattern) = scan(&category)
+            .or_else(|| scan(&fact_text))
+            .or_else(|| detail.as_ref().and_then(|d| scan(d)))
+        {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!(
+                    "Blocked: input looks like a secret ({pattern}); nothing stored. \
+                     Redact the secret and retry."
+                ),
+                is_error: true,
+            });
+        }
+
+        let Some(ref slot) = self.memory else {
+            // No memory port wired (e.g. headless/eval) — don't fail the turn.
+            tracing::warn!("remember_fact: no memory port wired — fact not persisted");
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: "Memory adapter not configured; nothing stored.".to_string(),
+                is_error: false,
+            });
+        };
+
+        // load_full() so a profile swap (re-published into the slot) is respected.
+        let memory = slot.load_full();
+        let mem_fact = crate::domain::models::MemoryFact {
+            category,
+            fact: fact_text.clone(),
+            detail,
+        };
+        match memory.remember_fact(mem_fact).await {
+            Ok(()) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Recorded durable fact: {fact_text}"),
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Failed to record fact: {e}"),
                 is_error: true,
             }),
         }
@@ -1316,6 +1460,179 @@ mod tests {
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),
         )
+    }
+
+    fn mem_slot(
+        mem: Arc<dyn crate::domain::ports::MemoryPort>,
+    ) -> Arc<ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>> {
+        Arc::new(ArcSwap::from_pointee(mem))
+    }
+
+    // Story 11.2 — the remember_fact tool persists a durable fact to MEMORY.md.
+    #[tokio::test]
+    async fn test_remember_fact_tool_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut adapter = make_adapter(tmp.path());
+        let lt: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(tmp.path()),
+        );
+        adapter.set_memory(mem_slot(Arc::clone(&lt)));
+
+        let result = adapter
+            .execute(
+                "remember_fact",
+                serde_json::json!({"category": "Preferences", "fact": "prefers snake_case"}),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("Recorded durable fact"));
+        assert!(tmp.path().join(".rustain").join("MEMORY.md").exists());
+        assert_eq!(lt.recent(10).await.unwrap().len(), 1);
+    }
+
+    // Story 11.2 — remember_fact reports gracefully (not an error) with no port.
+    #[tokio::test]
+    async fn test_remember_fact_tool_no_memory_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "remember_fact",
+                serde_json::json!({"category": "Cat", "fact": "fact"}),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.is_error,
+            "missing memory port does not fail the turn"
+        );
+        assert!(result.content.contains("not configured"));
+    }
+
+    // Story 11.2 — empty/missing required fields are InvalidInput.
+    #[tokio::test]
+    async fn test_remember_fact_tool_rejects_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = make_adapter(tmp.path());
+        assert!(matches!(
+            adapter
+                .execute(
+                    "remember_fact",
+                    serde_json::json!({"category": "Cat", "fact": "   "}),
+                    test_cancel()
+                )
+                .await,
+            Err(ToolError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            adapter
+                .execute(
+                    "remember_fact",
+                    serde_json::json!({"fact": "no category"}),
+                    test_cancel()
+                )
+                .await,
+            Err(ToolError::InvalidInput(_))
+        ));
+    }
+
+    // Story 11.2 Task 7 (test 18) — the secret gate blocks remember_fact and
+    // nothing is persisted; clean input stores normally.
+    #[tokio::test]
+    async fn test_remember_fact_tool_blocks_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut adapter = make_adapter(tmp.path());
+        let lt: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(tmp.path()),
+        );
+        adapter.set_memory(mem_slot(Arc::clone(&lt)));
+
+        // Secret in the fact text → blocked.
+        let blocked = adapter
+            .execute(
+                "remember_fact",
+                serde_json::json!({"category": "Creds", "fact": "key is AKIAIOSFODNN7EXAMPLE"}),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(blocked.is_error, "secret blocked");
+        assert!(blocked.content.contains("Blocked"));
+        assert!(
+            !tmp.path().join(".rustain").join("MEMORY.md").exists(),
+            "blocked secret not persisted"
+        );
+        assert!(lt.recent(10).await.unwrap().is_empty());
+
+        // Secret hidden in the detail field → also blocked.
+        let blocked2 = adapter
+            .execute(
+                "remember_fact",
+                serde_json::json!({
+                    "category": "Notes",
+                    "fact": "deploy key",
+                    "detail": "-----BEGIN OPENSSH PRIVATE KEY-----"
+                }),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(blocked2.is_error, "secret in detail blocked");
+        assert!(lt.recent(10).await.unwrap().is_empty());
+
+        // Clean input stores.
+        let ok = adapter
+            .execute(
+                "remember_fact",
+                serde_json::json!({"category": "Database", "fact": "PostgreSQL 15"}),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(!ok.is_error);
+        assert_eq!(lt.recent(10).await.unwrap().len(), 1);
+    }
+
+    // Story 11.2 Task 7 (RETROFIT, test 18) — the secret gate blocks the
+    // existing `remember` tool too (closes the 11.1 daily-log gap).
+    #[tokio::test]
+    async fn test_remember_tool_blocks_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut adapter = make_adapter(tmp.path());
+        let daily: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()),
+        );
+        adapter.set_memory(mem_slot(Arc::clone(&daily)));
+
+        let blocked = adapter
+            .execute(
+                "remember",
+                serde_json::json!({"summary": "token sk-abcdefghijklmnopqrstuvwxyz123"}),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(blocked.is_error, "secret blocked");
+        assert!(blocked.content.contains("Blocked"));
+        assert!(
+            daily.recent(10).await.unwrap().is_empty(),
+            "no daily entry appended for a blocked secret"
+        );
+
+        // Clean input stores normally.
+        let ok = adapter
+            .execute(
+                "remember",
+                serde_json::json!({"summary": "clean decision"}),
+                test_cancel(),
+            )
+            .await
+            .unwrap();
+        assert!(!ok.is_error);
+        assert_eq!(daily.recent(10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

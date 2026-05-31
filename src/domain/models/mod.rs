@@ -22,6 +22,7 @@ pub mod launch_spec;
 pub mod mcp_server_spec;
 pub mod mcp_server_state;
 pub mod memory_entry;
+pub mod memory_fact;
 mod message;
 mod notice;
 pub mod palette;
@@ -153,6 +154,8 @@ pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_e
 pub use mcp_server_state::McpConnectionState;
 #[allow(unused_imports)]
 pub use memory_entry::MemoryEntry;
+#[allow(unused_imports)]
+pub use memory_fact::MemoryFact;
 #[allow(unused_imports)]
 pub use pricing::PricingConfig;
 #[allow(unused_imports)]

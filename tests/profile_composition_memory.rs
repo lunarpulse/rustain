@@ -257,6 +257,85 @@ async fn test_personal_assistant_remember_persists_via_daily_log() {
     );
 }
 
+/// Story 11.2 — the `coding` profile's real selection (memory = project-scoped).
+fn coding_project_scoped_selection() -> ProfileSelection {
+    let mut sel = coding_selection();
+    sel.dimensions.insert(
+        PortDimension::Memory,
+        AdapterRef {
+            adapter: "project-scoped".into(),
+            _config: None,
+        },
+    );
+    sel
+}
+
+/// Story 11.2 (test 14) — AC5/AC6 + DoD: the `coding` profile composes with the
+/// REAL project-scoped composite. `remember_fact` persists a durable fact to
+/// MEMORY.md and `remember` routes to the daily log — both retrievable through
+/// the composed port, long-term first (AC6).
+#[tokio::test]
+async fn test_coding_profile_composes_real_project_scoped() {
+    use tokio_util::sync::CancellationToken;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = compose_ctx();
+    ctx.workspace_path = tmp.path().to_path_buf();
+
+    let core = AgentCore::compose("coding", &coding_project_scoped_selection(), &ctx)
+        .expect("coding profile composes with the real project-scoped composite");
+
+    let tools = core.tools.load_full();
+
+    // Durable fact → long-term MEMORY.md.
+    let fact_result = tools
+        .execute(
+            "remember_fact",
+            serde_json::json!({"category": "Database", "fact": "PostgreSQL 15"}),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("remember_fact tool executes");
+    assert!(
+        !fact_result.is_error,
+        "remember_fact is risk-Safe and succeeds"
+    );
+
+    // Operational record → daily log (same composite).
+    let entry_result = tools
+        .execute(
+            "remember",
+            serde_json::json!({"summary": "kicked off epic 11.2"}),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("remember tool executes");
+    assert!(!entry_result.is_error);
+
+    let mem = core.memory.load_full();
+    let recent = mem.recent(10).await.expect("recent");
+    let summaries: Vec<&str> = recent.iter().map(|e| e.summary.as_str()).collect();
+    assert!(
+        summaries.contains(&"PostgreSQL 15"),
+        "durable fact via composite"
+    );
+    assert!(
+        summaries.contains(&"kicked off epic 11.2"),
+        "daily entry via composite"
+    );
+    assert_eq!(recent[0].summary, "PostgreSQL 15", "long-term first (AC6)");
+
+    // Files landed at the canonical sibling paths.
+    assert!(
+        tmp.path().join(".rustain").join("MEMORY.md").exists(),
+        "MEMORY.md written by the long-term child"
+    );
+    assert!(
+        tmp.path().join(".rustain").join("memory").is_dir(),
+        "daily-log dir written by the daily child"
+    );
+}
+
 #[test]
 #[ignore = "RSS-based; run with `cargo test --test profile_composition_memory -- --ignored --nocapture`"]
 fn test_coding_profile_under_35mb() {

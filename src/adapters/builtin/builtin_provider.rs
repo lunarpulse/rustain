@@ -141,6 +141,7 @@ mod tests {
                     "exit_plan_mode",
                     "propose_plan",
                     "remember",
+                    "remember_fact",
                     "skill_view",
                 ]
             );
@@ -157,6 +158,7 @@ mod tests {
                     "exit_plan_mode",
                     "propose_plan",
                     "remember",
+                    "remember_fact",
                     "search_skills",
                     "search_tools",
                     "skill_view",

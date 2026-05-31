@@ -126,7 +126,8 @@ impl DailyLogMemory {
             let Some(rest) = line.strip_prefix("## ") else {
                 continue;
             };
-            let Some((time_str, summary)) = rest.split_once(" — ")
+            let Some((time_str, summary)) = rest
+                .split_once(" — ")
                 .or_else(|| rest.split_once(" - "))
                 .or_else(|| rest.split_once(" – "))
             else {

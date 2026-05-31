@@ -988,34 +988,49 @@ impl HealthCheck for MemoryDirSizeCheck {
             },
         };
 
-        let memory_dir = workspace.join(".rustain").join("memory");
+        let rustain_dir = workspace.join(".rustain");
+        let memory_dir = rustain_dir.join("memory");
+        // Story 11.2 — the long-term curated tier is a SIBLING of memory/.
+        let memory_md = rustain_dir.join("MEMORY.md");
 
         let mut total: u64 = 0;
         let mut file_count: usize = 0;
-        match std::fs::read_dir(&memory_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let ft = match entry.file_type() {
-                        Ok(ft) => ft,
-                        Err(_) => continue,
-                    };
-                    if ft.is_file() && !ft.is_symlink() {
-                        if let Ok(meta) = entry.metadata() {
-                            total += meta.len();
-                            file_count += 1;
-                        }
+        // Daily-log day files (Story 11.1). A missing dir is fine — memory may
+        // simply not have been written yet; MEMORY.md may still exist below.
+        if let Ok(entries) = std::fs::read_dir(&memory_dir) {
+            for entry in entries.flatten() {
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_file() && !ft.is_symlink() {
+                    if let Ok(meta) = entry.metadata() {
+                        total += meta.len();
+                        file_count += 1;
                     }
                 }
             }
-            // Missing dir is fine — memory simply hasn't been written yet (AC7).
-            Err(_) => {
-                return CheckResult {
-                    name: self.name().to_string(),
-                    status: CheckStatus::Pass,
-                    message: "no memory yet".to_string(),
-                    fix: None,
-                };
+        }
+
+        // Long-term MEMORY.md (Story 11.2). `symlink_metadata` does NOT follow
+        // links, so `is_file()` is true only for a real regular file — skipping
+        // symlinks, mirroring the day-file loop above.
+        let mut memory_md_size: u64 = 0;
+        if let Ok(meta) = std::fs::symlink_metadata(&memory_md) {
+            if meta.is_file() {
+                memory_md_size = meta.len();
+                total += memory_md_size;
             }
+        }
+
+        // Missing both is fine — memory simply hasn't been written yet (AC7).
+        if file_count == 0 && memory_md_size == 0 {
+            return CheckResult {
+                name: self.name().to_string(),
+                status: CheckStatus::Pass,
+                message: "no memory yet".to_string(),
+                fix: None,
+            };
         }
 
         let size_display = if total >= 1_048_576 {
@@ -1026,10 +1041,23 @@ impl HealthCheck for MemoryDirSizeCheck {
             format!("{total} B")
         };
 
+        // Awareness-only sub-note when MEMORY.md crosses the 20KB framing (AC3).
+        // Still never a failure (consistent with 11.1 AC7).
+        let md_note = if memory_md_size > 20 * 1024 {
+            format!(
+                " (MEMORY.md {:.1} KB — consider pruning)",
+                memory_md_size as f64 / 1024.0
+            )
+        } else if memory_md_size > 0 {
+            " (incl. MEMORY.md)".to_string()
+        } else {
+            String::new()
+        };
+
         CheckResult {
             name: self.name().to_string(),
             status: CheckStatus::Pass,
-            message: format!("{file_count} day file(s), {size_display}"),
+            message: format!("{file_count} day file(s), {size_display}{md_note}"),
             fix: None,
         }
     }
