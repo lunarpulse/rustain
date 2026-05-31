@@ -255,6 +255,10 @@ mod tests {
             sandbox_policy: Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),
+            memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+                crate::adapters::noop::NoOpMemory,
+            )
+                as Arc<dyn crate::domain::ports::MemoryPort>)),
             #[cfg(feature = "meta-search")]
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]

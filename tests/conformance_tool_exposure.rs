@@ -217,6 +217,10 @@ fn test_compose_with_default_config_binds_static_full() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
@@ -264,6 +268,10 @@ fn test_compose_with_unknown_exposure_returns_error() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as std::sync::Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: std::sync::Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),

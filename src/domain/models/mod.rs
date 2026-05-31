@@ -21,6 +21,7 @@ mod focus;
 pub mod launch_spec;
 pub mod mcp_server_spec;
 pub mod mcp_server_state;
+pub mod memory_entry;
 mod message;
 mod notice;
 pub mod palette;
@@ -150,6 +151,8 @@ pub use filtered_skill_catalog::FilteredSkillCatalog;
 pub use launch_spec::AgentLaunchSpec;
 pub use mcp_server_spec::{McpServerSource, McpServerSpec, McpTransport, expand_env_vars};
 pub use mcp_server_state::McpConnectionState;
+#[allow(unused_imports)]
+pub use memory_entry::MemoryEntry;
 #[allow(unused_imports)]
 pub use pricing::PricingConfig;
 #[allow(unused_imports)]

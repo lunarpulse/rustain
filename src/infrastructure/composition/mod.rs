@@ -58,6 +58,12 @@ pub struct ComposeContext {
     /// Story 9.5 — sandbox policy shared reference for Bash-tool enforcement.
     /// Mirrors the AppState.sandbox_policy field; read at spawn time.
     pub sandbox_policy: Arc<tokio::sync::RwLock<crate::domain::models::sandbox::SandboxPolicy>>,
+    /// Story 11.1 — shared memory-port slot for the `remember` builtin tool.
+    /// Mirrors `sandbox_slot`: created (NoOpMemory) before compose and shared
+    /// with `ToolSetAdapter`. `build_memory` publishes the composed memory port
+    /// into it — including on profile reload — so the `remember` tool, which
+    /// reads through `ArcSwap::load_full()`, always routes to the live adapter.
+    pub memory_slot: Arc<arc_swap::ArcSwap<Arc<dyn MemoryPort>>>,
     #[cfg(feature = "meta-search")]
     pub search_config: crate::domain::models::SearchConfig,
     #[cfg(feature = "meta-search")]
@@ -181,24 +187,38 @@ pub fn build_persona(
 pub fn build_memory(
     name: &str,
     _config: Option<&toml::Value>,
-    _ctx: &ComposeContext,
+    ctx: &ComposeContext,
 ) -> Result<Arc<dyn MemoryPort>, AdapterCompositionError> {
-    match name {
-        "noop" => Ok(Arc::new(NoOpMemory)),
-        "project-scoped" | "daily-log" => {
+    let adapter: Arc<dyn MemoryPort> = match name {
+        "noop" => Arc::new(NoOpMemory),
+        // Story 11.1 — real file-backed daily-log adapter.
+        "daily-log" => Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(
+            &ctx.workspace_path,
+        )),
+        // `project-scoped` becomes the daily-log + long-term MEMORY.md composite
+        // in Story 11.2 — stays NoOp until then.
+        "project-scoped" => {
             tracing::warn!(
                 port = ?PortDimension::Memory,
                 adapter = %name,
-                "Placeholder adapter — real implementation deferred to Epic 12+"
+                "project-scoped composite (daily-log + long-term) deferred to Story 11.2 — using NoOpMemory"
             );
-            Ok(Arc::new(NoOpMemory))
+            Arc::new(NoOpMemory)
         }
-        other => Err(AdapterCompositionError::UnknownAdapter {
-            port: PortDimension::Memory,
-            name: other.to_string(),
-            available: vec!["noop".into(), "project-scoped".into(), "daily-log".into()],
-        }),
-    }
+        other => {
+            return Err(AdapterCompositionError::UnknownAdapter {
+                port: PortDimension::Memory,
+                name: other.to_string(),
+                available: vec!["noop".into(), "project-scoped".into(), "daily-log".into()],
+            });
+        }
+    };
+
+    // Publish the composed memory port into the shared slot so the `remember`
+    // builtin tool (held by ToolSetAdapter via Arc::clone of this slot) routes
+    // writes to the live adapter — on both initial compose and profile reload.
+    ctx.memory_slot.store(Arc::new(Arc::clone(&adapter)));
+    Ok(adapter)
 }
 
 pub fn build_session(
@@ -245,6 +265,9 @@ pub fn build_tools(
             if let Some(ref tx) = ctx.domain_tx {
                 adapter.set_event_tx(tx.clone());
             }
+            // Story 11.1 — wire the shared memory slot so the `remember` builtin
+            // tool can append notable entries via MemoryPort::store.
+            adapter.set_memory(Arc::clone(&ctx.memory_slot));
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
                 adapter.set_meta_search_engine(Arc::clone(engine));
@@ -267,6 +290,8 @@ pub fn build_tools(
             if let Some(ref tx) = ctx.domain_tx {
                 adapter.set_event_tx(tx.clone());
             }
+            // Story 11.1 — wire the shared memory slot for the `remember` tool.
+            adapter.set_memory(Arc::clone(&ctx.memory_slot));
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
                 adapter.set_meta_search_engine(Arc::clone(engine));
@@ -727,6 +752,10 @@ mod tests {
             sandbox_policy: Arc::new(tokio::sync::RwLock::new(
                 crate::domain::models::sandbox::SandboxPolicy::Permissive,
             )),
+            memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+                crate::adapters::noop::NoOpMemory,
+            )
+                as Arc<dyn MemoryPort>)),
             #[cfg(feature = "meta-search")]
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
@@ -777,6 +806,72 @@ mod tests {
     fn test_build_memory_project_scoped() {
         let ctx = test_compose_ctx();
         assert!(build_memory("project-scoped", None, &ctx).is_ok());
+    }
+
+    // Story 11.1 — daily-log composes a REAL adapter (a stored entry is
+    // retrievable); project-scoped stays NoOp (store is a no-op) until 11.2.
+    #[tokio::test]
+    async fn test_build_memory_daily_log_is_real_and_published_to_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = test_compose_ctx();
+        ctx.workspace_path = tmp.path().to_path_buf();
+
+        let mem = build_memory("daily-log", None, &ctx).expect("daily-log builds");
+        mem.store(crate::domain::models::MemoryEntry {
+            timestamp: chrono::Local::now(),
+            summary: "composed entry".into(),
+            context: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            mem.recent(10).await.unwrap().len(),
+            1,
+            "daily-log persists (non-NoOp)"
+        );
+        // build_memory published the composed port into the shared slot.
+        let slot = ctx.memory_slot.load_full();
+        assert_eq!(
+            slot.recent(10).await.unwrap().len(),
+            1,
+            "composed memory port published into memory_slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_memory_project_scoped_stays_noop() {
+        let ctx = test_compose_ctx();
+        let mem = build_memory("project-scoped", None, &ctx).expect("project-scoped builds");
+        mem.store(crate::domain::models::MemoryEntry {
+            timestamp: chrono::Local::now(),
+            summary: "ignored".into(),
+            context: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            mem.recent(10).await.unwrap().is_empty(),
+            "project-scoped is NoOp until Story 11.2"
+        );
+    }
+
+    // Story 11.1 — additive-with-defaults regression: NoOpMemory's defaulted
+    // store/recent/search return Ok/empty without any edits to noop.rs.
+    #[tokio::test]
+    async fn test_noop_memory_additive_defaults() {
+        use crate::adapters::noop::NoOpMemory;
+        let m = NoOpMemory;
+        assert!(
+            m.store(crate::domain::models::MemoryEntry {
+                timestamp: chrono::Local::now(),
+                summary: "x".into(),
+                context: None,
+            })
+            .await
+            .is_ok()
+        );
+        assert!(m.recent(5).await.unwrap().is_empty());
+        assert!(m.search("q", 5).await.unwrap().is_empty());
     }
 
     #[test]

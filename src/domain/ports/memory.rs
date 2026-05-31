@@ -10,12 +10,39 @@
 // 2026-05-19 — Story 8.5 added health_snapshot() with default HealthSummary::unknown() impl
 // following additive-with-defaults discipline. No existing adapters needed changes.
 // Real metrics ship with real adapters in Epic 12.
+// 2026-05-31 — Story 11.1 lit up the v1.0 store/recent/search surface as
+// defaulted methods (additive-with-defaults). NoOpMemory and every existing
+// adapter keep compiling untouched; DailyLogMemory is the first real override.
 #[async_trait::async_trait]
 pub trait MemoryPort: Send + Sync {
-    // v1.0 reserved methods (commented out):
-    // - store(&self, entry: MemoryEntry) -> Result<(), MemoryError>
-    // - recent(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError>
-    // - search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError>
+    /// Append a notable entry to durable memory. Default is a no-op (NoOpMemory).
+    async fn store(
+        &self,
+        _entry: crate::domain::models::MemoryEntry,
+    ) -> Result<(), crate::domain::errors::MemoryError> {
+        Ok(())
+    }
+
+    /// Return up to `limit` most-recent loaded entries (newest-first).
+    /// For the daily-log adapter this is the current + previous day (AC3),
+    /// satisfying the epic's "recall" behavior. Default returns empty.
+    async fn recent(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<crate::domain::models::MemoryEntry>, crate::domain::errors::MemoryError> {
+        Ok(Vec::new())
+    }
+
+    /// Case-insensitive keyword search over loaded entries, capped at `limit`.
+    /// Default returns empty.
+    async fn search(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<crate::domain::models::MemoryEntry>, crate::domain::errors::MemoryError> {
+        Ok(Vec::new())
+    }
+
     fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
         crate::domain::models::HealthSummary::unknown()
     }

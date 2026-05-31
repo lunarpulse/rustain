@@ -80,6 +80,10 @@ fn test_app_state_honors_raw_capacity() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
@@ -151,6 +155,10 @@ fn test_app_state_session_cancel_is_root_token() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),

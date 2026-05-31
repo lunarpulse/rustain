@@ -140,6 +140,7 @@ mod tests {
                     "activate_skill",
                     "exit_plan_mode",
                     "propose_plan",
+                    "remember",
                     "skill_view",
                 ]
             );
@@ -155,6 +156,7 @@ mod tests {
                     "activate_skill",
                     "exit_plan_mode",
                     "propose_plan",
+                    "remember",
                     "search_skills",
                     "search_tools",
                     "skill_view",

@@ -172,6 +172,10 @@ fn test_coding_profile_composes_seven_ports() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
@@ -230,6 +234,10 @@ fn test_base_profile_composes_all_noop() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
@@ -275,6 +283,10 @@ fn test_personal_assistant_preview_composes_with_fallback() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
@@ -330,6 +342,10 @@ fn test_reload_recomposes_agent_core() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),

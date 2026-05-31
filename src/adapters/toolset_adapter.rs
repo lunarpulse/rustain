@@ -70,6 +70,10 @@ pub struct ToolSetAdapter {
     sandbox: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::SandboxManager>>>,
     /// Story 9.5 — sandbox policy reference for reading current policy at Bash spawn time.
     sandbox_policy: Arc<tokio::sync::RwLock<SandboxPolicy>>,
+    /// Story 11.1 — shared memory-port slot for the `remember` builtin tool.
+    /// `None` until wired at the composition root; read via `load_full()` so a
+    /// profile swap (which re-publishes into this slot) is always respected.
+    memory: Option<Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>>>,
     /// Story 9.7 Phase B — optional meta-search engine for `search_skills` AND `search_tools` builtin tools.
     #[cfg(feature = "meta-search")]
     meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
@@ -203,9 +207,18 @@ impl ToolSetAdapter {
             skill_cache: None,
             sandbox,
             sandbox_policy,
+            memory: None,
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
         }
+    }
+
+    /// Story 11.1 — wire the shared memory-port slot for the `remember` tool.
+    pub fn set_memory(
+        &mut self,
+        memory: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>>,
+    ) {
+        self.memory = Some(memory);
     }
 
     #[allow(dead_code)]
@@ -834,6 +847,33 @@ impl ToolSetPort for ToolSetAdapter {
                 }),
                 parallel_safe: false,
             },
+            ToolDefinition {
+                name: "remember".to_string(),
+                // The persona/system-prompt hint for this builtin lives in its
+                // description — this is what reaches the model (AC1: notable =
+                // LLM-driven, "not every turn is logged").
+                description: "Append a notable outcome to today's daily memory log so it is \
+                              available in future sessions. Call this ONLY for genuinely notable \
+                              outcomes — decisions made, files changed, tasks completed — NOT for \
+                              routine chatter or every turn. Append-only and local to \
+                              {workspace}/.rustain/memory/."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "One-line summary of the notable action or decision."
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "Optional supporting detail (files touched, rationale)."
+                        }
+                    },
+                    "required": ["summary"]
+                }),
+                parallel_safe: true,
+            },
             #[cfg(feature = "meta-search")]
             crate::adapters::tool_exposure::meta_search::build_search_skills_tool_definition(),
             #[cfg(feature = "meta-search")]
@@ -877,6 +917,7 @@ impl ToolSetPort for ToolSetAdapter {
             "skill_view" => self.execute_skill_view(&input, "", cancel).await,
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
             "propose_plan" => self.execute_propose_plan(&input).await,
+            "remember" => self.execute_remember(&input).await,
             #[cfg(feature = "meta-search")]
             "search_skills" => self.execute_search_skills(&input, "", cancel).await,
             #[cfg(feature = "meta-search")]
@@ -998,6 +1039,59 @@ impl ToolSetAdapter {
             content: "Plan proposed for user approval.".to_string(),
             is_error: false,
         })
+    }
+
+    /// Story 11.1 — `remember` builtin: append a notable entry to daily-log
+    /// memory via `MemoryPort::store`. Risk-Safe / auto-approve (see
+    /// `risk_for_builtin`) so it never interrupts the turn with a prompt.
+    async fn execute_remember(&self, input: &serde_json::Value) -> Result<ToolResult, ToolError> {
+        let summary = input
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput("remember: missing 'summary'".into()))?;
+        if summary.trim().is_empty() {
+            return Err(ToolError::InvalidInput(
+                "remember: summary must not be empty".into(),
+            ));
+        }
+        let context = input
+            .get("context")
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| v.to_string())
+            });
+
+        let Some(ref slot) = self.memory else {
+            // No memory port wired (e.g. headless/eval) — don't fail the turn.
+            tracing::warn!("remember: no memory port wired — entry not persisted");
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: "Memory adapter not configured; nothing stored.".to_string(),
+                is_error: false,
+            });
+        };
+
+        // load_full() so a profile swap (which re-publishes into the slot) is respected.
+        let memory = slot.load_full();
+        let entry = crate::domain::models::MemoryEntry {
+            timestamp: chrono::Local::now(),
+            summary: summary.to_string(),
+            context,
+        };
+        match memory.store(entry).await {
+            Ok(()) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Remembered: {summary}"),
+                is_error: false,
+            }),
+            Err(e) => Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Failed to remember: {e}"),
+                is_error: true,
+            }),
+        }
     }
 
     async fn execute_activate_skill(

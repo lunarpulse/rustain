@@ -963,6 +963,12 @@ pub async fn run() -> Result<()> {
         sandbox_startup_policy: sandbox_policy.clone(),
         sandbox_slot: Arc::clone(&sandbox_slot),
         sandbox_policy: Arc::clone(&sandbox_policy_ref),
+        // Story 11.1 — shared memory slot for the `remember` tool. `build_memory`
+        // publishes the composed adapter into it during compose (and on reload).
+        memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+            crate::adapters::noop::NoOpMemory,
+        )
+            as Arc<dyn crate::domain::ports::MemoryPort>)),
         #[cfg(feature = "meta-search")]
         search_config: app_config.search.clone(),
         #[cfg(feature = "meta-search")]

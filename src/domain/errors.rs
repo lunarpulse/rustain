@@ -17,6 +17,9 @@ pub enum DomainError {
     Storage(#[from] StorageError),
 
     #[error(transparent)]
+    Memory(#[from] MemoryError),
+
+    #[error(transparent)]
     Permission(#[from] PermissionError),
 
     #[error(transparent)]
@@ -126,6 +129,23 @@ pub enum StorageError {
 
     #[error("I/O error: {0}")]
     IoError(String),
+
+    #[error("Operation not supported: {0}")]
+    NotSupported(String),
+
+    #[error("{0}")]
+    Other(String),
+}
+
+/// Story 11.1 — daily-log memory adapter errors. Mirrors `StorageError`.
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum MemoryError {
+    #[error("I/O error: {0}")]
+    IoError(String),
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
 
     #[error("Operation not supported: {0}")]
     NotSupported(String),

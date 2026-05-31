@@ -29,6 +29,10 @@ fn compose_ctx() -> ComposeContext {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
@@ -145,6 +149,112 @@ fn base_selection() -> ProfileSelection {
         },
     );
     ProfileSelection { dimensions: dims }
+}
+
+/// Story 11.1 — the `personal-assistant` profile's resolved selection. The real
+/// profile declares `channels = "telegram"` / `scheduler = "cron"` (preview,
+/// feature-gated); the resolver rewrites those to the available `terminal`/`none`
+/// adapters on a build without those features. Memory is the real `daily-log`.
+fn personal_assistant_selection() -> ProfileSelection {
+    let mut dims = BTreeMap::new();
+    dims.insert(
+        PortDimension::Persona,
+        AdapterRef {
+            adapter: "personal-assistant".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Memory,
+        AdapterRef {
+            adapter: "daily-log".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Session,
+        AdapterRef {
+            adapter: "basic".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Tools,
+        AdapterRef {
+            adapter: "builtin-full".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Channels,
+        AdapterRef {
+            adapter: "terminal".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Scheduler,
+        AdapterRef {
+            adapter: "none".into(),
+            _config: None,
+        },
+    );
+    dims.insert(
+        PortDimension::Context,
+        AdapterRef {
+            adapter: "daily".into(),
+            _config: None,
+        },
+    );
+    ProfileSelection { dimensions: dims }
+}
+
+/// AC1 + DoD + Task 5 end-to-end: the `personal-assistant` profile composes with
+/// the real daily-log memory, and the risk-Safe `remember` builtin tool (wired at
+/// the composition root) persists a notable entry through it. Drives the tool
+/// (not `MemoryEntry` directly) so the test needs no `chrono` dev-dependency.
+#[tokio::test]
+async fn test_personal_assistant_remember_persists_via_daily_log() {
+    use tokio_util::sync::CancellationToken;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = compose_ctx();
+    ctx.workspace_path = tmp.path().to_path_buf();
+
+    let core = AgentCore::compose("personal-assistant", &personal_assistant_selection(), &ctx)
+        .expect("personal-assistant profile composes with daily-log memory");
+
+    // The `remember` tool routes through memory_slot → composed daily-log adapter.
+    let tools = core.tools.load_full();
+    let result = tools
+        .execute(
+            "remember",
+            serde_json::json!({
+                "summary": "epic 11 kickoff",
+                "context": "first real MemoryPort adapter"
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("remember tool executes");
+    assert!(!result.is_error, "remember is risk-Safe and succeeds");
+
+    // The composed memory port reflects the stored entry (non-NoOp daily-log).
+    let mem = core.memory.load_full();
+    let recent = mem.recent(10).await.expect("recent");
+    assert_eq!(
+        recent.len(),
+        1,
+        "entry persisted via composed daily-log memory"
+    );
+    assert_eq!(recent[0].summary, "epic 11 kickoff");
+
+    // AC1 path: the day file landed under {workspace}/.rustain/memory/.
+    let memory_dir = tmp.path().join(".rustain").join("memory");
+    assert!(
+        memory_dir.is_dir(),
+        "memory dir auto-created at canonical path"
+    );
 }
 
 #[test]

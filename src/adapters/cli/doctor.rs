@@ -57,6 +57,7 @@ fn build_check_list(terminal_detail: bool) -> Vec<Box<dyn HealthCheck>> {
     ];
     checks.push(Box::new(PermissionRulesCheck { workspace: None }));
     checks.push(Box::new(PlanDirCheck { workspace: None }));
+    checks.push(Box::new(MemoryDirSizeCheck { workspace: None }));
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
     }
@@ -952,6 +953,88 @@ impl HealthCheck for PlanDirCheck {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Story 11.1: Memory-directory size report (AC7 — awareness only)
+// ──────────────────────────────────────────────────────────────────
+
+/// Report the total on-disk size of `{workspace}/.rustain/memory/`.
+///
+/// Awareness-only (AC7): daily logs are kept indefinitely — no auto-deletion.
+/// A missing directory is informational ("no memory yet"), NOT a failure. This
+/// check NEVER returns `Fail`.
+pub struct MemoryDirSizeCheck {
+    pub workspace: Option<std::path::PathBuf>,
+}
+
+#[async_trait]
+impl HealthCheck for MemoryDirSizeCheck {
+    fn name(&self) -> &str {
+        "Memory dir"
+    }
+
+    async fn run(&self) -> CheckResult {
+        let workspace = match &self.workspace {
+            Some(w) => w.clone(),
+            None => match paths::workspace_dir() {
+                Ok(w) => w,
+                Err(_) => {
+                    return CheckResult {
+                        name: self.name().to_string(),
+                        status: CheckStatus::Warning,
+                        message: "cannot determine workspace directory".to_string(),
+                        fix: None,
+                    };
+                }
+            },
+        };
+
+        let memory_dir = workspace.join(".rustain").join("memory");
+
+        let mut total: u64 = 0;
+        let mut file_count: usize = 0;
+        match std::fs::read_dir(&memory_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let ft = match entry.file_type() {
+                        Ok(ft) => ft,
+                        Err(_) => continue,
+                    };
+                    if ft.is_file() && !ft.is_symlink() {
+                        if let Ok(meta) = entry.metadata() {
+                            total += meta.len();
+                            file_count += 1;
+                        }
+                    }
+                }
+            }
+            // Missing dir is fine — memory simply hasn't been written yet (AC7).
+            Err(_) => {
+                return CheckResult {
+                    name: self.name().to_string(),
+                    status: CheckStatus::Pass,
+                    message: "no memory yet".to_string(),
+                    fix: None,
+                };
+            }
+        }
+
+        let size_display = if total >= 1_048_576 {
+            format!("{:.1} MB", total as f64 / 1_048_576.0)
+        } else if total >= 1024 {
+            format!("{:.1} KB", total as f64 / 1024.0)
+        } else {
+            format!("{total} B")
+        };
+
+        CheckResult {
+            name: self.name().to_string(),
+            status: CheckStatus::Pass,
+            message: format!("{file_count} day file(s), {size_display}"),
+            fix: None,
+        }
+    }
+}
+
 // Tests
 // ──────────────────────────────────────────────────────────────────
 
@@ -1336,6 +1419,39 @@ mod tests {
         );
         let names: Vec<&str> = checks_with.iter().map(|c| c.name()).collect();
         assert!(names.contains(&"Terminal details"));
+    }
+
+    // ── MemoryDirSizeCheck tests (Story 11.1, AC7) ──
+
+    #[tokio::test]
+    async fn test_memory_dir_missing_is_pass_no_memory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let check = MemoryDirSizeCheck {
+            workspace: Some(tmp.path().to_path_buf()),
+        };
+        let result = check.run().await;
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert!(result.message.contains("no memory yet"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_dir_reports_size() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let memory_dir = tmp.path().join(".rustain").join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::write(
+            memory_dir.join("2026-05-31.md"),
+            "# 2026-05-31\n\n## 10:00:00 — x\n",
+        )
+        .unwrap();
+
+        let check = MemoryDirSizeCheck {
+            workspace: Some(tmp.path().to_path_buf()),
+        };
+        let result = check.run().await;
+        // AC7: awareness-only — never Fail.
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert!(result.message.contains("1 day file"));
     }
 
     // ── ApiEndpointCheck tests (Task 8.9) ──

@@ -693,7 +693,10 @@ mod tests {
                 None,
             )
             .await;
-        assert!(id.is_none(), "deny should return None id for BackgroundAgent");
+        assert!(
+            id.is_none(),
+            "deny should return None id for BackgroundAgent"
+        );
         assert_eq!(
             rx.await.unwrap(),
             ApprovalOutcome::Reject {
@@ -731,7 +734,10 @@ mod tests {
                 None,
             )
             .await;
-        assert!(id.is_none(), "allow should return None id for BackgroundAgent");
+        assert!(
+            id.is_none(),
+            "allow should return None id for BackgroundAgent"
+        );
         assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
         assert!(
             matches!(

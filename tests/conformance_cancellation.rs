@@ -273,6 +273,10 @@ async fn ac4_signal_cancel_before_shutdown() {
             rustain::adapters::sandbox::NoOpSandbox,
         )
             as Arc<dyn rustain::domain::ports::SandboxManager>)),
+        memory_slot: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(std::sync::Arc::new(
+            rustain::adapters::noop::NoOpMemory,
+        )
+            as std::sync::Arc<dyn rustain::domain::ports::MemoryPort>)),
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
