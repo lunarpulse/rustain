@@ -222,7 +222,7 @@ pub fn build_memory(
         // real wrap-and-override adapter; when not, a graceful SystemNotice + a
         // project-scoped keyword fallback (AC4) — deliberately NOT the
         // `UnknownAdapter` hard error, which would abort startup.
-        "vector-search" => build_vector_search_memory(ctx),
+        "vector-search" => build_vector_search_memory(ctx, _config),
         other => {
             return Err(AdapterCompositionError::UnknownAdapter {
                 port: PortDimension::Memory,
@@ -257,28 +257,143 @@ fn build_project_scoped_inner(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
     Arc::new(inner)
 }
 
-/// Story 11.3a — the `vector-search` memory arm, compiled in. Wraps the inner
-/// `project-scoped` content source with a `LocalEmbeddingProvider` + the flat
-/// cosine index, persisting to `{workspace}/.rustain/memory/index.bin`. The
-/// model cache is user-global (`~/.config/rustain/models/`), a DIFFERENT root.
+/// Story 11.3a/11.3b — the `vector-search` memory arm, compiled in. Wraps the
+/// inner `project-scoped` content source with a config-selected
+/// `EmbeddingProvider` (Local default, or a Remote OpenAI-compatible one — AC1)
+/// + the flat cosine index, persisting to `{workspace}/.rustain/memory/index.bin`.
+/// The model cache is user-global (`~/.config/rustain/models/`), a DIFFERENT
+/// root. The `domain_tx` is wired into the adapter so the guided-reindex notices
+/// (AC1) surface on a provider/dimension switch.
 #[cfg(feature = "vector-search")]
-fn build_vector_search_memory(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
+fn build_vector_search_memory(
+    ctx: &ComposeContext,
+    config: Option<&toml::Value>,
+) -> Arc<dyn MemoryPort> {
     use crate::adapters::vector_search::{
-        LocalEmbeddingProvider, VectorSearchMemory, default_cache_dir,
+        EmbeddingProvider, LocalEmbeddingProvider, VectorSearchConfig, VectorSearchMemory,
+        default_cache_dir,
+    };
+    use crate::domain::events::AppEvent;
+
+    // Deserialize the per-adapter `[memory] config` block from the VERIFIED-wired
+    // `AdapterRef._config` seam (profile.rs:78-81; proven by `adapter_ref_with_config`).
+    // Absent / unparsable → defaults (provider = "local"), so offline/coding
+    // profiles are unchanged (NFR9).
+    let cfg: VectorSearchConfig = match config {
+        Some(v) => match v.clone().try_into::<VectorSearchConfig>() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid [memory] config for vector-search — falling back to defaults");
+                VectorSearchConfig::default()
+            }
+        },
+        None => VectorSearchConfig::default(),
     };
 
     let inner = build_project_scoped_inner(ctx);
-    let provider = LocalEmbeddingProvider::new(default_cache_dir(), ctx.domain_tx.clone());
+    let provider: Arc<dyn EmbeddingProvider> = match resolve_embedding_provider(&cfg, ctx) {
+        Ok(p) => p,
+        Err(reason) => {
+            // A remote-provider misconfig must NEVER abort startup — fall back to
+            // the local model with a surfaced notice (offline-default + the AC4
+            // graceful-degradation philosophy).
+            if let Some(ref tx) = ctx.domain_tx {
+                let event = AppEvent::SystemNotice {
+                    conversation_id: None,
+                    level: crate::domain::models::NoticeLevel::Warning,
+                    message: format!(
+                        "Memory embedding provider '{}' unavailable ({reason}); using the local model.",
+                        cfg.provider
+                    ),
+                };
+                let _ = tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 11-3b AC1 — remote-provider misconfig falls back to local with a surfaced notice (no event_bus access at compose time)
+            }
+            Arc::new(LocalEmbeddingProvider::new(
+                default_cache_dir(),
+                ctx.domain_tx.clone(),
+            ))
+        }
+    };
+
     let index_path = ctx
         .workspace_path
         .join(".rustain")
         .join("memory")
         .join("index.bin");
-    Arc::new(VectorSearchMemory::new(
-        inner,
-        Arc::new(provider),
-        index_path,
-    ))
+    let mut mem = VectorSearchMemory::new(inner, provider, index_path);
+    if let Some(ref tx) = ctx.domain_tx {
+        mem.set_event_tx(tx.clone());
+    }
+    Arc::new(mem)
+}
+
+/// Story 11.3b — select the embedding provider from [`VectorSearchConfig`] (AC1).
+/// `Ok` for the local default and any well-formed remote provider; `Err(reason)`
+/// (a human-readable string) when a remote provider is misconfigured (unknown
+/// provider string, missing `base_url`/`model`, unknown dimension, or bad
+/// credentials) so the caller falls back to local with a notice. Vendor strings
+/// are resolved to a `base_url` here — they never become type names
+/// (architecture.md:174).
+#[cfg(feature = "vector-search")]
+fn resolve_embedding_provider(
+    cfg: &crate::adapters::vector_search::VectorSearchConfig,
+    ctx: &ComposeContext,
+) -> Result<Arc<dyn crate::adapters::vector_search::EmbeddingProvider>, String> {
+    use crate::adapters::vector_search::{
+        LocalEmbeddingProvider, RemoteEmbeddingProvider, default_cache_dir, known_dimension,
+        provider_defaults,
+    };
+
+    let provider = cfg.provider.trim();
+    if provider.is_empty() || provider.eq_ignore_ascii_case("local") {
+        return Ok(Arc::new(LocalEmbeddingProvider::new(
+            default_cache_dir(),
+            ctx.domain_tx.clone(),
+        )));
+    }
+
+    let defaults =
+        provider_defaults(provider).ok_or_else(|| format!("unknown provider '{provider}'"))?;
+
+    // `base_url` makes a host swap a config change, not a code rewrite (the
+    // AC-11-3b-GATE fallback requirement). `openai-compatible` has no default.
+    let base_url = cfg
+        .base_url
+        .clone()
+        .or_else(|| defaults.base_url.map(str::to_string))
+        .ok_or_else(|| format!("provider '{provider}' requires an explicit base_url"))?;
+
+    let model = cfg
+        .model
+        .clone()
+        .or_else(|| defaults.default_model.map(str::to_string))
+        .ok_or_else(|| format!("provider '{provider}' requires an explicit model"))?;
+
+    // Never guess a dimension — a wrong one corrupts the index header.
+    let dimension = cfg
+        .dimension
+        .or_else(|| known_dimension(&model))
+        .ok_or_else(|| {
+            format!(
+                "dimension for model '{model}' is unknown — set `dimension` in the [memory] config"
+            )
+        })?;
+
+    // Only the env var NAME is configured; the key value is read from the env.
+    let api_key_env = cfg
+        .api_key_env
+        .clone()
+        .unwrap_or_else(|| defaults.api_key_env.to_string());
+    let api_key = crate::infrastructure::utils::env_var_trimmed(&api_key_env).unwrap_or_default();
+    if api_key.is_empty() {
+        return Err(format!(
+            "API key env var '{api_key_env}' is not set or empty"
+        ));
+    }
+
+    let remote = RemoteEmbeddingProvider::new(base_url, api_key, model, dimension)
+        .map_err(|e| format!("failed to build remote provider: {e}"))?;
+    Ok(Arc::new(remote))
 }
 
 /// Story 11.3a — the `vector-search` memory arm, NOT compiled in. Emits the
@@ -287,7 +402,10 @@ fn build_vector_search_memory(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
 /// built), so routing it through `UnknownAdapter` — which is fatal at compose —
 /// would violate AC4's "memory falls back to keyword-only search".
 #[cfg(not(feature = "vector-search"))]
-fn build_vector_search_memory(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
+fn build_vector_search_memory(
+    ctx: &ComposeContext,
+    _config: Option<&toml::Value>,
+) -> Arc<dyn MemoryPort> {
     use crate::domain::events::AppEvent;
     use crate::domain::models::NoticeLevel;
 

@@ -121,6 +121,33 @@ impl VectorIndex {
             .collect()
     }
 
+    /// Cosine ranking for hybrid fusion (Story 11.3b, AC2): the top-`k` content
+    /// keys ordered by descending cosine similarity, ties broken by `key`
+    /// ascending (deterministic, matches the fusion tie-break). Returns keys
+    /// only — the cosine score is consumed by RRF and never leaks past the
+    /// adapter (`ProvenancedEntry`/scores are fenced to Story 11.4). O(N) scan +
+    /// sort; sub-50ms at the NFR56 10k bound.
+    pub fn search_ranked(&self, query: &[f32], k: usize) -> Vec<u64> {
+        if k == 0 || self.entries.is_empty() {
+            return Vec::new();
+        }
+        let q_norm = norm(query);
+        if q_norm == 0.0 {
+            return Vec::new();
+        }
+        let mut scored: Vec<(f32, u64)> = self
+            .entries
+            .iter()
+            .map(|e| (cosine_pre(query, q_norm, &e.vector), e.key))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        scored.into_iter().take(k).map(|(_, key)| key).collect()
+    }
+
     /// Drop every entry whose key is NOT in `keep` (AC6 — vanished entries).
     pub fn retain_keys(&mut self, keep: &HashSet<u64>) {
         self.entries.retain(|e| keep.contains(&e.key));
@@ -240,7 +267,10 @@ fn millis_to_local(ms: i64) -> DateTime<Local> {
     match Utc.timestamp_millis_opt(ms).single() {
         Some(u) => u.with_timezone(&Local),
         None => {
-            tracing::warn!(ms, "out-of-range timestamp in index — substituting current time");
+            tracing::warn!(
+                ms,
+                "out-of-range timestamp in index — substituting current time"
+            );
             Local::now()
         }
     }
@@ -313,6 +343,41 @@ mod tests {
         assert_eq!(hits[0].1.summary, "x-axis");
         assert_eq!(hits[1].1.summary, "near-x");
         assert!(hits[0].0 >= hits[1].0, "scores descending");
+    }
+
+    #[test]
+    fn search_ranked_returns_keys_descending_with_keytie() {
+        let mut idx = VectorIndex::empty(meta());
+        idx.extend(vec![
+            IndexedEntry {
+                key: 100,
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+                entry: entry_at(1, "x-axis", None),
+            },
+            IndexedEntry {
+                key: 200,
+                vector: vec![0.0, 1.0, 0.0, 0.0],
+                entry: entry_at(2, "y-axis", None),
+            },
+            IndexedEntry {
+                key: 300,
+                vector: vec![0.9, 0.1, 0.0, 0.0],
+                entry: entry_at(3, "near-x", None),
+            },
+        ]);
+        // Query along x: key 100 (1.0) > key 300 (~0.99) > key 200 (~0).
+        let ranked = idx.search_ranked(&[1.0, 0.0, 0.0, 0.0], 10);
+        assert_eq!(ranked, vec![100, 300, 200]);
+        // k cap.
+        assert_eq!(idx.search_ranked(&[1.0, 0.0, 0.0, 0.0], 2), vec![100, 300]);
+        // Zero query / empty / k=0 → empty.
+        assert!(idx.search_ranked(&[0.0, 0.0, 0.0, 0.0], 5).is_empty());
+        assert!(idx.search_ranked(&[1.0, 0.0, 0.0, 0.0], 0).is_empty());
+        assert!(
+            VectorIndex::empty(meta())
+                .search_ranked(&[1.0, 0.0, 0.0, 0.0], 5)
+                .is_empty()
+        );
     }
 
     #[test]

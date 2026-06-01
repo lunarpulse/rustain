@@ -315,8 +315,11 @@ mod compiled {
         let started = Instant::now();
         mem_1k.initialize().await.expect("1k index build");
         let build_1k = started.elapsed();
-        let count_1k = { mem_1k.index.read().await.entries.len() };
-        assert!(count_1k >= 1000, "indexed at least 1000 entries (got {count_1k})");
+        let count_1k = mem_1k.indexed_entry_count().await;
+        assert!(
+            count_1k >= 1000,
+            "indexed at least 1000 entries (got {count_1k})"
+        );
         assert!(
             build_1k.as_secs() < 5,
             "NFR57: 1k index build < 5s (was {:.1}s, {} entries)",
@@ -334,8 +337,11 @@ mod compiled {
             index_path,
         );
         mem_10k.initialize().await.expect("10k index build");
-        let count_10k = { mem_10k.index.read().await.entries.len() };
-        assert!(count_10k >= 10_000, "indexed at least 10000 entries (got {count_10k})");
+        let count_10k = mem_10k.indexed_entry_count().await;
+        assert!(
+            count_10k >= 10_000,
+            "indexed at least 10000 entries (got {count_10k})"
+        );
 
         let started = Instant::now();
         let hits = mem_10k.search("entry 5000", 10).await.expect("10k query");
@@ -346,6 +352,258 @@ mod compiled {
             "NFR56: 10k query < 200ms (was {}ms, {} entries)",
             query_10k.as_millis(),
             count_10k,
+        );
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Story 11.3b — RemoteEmbeddingProvider HTTP client (mockito; NO real network).
+// The OpenAI-compatible `/embeddings` client is exercised against a local mock
+// server: request shape, Bearer auth, response parsing, `index` re-ordering,
+// and HTTP status → EmbeddingError mapping. Determinism > realism (project
+// memory `feedback_mcp_llm_test_prompts.md`) — these run in `--features
+// vector-search` CI with no network.
+// ──────────────────────────────────────────────────────────────────────────
+#[cfg(feature = "vector-search")]
+mod remote_http {
+    use rustain::adapters::vector_search::{
+        EmbeddingError, EmbeddingProvider, ProviderKind, RemoteEmbeddingProvider,
+    };
+
+    fn provider(base_url: String, dimension: usize) -> RemoteEmbeddingProvider {
+        RemoteEmbeddingProvider::new(
+            base_url,
+            "sk-test-key".into(),
+            "baai/bge-m3".into(),
+            dimension,
+        )
+        .expect("remote provider builds")
+    }
+
+    #[tokio::test]
+    async fn embed_posts_correct_shape_and_parses_vectors() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/embeddings")
+            .match_header("content-type", "application/json")
+            .match_header("authorization", mockito::Matcher::Regex("Bearer .+".into()))
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"model":"baai/bge-m3","encoding_format":"float"}"#.into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[{"embedding":[0.1,0.2,0.3,0.4],"index":0}],"usage":{"prompt_tokens":3}}"#,
+            )
+            .create_async()
+            .await;
+
+        let p = provider(server.url(), 4);
+        let vectors = p.embed(&["hello world".to_string()]).await.unwrap();
+        mock.assert_async().await; // request matched method+path+auth+body shape
+
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0], vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(p.kind(), ProviderKind::Remote);
+        assert_eq!(p.dimension(), 4);
+    }
+
+    #[tokio::test]
+    async fn embed_reorders_response_by_index() {
+        let mut server = mockito::Server::new_async().await;
+        // Two inputs; response returned OUT of order (index 1 before index 0).
+        // `embed()` must restore input order so refresh()/search() zip correctly.
+        let _mock = server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[{"embedding":[9.0,9.0],"index":1},{"embedding":[1.0,1.0],"index":0}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let p = provider(server.url(), 2);
+        let vectors = p
+            .embed(&["first".to_string(), "second".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(
+            vectors[0],
+            vec![1.0, 1.0],
+            "input 0 → embedding with index 0"
+        );
+        assert_eq!(
+            vectors[1],
+            vec![9.0, 9.0],
+            "input 1 → embedding with index 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn embed_count_mismatch_is_an_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_body(r#"{"data":[{"embedding":[1.0,1.0],"index":0}]}"#)
+            .create_async()
+            .await;
+        // Two inputs, one vector returned → mismatch.
+        let p = provider(server.url(), 2);
+        let err = p
+            .embed(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::EmbedFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn status_401_maps_to_not_ready() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/embeddings")
+            .with_status(401)
+            .with_body(r#"{"error":"invalid api key"}"#)
+            .create_async()
+            .await;
+        let p = provider(server.url(), 4);
+        let err = p.embed(&["x".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::NotReady(_)),
+            "401 → NotReady, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_404_maps_to_model_unavailable() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/embeddings")
+            .with_status(404)
+            .with_body(r#"{"error":"model withdrawn"}"#)
+            .create_async()
+            .await;
+        let p = provider(server.url(), 4);
+        let err = p.embed(&["x".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingError::ModelUnavailable(_)),
+            "404 (model withdrawn — the GATE fallback trigger) → ModelUnavailable, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_429_and_5xx_map_to_embed_failed() {
+        for code in [429u16, 500, 503] {
+            let mut server = mockito::Server::new_async().await;
+            let _mock = server
+                .mock("POST", "/embeddings")
+                .with_status(code as usize)
+                .with_header("retry-after", "12")
+                .with_body("server says no")
+                .create_async()
+                .await;
+            let p = provider(server.url(), 4);
+            let err = p.embed(&["x".to_string()]).await.unwrap_err();
+            assert!(
+                matches!(err, EmbeddingError::EmbedFailed(_)),
+                "HTTP {code} → EmbedFailed, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_reports_healthy_with_live_dimension() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/embeddings")
+            .with_status(200)
+            .with_body(r#"{"data":[{"embedding":[0.0,0.1,0.2],"index":0}]}"#)
+            .create_async()
+            .await;
+        // Configured dimension matches the live 3-dim response → healthy, no detail.
+        let p = provider(server.url(), 3);
+        let report = p.probe().await.unwrap();
+        assert!(report.healthy);
+        assert_eq!(report.dimension, 3);
+        assert_eq!(report.kind, ProviderKind::Remote);
+        assert!(report.detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_unreachable_host_is_unhealthy_with_detail() {
+        // Point at an unroutable address; probe must NOT error — it returns an
+        // unhealthy report carrying the failure detail (so the GATE row records it).
+        let p = provider("http://127.0.0.1:1/v1".into(), 1024);
+        let report = p.probe().await.unwrap();
+        assert!(!report.healthy);
+        assert!(report.detail.is_some());
+        assert_eq!(report.kind, ProviderKind::Remote);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// AC-11-3b-GATE — the ONE real-network test. Gated by `#[ignore]` + the
+// `OPENROUTER_API_KEY` env var so it NEVER runs in default or
+// `--features vector-search` CI. Its job is to FILL the Dev Record GATE row
+// (chosen host / model / returned dimension / latency / pass-fail), not to run
+// in CI. Run with:
+//   OPENROUTER_API_KEY=… cargo test --features vector-search gate_probe -- --ignored --nocapture
+// ──────────────────────────────────────────────────────────────────────────
+#[cfg(feature = "vector-search")]
+mod gate_probe {
+    use rustain::adapters::vector_search::{EmbeddingProvider, RemoteEmbeddingProvider};
+
+    #[tokio::test]
+    #[ignore = "AC-11-3b-GATE: real OpenRouter network probe; needs OPENROUTER_API_KEY"]
+    async fn openrouter_embeddings_reachability_probe() {
+        let api_key = match std::env::var("OPENROUTER_API_KEY") {
+            Ok(k) if !k.trim().is_empty() => k,
+            _ => {
+                panic!("OPENROUTER_API_KEY must be set to run the GATE probe");
+            }
+        };
+        // bge-m3 is the fixed-dim (1024) default; the probe confirms & LOCKS it.
+        let model =
+            std::env::var("RUSTAIN_GATE_MODEL").unwrap_or_else(|_| "baai/bge-m3".to_string());
+        let expected_dim: usize = std::env::var("RUSTAIN_GATE_DIM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+
+        let provider = RemoteEmbeddingProvider::new(
+            "https://openrouter.ai/api/v1".into(),
+            api_key,
+            model.clone(),
+            expected_dim,
+        )
+        .expect("provider builds");
+
+        let started = std::time::Instant::now();
+        let report = provider.probe().await.expect("probe returns a report");
+        let latency = started.elapsed();
+
+        println!("── AC-11-3b-GATE probe result ──");
+        println!("  host:       https://openrouter.ai/api/v1");
+        println!("  model:      {model}");
+        println!("  healthy:    {}", report.healthy);
+        println!(
+            "  dimension:  {} (expected {expected_dim})",
+            report.dimension
+        );
+        println!("  latency:    {} ms", latency.as_millis());
+        if let Some(detail) = &report.detail {
+            println!("  detail:     {detail}");
+        }
+        println!("  → record the above in the story Dev Agent Record GATE table.");
+
+        assert!(
+            report.healthy,
+            "probe must be healthy to mark the provider supported"
+        );
+        assert!(
+            report.dimension > 0,
+            "probe must return a positive dimension"
         );
     }
 }

@@ -149,7 +149,15 @@ sandbox = ["dep:landlock"]
 # Story 11.3a — local semantic memory search. OUT of `default` (NFR9): the
 # embedding model is downloaded on first use, not bundled, and `ort` needs
 # network at build time. `cargo build|test --features vector-search` to enable.
-vector-search = ["dep:fastembed", "dep:bincode"]
+#
+# Story 11.3b extends the SAME feature (proposal 2026-05-30 Change 3 — "no new
+# cargo feature beyond `vector-search`"): `reqwest` is the remote OpenAI-compatible
+# `/embeddings` HTTP client (RemoteEmbeddingProvider, AC1) and `bm25` is the
+# keyword scorer for hybrid retrieval (AC2). Both already live in the tree
+# (`reqwest` is pulled by the default provider features; `bm25` is also behind
+# `meta-search`); listing them here makes `--features vector-search` self-
+# sufficient even when those features are off (Cargo features are additive).
+vector-search = ["dep:fastembed", "dep:bincode", "dep:reqwest", "dep:bm25"]
 
 [profile.release]
 opt-level =  3 #"z"

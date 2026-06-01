@@ -193,12 +193,56 @@ adapters not yet fully implemented.
    active_profile = "my-profile"
    ```
 
+### `[memory]` — Embedding Providers (`vector-search`, feature-gated)
+
+The `vector-search` memory adapter (build with `--features vector-search`) wraps the
+`project-scoped` content source with semantic + hybrid keyword retrieval. The embedding
+provider is selected by the per-dimension `[memory] config` table. The **default is the
+local in-process model** (no config needed, fully offline):
+
+```toml
+[memory]
+adapter = "vector-search"           # local BAAI/bge-small-en-v1.5 (384-dim), downloaded on first use
+```
+
+To use a remote OpenAI-compatible `/embeddings` endpoint, add a `[memory.config]` table.
+Only the API-key env-var **name** is configured — the key value is read from the environment,
+never stored in the profile:
+
+```toml
+[memory]
+adapter = "vector-search"
+[memory.config]
+provider    = "openrouter"          # → base_url https://openrouter.ai/api/v1, api_key_env OPENROUTER_API_KEY
+model       = "baai/bge-m3"         # 1024-dim, fixed (GATE-verified 2026-06-01)
+# dimension = 1024                  # optional; auto-locked for known models
+# api_key_env = "OPENROUTER_API_KEY"  # optional; defaults per provider
+```
+
+- **`provider`** — one of `local` (default), `openai`, `voyage`, `openrouter`, `deepinfra`,
+  `together`, `openai-compatible`. Each maps to a default `base_url` + `*_API_KEY` env var.
+  `openai-compatible` requires an explicit `base_url`.
+- **`dimension`** is auto-resolved for known models (`baai/bge-m3` → 1024,
+  `qwen/qwen3-embedding-8b` → 4096, OpenAI `text-embedding-3-*`); set it explicitly for any
+  other model.
+- **Switching providers** (or models with a different dimension) triggers a **guided reindex**:
+  a notice is surfaced and the index is automatically rebuilt from your memory content.
+- A misconfigured remote provider (missing key, unknown model/dimension) **falls back to the
+  local model** with a warning notice — it never blocks startup.
+- **Verified providers** (AC-11-3b-GATE reachability probe, 2026-06-01): **OpenRouter** with
+  `baai/bge-m3` (1024-dim) and `qwen/qwen3-embedding-8b` (4096-dim, higher quality; ~6.4s
+  first-request cold start). Other hosts use the same OpenAI-compatible client and are
+  reachable by changing only `base_url`/`model`/`api_key_env`.
+
+> Remote network embedding latency is excluded from the `<200ms` search bound (NFR56); the
+> local embedding + index-search path is what that bound covers.
+
 ## Available Adapters by Port
 
 | Port       | Available Adapters                          |
 |------------|---------------------------------------------|
 | Persona    | minimal, coding, personal-assistant         |
-| Memory     | noop, project-scoped, daily-log             |
+| Memory     | noop, project-scoped, daily-log, long-term, vector-search (feature-gated) |
 | Session    | basic, workspace                            |
 | Tools      | builtin-only, builtin-full, composite        |
 | Channels   | terminal, telegram (feature-gated)          |

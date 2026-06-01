@@ -29,33 +29,98 @@
 //! `std::sync::*Lock` anywhere — the ratchet (`MAX_KNOWN_STD_SYNC_LOCKS = 4`)
 //! is not moved.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OnceCell, RwLock};
 
 use crate::domain::errors::{MemoryError, TransitionError};
-use crate::domain::models::{HealthSummary, MemoryEntry, MemoryFact, TransitionState};
+use crate::domain::events::AppEvent;
+use crate::domain::models::{HealthSummary, MemoryEntry, MemoryFact, NoticeLevel, TransitionState};
 use crate::domain::ports::MemoryPort;
 
 use super::EmbeddingProvider;
+use super::fusion;
 use super::index::{INDEX_VERSION, IndexMeta, IndexedEntry, VectorIndex, load_index};
 
 /// How many inner entries to pull into the index per refresh. NFR56 bounds the
 /// search side at 10k indexed entries; the refresh source cap matches it.
 const DEFAULT_REFRESH_LIMIT: usize = 10_000;
 
+/// How many top candidates to pull from EACH ranked list (vector + BM25) before
+/// RRF fusion. Generous relative to typical `limit`s; with `K=60`, contributions
+/// past ~100 are negligible, so this bounds the fusion work without moving the
+/// head of the results.
+const FUSION_CANDIDATES: usize = 128;
+
+/// In-memory BM25 keyword index over the SAME content corpus as the vector
+/// index (Story 11.3b, AC2), keyed by the SAME `content_key` so the two indexes
+/// fuse cleanly. Built from the raw `bm25` crate — NOT the meta-search
+/// `MergedIndex` (which is hardwired to the tool/skill `DocKey`/`CapabilityKind`
+/// domain). Rebuilt on every refresh and NEVER persisted (Q5): cheap at ≤10k
+/// entries, and it keeps the redaction must-test (Story 11.4) single-surfaced on
+/// `index.bin`.
+struct Bm25Index {
+    engine: bm25::SearchEngine<u64>,
+}
+
+impl Bm25Index {
+    fn empty() -> Self {
+        Self {
+            engine: bm25::SearchEngineBuilder::<u64>::with_avgdl(1.0).build(),
+        }
+    }
+
+    fn build(docs: &[(u64, String)]) -> Self {
+        if docs.is_empty() {
+            return Self::empty();
+        }
+        let documents: Vec<bm25::Document<u64>> = docs
+            .iter()
+            .map(|(key, text)| bm25::Document::new(*key, text.clone()))
+            .collect();
+        Self {
+            engine: bm25::SearchEngineBuilder::with_documents(bm25::Language::English, documents)
+                .build(),
+        }
+    }
+
+    /// Top-`k` content keys by descending BM25 score, ties broken by `key`
+    /// ascending so the rank assignment fed to RRF is deterministic.
+    fn ranked(&self, query: &str, k: usize) -> Vec<u64> {
+        if k == 0 {
+            return Vec::new();
+        }
+        let mut results = self.engine.search(query, None);
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.document.id.cmp(&b.document.id))
+        });
+        results.into_iter().take(k).map(|r| r.document.id).collect()
+    }
+}
+
 /// Semantic-search composite over an inner content `MemoryPort`.
 pub struct VectorSearchMemory {
     inner: Arc<dyn MemoryPort>,
     provider: Arc<dyn EmbeddingProvider>,
     index: RwLock<VectorIndex>,
+    /// Key-aligned keyword index for hybrid retrieval (Story 11.3b, AC2).
+    bm25: RwLock<Bm25Index>,
     index_path: PathBuf,
     init: OnceCell<()>,
     refresh_limit: usize,
+    /// Surfaces the guided-reindex notices (AC1). `None` (headless/eval) stays
+    /// silent. Wired via [`Self::set_event_tx`] so `new()` is untouched.
+    domain_tx: Option<UnboundedSender<AppEvent>>,
+    /// Temporal-decay half-life in days (Q4). Adjustable in code; no user knob.
+    half_life_days: f64,
 }
 
 /// Stable content key for an entry: `blake3(timestamp_ms || summary)` → u64.
@@ -100,9 +165,34 @@ impl VectorSearchMemory {
             inner,
             provider,
             index: RwLock::new(VectorIndex::empty(meta)),
+            bm25: RwLock::new(Bm25Index::empty()),
             index_path,
             init: OnceCell::new(),
             refresh_limit: DEFAULT_REFRESH_LIMIT,
+            domain_tx: None,
+            half_life_days: fusion::DEFAULT_HALF_LIFE_DAYS,
+        }
+    }
+
+    /// Wire the domain event channel so the guided-reindex notices (AC1) surface
+    /// in the TUI. Mirrors `LongTermMemory::set_event_tx` / the
+    /// `project-scoped` composite wiring. `None` (headless/eval) stays silent.
+    /// Builder-style so the existing `new()` call sites are untouched.
+    pub fn set_event_tx(&mut self, tx: UnboundedSender<AppEvent>) {
+        self.domain_tx = Some(tx);
+    }
+
+    /// Emit a `SystemNotice` if a channel is wired (mirrors
+    /// `LocalEmbeddingProvider::notice`). The event is pre-built so the
+    /// conformance scanner sees a bare `tx.send(event)`, and the line is tagged.
+    fn notice(&self, level: NoticeLevel, message: String) {
+        if let Some(tx) = &self.domain_tx {
+            let event = AppEvent::SystemNotice {
+                conversation_id: None,
+                level,
+                message,
+            };
+            let _ = tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 11-3b AC1 — guided-reindex provider-switch notice via adapter domain_tx (no event_bus access)
         }
     }
 
@@ -110,6 +200,13 @@ impl VectorSearchMemory {
     /// startup/tests; `search` triggers it lazily otherwise.
     pub async fn initialize(&self) -> Result<(), MemoryError> {
         self.ensure_init().await
+    }
+
+    /// Number of entries currently in the vector index. Diagnostic/test support
+    /// (the gated NFR scale tests assert the indexed count) — the index field
+    /// itself stays private.
+    pub async fn indexed_entry_count(&self) -> usize {
+        self.index.read().await.entries.len()
     }
 
     async fn ensure_init(&self) -> Result<(), MemoryError> {
@@ -135,6 +232,11 @@ impl VectorSearchMemory {
                 None
             }
         };
+        // When the persisted header doesn't match the active provider, remember
+        // the OLD identity so we can SURFACE the reindex (AC1 — a "guided full
+        // reindex rather than silent corruption"). 11.3a log-warned + rebuilt
+        // silently; 11.3b adds the two-notice UX.
+        let mut reindex_from: Option<(String, usize)> = None;
         if let Some(loaded) = loaded {
             let want_dim = self.provider.dimension();
             let want_model = self.provider.model_id();
@@ -151,11 +253,41 @@ impl VectorSearchMemory {
                     loaded_version = loaded.meta.version,
                     active_model = %want_model,
                     active_dim = want_dim,
-                    "vector index header mismatch — discarding and rebuilding from inner content"
+                    "vector index header mismatch — guided reindex from inner content"
                 );
+                reindex_from = Some((loaded.meta.model_id.clone(), loaded.meta.dimension));
             }
         }
-        self.refresh().await
+
+        // "Guided" = surfaced + automatic (a TUI agent has no blocking modal at
+        // startup; surfacing the rebuild IS the guidance). Notice BEFORE the
+        // (potentially slow, but here local) rebuild.
+        if let Some((old_model, old_dim)) = &reindex_from {
+            self.notice(
+                NoticeLevel::Warning,
+                format!(
+                    "Embedding provider changed (was `{old_model}` {old_dim}-dim, now `{}` {}-dim). Reindexing memory entries…",
+                    self.provider.model_id(),
+                    self.provider.dimension()
+                ),
+            );
+        }
+
+        self.refresh().await?;
+
+        // Completion notice (mirrors the 11.3a download two-notice pattern).
+        if reindex_from.is_some() {
+            let n = { self.index.read().await.entries.len() };
+            self.notice(
+                NoticeLevel::Info,
+                format!(
+                    "Reindexed {n} memory entries with `{}` ({}-dim).",
+                    self.provider.model_id(),
+                    self.provider.dimension()
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// Incremental, batched index refresh (AC6). Diffs `inner`'s current content
@@ -215,6 +347,25 @@ impl VectorSearchMemory {
             guard.extend(new_indexed);
         }
 
+        // 4b. Rebuild the key-aligned BM25 index over the FULL current corpus
+        // (Story 11.3b, AC2). Snapshot (key, text) under a read guard, build the
+        // engine with NO guard held (the build is sync — no `.await` — so the
+        // std-sync-lock ratchet is untouched), then swap it in. Rebuild-on-
+        // refresh (Q5): not persisted to disk.
+        let docs: Vec<(u64, String)> = {
+            let guard = self.index.read().await;
+            guard
+                .entries
+                .iter()
+                .map(|e| (e.key, entry_text(&e.entry)))
+                .collect()
+        };
+        let bm25 = Bm25Index::build(&docs);
+        {
+            let mut guard = self.bm25.write().await;
+            *guard = bm25;
+        }
+
         // 5. Persist (AC3). Encode under a read guard (sync), write outside it.
         let bytes = {
             let guard = self.index.read().await;
@@ -270,7 +421,12 @@ impl MemoryPort for VectorSearchMemory {
         self.inner.recent(limit).await
     }
 
-    // ── Overridden: semantic search (AC2) with keyword fallback (AC4) ──
+    // ── Overridden: hybrid retrieval (AC2) with keyword fallback (AC4) ──
+    //
+    // Combines BM25 (keyword) + vector (semantic) via RRF, then a half-life
+    // temporal-decay multiplier (Story 11.3b, AC2). ALL scoring is internal —
+    // this still returns plain `Vec<MemoryEntry>`; `ProvenancedEntry`/scores are
+    // fenced to Story 11.4 (`search()` signature unchanged, memory.rs:58-64).
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
         if query.trim().is_empty() {
@@ -278,28 +434,77 @@ impl MemoryPort for VectorSearchMemory {
         }
         self.ensure_init().await?;
 
-        let query_vec = match self.provider.embed(&[query.to_string()]).await {
-            Ok(mut vecs) if !vecs.is_empty() => vecs.swap_remove(0),
-            Ok(_) => {
-                // Provider returned no vector — degrade to keyword search.
-                return self.inner.search(query, limit).await;
-            }
+        // Embed the query. On failure degrade to BM25-only (vector list empty);
+        // if BM25 also yields nothing, fall through to inner keyword search.
+        let query_vec: Option<Vec<f32>> = match self.provider.embed(&[query.to_string()]).await {
+            Ok(mut vecs) if !vecs.is_empty() => Some(vecs.swap_remove(0)),
+            Ok(_) => None,
             Err(e) => {
-                tracing::warn!(error = %e, "query embedding failed — falling back to keyword search");
-                return self.inner.search(query, limit).await;
+                tracing::warn!(error = %e, "query embedding failed — hybrid retrieval degrades to BM25/keyword");
+                None
             }
         };
 
-        let hits = {
+        let candidates = limit.max(FUSION_CANDIDATES);
+
+        // Vector ranking + per-key recency weight + key→entry map, all under ONE
+        // read guard with no `.await` held.
+        let (vec_ranked, recency, entry_by_key): (
+            Vec<u64>,
+            HashMap<u64, f64>,
+            HashMap<u64, MemoryEntry>,
+        ) = {
             let guard = self.index.read().await;
-            guard.search(&query_vec, limit)
+            if guard.entries.is_empty() {
+                drop(guard);
+                // Nothing indexed yet — keyword fallback over inner (AC4).
+                return self.inner.search(query, limit).await;
+            }
+            let now = Local::now();
+            let mut recency = HashMap::with_capacity(guard.entries.len());
+            let mut entry_by_key = HashMap::with_capacity(guard.entries.len());
+            for e in &guard.entries {
+                let age_days = (now - e.entry.timestamp).num_seconds() as f64 / 86_400.0;
+                recency.insert(e.key, fusion::recency_weight(age_days, self.half_life_days));
+                entry_by_key.insert(e.key, e.entry.clone());
+            }
+            let vec_ranked = match &query_vec {
+                Some(qv) => guard.search_ranked(qv, candidates),
+                None => Vec::new(),
+            };
+            (vec_ranked, recency, entry_by_key)
         };
-        if hits.is_empty() {
-            // Nothing indexed (or no similarity) — keyword fallback so the user
-            // still gets results rather than an empty void.
+
+        // BM25 keyword ranking (separate read guard).
+        let bm25_ranked: Vec<u64> = {
+            let guard = self.bm25.read().await;
+            guard.ranked(query, candidates)
+        };
+
+        if vec_ranked.is_empty() && bm25_ranked.is_empty() {
+            // No semantic vector (embed failed) AND no keyword match — keyword
+            // fallback over inner so the user still gets results (AC4).
             return self.inner.search(query, limit).await;
         }
-        Ok(hits.into_iter().map(|(_, entry)| entry).collect())
+
+        // Fuse: RRF relevance × half-life recency, top-`limit`, deterministic.
+        let relevance = fusion::rrf_relevance(&vec_ranked, &bm25_ranked);
+        let fused = fusion::fuse_rank(&relevance, &recency, limit);
+        if fused.is_empty() {
+            return self.inner.search(query, limit).await;
+        }
+        // Guard against concurrent refresh: if keys disappeared from
+        // entry_by_key (stale snapshot vs. updated BM25), fall back rather than
+        // silently truncating results below the requested limit.
+        let missing: Vec<_> = fused.iter().filter(|k| !entry_by_key.contains_key(k)).collect();
+        if !missing.is_empty() {
+            tracing::debug!(?missing, "concurrent refresh detected — falling back to inner search");
+            return self.inner.search(query, limit).await;
+        }
+        Ok(fused
+            .into_iter()
+            .filter_map(|key| entry_by_key.get(&key).cloned())
+            .collect())
     }
 
     // ── Aggregate / lifecycle: delegate to inner ──
@@ -575,6 +780,77 @@ mod tests {
         assert!(
             guard.entries.iter().all(|e| e.vector.len() == 16),
             "rebuilt vectors are the new dimension"
+        );
+    }
+
+    #[tokio::test]
+    async fn guided_reindex_emits_notices_on_provider_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+
+        // First build (8-dim, model "stub-small") — no channel: a fresh build
+        // has no persisted header to mismatch, so it must NOT emit a notice.
+        let mem8 = VectorSearchMemory::new(
+            fake_inner(&[(1, "alpha one"), (2, "beta two")]),
+            Arc::new(StubEmbedder::new(8, "stub-small")),
+            index_path.clone(),
+        );
+        mem8.initialize().await.unwrap();
+
+        // Reopen with a DIFFERENT provider (16-dim, "stub-large") + a wired
+        // channel → the guided reindex (AC1) fires two SystemNotices.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let stub16 = Arc::new(StubEmbedder::new(16, "stub-large"));
+        let mut mem16 = VectorSearchMemory::new(
+            fake_inner(&[(1, "alpha one"), (2, "beta two")]),
+            stub16.clone(),
+            index_path,
+        );
+        mem16.set_event_tx(tx);
+        mem16.initialize().await.unwrap();
+
+        let mut notices: Vec<(NoticeLevel, String)> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::SystemNotice { level, message, .. } = ev {
+                notices.push((level, message));
+            }
+        }
+        assert!(
+            notices.iter().any(|(lvl, m)| *lvl == NoticeLevel::Warning
+                && m.contains("provider changed")
+                && m.contains("stub-small")
+                && m.contains("stub-large")),
+            "a Warning notice announces the switch BEFORE reindex: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|(lvl, m)| *lvl == NoticeLevel::Info && m.contains("Reindexed")),
+            "an Info notice confirms reindex completion: {notices:?}"
+        );
+        assert_eq!(stub16.embedded_count(), 2, "mismatch forced a full rebuild");
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_surfaces_matching_entry() {
+        // The fused (BM25 + vector + decay) path returns the entry that shares
+        // the query's terms first. Recency is ~equal across these fixed-epoch
+        // entries, so relevance drives the order.
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = VectorSearchMemory::new(
+            fake_inner(&[
+                (1, "the database uses postgres"),
+                (2, "the parser implements pratt parsing"),
+                (3, "ci pipeline runs nightly"),
+            ]),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            tmp.path().join("memory").join("index.bin"),
+        );
+        let hits = mem.search("pratt parser", 3).await.unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(
+            hits[0].summary, "the parser implements pratt parsing",
+            "the entry sharing both query terms ranks first via hybrid fusion"
         );
     }
 
