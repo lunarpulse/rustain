@@ -31,6 +31,11 @@ pub mod tool_exposure;
 pub mod toolset_adapter;
 pub mod tui;
 
+// Story 11.3a — local semantic-search memory adapter. Feature-gated so the
+// default build pulls neither fastembed/ort nor bincode (NFR9 preserved).
+#[cfg(feature = "vector-search")]
+pub mod vector_search;
+
 #[cfg(feature = "mcp")]
 pub mod mcp;
 

@@ -995,6 +995,10 @@ impl HealthCheck for MemoryDirSizeCheck {
 
         let mut total: u64 = 0;
         let mut file_count: usize = 0;
+        // Story 11.3a — the vector index (`index.bin`) lives in memory/ but is
+        // NOT a day file; its size is reported in the total but attributed
+        // separately so the day-file count stays accurate.
+        let mut index_bin_size: u64 = 0;
         // Daily-log day files (Story 11.1). A missing dir is fine — memory may
         // simply not have been written yet; MEMORY.md may still exist below.
         if let Ok(entries) = std::fs::read_dir(&memory_dir) {
@@ -1006,7 +1010,11 @@ impl HealthCheck for MemoryDirSizeCheck {
                 if ft.is_file() && !ft.is_symlink() {
                     if let Ok(meta) = entry.metadata() {
                         total += meta.len();
-                        file_count += 1;
+                        if entry.file_name() == "index.bin" {
+                            index_bin_size = meta.len();
+                        } else {
+                            file_count += 1;
+                        }
                     }
                 }
             }
@@ -1023,8 +1031,8 @@ impl HealthCheck for MemoryDirSizeCheck {
             }
         }
 
-        // Missing both is fine — memory simply hasn't been written yet (AC7).
-        if file_count == 0 && memory_md_size == 0 {
+        // Missing all is fine — memory simply hasn't been written yet (AC7).
+        if file_count == 0 && memory_md_size == 0 && index_bin_size == 0 {
             return CheckResult {
                 name: self.name().to_string(),
                 status: CheckStatus::Pass,
@@ -1054,10 +1062,21 @@ impl HealthCheck for MemoryDirSizeCheck {
             String::new()
         };
 
+        // Story 11.3a — attribute the vector index size (awareness-only, never a
+        // failure; the index is rebuildable from memory content).
+        let index_note = if index_bin_size > 0 {
+            format!(
+                " (incl. vector index {:.1} KB)",
+                index_bin_size as f64 / 1024.0
+            )
+        } else {
+            String::new()
+        };
+
         CheckResult {
             name: self.name().to_string(),
             status: CheckStatus::Pass,
-            message: format!("{file_count} day file(s), {size_display}{md_note}"),
+            message: format!("{file_count} day file(s), {size_display}{md_note}{index_note}"),
             fix: None,
         }
     }
@@ -1480,6 +1499,62 @@ mod tests {
         // AC7: awareness-only — never Fail.
         assert_eq!(result.status, CheckStatus::Pass);
         assert!(result.message.contains("1 day file"));
+    }
+
+    // Story 11.3a — the vector index.bin is counted in the size + attributed,
+    // but NOT counted as a "day file".
+    #[tokio::test]
+    async fn test_memory_dir_attributes_vector_index() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let memory_dir = tmp.path().join(".rustain").join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::write(
+            memory_dir.join("2026-05-31.md"),
+            "# 2026-05-31\n\n## 10:00:00 — x\n",
+        )
+        .unwrap();
+        // A vector index sized so the KB display is non-zero.
+        std::fs::write(memory_dir.join("index.bin"), vec![0u8; 2048]).unwrap();
+
+        let check = MemoryDirSizeCheck {
+            workspace: Some(tmp.path().to_path_buf()),
+        };
+        let result = check.run().await;
+        assert_eq!(result.status, CheckStatus::Pass);
+        // index.bin is NOT a day file — still exactly one day file reported.
+        assert!(result.message.contains("1 day file"), "{}", result.message);
+        // …but its size is attributed.
+        assert!(
+            result.message.contains("vector index"),
+            "{}",
+            result.message
+        );
+    }
+
+    // Only index.bin present (no day files, no MEMORY.md) → still reported, not
+    // "no memory yet".
+    #[tokio::test]
+    async fn test_memory_dir_only_index_is_reported() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let memory_dir = tmp.path().join(".rustain").join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        std::fs::write(memory_dir.join("index.bin"), vec![0u8; 4096]).unwrap();
+
+        let check = MemoryDirSizeCheck {
+            workspace: Some(tmp.path().to_path_buf()),
+        };
+        let result = check.run().await;
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert!(
+            !result.message.contains("no memory yet"),
+            "{}",
+            result.message
+        );
+        assert!(
+            result.message.contains("vector index"),
+            "{}",
+            result.message
+        );
     }
 
     // ── ApiEndpointCheck tests (Task 8.9) ──

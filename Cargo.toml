@@ -91,6 +91,16 @@ bm25 = { version = "=2.3.2", optional = true }
 hex = "0.4"
 gray_matter = "0.2"
 
+# ── Local vector search (Story 11.3a, feature-gated `vector-search`) ──
+# Local ONNX embeddings (downloads + caches the model on first use → AC5) and
+# the binary `index.bin` codec (architecture.md:576). BOTH optional + kept OUT
+# of `default` so NFR9 (<30MB default binary) is untouched and no ONNX runtime
+# is pulled unless the feature is compiled in. fastembed transitively pulls
+# `ort` (ONNX Runtime), whose `download-binaries` fetches a prebuilt runtime at
+# build/first-run → `--features vector-search` requires network (see Dev Notes).
+fastembed = { version = "5.14", optional = true }
+bincode = { version = "2", optional = true }
+
 # ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
 landlock = { version = "0.4", optional = true }
 
@@ -136,6 +146,10 @@ mcp = ["dep:rmcp"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]
+# Story 11.3a — local semantic memory search. OUT of `default` (NFR9): the
+# embedding model is downloaded on first use, not bundled, and `ort` needs
+# network at build time. `cargo build|test --features vector-search` to enable.
+vector-search = ["dep:fastembed", "dep:bincode"]
 
 [profile.release]
 opt-level =  3 #"z"

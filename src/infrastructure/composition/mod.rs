@@ -217,6 +217,12 @@ pub fn build_memory(
             }
             Arc::new(long_term)
         }
+        // Story 11.3a — local semantic-search memory. A KNOWN adapter whose
+        // behaviour depends on the `vector-search` feature: when compiled in, the
+        // real wrap-and-override adapter; when not, a graceful SystemNotice + a
+        // project-scoped keyword fallback (AC4) — deliberately NOT the
+        // `UnknownAdapter` hard error, which would abort startup.
+        "vector-search" => build_vector_search_memory(ctx),
         other => {
             return Err(AdapterCompositionError::UnknownAdapter {
                 port: PortDimension::Memory,
@@ -226,6 +232,7 @@ pub fn build_memory(
                     "project-scoped".into(),
                     "daily-log".into(),
                     "long-term".into(),
+                    "vector-search".into(),
                 ],
             });
         }
@@ -236,6 +243,66 @@ pub fn build_memory(
     // writes to the live adapter — on both initial compose and profile reload.
     ctx.memory_slot.store(Arc::new(Arc::clone(&adapter)));
     Ok(adapter)
+}
+
+/// Build the `project-scoped` content source used as the vector adapter's inner
+/// (Q1) — the same construction as the standalone `project-scoped` arm, so it
+/// indexes daily-log + MEMORY.md and the AC4 keyword fallback is `inner.search`.
+fn build_project_scoped_inner(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
+    let mut inner =
+        crate::adapters::project_scoped_memory::ProjectScopedMemory::new(&ctx.workspace_path);
+    if let Some(ref tx) = ctx.domain_tx {
+        inner.set_event_tx(tx.clone());
+    }
+    Arc::new(inner)
+}
+
+/// Story 11.3a — the `vector-search` memory arm, compiled in. Wraps the inner
+/// `project-scoped` content source with a `LocalEmbeddingProvider` + the flat
+/// cosine index, persisting to `{workspace}/.rustain/memory/index.bin`. The
+/// model cache is user-global (`~/.config/rustain/models/`), a DIFFERENT root.
+#[cfg(feature = "vector-search")]
+fn build_vector_search_memory(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
+    use crate::adapters::vector_search::{
+        LocalEmbeddingProvider, VectorSearchMemory, default_cache_dir,
+    };
+
+    let inner = build_project_scoped_inner(ctx);
+    let provider = LocalEmbeddingProvider::new(default_cache_dir(), ctx.domain_tx.clone());
+    let index_path = ctx
+        .workspace_path
+        .join(".rustain")
+        .join("memory")
+        .join("index.bin");
+    Arc::new(VectorSearchMemory::new(
+        inner,
+        Arc::new(provider),
+        index_path,
+    ))
+}
+
+/// Story 11.3a — the `vector-search` memory arm, NOT compiled in. Emits the
+/// exact AC4 SystemNotice and falls back to keyword-only `project-scoped` search.
+/// This is graceful-by-design: `vector-search` is a KNOWN adapter (just not
+/// built), so routing it through `UnknownAdapter` — which is fatal at compose —
+/// would violate AC4's "memory falls back to keyword-only search".
+#[cfg(not(feature = "vector-search"))]
+fn build_vector_search_memory(ctx: &ComposeContext) -> Arc<dyn MemoryPort> {
+    use crate::domain::events::AppEvent;
+    use crate::domain::models::NoticeLevel;
+
+    if let Some(ref tx) = ctx.domain_tx {
+        let event = AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message:
+                "Adapter 'vector-search' not available. Install with: cargo install rustain --features vector-search"
+                    .to_string(),
+        };
+        let _ = tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 11-3a AC4 — not-compiled fallback notice via composition domain_tx (no event_bus access)
+    }
+
+    build_project_scoped_inner(ctx)
 }
 
 pub fn build_session(
