@@ -26,6 +26,7 @@ pub mod compact_slash;
 pub mod compaction;
 pub mod config;
 pub mod config_slash;
+pub mod consolidation;
 pub mod context_warning;
 pub mod export;
 pub mod mcp_catalog;

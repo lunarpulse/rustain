@@ -1430,6 +1430,29 @@ pub async fn run(
                                         });
                                     }
                                 }
+                                // Story 11.2a: Memory-consolidation card key handlers
+                                InputAction::ConsolidateAcceptAll => {
+                                    if let Some(card) = state.pending_consolidation_card.take() {
+                                        let conversation_id = conversation.id.clone();
+                                        let accepted: Vec<crate::domain::models::MemoryFact> =
+                                            card.proposals.into_iter().map(|(f, _)| f).collect();
+                                        state.needs_redraw = true;
+                                        app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
+                                            conversation_id,
+                                            accepted,
+                                        });
+                                    }
+                                }
+                                InputAction::ConsolidateDeclineAll => {
+                                    if state.pending_consolidation_card.take().is_some() {
+                                        let conversation_id = conversation.id.clone();
+                                        state.needs_redraw = true;
+                                        app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
+                                            conversation_id,
+                                            accepted: Vec::new(),
+                                        });
+                                    }
+                                }
                                 InputAction::DelegationCardCancel => {
                                     if let Some(ref pending) = state.pending_delegation_card {
                                         let conv_id = conversation.id.clone();
@@ -1987,28 +2010,61 @@ pub async fn run(
                                     } else if cmd_name == "memory"
                                         && cmd_arg.map(str::trim) == Some("consolidate")
                                     {
-                                        // Story 11.2 Task 8 — `/memory consolidate` is intercepted
-                                        // HERE, BEFORE the adapter-override path below; otherwise
-                                        // `port_dimension_from_command_name("memory")` would route
-                                        // it into handle_apply_adapter_override and error as
-                                        // "unknown adapter 'consolidate'". The full propose→confirm
-                                        // consolidation flow (AC4) is split to fast-follow 11.2a per
-                                        // the story's STOP-and-flag clause: the structured model
-                                        // sub-turn + a new proposal-review approval card/handler
-                                        // materially exceed "reuse the approval card + one new
-                                        // event/handler", and shipping a half-wired flow is worse
-                                        // than a clean split. Durable capture already works via the
-                                        // risk-Safe `remember_fact` tool and by editing
-                                        // `.rustain/MEMORY.md` directly (the user owns the record).
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: None,
-                                            level: crate::domain::models::NoticeLevel::Info,
-                                            message: "/memory consolidate (propose→confirm) ships in 11.2a. \
-                                                      Durable facts are captured today via the agent's \
-                                                      `remember_fact` tool and by editing .rustain/MEMORY.md."
-                                                .to_string(),
-                                        });
-                                        state.needs_redraw = true;
+                                        // Story 11.2a — `/memory consolidate` propose→confirm flow
+                                        // (completes 11.2 AC4). Intercepted HERE, BEFORE the
+                                        // adapter-override path below; otherwise
+                                        // `port_dimension_from_command_name("memory")` would route it
+                                        // into handle_apply_adapter_override and error as "unknown
+                                        // adapter 'consolidate'". Dispatches a structured background
+                                        // model sub-turn (NOT AgentThenSubmit — that would let the
+                                        // model auto-approve `remember_fact`, bypassing the user
+                                        // confirm AC4 requires) and surfaces a propose→confirm review
+                                        // card. Daily-log entries are NEVER deleted (AC4).
+                                        if streaming.is_streaming {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: "Consolidation unavailable while a turn is in progress — try again after it finishes.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                        } else {
+                                            let memory = app_state.agent_core.memory.load_full();
+                                            match memory.recent(30).await {
+                                                Ok(entries) if entries.is_empty() => {
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Info,
+                                                        message: "Nothing to consolidate yet — no recent activity recorded.".to_string(),
+                                                    });
+                                                    state.needs_redraw = true;
+                                                }
+                                                Ok(entries) => {
+                                                    let prompt_body = crate::domain::services::consolidation::build_proposal_prompt(&entries);
+                                                    let payload = handlers::consolidation::ConsolidationPayload {
+                                                        provider: provider.clone(),
+                                                        model: config.model.clone(),
+                                                        prompt_body,
+                                                        conversation_id: conversation.id.clone(),
+                                                        domain_tx: domain_tx.clone(),
+                                                    };
+                                                    tokio::spawn(handlers::consolidation::run_consolidation(payload));
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Info,
+                                                        message: "Reviewing recent activity for durable facts…".to_string(),
+                                                    });
+                                                    state.needs_redraw = true;
+                                                }
+                                                Err(e) => {
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: format!("Consolidation failed: {e}"),
+                                                    });
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
+                                        }
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         let cmd_arg = cmd_arg;
@@ -3684,7 +3740,14 @@ pub async fn run(
                                                 // Single conversation delete
                                                 if conv_id == conversation.id {
                                                     let tab_id = tab_manager.active_tab_id();
-                                                    if streaming.is_streaming {
+                                        if streaming.is_streaming || state.pending_consolidation_card.is_some() {
+                                            if state.pending_consolidation_card.is_some() {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: crate::domain::models::NoticeLevel::Info,
+                                                    message: "A consolidation review is already pending — accept or decline it first.".to_string(),
+                                                });
+                                            }
                                                         if let Some(handle) = _active_turn.take() {
                                                             handle.abort();
                                                         }
@@ -6087,6 +6150,89 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                             }
+                        }
+                    }
+                    AppEvent::MemoryConsolidationProposed { conversation_id, proposals } => {
+                        if conversation.id != conversation_id {
+                            tracing::warn!("MemoryConsolidationProposed for mismatched conversation");
+                        } else if proposals.is_empty() {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: NoticeLevel::Info,
+                                message: "Nothing worth promoting from recent activity.".to_string(),
+                            });
+                            state.needs_redraw = true;
+                        } else {
+                            state.pending_consolidation_card = Some(crate::adapters::tui::state::PendingConsolidationCard {
+                                conversation_id: conversation.id.clone(),
+                                proposals: proposals.into_iter().map(|f| (f, true)).collect(),
+                            });
+                            state.needs_redraw = true;
+                        }
+                    }
+                    AppEvent::MemoryConsolidationResolved { conversation_id, accepted } => {
+                        if conversation.id != conversation_id {
+                            tracing::warn!("MemoryConsolidationResolved for mismatched conversation");
+                        } else {
+                            state.pending_consolidation_card = None;
+                            state.focus = FocusState::Input;
+                            if accepted.is_empty() {
+                                // Declined — AC3/AC4: nothing is written.
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message: "Consolidation declined — nothing promoted.".to_string(),
+                                });
+                            } else {
+                                // Promote each accepted fact through the EXISTING remember_fact
+                                // path (composed port → LongTermMemory upsert+dedup). Daily-log
+                                // entries are NEVER deleted (AC4 — source of truth preserved).
+                                let memory = app_state.agent_core.memory.load_full();
+                                let mut promoted = 0usize;
+                                let mut skipped = 0usize;
+                                for fact in accepted {
+                                    // AC5 defense-in-depth: re-scan at promotion (daily content
+                                    // can predate the 11.2 capture gate).
+                                    let blob = format!(
+                                        "{}\n{}\n{}",
+                                        fact.category,
+                                        fact.fact,
+                                        fact.detail.as_deref().unwrap_or("")
+                                    );
+                                    if crate::domain::services::secret_scan::scan_for_secrets(&blob).is_some() {
+                                        skipped += 1;
+                                        continue;
+                                    }
+                                    match memory.remember_fact(fact).await {
+                                        Ok(()) => promoted += 1,
+                                        Err(e) => {
+                                            tracing::warn!("consolidation: remember_fact failed: {e}");
+                                            skipped += 1;
+                                        }
+                                    }
+                                }
+                                let message = if skipped > 0 {
+                                    format!("Promoted {promoted} fact(s) to MEMORY.md ({skipped} skipped).")
+                                } else {
+                                    format!("Promoted {promoted} fact(s) to MEMORY.md.")
+                                };
+                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Info,
+                                    message,
+                                });
+                            }
+                            state.needs_redraw = true;
+                        }
+                    }
+                    AppEvent::MemoryConsolidationFailed { conversation_id, reason } => {
+                        if conversation.id == conversation_id {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: NoticeLevel::Warning,
+                                message: format!("Consolidation failed: {reason}"),
+                            });
+                            state.needs_redraw = true;
                         }
                     }
                     AppEvent::PlanExecutionStarted { conversation_id, plan_id } => {
@@ -9184,6 +9330,32 @@ fn render(
                         card,
                         theme,
                     );
+                }
+
+                // Story 11.2a: render the memory-consolidation review card as a
+                // bottom-anchored inline card over the chat pane (helpful review,
+                // never a modal interruption — UX).
+                if let Some(ref card) = state.pending_consolidation_card {
+                    let card_lines = crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines(
+                        card,
+                        theme,
+                        app_layout.chat_pane.width,
+                    );
+                    let card_width = app_layout.chat_pane.width;
+                    let card_height =
+                        (card_lines.len() as u16 + 2).min(app_layout.chat_pane.height);
+                    let card_area = Rect {
+                        x: app_layout.chat_pane.x,
+                        y: app_layout.chat_pane.y
+                            + app_layout.chat_pane.height.saturating_sub(card_height),
+                        width: card_width,
+                        height: card_height,
+                    };
+                    let block = ratatui::widgets::Block::default()
+                        .borders(ratatui::widgets::Borders::ALL)
+                        .border_style(ratatui::style::Style::default().fg(theme.colors.accent));
+                    let para = ratatui::widgets::Paragraph::new(card_lines).block(block);
+                    ratatui::widgets::Widget::render(para, card_area, frame.buffer_mut());
                 }
 
                 // Story 4-4 AC1: render the search bar widget into its reserved slot.

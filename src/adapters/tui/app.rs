@@ -105,6 +105,10 @@ pub enum InputAction {
     RunTaskLocally,
     /// Story 10.5: Delegation card — user pressed Esc (cancel plan at this task).
     DelegationCardCancel,
+    /// Story 11.2a: Memory-consolidation card — user pressed y (promote all).
+    ConsolidateAcceptAll,
+    /// Story 11.2a: Memory-consolidation card — user pressed n/Esc (decline all).
+    ConsolidateDeclineAll,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -689,6 +693,15 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'd' => return InputAction::DelegateTask,
             'l' => return InputAction::RunTaskLocally,
             _ => {}
+        }
+    }
+
+    // Story 11.2a: Memory-consolidation card key intercept (y promote-all / n decline)
+    if state.pending_consolidation_card.is_some() {
+        match c {
+            'y' => return InputAction::ConsolidateAcceptAll,
+            'n' => return InputAction::ConsolidateDeclineAll,
+            _ => return InputAction::Consumed,
         }
     }
 
@@ -1789,6 +1802,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 };
                 state.needs_redraw = true;
                 return InputAction::Consumed;
+            }
+            // Story 11.2a: Esc on consolidation card → decline all.
+            if state.pending_consolidation_card.is_some() {
+                return InputAction::ConsolidateDeclineAll;
             }
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {

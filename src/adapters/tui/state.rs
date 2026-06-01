@@ -65,6 +65,16 @@ pub struct PendingDelegationCard {
     pub suggestion: crate::domain::services::delegation_decider::DelegationSuggestion,
 }
 
+/// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
+/// Reuses the plan-card / delegation-card grammar — a list of proposed durable
+/// facts, each paired with its selection flag (`true` = will be promoted on
+/// confirm). Nothing is written until the user resolves the card.
+#[derive(Debug, Clone)]
+pub struct PendingConsolidationCard {
+    pub conversation_id: crate::domain::models::tab::ConversationId,
+    pub proposals: Vec<(crate::domain::models::MemoryFact, bool)>,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -1676,6 +1686,8 @@ pub struct TuiState {
     pub pending_plan_card: Option<PendingPlanCard>,
     /// Story 10.5: pending delegation suggestion card awaiting user d/l response.
     pub pending_delegation_card: Option<PendingDelegationCard>,
+    /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
+    pub pending_consolidation_card: Option<PendingConsolidationCard>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -1798,6 +1810,7 @@ impl TuiState {
             pending_plan_approval: None,
             pending_plan_card: None,
             pending_delegation_card: None,
+            pending_consolidation_card: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

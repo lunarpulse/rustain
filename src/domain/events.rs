@@ -181,6 +181,26 @@ pub enum AppEvent {
         plan_id: String,
         edited_plan: Option<crate::domain::models::Plan>,
     },
+
+    /// Story 11.2a — `/memory consolidate` background sub-turn proposed durable
+    /// facts to promote. The event-loop handler stores a `PendingConsolidationCard`
+    /// (mirrors the `PlanProposed` → `pending_plan_card` grammar).
+    MemoryConsolidationProposed {
+        conversation_id: ConversationId,
+        proposals: Vec<crate::domain::models::MemoryFact>,
+    },
+    /// Story 11.2a — the user resolved the consolidation card. `accepted` is the
+    /// subset to promote via `remember_fact` (empty = declined; writes nothing).
+    MemoryConsolidationResolved {
+        conversation_id: ConversationId,
+        accepted: Vec<crate::domain::models::MemoryFact>,
+    },
+    /// Story 11.2a — consolidation produced nothing / failed / timed out (AC6).
+    /// The handler surfaces a `SystemNotice`; no card, no write.
+    MemoryConsolidationFailed {
+        conversation_id: ConversationId,
+        reason: String,
+    },
     /// Plan-time delegation suggestion — present the modal card. Emitted by
     /// `PlanRuntime::on_task_dispatch` BEFORE flipping the task to Running,
     /// only when `DelegationDecider::suggest()` returns `Some(s)` with
