@@ -159,8 +159,7 @@ impl RemoteEmbeddingProvider {
         // Validate that every expected index (0..texts.len()) appears exactly
         // once — a duplicate or gap means the server misbehaved and vectors
         // would be mapped to the wrong inputs.
-        let expected_indices: std::collections::HashSet<usize> =
-            (0..texts.len()).collect();
+        let expected_indices: std::collections::HashSet<usize> = (0..texts.len()).collect();
         let actual_indices: std::collections::HashSet<usize> =
             data.iter().map(|d| d.index).collect();
         if actual_indices != expected_indices {

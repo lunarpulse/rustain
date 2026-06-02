@@ -496,9 +496,15 @@ impl MemoryPort for VectorSearchMemory {
         // Guard against concurrent refresh: if keys disappeared from
         // entry_by_key (stale snapshot vs. updated BM25), fall back rather than
         // silently truncating results below the requested limit.
-        let missing: Vec<_> = fused.iter().filter(|k| !entry_by_key.contains_key(k)).collect();
+        let missing: Vec<_> = fused
+            .iter()
+            .filter(|k| !entry_by_key.contains_key(k))
+            .collect();
         if !missing.is_empty() {
-            tracing::debug!(?missing, "concurrent refresh detected — falling back to inner search");
+            tracing::debug!(
+                ?missing,
+                "concurrent refresh detected — falling back to inner search"
+            );
             return self.inner.search(query, limit).await;
         }
         Ok(fused

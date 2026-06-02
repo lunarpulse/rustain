@@ -63,6 +63,18 @@ pub trait MemoryPort: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Flush any pending/in-flight durable write to its backing store. Default
+    /// is a no-op: the daily-log (append-on-`store` + `file.flush()`, 11.1) and
+    /// long-term (`fs::write` on `remember_fact`, 11.2) tiers write synchronously,
+    /// so there is no buffer to drain (Q1). It exists as an explicit NFR58
+    /// ordering barrier (Story 11.4): a durable fact written this turn MUST be
+    /// flushed BEFORE context compaction rebuilds the window, so the fact is
+    /// never lost to compaction. A future buffered adapter overrides this; the
+    /// barrier semantics (await-before-compact) hold regardless.
+    async fn flush(&self) -> Result<(), crate::domain::errors::MemoryError> {
+        Ok(())
+    }
+
     fn health_snapshot(&self) -> crate::domain::models::HealthSummary {
         crate::domain::models::HealthSummary::unknown()
     }

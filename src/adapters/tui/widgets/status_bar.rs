@@ -27,6 +27,8 @@ pub fn render(
     has_project_context: bool,
     session_title: Option<&str>,
     multiline_mode: bool,
+    context_injection_on: bool,
+    injected_tokens: u32,
     current_hint: Option<&str>,
     active_skill_count: usize,
     active_agent_name: Option<&str>,
@@ -160,6 +162,14 @@ pub fn render(
         ));
     }
 
+    // Story 11.4 AC3: injected context token cost (shown when > 0).
+    if injected_tokens > 0 {
+        left_spans.push(Span::styled(
+            format!("{}+{} ctx", sep, format_token_count(injected_tokens)),
+            Style::default().fg(theme.colors.accent),
+        ));
+    }
+
     // Daily budget segment (Story 7.5 AC5). Suppressed when paused
     // (`unix_now <= dismissed_until_unix`).
     // The segment only appears at ≥80% utilization (yellow/red).
@@ -229,6 +239,18 @@ pub fn render(
             format!("{}[ML]", sep),
             Style::default()
                 .fg(theme.colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Story 11.4 (AC7) — memory-injection toggle indicator. A DISTINCT `mem: off`
+    // segment (NOT overloading the `ctx: N/M (P%)` window ratio above — Q3).
+    // Shown only when OFF (the notable state); ON is the default, left unannotated.
+    if !context_injection_on {
+        left_spans.push(Span::styled(
+            format!("{}mem: off", sep),
+            Style::default()
+                .fg(theme.colors.warning)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -429,6 +451,8 @@ mod tests {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 None,
@@ -483,6 +507,8 @@ mod tests {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 None,
@@ -540,6 +566,8 @@ mod tests {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 None,
@@ -642,6 +670,8 @@ mod tests {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 None,
@@ -657,5 +687,107 @@ mod tests {
         .unwrap();
         let txt = buffer_text(&t);
         assert!(txt.contains("READ-ONLY"), "READ-ONLY badge missing: {txt}");
+    }
+
+    // Story 11.4 AC7: `mem: off` segment renders iff context injection is OFF;
+    // it is distinct from the `ctx: N/M` window ratio (Q3).
+    #[test]
+    fn status_bar_renders_mem_off_when_injection_disabled() {
+        fn draw(injection_on: bool) -> String {
+            let backend = TestBackend::new(200, 1);
+            let mut t = Terminal::new(backend).unwrap();
+            let theme = Theme::dark();
+            t.draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    "sonnet-4-6",
+                    None,
+                    &StatusState::Idle,
+                    &theme,
+                    0,
+                    &[],
+                    0,
+                    20,
+                    PermissionMode::Normal,
+                    None,
+                    200_000,
+                    false,
+                    None,
+                    false,
+                    injection_on,
+                    0, // injected_tokens
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    DensityMode::Focus,
+                    false,
+                );
+            })
+            .unwrap();
+            buffer_text(&t)
+        }
+
+        let off = draw(false);
+        assert!(
+            off.contains("mem: off"),
+            "expected `mem: off` segment: {off}"
+        );
+        let on = draw(true);
+        assert!(
+            !on.contains("mem: off"),
+            "`mem: off` must NOT show when injection is on: {on}"
+        );
+    }
+
+    // Story 11.4 AC3: injected token cost is shown when > 0.
+    #[test]
+    fn status_bar_renders_injected_token_cost_when_present() {
+        let backend = TestBackend::new(200, 1);
+        let mut t = Terminal::new(backend).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "sonnet-4-6",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                200_000,
+                false,
+                None,
+                false,
+                true,
+                123, // injected_tokens
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                DensityMode::Focus,
+                false,
+            );
+        })
+        .unwrap();
+        let txt = buffer_text(&t);
+        assert!(
+            txt.contains("+123 ctx"),
+            "expected `+123 ctx` segment: {txt}"
+        );
     }
 }

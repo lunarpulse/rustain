@@ -136,7 +136,7 @@ impl CommandRegistry {
             },
             SlashCommandDef {
                 name: "context".to_string(),
-                description: "Override context adapter for this session."
+                description: "Inspect/toggle injected context: show | off | on"
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,

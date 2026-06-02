@@ -286,6 +286,8 @@ impl TestHarness {
                         has_project_context,
                         None, // session_title
                         multiline_mode,
+                        true,
+                        0,    // injected_tokens
                         None, // current_hint
                         0,
                         None,

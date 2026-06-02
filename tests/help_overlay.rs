@@ -391,6 +391,8 @@ fn test_status_bar_renders_hint() {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 Some("Tip: Press ? for help"),
                 0,
                 None,
@@ -451,6 +453,8 @@ fn test_status_bar_no_hint_when_none() {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 None,

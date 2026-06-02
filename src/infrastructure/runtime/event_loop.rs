@@ -832,7 +832,7 @@ pub async fn run(
                                         ) {
                                             HandlerOutcome::Quiet => {}
                                             HandlerOutcome::RequestCompaction(payload) => {
-                                                tokio::spawn(handlers::compaction::run_compaction(payload));
+                                                tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
                                             }
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
@@ -1162,7 +1162,7 @@ pub async fn run(
                                               &domain_tx,
                                               &security,
                                               &tools, &tool_scheduler,
-                                              &persona,
+                                              &persona, &app_state.agent_core.context,
                                               &workspace_path,
                                               &mut session_manager,
                                               &fs_storage,
@@ -1668,7 +1668,7 @@ pub async fn run(
                                         ) {
                                             HandlerOutcome::Quiet => {}
                                             HandlerOutcome::RequestCompaction(payload) => {
-                                                tokio::spawn(handlers::compaction::run_compaction(payload));
+                                                tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
                                             }
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
@@ -1749,7 +1749,7 @@ pub async fn run(
                                     ) {
                                         HandlerOutcome::Quiet => {}
                                         HandlerOutcome::RequestCompaction(payload) => {
-                                            tokio::spawn(handlers::compaction::run_compaction(payload));
+                                            tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
                                         }
                                         _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                     }
@@ -1914,7 +1914,7 @@ pub async fn run(
                                         ) {
                                             HandlerOutcome::Quiet => {}
                                             HandlerOutcome::RequestCompaction(payload) => {
-                                                tokio::spawn(handlers::compaction::run_compaction(payload));
+                                                tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
                                             }
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
@@ -1958,6 +1958,7 @@ pub async fn run(
                                         agent_activator.on_new_conversation(&conversation.id).await;
                                         state.active_agent_name = None;
                                         // Reset TUI state
+                                        state.last_context_bundle = None;
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
@@ -2064,6 +2065,20 @@ pub async fn run(
                                                     state.needs_redraw = true;
                                                 }
                                             }
+                                        }
+                                    } else if cmd_name == "context" {
+                                        // Story 11.4 (AC6/AC7) — `/context show | off | on`.
+                                        // Intercepted HERE, BEFORE the adapter-override path below
+                                        // (port_dimension_from_command_name("context") = Some(Context)
+                                        // would route `/context show` into the override and error as
+                                        // "unknown adapter 'show'"). Logic lives in the handler to
+                                        // respect the event_loop line budget.
+                                        for ev in handlers::context_command::handle_context_command(
+                                            &mut state,
+                                            &conversation.id,
+                                            cmd_arg,
+                                        ) {
+                                            app_state.event_bus.emit_domain(ev);
                                         }
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
@@ -2216,7 +2231,7 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools, &tool_scheduler,
-                                            &persona,
+                                            &persona, &app_state.agent_core.context,
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
@@ -3400,7 +3415,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3424,7 +3439,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3440,7 +3455,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3464,7 +3479,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3607,7 +3622,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                                     }
                                                 }
@@ -3759,7 +3774,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                                         }
                                                     }
@@ -4889,7 +4904,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -5057,7 +5072,7 @@ pub async fn run(
                                     ) {
                                         HandlerOutcome::Quiet => {}
                                         HandlerOutcome::RequestCompaction(payload) => {
-                                            tokio::spawn(handlers::compaction::run_compaction(payload));
+                                            tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
                                         }
                                         _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                     }
@@ -5420,7 +5435,7 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools, &tool_scheduler,
-                                            &persona,
+                                            &persona, &app_state.agent_core.context,
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
@@ -5513,7 +5528,7 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools, &tool_scheduler,
-                                            &persona,
+                                            &persona, &app_state.agent_core.context,
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
@@ -5689,7 +5704,7 @@ pub async fn run(
                                                 &domain_tx,
                                                 &security,
                                                 &tools, &tool_scheduler,
-                                                &persona,
+                                                &persona, &app_state.agent_core.context,
                                                 &workspace_path,
                                                 &mut session_manager,
                                                 &fs_storage,
@@ -5860,7 +5875,7 @@ pub async fn run(
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
-                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
@@ -5884,7 +5899,7 @@ pub async fn run(
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
-                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::Reject => {
@@ -6590,7 +6605,7 @@ pub async fn run(
                             &domain_tx,
                             &security,
                             &tools, &tool_scheduler,
-                            &persona,
+                            &persona, &app_state.agent_core.context,
                             &workspace_path,
                             &mut session_manager,
                             &fs_storage,
@@ -7107,7 +7122,7 @@ pub async fn run(
                                 &domain_tx,
                                 &security,
                                 &tools, &tool_scheduler,
-                                &persona,
+                                &persona, &app_state.agent_core.context,
                                 &workspace_path,
                                 &mut session_manager,
                                 &fs_storage,
@@ -7254,7 +7269,7 @@ pub async fn run(
                                         &domain_tx,
                                         &security,
                                         &tools, &tool_scheduler,
-                                        &persona,
+                                        &persona, &app_state.agent_core.context,
                                         &workspace_path,
                                         &mut session_manager,
                                         &fs_storage,
@@ -7389,7 +7404,7 @@ pub async fn run(
                                     &domain_tx,
                                     &security,
                                     &tools, &tool_scheduler,
-                                    &persona,
+                                    &persona, &app_state.agent_core.context,
                                     &workspace_path,
                                     &mut session_manager,
                                     &fs_storage,
@@ -8395,6 +8410,10 @@ async fn start_turn(
     tools: &Arc<dyn ToolSetPort>,
     tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
     persona: &Arc<dyn PersonaPort>,
+    // Story 11.4 — the context-assembly slot (read via `load_full()` at assemble
+    // time so warm profile swaps are seen). Passing the slot, not a loaded value,
+    // keeps the ~18 call sites a stable `&app_state.agent_core.context`.
+    context: &Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ContextPort>>>,
     workspace_path: &std::path::Path,
     session_manager: &mut SessionManager,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
@@ -8423,6 +8442,7 @@ async fn start_turn(
         tools,
         tool_scheduler,
         persona,
+        context,
         workspace_path,
         session_manager,
         fs_storage,
@@ -8454,6 +8474,10 @@ async fn start_turn_inner(
     tools: &Arc<dyn ToolSetPort>,
     tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
     persona: &Arc<dyn PersonaPort>,
+    // Story 11.4 — the context-assembly slot (read via `load_full()` at assemble
+    // time so warm profile swaps are seen). Passing the slot, not a loaded value,
+    // keeps the ~18 call sites a stable `&app_state.agent_core.context`.
+    context: &Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ContextPort>>>,
     workspace_path: &std::path::Path,
     session_manager: &mut SessionManager,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
@@ -8596,6 +8620,11 @@ async fn start_turn_inner(
                 ));
         }
     }
+
+    // Story 11.4 — Content-tier memory/context injection (AC1, AC3). Logic lives
+    // in the handler to respect the event_loop line budget; it short-circuits when
+    // the session toggle is OFF (AC7).
+    handlers::context_command::inject_assembled_context(state, context, text, &mut messages).await;
 
     let all_tool_defs = tools.available_tools();
     let persona_prompt = persona.system_prompt(workspace_path);
@@ -9673,6 +9702,8 @@ fn render(
                     has_project_context,
                     session_title,
                     multiline_mode,
+                    state.context_injection_on,
+                    state.last_context_bundle.as_ref().map_or(0, |b| b.diagnostics.total_tokens as u32),
                     current_hint.as_deref(),
                     state.active_skill_count,
                     state.active_agent_name.as_deref(),

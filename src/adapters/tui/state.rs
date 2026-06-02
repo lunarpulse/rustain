@@ -1527,6 +1527,16 @@ pub struct TuiState {
     /// Whether multi-line mode is active (toggled by Ctrl+E).
     // Covers: UX-DR76
     pub multiline_mode: bool,
+    /// Story 11.4 (AC7) — whether memory-based context injection is enabled for
+    /// this session. Toggled by `/context off` / `/context on`. Default `true`.
+    /// Session-scoped: persists across `/new` (like `selected_model`, Q3). When
+    /// `false`, the turn seam fully short-circuits — zero `MemoryPort` calls.
+    /// Project context (CLAUDE.md) is unaffected (it is structural, persona-owned).
+    pub context_injection_on: bool,
+    /// Story 11.4 (Task 4.4) — the LAST assembled `ContextBundle`, cached so
+    /// `/context show` and the status-bar token cost read it without re-running
+    /// `assemble()`. `None` until the first injected turn.
+    pub last_context_bundle: Option<crate::domain::models::ContextBundle>,
     /// State for reverse search overlay (Ctrl+R).
     // Covers: UX-DR74
     pub reverse_search: ReverseSearchState,
@@ -1757,6 +1767,8 @@ impl TuiState {
             has_project_context: false,
             input_history: InputHistory::new(),
             multiline_mode: false,
+            context_injection_on: true,
+            last_context_bundle: None,
             reverse_search: ReverseSearchState::new(),
             search_state: SearchState::new(),
             cross_search: CrossSearchState::new(),

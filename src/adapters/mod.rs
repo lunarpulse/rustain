@@ -12,6 +12,7 @@ pub mod filesystem;
 pub mod importers;
 pub mod ledger;
 pub mod long_term_memory;
+pub mod memory_context;
 pub mod model_catalog_cache;
 pub mod noop;
 pub mod palette_registry;

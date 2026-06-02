@@ -29,10 +29,29 @@ use tokio::sync::mpsc;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::{AppEvent, CompactionPurpose};
 use crate::domain::models::{AppConfig, Conversation, NoticeLevel, StreamChunk, StreamingState};
-use crate::domain::ports::{ProviderInfoPort, StreamingProvider};
+use crate::domain::ports::{MemoryPort, ProviderInfoPort, StreamingProvider};
 use crate::domain::services::compaction::first_kept_message_id;
 
 use super::{CompactionPayload, HandlerOutcome};
+
+/// Story 11.4 NFR58 — flush durable memory BEFORE context compaction begins.
+///
+/// This is the single ordering barrier: it `await`s `memory.flush()` (a no-op
+/// for the synchronous-write tiers today, Q1) and only THEN runs the compaction
+/// summary. Spawning this instead of `run_compaction` directly guarantees a fact
+/// written this turn cannot be lost to the compaction that rebuilds the window
+/// (prd.md:2312). The barrier is the `await`, not the flush body — fire-and-forget
+/// would let compaction observe a pre-flush state (the contract test asserts this
+/// exact ordering). A flush error degrades (warn + proceed), never aborts.
+pub async fn flush_then_compact(memory: Arc<dyn MemoryPort>, payload: CompactionPayload) {
+    if let Err(e) = memory.flush().await {
+        tracing::warn!(
+            error = %e,
+            "NFR58: memory flush before compaction failed — proceeding with compaction"
+        );
+    }
+    run_compaction(payload).await;
+}
 
 /// Background task timeout for compaction summary generation. Mirrors
 /// `event_loop.rs::BACKGROUND_TASK_TIMEOUT` (kept duplicate at extraction time

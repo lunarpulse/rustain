@@ -780,7 +780,7 @@ fn test_handler_naming_reflection() {
 
     // Invariant 2: exactly N `pub fn handle_*` definitions under handlers/
     // Story 8.0a Phase 4 close: 18 extracted (1 deferred — apply_open_cross_search_result).
-    const EXPECTED_HANDLE_COUNT: usize = 26; // 21 prior + 2 for Story 8.5 (adapter override) + 2 for D-4 extraction (compact_slash, config_slash) + 1 for Story 9.2 (mcp_catalog)
+    const EXPECTED_HANDLE_COUNT: usize = 27; // 21 prior + 2 for Story 8.5 (adapter override) + 2 for D-4 extraction (compact_slash, config_slash) + 1 for Story 9.2 (mcp_catalog) + 1 for Story 11.4 (context_command — /context show|off|on extracted from event_loop)
     let handle_re =
         regex::Regex::new(r"(?m)^\s*pub(\(crate\))?\s+(async\s+)?fn\s+handle_[a-z_]+\(").unwrap();
     let mut total_handles = 0usize;

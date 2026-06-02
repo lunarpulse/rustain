@@ -83,6 +83,8 @@ fn render_status_bar_ml(
                 has_project_context,
                 session_title,
                 multiline_mode,
+                true, // context_injection_on (Story 11.4)
+                0,    // injected_tokens
                 None, // current_hint
                 0,
                 None,
@@ -313,6 +315,8 @@ fn test_status_bar_shows_active_agent() {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 Some("code-reviewer"),
@@ -362,6 +366,8 @@ fn test_status_bar_hides_agent_when_none() {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 None,
                 0,
                 None,
@@ -411,7 +417,9 @@ fn test_status_bar_agent_name_truncated() {
                 false,
                 None,
                 false,
-                None,
+                true,
+                0,    // injected_tokens
+                None, // current_hint
                 0,
                 Some("a-very-long-agent-name-that-exceeds-twenty-four"),
                 None,

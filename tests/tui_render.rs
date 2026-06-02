@@ -64,6 +64,8 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     state.has_project_context,
                     None,
                     state.multiline_mode,
+                    true,
+                    0,    // injected_tokens
                     None, // current_hint
                     0,
                     None,

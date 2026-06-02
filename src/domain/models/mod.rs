@@ -13,6 +13,7 @@ pub mod checkpoint;
 mod completion;
 mod config;
 mod content;
+pub mod context_bundle;
 pub mod conversation;
 pub mod doc_key;
 pub mod filtered_catalog;
@@ -146,6 +147,11 @@ pub use capability_registry::{
     CapabilityRegistry, ProviderId, RegisterHandle, RegisteredCapability, RegistryError,
 };
 pub use catalog_delta::CatalogDelta;
+#[allow(unused_imports)]
+pub use context_bundle::{
+    AssembleDiagnostics, ContextBudget, ContextBundle, ContextSource, ProvenancedEntry, Relevance,
+    RetrievalMethod, estimate_tokens,
+};
 pub use doc_key::DocKey;
 pub use filtered_catalog::FilteredCatalog;
 pub use filtered_skill_catalog::FilteredSkillCatalog;

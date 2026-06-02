@@ -356,6 +356,8 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 false,
                 None,
                 false,
+                true,
+                0, // injected_tokens
                 Some("Tip: j/k to scroll, i to type, ? for help"),
                 0,
                 None,

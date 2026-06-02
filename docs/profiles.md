@@ -17,7 +17,7 @@ session   = basic        # single-session, no persistence beyond log
 tools     = builtin-only # Bash/Read/Write/Edit/Glob/Grep only
 channels  = terminal     # TUI only
 scheduler = none         # no scheduled tasks
-context   = default      # project-context.md only
+context   = default      # memory + project-context injection (degrades to project-only when memory=noop)
 ```
 **Use as:** a parent for custom profiles. Not intended for direct daily use.
 
@@ -42,7 +42,7 @@ persona   = personal-assistant  # warm-tone, life-organization framing
 memory    = daily-log          # append-only daily-log memory (date-indexed)
 channels  = telegram           # feature-gated; falls back to terminal
 scheduler = cron               # feature-gated; falls back to none
-context   = daily              # daily-context.md + recent-events injection
+context   = daily              # alias of `default` — memory + project-context injection
 ```
 **Preview status:** Telegram and cron adapters are not yet available (coming in Epic 12).
 The profile loads gracefully with terminal and none as fallbacks.
@@ -99,7 +99,12 @@ adapter = "terminal"
 adapter = "none"
 
 [context]
-adapter = "default"
+adapter = "default"                 # memory + project-context injection (Story 11.4)
+# [context.config]                  # optional — adapter-local tuning (see below)
+# recent_limit = 20
+# search_limit = 10
+# max_tokens = 2000
+# daily_window_days = 2
 
 # AppConfig overrides — field-level merge into the config chain
 [overrides]
@@ -237,6 +242,34 @@ model       = "baai/bge-m3"         # 1024-dim, fixed (GATE-verified 2026-06-01)
 > Remote network embedding latency is excluded from the `<200ms` search bound (NFR56); the
 > local embedding + index-search path is what that bound covers.
 
+### `[context]` — Memory Context Injection (Story 11.4)
+
+The `default` context adapter (`daily` is an alias) assembles relevant memory at the
+**start of each turn** and injects it into the user message's invisible context prefix
+(it never shows as a chat message). It pulls recent entries + semantic search hits from the
+composed `[memory]` adapter, re-derives provenance, **deduplicates across sources**
+(`MEMORY.md` wins over a duplicate daily-log row), prioritises (`MEMORY.md` > daily logs >
+search results), and budget-truncates. Project context (`CLAUDE.md`) stays injected by the
+persona (it is structural, not memory) — the context bundle only *references* it.
+
+With `[memory] adapter = "noop"` (e.g. the `base` profile) the bundle is empty and nothing is
+injected — the agent operates normally on project context alone. Use `noop` to disable the
+adapter entirely.
+
+Inspect/toggle at runtime:
+- `/context show` — read-only view of the last-assembled context with per-source token counts.
+- `/context off` / `/context on` — disable/enable memory injection **for the session** (project
+  context keeps applying). When off, the status bar shows `mem: off` and zero memory reads occur.
+
+Adapter-local config (`[context.config]`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `recent_limit` | `20` | Max recent (`MEMORY.md` + daily-log) rows pulled per turn. |
+| `search_limit` | `10` | Max semantic search hits pulled per turn. |
+| `max_tokens` | `2000` | Hard cap on injected memory tokens (effective budget = `min(call-site, this)`). |
+| `daily_window_days` | `2` | Recency window: entries within N days are labelled `[daily-log: …]`, older as `[memory]`. |
+
 ## Available Adapters by Port
 
 | Port       | Available Adapters                          |
@@ -247,7 +280,7 @@ model       = "baai/bge-m3"         # 1024-dim, fixed (GATE-verified 2026-06-01)
 | Tools      | builtin-only, builtin-full, composite        |
 | Channels   | terminal, telegram (feature-gated)          |
 | Scheduler  | none, cron (feature-gated)                  |
-| Context    | default, daily                              |
+| Context    | default, daily (alias of default), noop      |
 
 ### MCP Servers
 

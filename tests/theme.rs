@@ -412,6 +412,8 @@ fn test_tui_renders_with_theme_colors() {
                     state.has_project_context,
                     None,
                     state.multiline_mode,
+                    true,
+                    0,    // injected_tokens
                     None, // current_hint
                     0,
                     None,

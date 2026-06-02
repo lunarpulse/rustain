@@ -2410,6 +2410,16 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /context show|off|on: inspect/toggle injected memory context —
+            // Story 11.4 AC6/AC7. Routed as ExecuteCommand (not the user-defined
+            // SubmitWithContext path) so the event-loop `/context` dispatch arm
+            // sees the sub-verb arg.
+            if cmd_name == "context" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // Discovered skill name → activate via ExecuteCommand so the event loop
             // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
             // user-defined-command SubmitWithContext if the name is NOT a skill.
@@ -3930,6 +3940,28 @@ mod tests {
             "Expected normal SubmitMessage when @Agents/ is mid-buffer, got {:?}",
             action
         );
+    }
+
+    // Story 11.4 (Task 5.2) — `/context <sub>` routes to ExecuteCommand (not the
+    // user-defined SubmitWithContext path) so the event-loop dispatch sees the arg.
+    #[test]
+    fn slash_context_routes_to_execute_command_with_subverb() {
+        for (input, expected_arg) in [
+            ("/context off", Some("off")),
+            ("/context on", Some("on")),
+            ("/context show", Some("show")),
+            ("/context", None),
+        ] {
+            let mut state = make_state();
+            state.input_buffer = input.to_string();
+            match submit_message(&mut state) {
+                InputAction::ExecuteCommand { name, args } => {
+                    assert_eq!(name, "context", "input: {input}");
+                    assert_eq!(args.as_deref(), expected_arg, "input: {input}");
+                }
+                other => panic!("expected ExecuteCommand for {input:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

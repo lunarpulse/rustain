@@ -154,6 +154,19 @@ pub enum MemoryError {
     Other(String),
 }
 
+/// Context-assembly failure (Story 11.4). Mirrors [`MemoryError`]: a context
+/// failure DEGRADES a turn (empty bundle, observable `warn` + counter), it never
+/// aborts it. A `MemoryError` raised while gathering converts in via `#[from]`.
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum ContextError {
+    #[error("memory error during context assembly: {0}")]
+    Memory(#[from] MemoryError),
+
+    #[error("{0}")]
+    Other(String),
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum PermissionError {

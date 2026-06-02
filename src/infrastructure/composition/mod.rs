@@ -595,24 +595,47 @@ pub fn build_scheduler(
 
 pub fn build_context(
     name: &str,
-    _config: Option<&toml::Value>,
-    _ctx: &ComposeContext,
+    config: Option<&toml::Value>,
+    ctx: &ComposeContext,
 ) -> Result<Arc<dyn ContextPort>, AdapterCompositionError> {
     match name {
+        // Story 11.4 — the real Content-tier context-assembly adapter. Captures
+        // the shared `memory_slot` (read via `load_full()` so warm profile swaps
+        // are seen) + the project context. `"daily"` is an alias of `"default"`
+        // (same adapter; the daily-vs-memory split is derived from entry recency,
+        // not the profile name). With a `noop` memory profile (e.g. `base`) the
+        // adapter degrades to an empty bundle — AC5.
         "default" | "daily" => {
-            if name == "daily" {
-                tracing::warn!(
-                    port = ?PortDimension::Context,
-                    adapter = %name,
-                    "Placeholder adapter — real implementation deferred to Epic 12+"
-                );
-            }
-            Ok(Arc::new(NoOpContext))
+            // Read adapter-local config off the per-dimension `_config` seam
+            // (11.3b pattern); `warn` on a parse error rather than silently
+            // dropping to defaults.
+            let cfg: crate::adapters::memory_context::ContextAssemblyConfig = config
+                .and_then(|v| match v.clone().try_into() {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        tracing::warn!(
+                            port = ?PortDimension::Context,
+                            adapter = %name,
+                            error = %e,
+                            "context config parse failed — using defaults"
+                        );
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            let adapter = crate::adapters::memory_context::MemoryContextAdapter::new(
+                Arc::clone(&ctx.memory_slot),
+                ctx.project_context.clone(),
+                cfg,
+            );
+            Ok(Arc::new(adapter))
         }
+        // Explicit opt-out — the dormant no-op (no injection at all).
+        "noop" => Ok(Arc::new(NoOpContext)),
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Context,
             name: other.to_string(),
-            available: vec!["default".into(), "daily".into()],
+            available: vec!["default".into(), "daily".into(), "noop".into()],
         }),
     }
 }
