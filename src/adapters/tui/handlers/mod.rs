@@ -30,6 +30,7 @@ pub mod consolidation;
 pub mod context_command;
 pub mod context_warning;
 pub mod export;
+pub mod forget_command;
 pub mod mcp_catalog;
 pub mod model_switch;
 pub mod notice;

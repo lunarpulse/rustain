@@ -75,6 +75,24 @@ pub struct PendingConsolidationCard {
     pub proposals: Vec<(crate::domain::models::MemoryFact, bool)>,
 }
 
+/// Story 11.4a (AC-R0): pending `/memory forget` disambiguation/confirm card.
+/// Reuses the consolidation-card grammar — a list of the fuzzy-matched entries
+/// to permanently remove, each carrying its stable `u64` content key (the
+/// tombstone identity) and a selection flag. The card DOUBLES as the scoped
+/// "what's in memory" view (no `/memory show` exists). Nothing is purged until
+/// the user confirms; on confirm a durable `RedactionRecord` is written per key.
+///
+/// Per-row toggle: Space flips the selection of the focused row; ↑/↓ (or j/k)
+/// move focus; `y` forgets all SELECTED rows, `n` cancels.
+#[derive(Debug, Clone)]
+pub struct PendingForgetCard {
+    pub conversation_id: crate::domain::models::tab::ConversationId,
+    /// `(stable u64 content key, matched entry, selected)`.
+    pub candidates: Vec<(u64, crate::domain::models::MemoryEntry, bool)>,
+    /// Index of the row that currently has keyboard focus (0-based).
+    pub focused_index: usize,
+}
+
 /// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
 pub struct SkillTrustState {
     pub skill_name: String,
@@ -1698,6 +1716,8 @@ pub struct TuiState {
     pub pending_delegation_card: Option<PendingDelegationCard>,
     /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
     pub pending_consolidation_card: Option<PendingConsolidationCard>,
+    /// Story 11.4a: pending `/memory forget` confirm card awaiting user y/n.
+    pub pending_forget_card: Option<PendingForgetCard>,
     /// Story 6-2a: pending AgentThenSubmit (synthetic task turn) queued
     /// when the event arrives while a stream is still active. Dispatched
     /// after the stream completes (TurnComplete handler).
@@ -1823,6 +1843,7 @@ impl TuiState {
             pending_plan_card: None,
             pending_delegation_card: None,
             pending_consolidation_card: None,
+            pending_forget_card: None,
             pending_agent_then_submit: None,
             pending_plan_reminder_at_turn: None,
             plan_file_path: None,

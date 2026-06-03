@@ -32,6 +32,7 @@ pub mod embedding_local;
 pub mod embedding_remote;
 pub mod fusion;
 pub mod index;
+pub mod redaction;
 
 use async_trait::async_trait;
 use serde::Deserialize;

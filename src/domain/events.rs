@@ -201,6 +201,14 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         reason: String,
     },
+    /// Story 11.4a (AC-R0) — the user resolved the `/memory forget` confirm card.
+    /// `keys` is the subset of stable `u64` content keys to permanently purge
+    /// (empty = cancelled; purges nothing). The handler calls `MemoryPort::forget`,
+    /// which writes a durable `RedactionRecord` per key and purges the index.
+    MemoryForgetResolved {
+        conversation_id: ConversationId,
+        keys: Vec<u64>,
+    },
     /// Plan-time delegation suggestion — present the modal card. Emitted by
     /// `PlanRuntime::on_task_dispatch` BEFORE flipping the task to Running,
     /// only when `DelegationDecider::suggest()` returns `Some(s)` with

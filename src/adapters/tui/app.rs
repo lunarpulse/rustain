@@ -109,6 +109,16 @@ pub enum InputAction {
     ConsolidateAcceptAll,
     /// Story 11.2a: Memory-consolidation card — user pressed n/Esc (decline all).
     ConsolidateDeclineAll,
+    /// Story 11.4a: `/memory forget` card — user pressed y (forget selected matches).
+    ForgetAcceptAll,
+    /// Story 11.4a: `/memory forget` card — user pressed n/Esc (cancel).
+    ForgetDeclineAll,
+    /// Story 11.4a: `/memory forget` card — user pressed Space (toggle focused row).
+    ForgetToggleSelection,
+    /// Story 11.4a: `/memory forget` card — user pressed ↑/k (move focus up).
+    ForgetNavigateUp,
+    /// Story 11.4a: `/memory forget` card — user pressed ↓/j (move focus down).
+    ForgetNavigateDown,
     /// Create a new tab (Ctrl+T or palette).
     NewTab,
     /// Close the active tab (palette).
@@ -697,10 +707,25 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     }
 
     // Story 11.2a: Memory-consolidation card key intercept (y promote-all / n decline)
-    if state.pending_consolidation_card.is_some() {
+    // Mutual exclusion: forget card takes precedence if both are somehow present
+    // (prevents consolidation from consuming the keystroke and leaving forget
+    // unresolvable).
+    if state.pending_consolidation_card.is_some() && state.pending_forget_card.is_none() {
         match c {
             'y' => return InputAction::ConsolidateAcceptAll,
             'n' => return InputAction::ConsolidateDeclineAll,
+            _ => return InputAction::Consumed,
+        }
+    }
+
+    // Story 11.4a: `/memory forget` confirm card key intercept.
+    if state.pending_forget_card.is_some() {
+        match c {
+            'y' => return InputAction::ForgetAcceptAll,
+            'n' => return InputAction::ForgetDeclineAll,
+            ' ' => return InputAction::ForgetToggleSelection,
+            'j' => return InputAction::ForgetNavigateDown,
+            'k' => return InputAction::ForgetNavigateUp,
             _ => return InputAction::Consumed,
         }
     }
@@ -1666,6 +1691,28 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         return handle_usage_panel_key(state, key);
     }
 
+    // Story 11.4a: `/memory forget` card navigation (Up/Down arrows).
+    if state.pending_forget_card.is_some() {
+        return match key {
+            DomainKey::Up => {
+                if let Some(ref mut card) = state.pending_forget_card {
+                    card.focused_index = card.focused_index.saturating_sub(1);
+                }
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            DomainKey::Down => {
+                if let Some(ref mut card) = state.pending_forget_card {
+                    let last = card.candidates.len().saturating_sub(1);
+                    card.focused_index = (card.focused_index + 1).min(last);
+                }
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Ignored,
+        };
+    }
+
     // Profile switcher overlay (Story 8.4 AC-1): Up/Down navigate, Esc dismisses
     if state.focus == FocusState::Overlay(OverlayType::ProfileSwitcher) {
         return handle_profile_switcher_key(state, key);
@@ -1806,6 +1853,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             // Story 11.2a: Esc on consolidation card → decline all.
             if state.pending_consolidation_card.is_some() {
                 return InputAction::ConsolidateDeclineAll;
+            }
+            // Story 11.4a: Esc on forget card → cancel (purge nothing).
+            if state.pending_forget_card.is_some() {
+                return InputAction::ForgetDeclineAll;
             }
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {

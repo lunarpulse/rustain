@@ -30,7 +30,7 @@
 //! is not moved.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -40,12 +40,16 @@ use tokio::sync::{OnceCell, RwLock};
 
 use crate::domain::errors::{MemoryError, TransitionError};
 use crate::domain::events::AppEvent;
-use crate::domain::models::{HealthSummary, MemoryEntry, MemoryFact, NoticeLevel, TransitionState};
+use crate::domain::models::{
+    HealthSummary, MemoryEntry, MemoryFact, NoticeLevel, RedactionRecord, TransitionState,
+};
 use crate::domain::ports::MemoryPort;
+use crate::domain::services::redaction_mask;
 
 use super::EmbeddingProvider;
 use super::fusion;
 use super::index::{INDEX_VERSION, IndexMeta, IndexedEntry, VectorIndex, load_index};
+use super::redaction::{RedactionStore, load_redactions, sidecar_path};
 
 /// How many inner entries to pull into the index per refresh. NFR56 bounds the
 /// search side at 10k indexed entries; the refresh source cap matches it.
@@ -114,6 +118,14 @@ pub struct VectorSearchMemory {
     /// Key-aligned keyword index for hybrid retrieval (Story 11.3b, AC2).
     bm25: RwLock<Bm25Index>,
     index_path: PathBuf,
+    /// Durable redaction tombstones (Story 11.4a / FR122). Loaded from the
+    /// `redactions.bin` sidecar BEFORE the first refresh, the source of truth for
+    /// removal: written FIRST on `forget`, consulted by `refresh()`/rebuild to
+    /// skip redacted keys at embed time, and by `search` for read-time masking.
+    redactions: RwLock<RedactionStore>,
+    /// Sibling sidecar path (`…/memory/redactions.bin`). Lives OUTSIDE `index.bin`
+    /// so a full index rebuild from source cannot lose the gravestone (AC-R3).
+    redactions_path: PathBuf,
     init: OnceCell<()>,
     refresh_limit: usize,
     /// Surfaces the guided-reindex notices (AC1). `None` (headless/eval) stays
@@ -140,6 +152,70 @@ pub fn content_key(ts: &DateTime<Local>, summary: &str) -> u64 {
     )
 }
 
+/// Fuzzy-match score for `query` against `text`. Returns `Some(score)` if the
+/// query is "close enough" (Levenshtein distance ≤ 2 OR the query is a
+/// substring), `None` otherwise. The threshold is intentionally generous so
+/// typo-tolerant matching works (e.g., "projcet" → "project").
+fn fuzzy_match_score(query: &str, text: &str) -> Option<u32> {
+    let q = query.to_lowercase();
+    let t = text.to_lowercase();
+
+    // Exact substring match: highest score.
+    if t.contains(&q) {
+        return Some(100);
+    }
+
+    // Levenshtein distance for typo tolerance.
+    let dist = levenshtein_distance(&q, &t);
+    // Allow up to 2 edits for short queries, up to 3 for longer ones.
+    let max_dist = if q.len() <= 4 { 1 } else { 2 };
+    if dist <= max_dist {
+        // Score inversely proportional to distance (closer = higher).
+        return Some((max_dist as u32 + 1 - dist as u32) * 25);
+    }
+
+    // Word-level substring match: each word of the query is a substring of text.
+    let q_words: Vec<&str> = q.split_whitespace().collect();
+    if !q_words.is_empty() && q_words.iter().all(|w| t.contains(w)) {
+        return Some(50);
+    }
+
+    None
+}
+
+/// Levenshtein distance between two strings (classic DP, O(n·m)).
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let alen = a_chars.len();
+    let blen = b_chars.len();
+
+    if alen == 0 {
+        return blen;
+    }
+    if blen == 0 {
+        return alen;
+    }
+
+    let mut prev: Vec<usize> = (0..=blen).collect();
+    let mut curr = vec![0usize; blen + 1];
+
+    for i in 1..=alen {
+        curr[0] = i;
+        for j in 1..=blen {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[blen]
+}
+
 /// The text embedded for an entry: summary, plus its context body when present.
 pub fn entry_text(e: &MemoryEntry) -> String {
     match &e.context {
@@ -161,12 +237,15 @@ impl VectorSearchMemory {
             dimension: provider.dimension(),
             version: INDEX_VERSION,
         };
+        let redactions_path = sidecar_path(&index_path);
         Self {
             inner,
             provider,
             index: RwLock::new(VectorIndex::empty(meta)),
             bm25: RwLock::new(Bm25Index::empty()),
             index_path,
+            redactions: RwLock::new(RedactionStore::empty()),
+            redactions_path,
             init: OnceCell::new(),
             refresh_limit: DEFAULT_REFRESH_LIMIT,
             domain_tx: None,
@@ -219,6 +298,16 @@ impl VectorSearchMemory {
     /// Load the persisted index (validating its header) else start empty, then
     /// incrementally refresh against `inner` and persist.
     async fn build_or_load(&self) -> Result<(), MemoryError> {
+        // Load redaction tombstones FIRST (Story 11.4a) — before any refresh or
+        // rebuild, so the embed-time gate is armed for the very first index build.
+        // This is what makes a redaction survive a full reindex from a still-dirty
+        // source (AC-R3): the sidecar outlives `index.bin`.
+        {
+            let store = load_redactions(&self.redactions_path).await?;
+            let mut guard = self.redactions.write().await;
+            *guard = store;
+        }
+
         let loaded = match load_index(&self.index_path).await {
             Ok(Some(idx)) => Some(idx),
             Ok(None) => None,
@@ -295,12 +384,27 @@ impl VectorSearchMemory {
     /// longer present, then persists. A full rebuild is just this run against an
     /// empty index.
     async fn refresh(&self) -> Result<(), MemoryError> {
-        // 1. Snapshot the inner content set to index.
+        // 0. Snapshot the redaction tombstone set (read guard released before any
+        //    await). THE fix for the self-heal (Story 11.4a, Task 3): the source
+        //    row of a redacted entry is still present (daily-log is append-only;
+        //    a MEMORY.md fact may be outside the window), so without this gate the
+        //    next refresh re-embeds it ("the ghost re-embeds"). Dropping redacted
+        //    keys here makes the one-time purge idempotent under refresh + rebuild.
+        let redacted: HashSet<u64> = {
+            let guard = self.redactions.read().await;
+            guard.keys()
+        };
+
+        // 1. Snapshot the inner content set to index, MINUS any redacted key.
         let entries = self.inner.recent(self.refresh_limit).await?;
         let current: Vec<(u64, MemoryEntry)> = entries
             .into_iter()
             .map(|e| (content_key(&e.timestamp, &e.summary), e))
+            .filter(|(k, _)| !redacted.contains(k))
             .collect();
+        // `current_keys` excludes redacted keys → `retain_keys` below drops any
+        // redacted entry already in the index (the one-time purge), and `to_embed`
+        // can never re-embed one.
         let current_keys: HashSet<u64> = current.iter().map(|(k, _)| *k).collect();
 
         // 2. Which keys are already embedded? (read guard released before await)
@@ -377,32 +481,60 @@ impl VectorSearchMemory {
     /// Atomic write: `index.bin.tmp` then rename, so a crash mid-write never
     /// corrupts the persisted index (AC3).
     async fn write_index_atomic(&self, bytes: &[u8]) -> Result<(), MemoryError> {
-        if let Some(parent) = self.index_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                MemoryError::IoError(format!(
-                    "failed to create index dir {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-        let tmp = {
-            let mut s = self.index_path.clone().into_os_string();
-            s.push(".tmp");
-            PathBuf::from(s)
-        };
-        tokio::fs::write(&tmp, bytes)
-            .await
-            .map_err(|e| MemoryError::IoError(format!("failed to write {}: {e}", tmp.display())))?;
-        if let Err(e) = tokio::fs::rename(&tmp, &self.index_path).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(MemoryError::IoError(format!(
-                "failed to rename {} → {}: {e}",
-                tmp.display(),
-                self.index_path.display()
-            )));
-        }
-        Ok(())
+        let path = self.index_path.clone();
+        write_atomic(&path, bytes).await
     }
+
+    /// Persist the redaction tombstone set to its sidecar (`redactions.bin`),
+    /// atomically (tmp→rename). Called BEFORE the one-time purge on `forget`
+    /// (AC-R6 — the tombstone is the source of truth and must land first).
+    async fn persist_redactions(&self) -> Result<(), MemoryError> {
+        let bytes = {
+            let guard = self.redactions.read().await;
+            guard.to_bytes()?
+        };
+        let path = self.redactions_path.clone();
+        write_atomic(&path, &bytes).await
+    }
+}
+
+/// Atomic write: `<path>.tmp.<random>` then rename, so a crash mid-write never
+/// corrupts the target. The random suffix prevents concurrent writers from
+/// racing on the same temp name. Shared by `index.bin` (AC3) and
+/// `redactions.bin` (AC-R6).
+async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), MemoryError> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            MemoryError::IoError(format!("failed to create dir {}: {e}", parent.display()))
+        })?;
+    }
+    // Unique temp name: pid + monotonic counter to avoid concurrent collisions
+    // and symlink-attack predictability.
+    let tmp = {
+        let mut s = path.to_path_buf().into_os_string();
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let pid = std::process::id();
+        s.push(format!(".tmp.{pid}.{n:016x}",));
+        PathBuf::from(s)
+    };
+    tokio::fs::write(&tmp, bytes)
+        .await
+        .map_err(|e| MemoryError::IoError(format!("failed to write {}: {e}", tmp.display())))?;
+    // On Windows, rename fails if the target exists; remove it first.
+    #[cfg(windows)]
+    {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(MemoryError::IoError(format!(
+            "failed to rename {} → {}: {e}",
+            tmp.display(),
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -419,6 +551,87 @@ impl MemoryPort for VectorSearchMemory {
 
     async fn recent(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
         self.inner.recent(limit).await
+    }
+
+    // ── Overridden: removal-integrity (Story 11.4a / FR122) ──
+
+    /// Fuzzy-match candidate entries to forget, returning each with its stable
+    /// `u64` content key for the `/memory forget` confirm card (AC-R0). Matches
+    /// case-insensitively over the SAME corpus `refresh()` indexes (`inner`'s
+    /// recent content), skipping anything already redacted. Deterministic — no
+    /// model call — so the disambiguation card is reproducible.
+    async fn forget_candidates(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(u64, MemoryEntry)>, MemoryError> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.ensure_init().await?;
+        let redacted: HashSet<u64> = {
+            let guard = self.redactions.read().await;
+            guard.keys()
+        };
+        let entries = self.inner.recent(self.refresh_limit).await?;
+        let mut out: Vec<(u64, MemoryEntry)> = Vec::new();
+        // Use a HashMap<key, Vec<entry>> to detect collisions — two distinct
+        // entries with the same content_key are shown separately so the user
+        // can choose which to forget (Story 11.4a CR fix).
+        let mut seen: HashMap<u64, Vec<MemoryEntry>> = HashMap::new();
+        for e in entries {
+            let text = entry_text(&e);
+            if fuzzy_match_score(&needle, &text).is_some() {
+                let key = content_key(&e.timestamp, &e.summary);
+                if !redacted.contains(&key) {
+                    seen.entry(key).or_default().push(e);
+                }
+            }
+        }
+        // Flatten, keeping all collisions visible. If the same key appears
+        // multiple times, each gets a synthetic disambiguating suffix so the
+        // user sees every candidate.
+        for (key, group) in seen {
+            if group.len() == 1 {
+                out.push((key, group.into_iter().next().unwrap()));
+            } else {
+                let group_len = group.len();
+                for (idx, mut e) in group.into_iter().enumerate() {
+                    let summary = e.summary.clone();
+                    e.summary = format!("{} [{}/{}]", summary, idx + 1, group_len);
+                    out.push((key, e));
+                }
+            }
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Permanently purge the given content keys (Story 11.4a, AC-R1/R2/R6). The
+    /// tombstone is written and persisted FIRST (source of truth), THEN the
+    /// one-time purge runs via `refresh()` — which now filters the redacted keys,
+    /// so it drops them from the vector index, rebuilds BM25 excluding them, and
+    /// re-persists `index.bin`. If the purge is interrupted after the tombstone
+    /// lands, read-time masking + the next refresh converge (AC-R6).
+    async fn forget(&self, keys: &[u64]) -> Result<(), MemoryError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.ensure_init().await?;
+        // 1. Tombstone FIRST + persist to the sidecar (AC-R6).
+        let now = Local::now();
+        {
+            let mut guard = self.redactions.write().await;
+            for &key in keys {
+                guard.insert(RedactionRecord::forget(key, now));
+            }
+        }
+        self.persist_redactions().await?;
+        // 2. One-time purge (vector retain + BM25 rebuild-excluding + persist).
+        self.refresh().await
     }
 
     // ── Overridden: hybrid retrieval (AC2) with keyword fallback (AC4) ──
@@ -447,6 +660,16 @@ impl MemoryPort for VectorSearchMemory {
 
         let candidates = limit.max(FUSION_CANDIDATES);
 
+        // Read-time redaction mask (Story 11.4a, Task 5 — defense-in-depth). After
+        // a successful purge the index holds no redacted key, but during the
+        // AC-R6 window (tombstone persisted, purge not yet complete) it may — so
+        // we mask redacted keys out of the ranked lists + the key→entry map so a
+        // redacted entry is NEVER retrievable, even mid-purge.
+        let redacted: HashSet<u64> = {
+            let guard = self.redactions.read().await;
+            guard.keys()
+        };
+
         // Vector ranking + per-key recency weight + key→entry map, all under ONE
         // read guard with no `.await` held.
         let (vec_ranked, recency, entry_by_key): (
@@ -457,41 +680,68 @@ impl MemoryPort for VectorSearchMemory {
             let guard = self.index.read().await;
             if guard.entries.is_empty() {
                 drop(guard);
-                // Nothing indexed yet — keyword fallback over inner (AC4).
-                return self.inner.search(query, limit).await;
+                // Nothing indexed yet — keyword fallback over inner (AC4),
+                // but redaction-masked so redacted entries never leak.
+                let redacted: HashSet<u64> = {
+                    let guard = self.redactions.read().await;
+                    guard.keys()
+                };
+                let mut hits = self.inner.search(query, limit).await?;
+                hits.retain(|e| {
+                    let key = content_key(&e.timestamp, &e.summary);
+                    !redacted.contains(&key)
+                });
+                return Ok(hits);
             }
             let now = Local::now();
             let mut recency = HashMap::with_capacity(guard.entries.len());
             let mut entry_by_key = HashMap::with_capacity(guard.entries.len());
             for e in &guard.entries {
+                // Skip redacted entries so they never rank, never map back.
+                if redacted.contains(&e.key) {
+                    continue;
+                }
                 let age_days = (now - e.entry.timestamp).num_seconds() as f64 / 86_400.0;
                 recency.insert(e.key, fusion::recency_weight(age_days, self.half_life_days));
                 entry_by_key.insert(e.key, e.entry.clone());
             }
             let vec_ranked = match &query_vec {
-                Some(qv) => guard.search_ranked(qv, candidates),
+                Some(qv) => {
+                    redaction_mask::retain_visible(guard.search_ranked(qv, candidates), &redacted)
+                }
                 None => Vec::new(),
             };
             (vec_ranked, recency, entry_by_key)
         };
 
-        // BM25 keyword ranking (separate read guard).
+        // BM25 keyword ranking (separate read guard), redaction-masked.
         let bm25_ranked: Vec<u64> = {
             let guard = self.bm25.read().await;
-            guard.ranked(query, candidates)
+            redaction_mask::retain_visible(guard.ranked(query, candidates), &redacted)
         };
 
         if vec_ranked.is_empty() && bm25_ranked.is_empty() {
             // No semantic vector (embed failed) AND no keyword match — keyword
-            // fallback over inner so the user still gets results (AC4).
-            return self.inner.search(query, limit).await;
+            // fallback over inner so the user still gets results (AC4),
+            // redaction-masked so redacted entries never leak.
+            let mut hits = self.inner.search(query, limit).await?;
+            hits.retain(|e| {
+                let key = content_key(&e.timestamp, &e.summary);
+                !redacted.contains(&key)
+            });
+            return Ok(hits);
         }
 
         // Fuse: RRF relevance × half-life recency, top-`limit`, deterministic.
         let relevance = fusion::rrf_relevance(&vec_ranked, &bm25_ranked);
         let fused = fusion::fuse_rank(&relevance, &recency, limit);
         if fused.is_empty() {
-            return self.inner.search(query, limit).await;
+            let mut hits = self.inner.search(query, limit).await?;
+            hits.retain(|e| {
+                let key = content_key(&e.timestamp, &e.summary);
+                !redacted.contains(&key)
+            });
+            return Ok(hits);
         }
         // Guard against concurrent refresh: if keys disappeared from
         // entry_by_key (stale snapshot vs. updated BM25), fall back rather than
@@ -505,7 +755,12 @@ impl MemoryPort for VectorSearchMemory {
                 ?missing,
                 "concurrent refresh detected — falling back to inner search"
             );
-            return self.inner.search(query, limit).await;
+            let mut hits = self.inner.search(query, limit).await?;
+            hits.retain(|e| {
+                let key = content_key(&e.timestamp, &e.summary);
+                !redacted.contains(&key)
+            });
+            return Ok(hits);
         }
         Ok(fused
             .into_iter()
@@ -884,5 +1139,230 @@ mod tests {
         );
         // No indexed entries → empty (inner is empty too).
         assert!(mem.search("anything", 5).await.unwrap().is_empty());
+    }
+
+    // ───────────────────────── Story 11.4a — removal-integrity ─────────────────
+    //
+    // The deterministic StubEmbedder (bag-of-words) means a query sharing the
+    // entry's words ranks it first, so the RETRIEVAL boundary (AC-R1/R3 oracle)
+    // is assertable without a model. Tests live in the adapter's own test module,
+    // so they reach private `refresh()`/`redactions`/`index` directly — letting us
+    // drive the exact AC-R3/R6 states (forced refresh, source-still-dirty reindex,
+    // tombstone-written-but-purge-not-yet-run) without faking them.
+
+    /// Reload `index.bin` from disk and return its key set (the AC-R1 "absent from
+    /// the persisted bytes after reload" oracle — not an in-memory flag).
+    async fn keys_on_disk(path: &std::path::Path) -> HashSet<u64> {
+        load_index(path)
+            .await
+            .unwrap()
+            .map(|i| i.keys())
+            .unwrap_or_default()
+    }
+
+    /// Does a hybrid search for `query` return an entry whose summary == `summary`?
+    /// This is the RETRIEVAL-boundary oracle across BOTH vector + BM25 (search()
+    /// fuses them), as AC-R1/R2 demand — never a flag-only assertion.
+    async fn retrievable(mem: &VectorSearchMemory, query: &str, summary: &str) -> bool {
+        mem.search(query, 10)
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.summary == summary)
+    }
+
+    const SECRET: &str = "the secret password is hunter2";
+    const NEIGHBOUR: &str = "the database uses postgres";
+
+    /// AC-R3 LINCHPIN — `redaction_survives_refresh`. The full linear arc:
+    /// seed → embed → assert retrievable → redact → assert gone (AC-R1+R2, both
+    /// modes, retrieval boundary, absent from index.bin bytes) → FORCE refresh
+    /// with the source STILL dirty → still gone → PURGE index.bin + reindex from
+    /// the still-secret-bearing source → STILL gone. A tombstone-only OR
+    /// delete-only impl passes the first asserts and FAILS the last — that is the
+    /// false-green this test exists to catch.
+    #[tokio::test]
+    async fn redaction_survives_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        let redactions_path = sidecar_path(&index_path);
+
+        // The source is STILL DIRTY throughout (append-only daily-log semantics):
+        // the secret row is never removed from `inner`. This is the explicit
+        // precondition — without it the reindex step would be a vacuous_pass.
+        let dirty_inner = || fake_inner(&[(1, SECRET), (2, NEIGHBOUR)]);
+        let stub = || Arc::new(StubEmbedder::new(64, "stub-v1"));
+
+        let mem = VectorSearchMemory::new(dirty_inner(), stub(), index_path.clone());
+        mem.initialize().await.unwrap();
+        assert!(
+            retrievable(&mem, "secret password", SECRET).await,
+            "pre-redaction the secret IS retrievable (precondition for the gap)"
+        );
+
+        // Redact it.
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+        mem.forget(&[secret_key]).await.unwrap();
+
+        // AC-R1: absent from the persisted index.bin bytes after reload.
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "AC-R1: redacted key is absent from index.bin after reload"
+        );
+        // AC-R1 + AC-R2: gone at the retrieval boundary (vector + BM25 fused).
+        assert!(
+            !retrievable(&mem, "secret password", SECRET).await,
+            "AC-R1/R2: a query that WOULD have matched returns the secret absent"
+        );
+        // AC-R3 step "purge is surgical" (also 6.5): the neighbour survives.
+        assert!(
+            retrievable(&mem, "database postgres", NEIGHBOUR).await,
+            "purge is surgical — the non-redacted neighbour is still retrievable"
+        );
+
+        // FORCE refresh() again with the source STILL dirty (the self-heal trap).
+        mem.refresh().await.unwrap();
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "AC-R3: after a forced refresh over the still-dirty source, still absent on disk"
+        );
+        assert!(
+            !retrievable(&mem, "secret password", SECRET).await,
+            "AC-R3: refresh did NOT re-embed the still-present source row (no ghost re-embed)"
+        );
+
+        // PURGE index.bin + reindex from the STILL-dirty source (the false-green
+        // catcher). A fresh adapter over the same paths: index.bin gone → rebuild
+        // from inner — but the redactions sidecar survives and gates the rebuild.
+        tokio::fs::remove_file(&index_path).await.unwrap();
+        assert!(
+            redactions_path.exists(),
+            "the tombstone sidecar OUTLIVES index.bin (it is not inside it)"
+        );
+        let mem2 = VectorSearchMemory::new(dirty_inner(), stub(), index_path.clone());
+        mem2.initialize().await.unwrap();
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "AC-R3 LINCHPIN: rebuilt-from-source index STILL excludes the redacted key"
+        );
+        assert!(
+            !retrievable(&mem2, "secret password", SECRET).await,
+            "AC-R3 LINCHPIN: still gone at retrieval after a full reindex from the dirty source"
+        );
+        assert!(
+            retrievable(&mem2, "database postgres", NEIGHBOUR).await,
+            "the neighbour is re-indexed by the rebuild (gate is surgical)"
+        );
+    }
+
+    /// AC-R5 — `redaction_survives_restart`. Redact, drop all in-memory state,
+    /// reload index + tombstone COLD from disk, assert still gone AND the refresh
+    /// filter is still active (a forced refresh does not resurrect it).
+    #[tokio::test]
+    async fn redaction_survives_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        let dirty_inner = || fake_inner(&[(1, SECRET), (2, NEIGHBOUR)]);
+
+        let mem = VectorSearchMemory::new(
+            dirty_inner(),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            index_path.clone(),
+        );
+        mem.initialize().await.unwrap();
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+        mem.forget(&[secret_key]).await.unwrap();
+
+        // Drop ALL in-memory state.
+        drop(mem);
+
+        // Cold reload — a brand-new adapter reads index.bin + redactions.bin.
+        let mem = VectorSearchMemory::new(
+            dirty_inner(),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            index_path.clone(),
+        );
+        mem.initialize().await.unwrap();
+        assert!(
+            !retrievable(&mem, "secret password", SECRET).await,
+            "AC-R5: still gone after a cold restart"
+        );
+        // Filter still active: a forced refresh over the dirty source keeps it out.
+        mem.refresh().await.unwrap();
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "AC-R5: the refresh filter is still armed after restart"
+        );
+    }
+
+    /// AC-R6 — cross-store consistency + partial-failure. Simulate "tombstone
+    /// written but the one-time purge did NOT run": insert the tombstone directly
+    /// (index.bin still holds the vector). Read-time masking MUST hide it anyway,
+    /// then the next `refresh()` converges the on-disk index to the tombstone set.
+    #[tokio::test]
+    async fn redaction_partial_failure_masks_then_converges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        let mem = VectorSearchMemory::new(
+            fake_inner(&[(1, SECRET), (2, NEIGHBOUR)]),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            index_path.clone(),
+        );
+        mem.initialize().await.unwrap();
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+
+        // Tombstone lands but the purge is "interrupted": the index STILL has it.
+        {
+            let mut g = mem.redactions.write().await;
+            g.insert(RedactionRecord::forget(secret_key, Local::now()));
+        }
+        assert!(
+            mem.index.read().await.keys().contains(&secret_key),
+            "precondition: the half-state — index still holds the redacted vector"
+        );
+        // Read-time masking hides it despite the un-purged index (AC-R6).
+        assert!(
+            !retrievable(&mem, "secret password", SECRET).await,
+            "AC-R6: redacted ⇒ never retrievable, even before the purge completes"
+        );
+
+        // Next refresh converges the on-disk index (idempotent re-purge).
+        mem.refresh().await.unwrap();
+        assert!(
+            !mem.index.read().await.keys().contains(&secret_key),
+            "AC-R6: the next refresh converges the in-memory index"
+        );
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "AC-R6: and persists the converged state to disk"
+        );
+    }
+
+    /// AC-R0 — `forget_candidates` is the disambiguation/confirm card's data
+    /// source: fuzzy text → (stable key, entry) pairs, redaction-aware.
+    #[tokio::test]
+    async fn forget_candidates_match_fuzzy_text_and_skip_already_redacted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = VectorSearchMemory::new(
+            fake_inner(&[(1, SECRET), (2, NEIGHBOUR), (3, "secret handshake ritual")]),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            tmp.path().join("memory").join("index.bin"),
+        );
+        mem.initialize().await.unwrap();
+
+        let cands = mem.forget_candidates("secret", 10).await.unwrap();
+        assert_eq!(cands.len(), 2, "two entries contain 'secret'");
+        assert!(cands.iter().all(|(k, _)| *k != 0));
+
+        // Forget one of them, then it must no longer be a candidate.
+        let key = cands[0].0;
+        mem.forget(&[key]).await.unwrap();
+        let after = mem.forget_candidates("secret", 10).await.unwrap();
+        assert_eq!(after.len(), 1, "the redacted entry drops out of candidates");
+        assert!(after.iter().all(|(k, _)| *k != key));
+
+        // Empty / blank query → no candidates.
+        assert!(mem.forget_candidates("", 10).await.unwrap().is_empty());
+        assert!(mem.forget_candidates("   ", 10).await.unwrap().is_empty());
     }
 }

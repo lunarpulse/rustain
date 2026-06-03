@@ -242,6 +242,37 @@ model       = "baai/bge-m3"         # 1024-dim, fixed (GATE-verified 2026-06-01)
 > Remote network embedding latency is excluded from the `<200ms` search bound (NFR56); the
 > local embedding + index-search path is what that bound covers.
 
+#### Removal-integrity — `/memory forget` (Story 11.4a / FR122)
+
+A memory you remove is **gone, not just hidden** — it can never resurface through memory
+search, now or after any reindex.
+
+- **`/memory forget <text>`** fuzzy-matches your memory entries and shows a confirm card
+  listing each match (with its stable key). Because there is no separate `/memory show`, this
+  card doubles as the scoped "what's in memory" view. **Nothing is purged until you press
+  `[y]`** (`[n]`/`Esc` cancels).
+- On confirm, a durable **redaction tombstone** is written to `…/.rustain/memory/redactions.bin`
+  (a sibling of `index.bin`, **never** inside your `MEMORY.md`/daily-log source), then the
+  vector index and the BM25 keyword index are purged of that entry.
+- **The guarantee survives a reindex.** The persistent index re-derives itself from an
+  append-only source on every refresh; the tombstone gates that rebuild, skipping the redacted
+  key at embed time. So even if the original source row is still present (daily-log is
+  append-only), the removed fact is never re-embedded — and a full index rebuild from source
+  still excludes it. The tombstone is the source of truth: it is written and persisted **first**,
+  so "redacted ⇒ never retrievable" holds even if a purge is interrupted (the next refresh
+  converges).
+- **Scope.** `/memory forget` removes the entry from the *search index*. Strategy A does not
+  edit your `MEMORY.md`/daily-log source files — silently honoring a manual `MEMORY.md`
+  line-deletion is a deferred follow-up (it will funnel through the *same* tombstone, confirm
+  on reload, and never silent-purge). Removal-integrity applies to the `vector-search` build;
+  without a derived index there is nothing to purge.
+
+> **Known issue (AC-R4, 2026-06-02).** Removal-integrity (`/memory forget` → tombstone →
+> index purge) and the 11.2 "remove a fact" affordance must ship **together**: a build that
+> exposes removal without 11.4a green could leave a removed fact searchable. They land in the
+> same Epic-11 closure, so any honest "removed/forgotten" copy is now backed by an actual
+> purge. (Low urgency: a single internal dogfood install with test data existed pre-11.4a.)
+
 ### `[context]` — Memory Context Injection (Story 11.4)
 
 The `default` context adapter (`daily` is an alias) assembles relevant memory at the

@@ -63,6 +63,31 @@ pub trait MemoryPort: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Find candidate entries to permanently forget by fuzzy text (Story 11.4a /
+    /// AC-R0). Returns `(stable u64 content key, entry)` pairs to populate the
+    /// `/memory forget` disambiguation/confirm card. The `u64` key is the same
+    /// `blake3(timestamp_ms || summary)` identity the search index uses, so a
+    /// confirmed key drives [`Self::forget`] directly. Default empty — only an
+    /// adapter that maintains a derived search index can offer removal-integrity.
+    async fn forget_candidates(
+        &self,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<(u64, crate::domain::models::MemoryEntry)>, crate::domain::errors::MemoryError>
+    {
+        Ok(Vec::new())
+    }
+
+    /// Permanently purge entries (by stable `u64` content key) from any derived
+    /// search index, writing a durable tombstone FIRST so the removal survives
+    /// `refresh()` and a full reindex (Story 11.4a / FR122 — the Epic-11
+    /// "removal-integrity" closure gate). Default no-op: an adapter with no
+    /// derived index (NoOpMemory, DailyLogMemory, LongTermMemory) has nothing to
+    /// purge — its content lives only in the append-only/curated source.
+    async fn forget(&self, _keys: &[u64]) -> Result<(), crate::domain::errors::MemoryError> {
+        Ok(())
+    }
+
     /// Flush any pending/in-flight durable write to its backing store. Default
     /// is a no-op: the daily-log (append-on-`store` + `file.flush()`, 11.1) and
     /// long-term (`fs::write` on `remember_fact`, 11.2) tiers write synchronously,

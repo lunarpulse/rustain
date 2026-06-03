@@ -34,6 +34,7 @@ pub mod profile;
 pub mod project_context;
 pub mod provider;
 pub mod provider_capabilities;
+pub mod redaction;
 pub mod router;
 pub mod sandbox;
 pub mod search_hit;
@@ -173,6 +174,8 @@ pub use profile::{
 #[allow(unused_imports)]
 pub use provider::{ModelCapability, ModelDescriptor, ProviderDescriptor};
 pub use provider_capabilities::{NativeRetrievalKind, ProviderCapabilities, TransportKind};
+#[allow(unused_imports)]
+pub use redaction::{RedactionOp, RedactionRecord};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 pub use search_hit::SearchHit;

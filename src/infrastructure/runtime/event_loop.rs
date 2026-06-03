@@ -1453,6 +1453,32 @@ pub async fn run(
                                         });
                                     }
                                 }
+                                // Story 11.4a: `/memory forget` card key handlers.
+                                InputAction::ForgetAcceptAll => {
+                                    if let Some(ev) = handlers::forget_command::resolve_forget_card(&mut state, &conversation.id, true) {
+                                        app_state.event_bus.emit_domain(ev);
+                                    }
+                                }
+                                InputAction::ForgetToggleSelection => {
+                                    if let Some(ref mut card) = state.pending_forget_card {
+                                        let idx = card.focused_index;
+                                        if let Some((_, _, selected)) = card.candidates.get_mut(idx) {
+                                            *selected = !*selected;
+                                            state.needs_redraw = true;
+                                        }
+                                    }
+                                }
+                                InputAction::ForgetNavigateUp => {
+                                    // Handled in app.rs (focus change + redraw)
+                                }
+                                InputAction::ForgetNavigateDown => {
+                                    // Handled in app.rs (focus change + redraw)
+                                }
+                                InputAction::ForgetDeclineAll => {
+                                    if let Some(ev) = handlers::forget_command::resolve_forget_card(&mut state, &conversation.id, false) {
+                                        app_state.event_bus.emit_domain(ev);
+                                    }
+                                }
                                 InputAction::DelegationCardCancel => {
                                     if let Some(ref pending) = state.pending_delegation_card {
                                         let conv_id = conversation.id.clone();
@@ -2064,6 +2090,29 @@ pub async fn run(
                                                     });
                                                     state.needs_redraw = true;
                                                 }
+                                            }
+                                        }
+                                    } else if let Some(query) = handlers::forget_command::parse_forget_query(cmd_name, cmd_arg) {
+                                        // Story 11.4a (AC-R0) — `/memory forget <fuzzy text>`.
+                                        // Intercepted HERE, BEFORE the adapter-override path (like
+                                        // `/memory consolidate` at :2011) so it isn't routed into
+                                        // handle_apply_adapter_override. Logic lives in the handler to
+                                        // respect the AC-4 line budget; NOTHING is purged until confirm.
+                                        if streaming.is_streaming {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: "Memory forget unavailable while a turn is in progress — try again after it finishes.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                        } else {
+                                            let result = if query.is_empty() {
+                                                None
+                                            } else {
+                                                Some(app_state.agent_core.memory.load_full().forget_candidates(&query, handlers::forget_command::FORGET_CANDIDATE_LIMIT).await)
+                                            };
+                                            for ev in handlers::forget_command::handle_forget_command(&mut state, &conversation.id, &query, result) {
+                                                app_state.event_bus.emit_domain(ev);
                                             }
                                         }
                                     } else if cmd_name == "context" {
@@ -6250,6 +6299,26 @@ pub async fn run(
                             state.needs_redraw = true;
                         }
                     }
+                    AppEvent::MemoryForgetResolved { conversation_id, keys } => {
+                        // Story 11.4a (AC-R0/R1/R2) — the user resolved the forget card. The
+                        // purge funnel (MemoryPort::forget) writes a durable RedactionRecord
+                        // per key FIRST, then purges the vector + BM25 index; the source
+                        // (MEMORY.md/daily-log) is left intact (Strategy A). Notice wording
+                        // lives in the handler to respect the AC-4 line budget.
+                        if conversation.id == conversation_id {
+                            state.pending_forget_card = None;
+                            state.focus = FocusState::Input;
+                            let result = if keys.is_empty() {
+                                None
+                            } else {
+                                Some(app_state.agent_core.memory.load_full().forget(&keys).await)
+                            };
+                            app_state.event_bus.emit_domain(handlers::forget_command::forget_result_notice(&conversation.id, keys.len(), result));
+                            state.needs_redraw = true;
+                        } else {
+                            tracing::warn!("MemoryForgetResolved for mismatched conversation");
+                        }
+                    }
                     AppEvent::PlanExecutionStarted { conversation_id, plan_id } => {
                         let agents_snapshot = {
                             if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
@@ -9370,21 +9439,22 @@ fn render(
                         theme,
                         app_layout.chat_pane.width,
                     );
-                    let card_width = app_layout.chat_pane.width;
-                    let card_height =
-                        (card_lines.len() as u16 + 2).min(app_layout.chat_pane.height);
-                    let card_area = Rect {
-                        x: app_layout.chat_pane.x,
-                        y: app_layout.chat_pane.y
-                            + app_layout.chat_pane.height.saturating_sub(card_height),
-                        width: card_width,
-                        height: card_height,
-                    };
-                    let block = ratatui::widgets::Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .border_style(ratatui::style::Style::default().fg(theme.colors.accent));
-                    let para = ratatui::widgets::Paragraph::new(card_lines).block(block);
-                    ratatui::widgets::Widget::render(para, card_area, frame.buffer_mut());
+                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
+                        frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
+                    );
+                }
+
+                // Story 11.4a: render the `/memory forget` confirm card, same
+                // bottom-anchored inline grammar as the consolidation card.
+                if let Some(ref card) = state.pending_forget_card {
+                    let card_lines = crate::adapters::tui::widgets::forget_card::render_forget_card_lines(
+                        card,
+                        theme,
+                        app_layout.chat_pane.width,
+                    );
+                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
+                        frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
+                    );
                 }
 
                 // Story 4-4 AC1: render the search bar widget into its reserved slot.
