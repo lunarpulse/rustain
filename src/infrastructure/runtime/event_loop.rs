@@ -1162,7 +1162,7 @@ pub async fn run(
                                               &domain_tx,
                                               &security,
                                               &tools, &tool_scheduler,
-                                              &persona, &app_state.agent_core.context,
+                                              &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                               &workspace_path,
                                               &mut session_manager,
                                               &fs_storage,
@@ -2280,7 +2280,7 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools, &tool_scheduler,
-                                            &persona, &app_state.agent_core.context,
+                                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
@@ -3464,7 +3464,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3488,7 +3488,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3504,7 +3504,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3528,7 +3528,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -3671,7 +3671,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                                     }
                                                 }
@@ -3823,7 +3823,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                                         }
                                                     }
@@ -4953,7 +4953,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
                                             }
                                         }
@@ -5484,7 +5484,7 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools, &tool_scheduler,
-                                            &persona, &app_state.agent_core.context,
+                                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
@@ -5577,7 +5577,7 @@ pub async fn run(
                                             &domain_tx,
                                             &security,
                                             &tools, &tool_scheduler,
-                                            &persona, &app_state.agent_core.context,
+                                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                             &workspace_path,
                                             &mut session_manager,
                                             &fs_storage,
@@ -5753,7 +5753,7 @@ pub async fn run(
                                                 &domain_tx,
                                                 &security,
                                                 &tools, &tool_scheduler,
-                                                &persona, &app_state.agent_core.context,
+                                                &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                                 &workspace_path,
                                                 &mut session_manager,
                                                 &fs_storage,
@@ -5924,7 +5924,7 @@ pub async fn run(
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
-                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
@@ -5948,7 +5948,7 @@ pub async fn run(
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
-                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &workspace_path, &mut session_manager, &fs_storage, &storage,
+                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
                                               &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::Reject => {
@@ -6674,7 +6674,7 @@ pub async fn run(
                             &domain_tx,
                             &security,
                             &tools, &tool_scheduler,
-                            &persona, &app_state.agent_core.context,
+                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                             &workspace_path,
                             &mut session_manager,
                             &fs_storage,
@@ -7191,7 +7191,7 @@ pub async fn run(
                                 &domain_tx,
                                 &security,
                                 &tools, &tool_scheduler,
-                                &persona, &app_state.agent_core.context,
+                                &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                 &workspace_path,
                                 &mut session_manager,
                                 &fs_storage,
@@ -7338,7 +7338,7 @@ pub async fn run(
                                         &domain_tx,
                                         &security,
                                         &tools, &tool_scheduler,
-                                        &persona, &app_state.agent_core.context,
+                                        &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                         &workspace_path,
                                         &mut session_manager,
                                         &fs_storage,
@@ -7473,7 +7473,7 @@ pub async fn run(
                                     &domain_tx,
                                     &security,
                                     &tools, &tool_scheduler,
-                                    &persona, &app_state.agent_core.context,
+                                    &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
                                     &workspace_path,
                                     &mut session_manager,
                                     &fs_storage,
@@ -8483,6 +8483,12 @@ async fn start_turn(
     // time so warm profile swaps are seen). Passing the slot, not a loaded value,
     // keeps the ~18 call sites a stable `&app_state.agent_core.context`.
     context: &Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ContextPort>>>,
+    // Story 11.0a — the Message-tier assembler slot (load_full() at assemble time
+    // so warm profile swaps are seen). `None` = eval/replay bypass (falls back to
+    // build_api_messages). Threaded like `context`, sourced from agent_core.
+    context_assembler: &Arc<
+        arc_swap::ArcSwap<Option<Arc<dyn crate::domain::ports::ContextAssemblerPort>>>,
+    >,
     workspace_path: &std::path::Path,
     session_manager: &mut SessionManager,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
@@ -8512,6 +8518,7 @@ async fn start_turn(
         tool_scheduler,
         persona,
         context,
+        context_assembler,
         workspace_path,
         session_manager,
         fs_storage,
@@ -8547,6 +8554,12 @@ async fn start_turn_inner(
     // time so warm profile swaps are seen). Passing the slot, not a loaded value,
     // keeps the ~18 call sites a stable `&app_state.agent_core.context`.
     context: &Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ContextPort>>>,
+    // Story 11.0a — the Message-tier assembler slot (load_full() at assemble time
+    // so warm profile swaps are seen). `None` = eval/replay bypass (falls back to
+    // build_api_messages). Threaded like `context`, sourced from agent_core.
+    context_assembler: &Arc<
+        arc_swap::ArcSwap<Option<Arc<dyn crate::domain::ports::ContextAssemblerPort>>>,
+    >,
     workspace_path: &std::path::Path,
     session_manager: &mut SessionManager,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
@@ -8587,8 +8600,25 @@ async fn start_turn_inner(
         images: persisted_refs,
     });
 
-    // Build messages list for provider
-    let mut messages = message_builder::build_api_messages(conversation);
+    // Build messages list for provider via the Story 11.0a Message-tier assembler
+    // (ADR-10-4). `StaticPassthroughAssembler` is byte-identical to the legacy
+    // inline `build_api_messages`; the budget is a sentinel (max) because
+    // passthrough ignores it (Story 11.6's WindowingAssembler honours it). `None`
+    // is the reserved eval/replay bypass → fall back to `build_api_messages`.
+    // Everything below this line is post-assembly decoration and stays inline.
+    let mut messages = match context_assembler.load().as_ref() {
+        Some(assembler) => {
+            assembler
+                .assemble(
+                    conversation,
+                    crate::domain::models::AssemblyBudget {
+                        max_tokens: usize::MAX,
+                    },
+                )
+                .messages
+        }
+        None => message_builder::build_api_messages(conversation),
+    };
 
     // Story 7.4 AC7: reshape messages when compaction is present
     crate::domain::services::compaction::shape_compacted_messages(conversation, &mut messages);

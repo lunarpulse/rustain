@@ -2,6 +2,7 @@ pub mod adapter_health;
 pub mod agent;
 pub mod agent_id;
 pub mod approval;
+pub mod assembled_context;
 pub mod autocomplete;
 pub mod budget;
 pub mod capability;
@@ -139,6 +140,8 @@ pub use crate::domain::services::reducer::{
 };
 pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
 pub use agent_id::AgentId;
+#[allow(unused_imports)]
+pub use assembled_context::{AssembledContext, AssemblyBudget};
 #[allow(unused_imports)]
 pub use budget::BudgetConfig;
 pub use capability::{Capability, CapabilityError};

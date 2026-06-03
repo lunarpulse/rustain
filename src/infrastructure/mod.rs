@@ -1,6 +1,7 @@
 pub mod clock_util;
 pub mod composition;
 pub mod config;
+pub mod context;
 pub mod logging;
 pub mod paths;
 pub mod permission_rules;

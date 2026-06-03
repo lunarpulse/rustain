@@ -119,6 +119,14 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
+            // Story 11.0a — Message-tier assembler, Option-wrapped like the
+            // exposure ports. Bound directly to the behaviour-preserving default
+            // (no BuiltAdapter variant — Option ports are bound here, not via
+            // store_for_port). `None` is the reserved eval/replay bypass.
+            context_assembler: Self::wrap_optional(Some(Arc::new(
+                crate::infrastructure::context::StaticPassthroughAssembler,
+            )
+                as Arc<dyn crate::domain::ports::ContextAssemblerPort>)),
             tool_exposure: Self::wrap_optional(tool_exposure),
             skill_exposure: Self::wrap_optional(skill_exposure),
             sandbox: Self::wrap(sandbox),

@@ -10,8 +10,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SessionPort,
-    SkillExposurePort, ToolExposurePort, ToolSetPort,
+    ChannelPort, ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort, SandboxManager,
+    SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -22,6 +22,15 @@ pub struct AgentCore {
     pub channels: Arc<ArcSwap<Arc<dyn ChannelPort>>>,
     pub scheduler: Arc<ArcSwap<Arc<dyn SchedulerPort>>>,
     pub context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
+    /// Story 11.0a — per-turn Message-tier context assembler (ADR-10-4): the
+    /// `Conversation -> Vec<Message>` wire-payload builder. Option-wrapped like
+    /// `tool_exposure`/`skill_exposure`: `Some(StaticPassthroughAssembler)` is the
+    /// behaviour-preserving default; `None` is the reserved eval/replay bypass
+    /// (architecture.md:245) where the call site falls back to `build_api_messages`
+    /// directly. Unreachable in 11.0a's live TUI paths (all bind `Some`); becomes
+    /// observable at Story 11.6 when the default is `WindowingAssembler` and eval
+    /// opts out via `None` to get raw passthrough.
+    pub context_assembler: Arc<ArcSwap<Option<Arc<dyn ContextAssemblerPort>>>>,
     /// Story 9.4 — per-turn tool exposure strategy. `None` for headless / eval
     /// path per ADR-09-01 v2.1 §W1 (Disabled is NOT a trait impl; the eval
     /// harness binds None).
@@ -61,6 +70,7 @@ impl AgentCore {
             NoOpToolSet,
         };
         use crate::adapters::sandbox::NoOpSandbox;
+        use crate::infrastructure::context::StaticPassthroughAssembler;
         Self {
             persona: Self::wrap(Arc::new(NoOpPersona) as Arc<dyn PersonaPort>),
             memory: Self::wrap(Arc::new(NoOpMemory) as Arc<dyn MemoryPort>),
@@ -69,6 +79,12 @@ impl AgentCore {
             channels: Self::wrap(Arc::new(NoOpChannel) as Arc<dyn ChannelPort>),
             scheduler: Self::wrap(Arc::new(NoOpScheduler) as Arc<dyn SchedulerPort>),
             context: Self::wrap(Arc::new(NoOpContext) as Arc<dyn ContextPort>),
+            // Asymmetry vs tool_exposure (which defaults None in noop):
+            // StaticPassthroughAssembler IS the behaviour-preserving default —
+            // there is no "no assembler" TUI path; None is only the eval bypass.
+            context_assembler: Self::wrap_optional(Some(
+                Arc::new(StaticPassthroughAssembler) as Arc<dyn ContextAssemblerPort>
+            )),
             tool_exposure: Self::wrap_optional(None as Option<Arc<dyn ToolExposurePort>>),
             skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
             sandbox: Self::wrap(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>),
@@ -117,6 +133,7 @@ mod tests {
         let ch = core.channels.load_full();
         let sc = core.scheduler.load_full();
         let cx = core.context.load_full();
+        let ca = core.context_assembler.load_full();
         let te = core.tool_exposure.load_full();
         let se = core.skill_exposure.load_full();
         let sb = core.sandbox.load_full();
@@ -127,6 +144,11 @@ mod tests {
         assert!(Arc::strong_count(&ch) >= 1);
         assert!(Arc::strong_count(&sc) >= 1);
         assert!(Arc::strong_count(&cx) >= 1);
+        assert!(
+            ca.is_some(),
+            "context_assembler defaults to Some(StaticPassthroughAssembler) in noop agent \
+             (passthrough IS the behaviour-preserving default; None is only the eval bypass)"
+        );
         assert!(te.is_none(), "tool_exposure defaults to None in noop agent");
         assert!(
             se.is_none(),

@@ -13,6 +13,8 @@ mod config_store;
 #[allow(unused_imports)]
 mod context;
 #[allow(unused_imports)]
+mod context_assembler;
+#[allow(unused_imports)]
 mod event_emitter;
 #[allow(unused_imports)]
 mod memory;
@@ -53,6 +55,7 @@ pub use channel::ChannelPort;
 pub use clipboard::ClipboardPort;
 pub use config_store::ConfigStorePort;
 pub use context::ContextPort;
+pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
 pub use persona::PersonaPort;
