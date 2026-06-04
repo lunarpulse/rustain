@@ -555,4 +555,86 @@ mod tests {
         );
         assert!(!mem.recent(1).await.unwrap().is_empty());
     }
+
+    // 11. AC5 midnight rollover (STRUCTURAL, not timed): within a single process
+    //     moment, two stores whose timestamps straddle local midnight land in
+    //     SEPARATE day files — each opened with its own H1 date header, with no
+    //     bleed across the boundary. This proves the first append after midnight
+    //     rolls into the new day's file automatically (no background task). Fixed
+    //     timestamps keep it deterministic (project rule: determinism > realism)
+    //     and would catch a regression to a single-file or now()-keyed writer.
+    #[tokio::test]
+    async fn midnight_rollover_writes_separate_day_files() {
+        use chrono::{NaiveDate, NaiveTime};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = DailyLogMemory::new(tmp.path());
+
+        // A DST-stable June date and its successor (avoids spring-forward gaps).
+        let day1 = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 6, 16).unwrap();
+        // 60s apart, but across the date boundary — reuse the adapter's own
+        // local_at so timezone handling matches store() exactly.
+        let before_midnight =
+            DailyLogMemory::local_at(day1, NaiveTime::from_hms_opt(23, 59, 30).unwrap());
+        let after_midnight =
+            DailyLogMemory::local_at(day2, NaiveTime::from_hms_opt(0, 0, 30).unwrap());
+        assert_eq!(before_midnight.date_naive(), day1, "pre-midnight is day one");
+        assert_eq!(after_midnight.date_naive(), day2, "post-midnight is day two");
+
+        mem.store(MemoryEntry {
+            timestamp: before_midnight,
+            summary: "last note of day one".into(),
+            context: None,
+        })
+        .await
+        .unwrap();
+        mem.store(MemoryEntry {
+            timestamp: after_midnight,
+            summary: "first note of day two".into(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+        let dir = tmp.path().join(".rustain").join("memory");
+        let f1 = dir.join(format!("{}.md", day1.format("%Y-%m-%d")));
+        let f2 = dir.join(format!("{}.md", day2.format("%Y-%m-%d")));
+        assert!(f1.exists(), "pre-midnight entry created day-one file {f1:?}");
+        assert!(f2.exists(), "post-midnight entry rolled into day-two file {f2:?}");
+
+        let c1 = std::fs::read_to_string(&f1).unwrap();
+        let c2 = std::fs::read_to_string(&f2).unwrap();
+
+        // Each entry lands in its OWN day file — no cross-boundary bleed.
+        assert!(c1.contains("last note of day one"));
+        assert!(
+            !c1.contains("first note of day two"),
+            "the post-midnight entry must NOT append to the previous day's file"
+        );
+        assert!(c2.contains("first note of day two"));
+        assert!(
+            !c2.contains("last note of day one"),
+            "the pre-midnight entry must NOT appear in the new day's file"
+        );
+
+        // Each new day file opens with its own H1 date header, exactly once.
+        assert_eq!(
+            c1.matches(&format!("# {}", day1.format("%Y-%m-%d")))
+                .count(),
+            1,
+            "day-one file carries its own H1 date header once"
+        );
+        assert_eq!(
+            c2.matches(&format!("# {}", day2.format("%Y-%m-%d")))
+                .count(),
+            1,
+            "day-two file carries its own H1 date header once"
+        );
+
+        // The in-memory snapshot holds both across the boundary, newest-first.
+        let recent = mem.recent(10).await.unwrap();
+        assert_eq!(recent.len(), 2, "both entries retained across the rollover");
+        assert_eq!(recent[0].summary, "first note of day two", "newest first");
+    }
 }

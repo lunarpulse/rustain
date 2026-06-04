@@ -1,0 +1,99 @@
+name: nightly-vector-search
+
+# Nightly-gated network tests for the `vector-search` feature. These NEVER run
+# in PR/push CI because they hit the network (live embedding provider + ONNX
+# model download) and the live probe needs a secret. The offline feature suite
+# (mockito locks, removal-integrity regression) runs per-PR in ci.yml.
+#
+# Closes the standing Epic 11 P1 PARTIAL: 11-3b AC-11-3b-GATE live reachability
+# probe was previously run by hand to fill the Dev Record GATE row; this job
+# runs it on a schedule and publishes the result to the run summary.
+
+on:
+  schedule:
+    # 03:17 UTC daily (off the top-of-hour rush).
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      gate_model:
+        description: "Embedding model for the live OpenRouter probe"
+        required: false
+        default: "baai/bge-m3"
+      gate_dim:
+        description: "Expected embedding dimension to assert/lock"
+        required: false
+        default: "1024"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Don't pile up overlapping nightly runs.
+concurrency:
+  group: nightly-vector-search
+  cancel-in-progress: false
+
+jobs:
+  live-embedding-probe:
+    name: 11-3b AC-GATE — OpenRouter live embedding probe
+    runs-on: ubuntu-latest
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      RUSTAIN_GATE_MODEL: ${{ github.event.inputs.gate_model || 'baai/bge-m3' }}
+      RUSTAIN_GATE_DIM: ${{ github.event.inputs.gate_dim || '1024' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — require OPENROUTER_API_KEY
+        id: guard
+        run: |
+          if [ -z "${OPENROUTER_API_KEY}" ]; then
+            echo "::warning::OPENROUTER_API_KEY is not set (e.g. a fork without secrets); skipping the live probe."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.guard.outputs.skip != 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.guard.outputs.skip != 'true'
+
+      # The probe asserts report.healthy + dimension > 0. A red run here means
+      # the configured provider/model is unreachable or withdrew the model —
+      # i.e. the documented GATE fallback trigger fired and needs attention.
+      - name: Run AC-11-3b-GATE probe (real network)
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -o pipefail
+          cargo test --features vector-search gate_probe -- --ignored --nocapture | tee probe.log
+
+      - name: Publish probe result to job summary
+        if: ${{ always() && steps.guard.outputs.skip != 'true' }}
+        run: |
+          {
+            echo "### AC-11-3b-GATE live embedding probe"
+            echo ""
+            echo "- model: \`${RUSTAIN_GATE_MODEL}\`  (expected dim \`${RUSTAIN_GATE_DIM}\`)"
+            echo ""
+            echo '```'
+            if [ -f probe.log ]; then
+              grep -A8 "AC-11-3b-GATE probe result" probe.log || tail -n 30 probe.log
+            else
+              echo "probe did not produce output (build or network failure — see logs)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  local-model-nfr:
+    name: 11-3a — local ONNX model NFR56/57 timings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Downloads the bge-small ONNX model on first run, then exercises the real
+      # embed/search round-trip and the 1k-index (<5s) / 10k-query (<200ms)
+      # NFR bounds. #[ignore] keeps these out of the default + PR feature run.
+      - name: Real-model embed + NFR timings
+        run: cargo test --features vector-search real_model -- --ignored --nocapture

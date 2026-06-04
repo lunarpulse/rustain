@@ -58,6 +58,7 @@ markers = [
     "story_10_5: Story 10-5 — Task Delegation to Subagents",
     "story_10_7: Story 10-7 — `task` Tool & Subagent Dispatch",
     "story_10_x: Story 10-x — Live-LLM subagent / task-tool smoke",
+    "story_11: Story 11 — Memory Adapters & Context Assembly (memory/context commands)",
     "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
     "subagent: Tests that exercise in-process subagent spawning / the task tool",
 ]

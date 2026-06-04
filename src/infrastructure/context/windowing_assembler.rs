@@ -699,4 +699,185 @@ mod tests {
             kept[0].content
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Topic-return scenario (user request).
+    //
+    //   pattern: A A A A  B B B B  A A A A  C C C C  B B B  A A A A
+    //            └─ G0 ─┘ └─ G1 ─┘ └─ G2 ─┘ └─ G3 ─┘ └ G4 ┘ └─ G5 ─┘
+    //                                                          (active)
+    //
+    // Each letter = a turn whose tool touches that topic's file — the file-set
+    // is how the grouper tells topics apart (R4 file-drift). The session ENDS
+    // back on topic A, so the active anchor is topic A. The earlier A history
+    // (G0, G2) is resurfaced as GISTS (not verbatim turns) and, under budget
+    // pressure, is retained in preference to the interleaved B / C groups —
+    // even though some B / C groups are more recent. That is the real
+    // mechanism behind "returning to A brings back the prior A topics".
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build the A/B/A/C/B/A branching conversation. Turns are 1s apart (so the
+    /// R3 time-gap never fires) and all use the same `Read` tool (so the R5
+    /// tool-break never fires) — the ONLY boundary driver is R4 file-set drift
+    /// between topics, giving 6 clean single-topic groups.
+    fn topic_return_conv() -> Conversation {
+        let seg = |ts0: i64, n: usize, prose: &str, file: &str| -> Vec<Turn> {
+            (0..n)
+                .map(|i| assistant_turn(ts0 + i as i64 * 1000, prose, &[("Read", file)]))
+                .collect()
+        };
+        let a = "src/topic_a.rs";
+        let b = "src/topic_b.rs";
+        let cc = "src/topic_c.rs";
+        let mut turns = Vec::new();
+        turns.extend(seg(0, 4, "work on A", a)); // G0  ts 0..3000
+        turns.extend(seg(4_000, 4, "work on B", b)); // G1  ts 4000..7000
+        turns.extend(seg(8_000, 4, "back to A", a)); // G2  ts 8000..11000
+        turns.extend(seg(12_000, 4, "work on C", cc)); // G3  ts 12000..15000
+        turns.extend(seg(16_000, 3, "B again", b)); // G4  ts 16000..18000
+        turns.extend(seg(19_000, 4, "return to A", a)); // G5  ts 19000..22000 (active)
+        conv(turns)
+    }
+
+    /// Parse the group id out of a rendered cold-gist message
+    /// (`[group {id}: {body}]`).
+    fn gist_group_id(content: &str) -> Option<u64> {
+        content
+            .strip_prefix("[group ")
+            .and_then(|s| s.split(':').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
+    // User scenario, part 1 — relevance retention under budget: ending on topic
+    // A, the two EARLIER topic-A groups survive the trim while the interleaved
+    // B / C groups drop first (overlap beats recency).
+    #[test]
+    fn returning_to_topic_a_resurfaces_prior_a_groups_over_b_and_c() {
+        use std::collections::BTreeSet;
+        use std::path::PathBuf;
+
+        let c = topic_return_conv();
+        let asm = WindowingAssembler::default();
+        let groups = group_turns(&c.turns, &GroupingConfig::default());
+
+        // Grouping invariant (R4 file-Jaccard / R5 tool-break): the six contiguous
+        // single-file segments must split into EXACTLY six groups whose file-sets
+        // follow the authored topic order A, B, A, C, B, A — a boundary at every
+        // topic change, no spurious merge and no extra split. A regression in the
+        // grouping rule fails HERE, not just on a loose `len() >= 6` floor.
+        let a_file = PathBuf::from("src/topic_a.rs");
+        let b_file = PathBuf::from("src/topic_b.rs");
+        let c_file = PathBuf::from("src/topic_c.rs");
+        let one = |p: &PathBuf| BTreeSet::from([p.clone()]);
+        let file_seq: Vec<BTreeSet<PathBuf>> = groups
+            .iter()
+            .map(|g| g.signature.file_set.iter().cloned().collect())
+            .collect();
+        assert_eq!(
+            file_seq,
+            vec![
+                one(&a_file),
+                one(&b_file),
+                one(&a_file),
+                one(&c_file),
+                one(&b_file),
+                one(&a_file),
+            ],
+            "grouping must split on every topic change in order A,B,A,C,B,A; got {file_seq:?}"
+        );
+
+        let anchor = groups.last().unwrap();
+        assert!(
+            anchor.signature.file_set.contains(&a_file),
+            "the active anchor (last group) must be topic A"
+        );
+
+        // The earlier (cold) topic-A groups — everything but the active one.
+        let a_cold_ids: BTreeSet<u64> = groups[..groups.len() - 1]
+            .iter()
+            .filter(|g| g.signature.file_set.contains(&a_file))
+            .map(|g| g.id.0)
+            .collect();
+        assert_eq!(
+            a_cold_ids.len(),
+            2,
+            "expected two earlier topic-A groups (G0, G2)"
+        );
+
+        // Full budget → every cold group is present as a gist (sanity baseline).
+        let full = asm.assemble(&c, big());
+        let cold_at_full: Vec<&Message> = full
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::System && m.content.starts_with("[group "))
+            .collect();
+        assert_eq!(
+            cold_at_full.len(),
+            groups.len() - 1,
+            "all cold groups present at full budget"
+        );
+
+        // Budget = active block + exactly the two topic-A gists. The B / C gists
+        // (zero file-overlap with the A anchor) score lower and must be trimmed
+        // first, leaving precisely the two resurfaced A topics.
+        let cold_total: usize = cold_at_full.iter().map(|m| message_tokens(m)).sum();
+        let active_tokens: usize =
+            full.messages.iter().map(message_tokens).sum::<usize>() - cold_total;
+        let a_gist_tokens: usize = cold_at_full
+            .iter()
+            .filter(|m| gist_group_id(&m.content).is_some_and(|id| a_cold_ids.contains(&id)))
+            .map(|m| message_tokens(m))
+            .sum();
+
+        let budget = AssemblyBudget {
+            max_tokens: active_tokens + a_gist_tokens,
+        };
+        let out = asm.assemble(&c, budget);
+        assert!(out.diagnostics.truncated, "the tight budget should force a trim");
+
+        let kept_ids: BTreeSet<u64> = out
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::System && m.content.starts_with("[group "))
+            .filter_map(|m| gist_group_id(&m.content))
+            .collect();
+
+        assert_eq!(
+            kept_ids, a_cold_ids,
+            "only the two earlier topic-A groups should survive the trim; kept {kept_ids:?}, \
+             expected {a_cold_ids:?}"
+        );
+    }
+
+    // User scenario, part 2 — explicit continuation link (budget-independent):
+    // the returning A group's gist is prefixed [cont. group #<first A>] because
+    // its file-set Jaccard with the earlier A group is ≥ 0.7 (AC-11.6.10).
+    #[test]
+    fn returning_to_topic_a_is_marked_as_continuation_of_prior_a() {
+        use std::path::PathBuf;
+
+        let c = topic_return_conv();
+        let groups = group_turns(&c.turns, &GroupingConfig::default());
+        let a_file = PathBuf::from("src/topic_a.rs");
+        let a_groups: Vec<&TurnGroup> = groups
+            .iter()
+            .filter(|g| g.signature.file_set.contains(&a_file))
+            .collect();
+        assert!(a_groups.len() >= 2, "need ≥2 topic-A groups");
+
+        let first_a = a_groups[0];
+        let second_a = a_groups[1];
+        assert_eq!(
+            second_a.supersedes,
+            Some(first_a.id),
+            "the second topic-A group should supersede the first"
+        );
+        assert!(
+            second_a
+                .gist
+                .starts_with(&format!("[cont. group #{}]", first_a.id.0)),
+            "the returning A group's gist should carry the continuation marker; got: {}",
+            second_a.gist
+        );
+    }
 }

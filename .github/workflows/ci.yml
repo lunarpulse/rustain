@@ -45,6 +45,24 @@ jobs:
       - name: Test with skills-validation feature
         run: cargo test --features skills-validation
 
+  vector-search:
+    name: Vector Search Feature (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Compiles fastembed/ort + reqwest + bm25 and runs every NON-ignored test
+      # under the feature. This is the PR-level guard for:
+      #   - R-001 removal-integrity regression (tests/regression_removal_integrity.rs)
+      #   - 11-3b mockito dimension/auth/status locks (tests/vector_search.rs::remote_http)
+      #   - vector-search composition + delegation tests
+      # The #[ignore] real-network / model-download tests do NOT run here — they
+      # are exercised by the nightly-vector-search workflow.
+      - name: Test with vector-search feature (no ignored network tests)
+        run: cargo test --features vector-search
+
   tui-tests:
     name: Python TUI Tests
     runs-on: ubuntu-latest

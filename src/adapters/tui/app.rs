@@ -2471,6 +2471,18 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /memory consolidate|forget|<adapter>: every `/memory` semantic lives
+            // in the event-loop ExecuteCommand arm — consolidation (11.2a), forget
+            // (11.4a), and the adapter-override (8.5). Route here as ExecuteCommand,
+            // mirroring /context, so they reach those handlers instead of falling
+            // through to the user-defined SubmitWithContext path (which treats it as
+            // a missing custom command and dispatches an EMPTY turn).
+            if cmd_name == "memory" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // Discovered skill name → activate via ExecuteCommand so the event loop
             // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
             // user-defined-command SubmitWithContext if the name is NOT a skill.
@@ -4008,6 +4020,30 @@ mod tests {
             match submit_message(&mut state) {
                 InputAction::ExecuteCommand { name, args } => {
                     assert_eq!(name, "context", "input: {input}");
+                    assert_eq!(args.as_deref(), expected_arg, "input: {input}");
+                }
+                other => panic!("expected ExecuteCommand for {input:?}, got {other:?}"),
+            }
+        }
+    }
+
+    // Story 11 (TUI E2E regression) — `/memory <sub>` must route to ExecuteCommand
+    // like `/context`, so the event-loop arm sees consolidate/forget/<adapter>.
+    // Before the fix it fell through to SubmitWithContext and dispatched an empty
+    // turn (provider 400 "Input cannot be empty").
+    #[test]
+    fn slash_memory_routes_to_execute_command_with_subverb() {
+        for (input, expected_arg) in [
+            ("/memory consolidate", Some("consolidate")),
+            ("/memory forget the secret", Some("forget the secret")),
+            ("/memory daily-log", Some("daily-log")),
+            ("/memory", None),
+        ] {
+            let mut state = make_state();
+            state.input_buffer = input.to_string();
+            match submit_message(&mut state) {
+                InputAction::ExecuteCommand { name, args } => {
+                    assert_eq!(name, "memory", "input: {input}");
                     assert_eq!(args.as_deref(), expected_arg, "input: {input}");
                 }
                 other => panic!("expected ExecuteCommand for {input:?}, got {other:?}"),
