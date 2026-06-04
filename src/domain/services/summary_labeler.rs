@@ -115,7 +115,11 @@ fn pluralize_verb(kind: &str, count: usize) -> String {
 /// Probes keys in priority order: `file_path` → `filePath` → `path`.
 /// Returns `Some(&str)` for the first non-empty string value, or `None`
 /// if no recognized key contains a non-empty string.
-fn extract_path_from_args(args: &serde_json::Value) -> Option<&str> {
+///
+/// `pub(crate)` so Story 11.6's `turn_grouping` reuses the exact same
+/// tool-agnostic path extractor (R4 file-set drift) rather than re-implementing
+/// the key-probe order.
+pub(crate) fn extract_path_from_args(args: &serde_json::Value) -> Option<&str> {
     for key in &["file_path", "filePath", "path"] {
         if let Some(val) = args.get(key) {
             if let Some(s) = val.as_str() {

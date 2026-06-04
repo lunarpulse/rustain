@@ -8,7 +8,7 @@
 //! surface within the STOP-and-flag budget (1 widget helper + 1 toggle bool + 1
 //! status segment). Pure text → no theme/ratatui dependency → trivially testable.
 
-use crate::domain::models::ContextBundle;
+use crate::domain::models::{ContextBundle, GroupId};
 
 /// Build the read-only context card text (newline-joined) for `/context show`.
 pub fn context_card_text(bundle: &ContextBundle, injection_on: bool) -> String {
@@ -59,6 +59,52 @@ pub fn context_card_text(bundle: &ContextBundle, injection_on: bool) -> String {
     lines.join("\n")
 }
 
+/// Story 11.6 (Task 7) — render the Message-tier windowing diagnostics for the
+/// `/context show` card. Returns `None` for the passthrough strategy (no groups
+/// formed → `group_count == 0`), so the card only grows a windowing section when
+/// the `WindowingAssembler` actually ran.
+pub fn group_diagnostics_text(d: &crate::domain::models::AssembleDiagnostics) -> Option<String> {
+    if d.group_count == 0 {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "\u{1FA9F} Windowing — {} group{}",
+        d.group_count,
+        if d.group_count == 1 { "" } else { "s" },
+    ));
+    if d.active_group_id != GroupId(0) {
+        lines.push(format!("  active group: {}", d.active_group_id.0));
+    }
+    if d.tokens_saved_vs_passthrough < 0 {
+        lines.push(format!(
+            "  cost {} extra token{} vs passthrough ({:.2}%)",
+            -d.tokens_saved_vs_passthrough,
+            if d.tokens_saved_vs_passthrough == -1 {
+                ""
+            } else {
+                "s"
+            },
+            d.tokens_saved_pct,
+        ));
+    } else {
+        lines.push(format!(
+            "  saved {} token{} vs passthrough ({:.2}%)",
+            d.tokens_saved_vs_passthrough,
+            if d.tokens_saved_vs_passthrough == 1 {
+                ""
+            } else {
+                "s"
+            },
+            d.tokens_saved_pct,
+        ));
+    }
+    if d.truncated {
+        lines.push("  (cold-group gists trimmed to fit the context window)".to_string());
+    }
+    Some(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,6 +142,7 @@ mod tests {
                 total_tokens: 9,
                 truncated: true,
                 deduped_count: 2,
+                ..Default::default()
             },
         }
     }
@@ -128,5 +175,29 @@ mod tests {
         let text = context_card_text(&ContextBundle::empty(), true);
         assert!(text.contains("no context assembled this turn"));
         assert!(text.contains("0 sources"));
+    }
+
+    #[test]
+    fn group_diagnostics_none_for_passthrough() {
+        // group_count == 0 (passthrough / default) → no windowing section.
+        let d = AssembleDiagnostics::default();
+        assert!(group_diagnostics_text(&d).is_none());
+    }
+
+    #[test]
+    fn group_diagnostics_renders_windowing_section() {
+        let d = AssembleDiagnostics {
+            group_count: 3,
+            active_group_id: crate::domain::models::GroupId(42),
+            tokens_saved_vs_passthrough: 128,
+            tokens_saved_pct: 17.50,
+            truncated: true,
+            ..Default::default()
+        };
+        let text = group_diagnostics_text(&d).expect("windowing ran");
+        assert!(text.contains("Windowing — 3 groups"));
+        assert!(text.contains("active group: 42"));
+        assert!(text.contains("saved 128 tokens vs passthrough (17.50%)"));
+        assert!(text.contains("trimmed to fit"));
     }
 }

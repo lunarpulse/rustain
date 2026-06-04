@@ -265,6 +265,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
         sandbox_adapter: "noop".into(),

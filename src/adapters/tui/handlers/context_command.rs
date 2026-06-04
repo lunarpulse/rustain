@@ -103,7 +103,7 @@ pub fn handle_context_command(
             )]
         }
         Some("show") | None | Some("") => {
-            let message = match state.last_context_bundle {
+            let mut message = match state.last_context_bundle {
                 Some(ref bundle) => crate::adapters::tui::widgets::context_card::context_card_text(
                     bundle,
                     state.context_injection_on,
@@ -116,6 +116,17 @@ pub fn handle_context_command(
                          context is being injected."
                     .to_string(),
             };
+            // Story 11.6 (Task 7) — append the Message-tier windowing diagnostics
+            // (group count / active group / tokens saved) when the
+            // WindowingAssembler ran this session. Passthrough → None → no-op.
+            if let Some(ref diag) = state.last_assembler_diagnostics {
+                if let Some(group_text) =
+                    crate::adapters::tui::widgets::context_card::group_diagnostics_text(diag)
+                {
+                    message.push('\n');
+                    message.push_str(&group_text);
+                }
+            }
             vec![notice(message, NoticeLevel::Info)]
         }
         Some(other) => vec![notice(
@@ -261,6 +272,7 @@ mod tests {
                 total_tokens: 5,
                 truncated: false,
                 deduped_count: 0,
+                ..Default::default()
             },
         };
 

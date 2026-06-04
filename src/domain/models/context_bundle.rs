@@ -27,6 +27,8 @@ use std::sync::Arc;
 
 use chrono::NaiveDate;
 
+use crate::domain::models::turn_group::GroupId;
+
 /// Rough token estimate: 1 token ≈ 4 bytes (the established heuristic, mirrors
 /// `event_loop.rs` parent-context sizing and `LongTermMemory`'s size warning).
 pub fn estimate_tokens(text: &str) -> usize {
@@ -195,6 +197,22 @@ pub struct AssembleDiagnostics {
     pub truncated: bool,
     /// How many entries were removed by cross-source dedup.
     pub deduped_count: usize,
+    // ── Story 11.6 (WindowingAssembler / Message tier) ──────────────────
+    // These are populated ONLY by `WindowingAssembler`. The Content-tier
+    // `MemoryContextAdapter` (and `StaticPassthroughAssembler`) leave them at
+    // their `Default` (`None` / `0` / `0.0`), so `/context show` shows group
+    // info only when the windowing strategy is selected.
+    /// (AC-11.6.6) The active group (the one containing the last turn).
+    /// `GroupId(0)` for passthrough / empty / single-group degenerate assemblies.
+    pub active_group_id: GroupId,
+    /// (AC-11.6.6) Total number of groups the session's turns folded into.
+    pub group_count: usize,
+    /// (AC-11.6.6) `passthrough_tokens − bundle_tokens` (may be ≤ 0 when the
+    /// gist overhead exceeds the turns it replaced).
+    pub tokens_saved_vs_passthrough: i64,
+    /// (AC-11.6.6) `tokens_saved / passthrough_tokens`, 2-dp rounded percentage.
+    /// NaN-safe: `0.0` when `passthrough_tokens == 0`.
+    pub tokens_saved_pct: f32,
 }
 
 /// The boundary object `ContextPort::assemble` returns. Carries the assembled,

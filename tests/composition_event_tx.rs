@@ -36,6 +36,7 @@ fn compose_ctx(domain_tx: Option<UnboundedSender<AppEvent>>) -> ComposeContext {
         include_builtin_tools: true,
         domain_tx,
         tool_exposure: "static-full".into(),
+        assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: Arc::new(rustain::infrastructure::skill_cache::SkillCache::new_in_memory()),
         sandbox_adapter: "noop".into(),

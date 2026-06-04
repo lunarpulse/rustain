@@ -8,5 +8,7 @@
 //! `domain::services::message_builder::build_api_messages` seam directly.
 
 pub mod static_passthrough_assembler;
+pub mod windowing_assembler;
 
 pub use static_passthrough_assembler::StaticPassthroughAssembler;
+pub use windowing_assembler::WindowingAssembler;

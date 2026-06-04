@@ -581,6 +581,7 @@ pub async fn run(
 
     // Render first frame immediately
     let _ctx_window = active_context_window(&app_state, &router, &state, config);
+    state.active_context_window = _ctx_window;
     match render(
         terminal,
         &mut state,
@@ -1175,6 +1176,7 @@ pub async fn run(
                                           app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
@@ -2292,6 +2294,7 @@ pub async fn run(
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
@@ -5420,6 +5423,7 @@ pub async fn run(
                                     // Story 7.4 AC3: context-pressure warning state machine
                                     let cw = active_context_window(&app_state, &router, &state, config,
                                     );
+                                    state.active_context_window = cw;
                                     if cw > 0 {
                                         let pct = conversation.usage.as_ref().map_or(0, |u| {
                                             u.input_tokens.saturating_mul(100) / cw
@@ -5589,6 +5593,7 @@ pub async fn run(
                                                                               tab_manager.reset_and_clone_turn_cancel(),
                                         app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
@@ -6686,6 +6691,7 @@ pub async fn run(
                                                               tab_manager.reset_and_clone_turn_cancel(),
                         app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                        state.active_context_window = _ctx_window;
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
@@ -7867,6 +7873,7 @@ pub async fn run(
 
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
+                                        state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
@@ -8602,20 +8609,30 @@ async fn start_turn_inner(
 
     // Build messages list for provider via the Story 11.0a Message-tier assembler
     // (ADR-10-4). `StaticPassthroughAssembler` is byte-identical to the legacy
-    // inline `build_api_messages`; the budget is a sentinel (max) because
-    // passthrough ignores it (Story 11.6's WindowingAssembler honours it). `None`
-    // is the reserved eval/replay bypass → fall back to `build_api_messages`.
-    // Everything below this line is post-assembly decoration and stays inline.
+    // inline `build_api_messages` and ignores the budget; Story 11.6's
+    // `WindowingAssembler` trims to it. The budget is the model's FULL context
+    // window (Story 11.6 Q2 — NOT the compaction `*7/10` headroom; windowing and
+    // compaction are independent stages). `0`/unknown → `usize::MAX` (no trim).
+    // `None` is the reserved eval/replay bypass → fall back to
+    // `build_api_messages`. Everything below this line is post-assembly
+    // decoration and stays inline.
+    let assembly_budget = if state.active_context_window == 0 {
+        usize::MAX
+    } else {
+        state.active_context_window as usize
+    };
     let mut messages = match context_assembler.load().as_ref() {
         Some(assembler) => {
-            assembler
-                .assemble(
-                    conversation,
-                    crate::domain::models::AssemblyBudget {
-                        max_tokens: usize::MAX,
-                    },
-                )
-                .messages
+            let assembled = assembler.assemble(
+                conversation,
+                crate::domain::models::AssemblyBudget {
+                    max_tokens: assembly_budget,
+                },
+            );
+            // Story 11.6 Task 7 — capture Message-tier diagnostics for `/context
+            // show` group info (kept separate from the Content-tier bundle).
+            state.last_assembler_diagnostics = Some(assembled.diagnostics);
+            assembled.messages
         }
         None => message_builder::build_api_messages(conversation),
     };

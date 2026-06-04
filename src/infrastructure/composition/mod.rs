@@ -38,6 +38,9 @@ pub struct ComposeContext {
     /// Story 9.4 — exposure strategy name from AppConfig.tools.exposure.
     /// Phase A: always "static-full".
     pub tool_exposure: String,
+    /// Story 11.6 — Message-tier assembler strategy name from
+    /// AppConfig.assembler.strategy. `"passthrough"` (default) or `"windowing"`.
+    pub assembler: String,
     /// Story 9.6 — skill exposure strategy name from AppConfig.skill_exposure.kind.
     /// Phase A: "l1-metadata" (default) or "static-full" (opt-in).
     pub skill_exposure: String,
@@ -119,14 +122,12 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
-            // Story 11.0a — Message-tier assembler, Option-wrapped like the
-            // exposure ports. Bound directly to the behaviour-preserving default
-            // (no BuiltAdapter variant — Option ports are bound here, not via
-            // store_for_port). `None` is the reserved eval/replay bypass.
-            context_assembler: Self::wrap_optional(Some(Arc::new(
-                crate::infrastructure::context::StaticPassthroughAssembler,
-            )
-                as Arc<dyn crate::domain::ports::ContextAssemblerPort>)),
+            // Story 11.0a / 11.6 — Message-tier assembler, Option-wrapped like
+            // the exposure ports (no BuiltAdapter variant — Option ports are
+            // bound here, not via store_for_port). The concrete strategy is
+            // selected by name from `[assembler].strategy` (default
+            // "passthrough"). `None` is the reserved eval/replay bypass.
+            context_assembler: Self::wrap_optional(Some(build_context_assembler(ctx)?)),
             tool_exposure: Self::wrap_optional(tool_exposure),
             skill_exposure: Self::wrap_optional(skill_exposure),
             sandbox: Self::wrap(sandbox),
@@ -736,6 +737,32 @@ pub fn build_tool_exposure(
     }
 }
 
+/// Story 11.6 — build the Message-tier context assembler from
+/// `[assembler].strategy`: `"passthrough"` (default, behaviour-preserving) or
+/// `"windowing"` (Algorithm A+ within-session grouped windowing).
+///
+/// Mirrors the `[tools].exposure` precedent: only known strategy *names* are
+/// accepted, and NO `GroupingConfig` threshold is threaded (FR121 / ADR-11-2
+/// "zero user-visible settings"). `startup::validate_assembler_strategy` is the
+/// primary gate (actionable error); this `Err` arm is defense-in-depth.
+pub fn build_context_assembler(
+    ctx: &ComposeContext,
+) -> Result<Arc<dyn crate::domain::ports::ContextAssemblerPort>, AdapterCompositionError> {
+    match ctx.assembler.trim() {
+        "passthrough" => Ok(Arc::new(
+            crate::infrastructure::context::StaticPassthroughAssembler,
+        )),
+        "windowing" => Ok(Arc::new(
+            crate::infrastructure::context::WindowingAssembler::default(),
+        )),
+        other => Err(AdapterCompositionError::UnknownAdapter {
+            port: PortDimension::Context,
+            name: other.to_string(),
+            available: vec!["passthrough".into(), "windowing".into()],
+        }),
+    }
+}
+
 /// Story 9.6 — build the per-turn skill exposure strategy from active config.
 ///
 /// Returns `Some(Arc::new(L1MetadataExposure))` for the default `"l1-metadata"`,
@@ -975,6 +1002,7 @@ mod tests {
             include_builtin_tools: true,
             domain_tx: None,
             tool_exposure: "static-full".into(),
+            assembler: "passthrough".into(),
             skill_exposure: "l1-metadata".into(),
             skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
             sandbox_adapter: "noop".into(),
@@ -993,6 +1021,38 @@ mod tests {
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
+        }
+    }
+
+    // ── Context-assembler selection (Story 11.6) ──
+
+    #[test]
+    fn test_build_context_assembler_passthrough_is_default() {
+        let mut ctx = test_compose_ctx();
+        ctx.assembler = "passthrough".into();
+        assert!(build_context_assembler(&ctx).is_ok());
+    }
+
+    #[test]
+    fn test_build_context_assembler_windowing_selects() {
+        let mut ctx = test_compose_ctx();
+        ctx.assembler = "windowing".into();
+        assert!(build_context_assembler(&ctx).is_ok());
+    }
+
+    #[test]
+    fn test_build_context_assembler_unknown_errors() {
+        let mut ctx = test_compose_ctx();
+        ctx.assembler = "nope".into();
+        match build_context_assembler(&ctx) {
+            Err(AdapterCompositionError::UnknownAdapter {
+                name, available, ..
+            }) => {
+                assert_eq!(name, "nope");
+                assert!(available.contains(&"windowing".to_string()));
+            }
+            Err(other) => panic!("expected UnknownAdapter, got {other:?}"),
+            Ok(_) => panic!("expected UnknownAdapter error, got Ok"),
         }
     }
 

@@ -307,6 +307,9 @@ impl ContextPort for MemoryContextAdapter {
                 total_tokens,
                 truncated,
                 deduped_count,
+                // Story 11.6 Message-tier group fields are not produced by the
+                // Content-tier adapter — leave at Default.
+                ..Default::default()
             },
         })
     }

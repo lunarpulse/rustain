@@ -207,6 +207,7 @@ fn test_compose_with_default_config_binds_static_full() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "static-full".into(),
+        assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: std::sync::Arc::new(
             rustain::infrastructure::skill_cache::SkillCache::new_in_memory(),
@@ -258,6 +259,7 @@ fn test_compose_with_unknown_exposure_returns_error() {
         include_builtin_tools: true,
         domain_tx: None,
         tool_exposure: "semantic".into(),
+        assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
         skill_cache: std::sync::Arc::new(
             rustain::infrastructure::skill_cache::SkillCache::new_in_memory(),

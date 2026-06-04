@@ -1,0 +1,79 @@
+[
+  {
+    "content": "implement auth",
+    "contextPrefix": null,
+    "images": [],
+    "role": "user",
+    "toolResults": [],
+    "toolUses": []
+  },
+  {
+    "content": "reading",
+    "contextPrefix": null,
+    "images": [],
+    "role": "assistant",
+    "toolResults": [],
+    "toolUses": [
+      {
+        "id": "tc-1",
+        "input": {
+          "file_path": "src/x.rs"
+        },
+        "name": "Read"
+      }
+    ]
+  },
+  {
+    "content": "thanks, now wire it",
+    "contextPrefix": null,
+    "images": [],
+    "role": "user",
+    "toolResults": [
+      {
+        "content": "ok",
+        "isError": false,
+        "toolUseId": "tc-1"
+      }
+    ],
+    "toolUses": []
+  },
+  {
+    "content": "here is the plan",
+    "contextPrefix": null,
+    "images": [],
+    "reasoningContent": "deliberating about the design",
+    "role": "assistant",
+    "toolResults": [],
+    "toolUses": []
+  },
+  {
+    "content": "editing",
+    "contextPrefix": null,
+    "images": [],
+    "role": "assistant",
+    "toolResults": [],
+    "toolUses": [
+      {
+        "id": "tc-2",
+        "input": {
+          "file_path": "src/x.rs"
+        },
+        "name": "Edit"
+      }
+    ]
+  },
+  {
+    "content": "",
+    "contextPrefix": null,
+    "images": [],
+    "role": "user",
+    "toolResults": [
+      {
+        "content": "ok",
+        "isError": false,
+        "toolUseId": "tc-2"
+      }
+    ],
+    "toolUses": []
+  }
+]

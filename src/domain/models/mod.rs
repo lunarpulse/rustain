@@ -57,6 +57,7 @@ mod tools;
 pub mod trace_context;
 pub mod transaction;
 pub mod turn;
+pub mod turn_group;
 pub mod usage;
 pub mod view_state;
 #[allow(dead_code)]
@@ -195,6 +196,11 @@ pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 pub use turn::{
     InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
     migrate_chat_message_to_turn, tool_call_id_for,
+};
+#[allow(unused_imports)]
+pub use turn_group::{
+    BoundaryRule, GroupId, GroupSignature, GroupingConfig, RoleCounts, TurnGroup, jaccard_distance,
+    jaccard_similarity,
 };
 #[allow(unused_imports)]
 pub use usage::{ModelInfo, TokenUsage, UsageInfo, UsageLedgerEntry};

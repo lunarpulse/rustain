@@ -382,6 +382,37 @@ impl Default for ToolsExposureConfig {
     }
 }
 
+/// Message-tier context-assembler strategy selection (Story 11.6).
+///
+/// The ONLY config touchpoint Story 11.6 adds — an opt-in *strategy name*,
+/// never a parameter. `GroupingConfig` thresholds are internal constants and
+/// are deliberately NOT exposed here (FR121 / ADR-11-2 "zero user-visible
+/// settings"). Mirrors the `[tools].exposure` precedent: accepts only known
+/// names; an unknown name produces an actionable startup error.
+///
+/// Accepts `"passthrough"` (the default — byte-identical to pre-11.0 behaviour,
+/// so AC-11.6.5 holds out of the box) and `"windowing"` (Algorithm A+).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssemblerConfig {
+    /// Strategy name: `"passthrough"` (default) or `"windowing"`.
+    #[serde(default = "AssemblerConfig::default_strategy")]
+    pub strategy: String,
+}
+
+impl AssemblerConfig {
+    fn default_strategy() -> String {
+        "passthrough".to_string()
+    }
+}
+
+impl Default for AssemblerConfig {
+    fn default() -> Self {
+        Self {
+            strategy: Self::default_strategy(),
+        }
+    }
+}
+
 /// Per-turn skill exposure strategy configuration (Story 9.6).
 ///
 /// Threaded through the existing 7-layer Figment stack at
@@ -540,6 +571,10 @@ pub struct AppConfig {
     /// Per-turn tool exposure strategy configuration. Story 9.4.
     #[serde(default)]
     pub tools: ToolsExposureConfig,
+    /// Message-tier context-assembler strategy selection. Story 11.6.
+    /// Defaults to `"passthrough"` (behaviour-preserving).
+    #[serde(default)]
+    pub assembler: AssemblerConfig,
     /// Per-turn skill exposure strategy configuration. Story 9.6.
     /// Defaults to `"l1-metadata"` (the spec-aligned default per ADR-09-02 §Decision,
     /// INVERTED from the Tools track which defaults to `static-full`).
@@ -735,6 +770,7 @@ impl Default for AppConfig {
             pricing: Self::default_pricing_catalog(),
             budget: BudgetConfig::default(),
             tools: ToolsExposureConfig::default(),
+            assembler: AssemblerConfig::default(),
             skill_exposure: SkillExposureConfig::default(),
             sandbox: SandboxConfig::default(),
             search: SearchConfig::default(),

@@ -1555,6 +1555,18 @@ pub struct TuiState {
     /// `/context show` and the status-bar token cost read it without re-running
     /// `assemble()`. `None` until the first injected turn.
     pub last_context_bundle: Option<crate::domain::models::ContextBundle>,
+    /// Story 11.6 (Task 7) — the model's full context window for the active
+    /// model, in tokens. Refreshed wherever the status bar recomputes it; read
+    /// by `start_turn_inner` as the `WindowingAssembler` budget. `0` = unknown
+    /// (guarded to `usize::MAX` → no trim). Distinct from `last_context_bundle`
+    /// (Content tier) — this drives the Message-tier assembler budget.
+    pub active_context_window: u32,
+    /// Story 11.6 (Task 7) — the LAST Message-tier `AssembleDiagnostics` (group
+    /// count, active group, tokens saved) from the context assembler, cached so
+    /// `/context show` can render group info. Kept SEPARATE from
+    /// `last_context_bundle` (the two tiers are distinct). `None` for the
+    /// passthrough strategy / before the first windowed turn.
+    pub last_assembler_diagnostics: Option<crate::domain::models::AssembleDiagnostics>,
     /// State for reverse search overlay (Ctrl+R).
     // Covers: UX-DR74
     pub reverse_search: ReverseSearchState,
@@ -1789,6 +1801,8 @@ impl TuiState {
             multiline_mode: false,
             context_injection_on: true,
             last_context_bundle: None,
+            active_context_window: 0,
+            last_assembler_diagnostics: None,
             reverse_search: ReverseSearchState::new(),
             search_state: SearchState::new(),
             cross_search: CrossSearchState::new(),

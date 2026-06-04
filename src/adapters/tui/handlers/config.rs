@@ -244,6 +244,7 @@ mod tests {
             include_builtin_tools: true,
             domain_tx: None,
             tool_exposure: "static-full".into(),
+            assembler: "passthrough".into(),
             skill_exposure: "l1-metadata".into(),
             skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new_in_memory()),
             sandbox_adapter: "noop".into(),

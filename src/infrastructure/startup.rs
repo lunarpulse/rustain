@@ -167,6 +167,12 @@ pub async fn run() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Story 11.6 — validate assembler.strategy BEFORE AgentCore composition
+    if let Err(e) = validate_assembler_strategy(&app_config.assembler.strategy) {
+        eprintln!("Config validation failed: {}", e);
+        std::process::exit(1);
+    }
+
     // Story 9.7 — validate [search] config (on/off per ADR-09-02)
     #[cfg(feature = "meta-search")]
     if let Err(e) = app_config.search.validate() {
@@ -957,6 +963,7 @@ pub async fn run() -> Result<()> {
         include_builtin_tools: resolved.include_builtin_tools,
         domain_tx: Some(domain_tx.clone()),
         tool_exposure: app_config.tools.exposure.clone(),
+        assembler: app_config.assembler.strategy.clone(),
         skill_exposure: app_config.skill_exposure.kind.clone(),
         skill_cache: Arc::clone(&shared_skill_cache),
         sandbox_adapter: app_config.sandbox.adapter.clone(),
@@ -1813,6 +1820,36 @@ pub fn validate_skill_exposure(kind: &str) -> Result<(), crate::domain::errors::
                  (default) and `\"static-full\"` (codex-parity opt-in fallback). \
                  Reserved values: `\"meta-search\"` (Story 9.7 Phase B, currently deferred).",
                 other
+            ),
+        })),
+    }
+}
+
+/// Story 11.6 — validate the `assembler.strategy` config value at startup.
+///
+/// Accepts `"passthrough"` (the default) and `"windowing"`. An unknown or empty
+/// name produces an actionable error rather than a silent fallback (mirrors
+/// `validate_tools_exposure`). NO `GroupingConfig` threshold is configurable —
+/// only the strategy name (FR121 / ADR-11-2 "zero user-visible settings").
+pub fn validate_assembler_strategy(
+    strategy: &str,
+) -> Result<(), crate::domain::errors::DomainError> {
+    use crate::domain::errors::{ConfigError, DomainError};
+    match strategy.trim() {
+        "passthrough" | "windowing" => Ok(()),
+        "" => Err(DomainError::Config(ConfigError::Invalid {
+            field: "assembler.strategy".into(),
+            value: "empty assembler strategy is invalid. Accepts `\"passthrough\"` (the \
+                    default) or `\"windowing\"` (Story 11.6 Algorithm A+). Remove the \
+                    `[assembler]` block to use the default."
+                .to_string(),
+        })),
+        other => Err(DomainError::Config(ConfigError::Invalid {
+            field: "assembler.strategy".into(),
+            value: format!(
+                "unknown assembler strategy `{other}`. Accepts only `\"passthrough\"` \
+                 (default, behaviour-preserving) and `\"windowing\"` (Story 11.6 \
+                 within-session grouped windowing, Algorithm A+)."
             ),
         })),
     }
