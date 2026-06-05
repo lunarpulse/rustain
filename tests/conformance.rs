@@ -563,9 +563,23 @@ fn test_no_std_sync_lock_in_async_module() {
 /// via /bmad-party-mode) from 10_696 to 10_990: the new user-facing `/memory
 /// forget` command grew the loop past the rolling +250 headroom even after
 /// extracting its logic to `handlers::forget_command` and DRY-ing both inline
-/// card renders into `widgets::inline_card`. `EVENT_LOOP_BASELINE_SHA` is the
-/// pre-merge sentinel (`PENDING_MERGE_SHA`); pin the real SHA at merge closeout.
-const EVENT_LOOP_BASELINE_LINES: usize = 10_990;
+/// card renders into `widgets::inline_card`.
+///
+/// Re-baselined + pinned 2026-06-05 (Epic 11 retro AI-11.7 closeout; Lunarpulse
+/// sign-off) from the phantom 10_990 to 11_071 at SHA `1bde771`. The 10_990 was
+/// measured at 11.4a *dev-complete*, before its 16 review patches (~24 lines)
+/// landed, so no committed commit ever held a 10_990-line `event_loop.rs`
+/// (11.4a `d0eed74` is 11_014; 11.6 `657916c` is 11_061; HEAD `1bde771` is
+/// 11_071, incl. the AI-11.5 trace-id fix). This reconciles the const to
+/// committed reality and un-skips `test_event_loop_baseline_integrity`.
+///
+/// GOVERNANCE (Epic 11 retro AI-11.3 / closes AI-10.3): this and every other
+/// tracked ratchet const (`MAX_KNOWN_BYPASSES`, `MAX_KNOWN_STD_SYNC_LOCKS`,
+/// `EVENT_LOOP_*`, `EXPECTED_HANDLE_COUNT`) are gated by
+/// `.github/workflows/ratchet-signoff-guard.yml`. Changing any of them requires a
+/// `RATCHET-SIGNOFF: <CONST_NAME> — <why>` trailer in a commit message or the PR
+/// body, or CI fails. Bumping a ratchet is a governance decision, never a silent edit.
+const EVENT_LOOP_BASELINE_LINES: usize = 11_071;
 
 /// Soft ceiling: PR-comment warning. Mary's calibration (baseline+75).
 const EVENT_LOOP_SOFT_BUDGET: usize = EVENT_LOOP_BASELINE_LINES + 75;
@@ -580,11 +594,10 @@ const EVENT_LOOP_RUN_BASELINE_CCN: u32 = 155;
 const COMPLEXITY_MULTIPLIER_PCT: u32 = 120;
 
 /// Commit SHA at which `EVENT_LOOP_BASELINE_LINES` was measured.
-/// Pre-merge sentinel for Story 11.4a: `test_event_loop_baseline_integrity` is
-/// SKIPPED while this is `PENDING_MERGE_SHA`. Pin the real merge SHA at closeout
-/// and confirm `git show <SHA>:event_loop.rs | wc -l` == `EVENT_LOOP_BASELINE_LINES`
-/// (10_990).
-const EVENT_LOOP_BASELINE_SHA: &str = "PENDING_MERGE_SHA";
+/// Pinned 2026-06-05 (Epic 11 retro AI-11.7 closeout) to the `retro 11` commit,
+/// where `git show <SHA>:event_loop.rs | wc -l` == `EVENT_LOOP_BASELINE_LINES`
+/// (11_071). `test_event_loop_baseline_integrity` is now LIVE (no longer skipped).
+const EVENT_LOOP_BASELINE_SHA: &str = "1bde7715d9931a249ccee7510eeaf60590ad5070";
 
 /// AC-4 line-budget ratchet for `event_loop.rs`. Soft warns; hard fails.
 /// Per Story 8.0a AC-4 + ADR-08-01 §D6.5.

@@ -1,0 +1,69 @@
+name: ratchet-signoff-guard
+
+# Epic 11 retro AI-11.3 (closes Epic 10 AI-10.3): conformance ratchet constants are a
+# governance surface, not a free knob. Any change to one of the tracked constants in
+# tests/conformance.rs must be accompanied by an explicit, constant-named sign-off token
+# so a ratchet relaxation can never land silently (as EVENT_LOOP_BASELINE 10696→11061 did
+# during Epic 11 with no gate). Mirrors the meta-search-flip-guard "sentinel + assertion"
+# pattern, but the sentinel is a commit/PR-body trailer instead of a JSON file.
+#
+# To bump a ratchet, add a trailer to a commit message OR the PR description:
+#   RATCHET-SIGNOFF: EVENT_LOOP_BASELINE_LINES — <why; ADR/story ref; reviewer>
+# The token MUST name the specific constant being changed.
+
+on:
+  pull_request:
+    paths:
+      - 'rustain/tests/conformance.rs'
+
+jobs:
+  ratchet-signoff-gate:
+    name: conformance ratchet bumps require RATCHET-SIGNOFF
+    runs-on: ubuntu-latest
+    env:
+      # Tracked ratchet constants. Keep in sync with tests/conformance.rs.
+      CONST_RE: 'const (MAX_KNOWN_BYPASSES|MAX_KNOWN_STD_SYNC_LOCKS|EVENT_LOOP_BASELINE_LINES|EVENT_LOOP_BASELINE_SHA|EVENT_LOOP_SOFT_BUDGET|EVENT_LOOP_HARD_BUDGET|EXPECTED_HANDLE_COUNT)'
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect whether a ratchet constant changed
+        id: detect
+        run: |
+          git diff "$BASE_SHA" "$HEAD_SHA" -- rustain/tests/conformance.rs > ratchet.diff || true
+          # Added/removed content lines (exclude the +++/--- file headers) that touch a tracked const.
+          if grep -E '^[+-][^+-]' ratchet.diff | grep -qE "$CONST_RE"; then
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+            echo "::notice::A tracked conformance ratchet constant changed in this PR — sign-off required."
+            grep -E '^[+-][^+-]' ratchet.diff | grep -E "$CONST_RE" || true
+          else
+            echo "changed=0" >> "$GITHUB_OUTPUT"
+            echo "No tracked ratchet constant changed — gate passes trivially."
+          fi
+
+      - name: Require a constant-named RATCHET-SIGNOFF token
+        if: steps.detect.outputs.changed == '1'
+        run: |
+          # Collect every commit message in the PR range plus the PR body.
+          git log --format='%B' "$BASE_SHA".."$HEAD_SHA" > signoff-sources.txt
+          printf '\n%s\n' "$PR_BODY" >> signoff-sources.txt
+
+          if grep -qE 'RATCHET-SIGNOFF:[[:space:]]*(MAX_KNOWN_BYPASSES|MAX_KNOWN_STD_SYNC_LOCKS|EVENT_LOOP_BASELINE_LINES|EVENT_LOOP_BASELINE_SHA|EVENT_LOOP_SOFT_BUDGET|EVENT_LOOP_HARD_BUDGET|EXPECTED_HANDLE_COUNT)' signoff-sources.txt; then
+            echo "✅ RATCHET-SIGNOFF found:"
+            grep -E 'RATCHET-SIGNOFF:' signoff-sources.txt
+          else
+            echo "❌ This PR changes a conformance ratchet constant but no RATCHET-SIGNOFF token names it."
+            echo ""
+            echo "A ratchet relaxation is a governance decision and must be explicit. Add a trailer to a"
+            echo "commit message or the PR description, naming the specific constant, e.g.:"
+            echo ""
+            echo "    RATCHET-SIGNOFF: EVENT_LOOP_BASELINE_LINES — extracted /memory forget handler (Story 11.4a); reviewer @architect"
+            echo ""
+            echo "Tracked constants: MAX_KNOWN_BYPASSES, MAX_KNOWN_STD_SYNC_LOCKS, EVENT_LOOP_BASELINE_LINES,"
+            echo "EVENT_LOOP_BASELINE_SHA, EVENT_LOOP_SOFT_BUDGET, EVENT_LOOP_HARD_BUDGET, EXPECTED_HANDLE_COUNT."
+            exit 1
+          fi

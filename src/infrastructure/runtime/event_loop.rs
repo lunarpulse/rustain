@@ -8865,14 +8865,24 @@ async fn start_turn_inner(
         .map(|m| m.content.len() as u32 / 4)
         .sum();
 
-    // Story 10.7 — generate W3C Trace Context for subagent propagation
+    // Story 10.7 — generate W3C Trace Context for subagent propagation.
+    // AI-11.5 (Epic 11 retro): the prior `ts*31`/`ts*17` form was a pure function of
+    // the millisecond clock, so two turns minted in the same millisecond produced
+    // identical trace/span ids — a W3C uniqueness violation. Mix a per-process
+    // monotonic counter (+ pid) into the ids so collisions are impossible within a
+    // process and improbable across processes. No new dependency.
     let parent_trace = {
-        let ts = chrono::Utc::now().timestamp_millis();
-        let trace_id = format!("{:032x}", ts.wrapping_mul(31));
-        let span_id = format!(
-            "{:016x}",
-            (ts.wrapping_mul(17) as u64) & 0xFFFF_FFFF_FFFF_FFFF_u64
-        );
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
+        let ts = chrono::Utc::now().timestamp_millis() as u64;
+        let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id() as u64;
+        // SplitMix64 odd-constant multiply is bijective over u64, so distinct
+        // (seq, pid) pairs map to distinct `mixed` values — guaranteeing per-process
+        // uniqueness regardless of clock resolution.
+        let mixed = (seq ^ (pid << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let trace_id = format!("{:016x}{:016x}", ts.wrapping_mul(31), mixed);
+        let span_id = format!("{:016x}", ts.wrapping_mul(17) ^ mixed);
         crate::domain::models::TraceContext::new(trace_id, span_id, 1).ok()
     };
 
