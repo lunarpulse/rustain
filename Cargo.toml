@@ -115,6 +115,14 @@ rmcp = { version = "1.0", default-features = false, features = ["client", "trans
 
 tempfile = "3.0"
 
+# ── Unix daemon (Story 12.1a) ────────────────────────────────────
+# setsid() for detaching the re-exec child from the controlling terminal and
+# kill(pid, signal)/kill(pid, 0) liveness probing for the daemon lifecycle.
+# Already vendored (was a dev-dep + transitive); promoting to a runtime dep is
+# within Story 12.1a scope (Task 2 setsid / Task 5 kill(pid,0)).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"

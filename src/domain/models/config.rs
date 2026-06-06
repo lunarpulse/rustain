@@ -413,6 +413,118 @@ impl Default for AssemblerConfig {
     }
 }
 
+/// Daemon-mode lifecycle configuration (Story 12.1a — `[daemon]` table).
+///
+/// Only consulted in daemon mode (`rustain daemon …`); the one-shot TUI ignores
+/// it (the lifecycle boundaries it drives are daemon-gated per AC-12-1a-7).
+///
+/// Parsing is deferred to the typed accessors (`parsed_daily_reset` /
+/// `parsed_idle_timeout`) so that loading config for non-daemon runs never fails
+/// on a malformed `[daemon]` value; the daemon body validates eagerly at startup
+/// via [`DaemonConfig::validate`] (AC-12-1a-7 Task 7) and surfaces an actionable
+/// error instead of silently falling back to a surprising default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Wall-clock daily-reset time in `"HH:MM"` (24h). At this time the daemon
+    /// resets its conversation context and finalizes the daily log, emitting a
+    /// single `SessionBoundary::DailyReset` (AC-12-1a-5).
+    #[serde(default = "DaemonConfig::default_daily_reset")]
+    pub daily_reset: String,
+    /// Idle window after which the daemon enters its low-power state, e.g.
+    /// `"4h"`, `"30m"`, `"90s"`, `"1d"`. Grammar: `^\d+[smhd]$` (AC-12-1a-6).
+    #[serde(default = "DaemonConfig::default_idle_timeout")]
+    pub idle_timeout: String,
+    /// Whether entering the low-power (idle) state also emits a
+    /// `SessionBoundary::IdleTimeout` (AC-12-1a-6 — configurable; default on).
+    #[serde(default = "DaemonConfig::default_low_power_emits_boundary")]
+    pub low_power_emits_boundary: bool,
+}
+
+impl DaemonConfig {
+    fn default_daily_reset() -> String {
+        "04:00".to_string()
+    }
+    fn default_idle_timeout() -> String {
+        "4h".to_string()
+    }
+    fn default_low_power_emits_boundary() -> bool {
+        true
+    }
+
+    /// Parse `daily_reset` (`"HH:MM"`) into a `chrono::NaiveTime`.
+    pub fn parsed_daily_reset(&self) -> Result<chrono::NaiveTime, String> {
+        chrono::NaiveTime::parse_from_str(&self.daily_reset, "%H:%M").map_err(|_| {
+            format!(
+                "[daemon] daily_reset = \"{}\" is not a valid 24h time — expected \"HH:MM\" (e.g. \"04:00\")",
+                self.daily_reset
+            )
+        })
+    }
+
+    /// Parse `idle_timeout` (`^\d+[smhd]$`) into a `std::time::Duration`.
+    ///
+    /// Hand-rolled (no `humantime` dep — Story 12.1a Q#3, recommendation taken):
+    /// the grammar is a single integer followed by one of `s`/`m`/`h`/`d`.
+    pub fn parsed_idle_timeout(&self) -> Result<std::time::Duration, String> {
+        parse_duration_smhd(&self.idle_timeout)
+    }
+
+    /// Eager validation for the daemon startup path (Task 7): both fields must
+    /// parse, else return an actionable error rather than a surprising default.
+    pub fn validate(&self) -> Result<(), String> {
+        self.parsed_daily_reset()?;
+        self.parsed_idle_timeout()?;
+        Ok(())
+    }
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            daily_reset: Self::default_daily_reset(),
+            idle_timeout: Self::default_idle_timeout(),
+            low_power_emits_boundary: Self::default_low_power_emits_boundary(),
+        }
+    }
+}
+
+/// Parse the `^\d+[smhd]$` duration grammar (Story 12.1a Task 7). Pure, so it is
+/// unit-testable without any timers (project law: determinism > realism).
+pub fn parse_duration_smhd(s: &str) -> Result<std::time::Duration, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err(
+            "[daemon] idle_timeout is empty — expected e.g. \"4h\", \"30m\", \"90s\", \"1d\""
+                .to_string(),
+        );
+    }
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let unit_char = unit
+        .chars()
+        .next()
+        .expect("split_at leaves one trailing char");
+    let multiplier_secs: u64 = match unit_char {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
+        other => {
+            return Err(format!(
+                "[daemon] idle_timeout = \"{s}\" has unknown unit '{other}' — expected one of s/m/h/d (e.g. \"4h\")"
+            ));
+        }
+    };
+    let value: u64 = num_str.parse().map_err(|_| {
+        format!(
+            "[daemon] idle_timeout = \"{s}\" is not a number followed by s/m/h/d (e.g. \"4h\", \"30m\")"
+        )
+    })?;
+    value
+        .checked_mul(multiplier_secs)
+        .map(std::time::Duration::from_secs)
+        .ok_or_else(|| format!("[daemon] idle_timeout = \"{s}\" overflows the supported range"))
+}
+
 /// Per-turn skill exposure strategy configuration (Story 9.6).
 ///
 /// Threaded through the existing 7-layer Figment stack at
@@ -597,6 +709,10 @@ pub struct AppConfig {
     /// Subagent approval routing policy (Story 10.X-AUTO).
     #[serde(default)]
     pub subagents: SubagentsConfig,
+    /// Daemon-mode lifecycle configuration (Story 12.1a). Only consulted in
+    /// daemon mode; the one-shot TUI ignores it. Last field, mirrors `subagents`.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 impl AppConfig {
@@ -776,6 +892,7 @@ impl Default for AppConfig {
             search: SearchConfig::default(),
             plan: PlanConfig::default(),
             subagents: SubagentsConfig::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }
@@ -783,6 +900,79 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_config_defaults_are_valid() {
+        let d = DaemonConfig::default();
+        assert_eq!(d.daily_reset, "04:00");
+        assert_eq!(d.idle_timeout, "4h");
+        assert!(d.low_power_emits_boundary);
+        assert!(d.validate().is_ok());
+        assert_eq!(
+            d.parsed_idle_timeout().unwrap(),
+            std::time::Duration::from_secs(4 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn parse_duration_smhd_covers_all_units() {
+        use std::time::Duration;
+        assert_eq!(parse_duration_smhd("90s").unwrap(), Duration::from_secs(90));
+        assert_eq!(
+            parse_duration_smhd("30m").unwrap(),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            parse_duration_smhd("4h").unwrap(),
+            Duration::from_secs(14400)
+        );
+        assert_eq!(
+            parse_duration_smhd("1d").unwrap(),
+            Duration::from_secs(86400)
+        );
+        assert_eq!(
+            parse_duration_smhd(" 2h ").unwrap(),
+            Duration::from_secs(7200)
+        );
+    }
+
+    #[test]
+    fn parse_duration_smhd_rejects_garbage() {
+        assert!(parse_duration_smhd("").is_err());
+        assert!(parse_duration_smhd("4").is_err()); // no unit
+        assert!(parse_duration_smhd("4w").is_err()); // unknown unit
+        assert!(parse_duration_smhd("abch").is_err()); // non-numeric
+        assert!(parse_duration_smhd("h").is_err()); // no number
+    }
+
+    #[test]
+    fn daemon_config_validate_rejects_bad_fields() {
+        let bad_time = DaemonConfig {
+            daily_reset: "25:99".into(),
+            ..DaemonConfig::default()
+        };
+        assert!(bad_time.validate().is_err());
+        let bad_dur = DaemonConfig {
+            idle_timeout: "soon".into(),
+            ..DaemonConfig::default()
+        };
+        assert!(bad_dur.validate().is_err());
+    }
+
+    #[test]
+    fn daemon_table_deserializes_and_absent_uses_defaults() {
+        let with_table: AppConfig = toml::from_str(
+            "model = \"m\"\n[daemon]\ndaily_reset = \"06:30\"\nidle_timeout = \"2h\"\nlow_power_emits_boundary = false\n",
+        )
+        .expect("deserialize [daemon]");
+        assert_eq!(with_table.daemon.daily_reset, "06:30");
+        assert_eq!(with_table.daemon.idle_timeout, "2h");
+        assert!(!with_table.daemon.low_power_emits_boundary);
+
+        // Absent [daemon] table → defaults (non-daemon configs never fail to load).
+        let no_table: AppConfig = toml::from_str("model = \"m\"\n").expect("deserialize");
+        assert_eq!(no_table.daemon, DaemonConfig::default());
+    }
 
     #[test]
     fn app_config_tool_progress_roundtrip() {

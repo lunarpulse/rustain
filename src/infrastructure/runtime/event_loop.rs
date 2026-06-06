@@ -30,10 +30,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
-use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
 use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
+use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::handlers::{self, HandlerOutcome, SpawnRequest};

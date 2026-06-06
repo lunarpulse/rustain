@@ -84,6 +84,59 @@ pub fn models_cache_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("models_cache.json"))
 }
 
+// ── Daemon path resolution (Story 12.1a AC-12-1a-8) ──────────────────────────
+//
+// "Hybrid" scoping (author decision, 2026-06-06): the PID file is
+// **workspace-scoped** — `{workspace}/.rustain/daemon.pid` — consistent with all
+// other workspace `.rustain/` runtime artifacts and human-discoverable. The
+// socket lives under the short data-dir root —
+// `{data_dir}/daemons/<workspace-hash>.sock` — so a deeply-nested workspace path
+// can never push the AF_UNIX `sun_path` over its ~108-byte limit (a socket under
+// `{workspace}/.rustain/daemon.sock` would). The socket path is recorded inside
+// the PID file so `status`/`stop`/attach(12.2) read it rather than re-deriving.
+//
+// These helpers are the SINGLE SOURCE OF TRUTH for the paths (AC-12-1a-8) — no
+// inline `join("daemon.pid")` is allowed elsewhere. Both honor the same
+// `RUSTAIN_DATA_DIR` test override as `data_dir()`.
+
+/// Resolve the workspace `{workspace}/.rustain/` runtime directory, creating it.
+fn rustain_workspace_dir(workspace: &std::path::Path) -> Result<PathBuf> {
+    let dir = workspace.join(".rustain");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Stable per-workspace hash used in the socket filename. Canonicalizes the
+/// workspace path first (so `.`/`..`/symlinks resolve to the same daemon) and
+/// falls back to the raw path bytes when the path can't be canonicalized.
+pub fn workspace_hash(workspace: &std::path::Path) -> String {
+    let canonical = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
+    // 16 hex chars (8 bytes) — collision-free in practice, keeps `sun_path` short.
+    digest.to_hex()[..16].to_string()
+}
+
+/// Path to the workspace-scoped daemon PID file (Story 12.1a AC-12-1a-8).
+/// `{workspace}/.rustain/daemon.pid`.
+pub fn daemon_pid_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("daemon.pid"))
+}
+
+/// Path to the per-workspace daemon Unix socket (Story 12.1a AC-12-1a-8).
+/// `{data_dir}/daemons/<workspace-hash>.sock` — short root avoids the AF_UNIX
+/// path-length limit; the hash keeps it per-workspace and collision-free.
+pub fn daemon_socket_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    let dir = data_dir()?.join("daemons");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir.join(format!("{}.sock", workspace_hash(workspace))))
+}
+
+/// Path to the daemon's stdio/log file (re-exec child redirects stdout+stderr
+/// here). `{workspace}/.rustain/daemon.log` — discoverable alongside the PID.
+pub fn daemon_log_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("daemon.log"))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()
@@ -91,4 +144,49 @@ pub fn crash_log_path() -> Result<PathBuf> {
         .unwrap_or_default()
         .as_secs();
     Ok(data_dir()?.join(format!("crash-{}.log", timestamp)))
+}
+
+#[cfg(test)]
+mod daemon_path_tests {
+    use super::*;
+
+    #[test]
+    fn pid_path_is_workspace_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = daemon_pid_path(tmp.path()).unwrap();
+        assert_eq!(p, tmp.path().join(".rustain").join("daemon.pid"));
+        assert!(tmp.path().join(".rustain").is_dir());
+    }
+
+    #[test]
+    fn workspace_hash_is_stable_and_distinct() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        assert_eq!(workspace_hash(a.path()), workspace_hash(a.path()));
+        assert_ne!(workspace_hash(a.path()), workspace_hash(b.path()));
+        assert_eq!(workspace_hash(a.path()).len(), 16);
+    }
+
+    #[test]
+    fn socket_path_lives_under_data_dir_and_is_short() {
+        let data = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; RUSTAIN_DATA_DIR override is the documented
+        // test seam consistent with data_dir().
+        unsafe {
+            std::env::set_var("RUSTAIN_DATA_DIR", data.path());
+        }
+        let sock = daemon_socket_path(ws.path()).unwrap();
+        unsafe {
+            std::env::remove_var("RUSTAIN_DATA_DIR");
+        }
+        assert!(sock.starts_with(data.path().join("daemons")));
+        assert!(sock.extension().unwrap() == "sock");
+        // AF_UNIX sun_path limit guard (Linux 108) — the whole point of the hash.
+        assert!(
+            sock.to_string_lossy().len() < 108,
+            "socket path must stay under the AF_UNIX limit: {}",
+            sock.display()
+        );
+    }
 }

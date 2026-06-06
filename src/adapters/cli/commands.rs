@@ -129,6 +129,39 @@ pub enum Command {
         #[command(subcommand)]
         action: CatalogAction,
     },
+    /// Run rustain as a background daemon (Story 12.1a — start/stop/status).
+    /// Unix only (Linux P0, macOS P1); Windows daemon support (named pipes) is
+    /// deferred to P2 (NFR33).
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DaemonAction {
+    /// Start a background (detached) daemon for this workspace.
+    Start {
+        /// Run the lifecycle loop in the foreground (do not detach). Useful for
+        /// `systemd`/`launchd` supervision (Story 12.1b) and debugging.
+        #[arg(long)]
+        foreground: bool,
+    },
+    /// Gracefully stop the running daemon for this workspace.
+    Stop,
+    /// Print a status snapshot for this workspace's daemon.
+    Status {
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+    /// INTERNAL — the detached child entrypoint (re-exec target of `start`).
+    /// Hidden because it is not a user verb: `start` re-execs the current binary
+    /// with this action after `setsid`-detaching. Running it by hand runs the
+    /// daemon lifecycle loop in the foreground without writing the readiness
+    /// handshake the parent `start` expects.
+    #[command(name = "__run", hide = true)]
+    Run,
 }
 
 #[derive(Subcommand, Debug, Clone)]

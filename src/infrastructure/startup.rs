@@ -476,6 +476,32 @@ pub async fn run() -> Result<()> {
         std::process::exit(exit_code);
     }
 
+    // Story 12.1a — Daemon subcommand intercept. MUST run before provider
+    // construction + terminal setup: the daemon is headless (no TUI, no
+    // provider layer in 12.1a) and `start` re-execs a detached child. The memory
+    // adapter name is resolved from the active profile so the headless daemon
+    // body composes the SAME memory sink the TUI would (build_daemon_memory).
+    if let Some(Command::Daemon { action }) = cli.command.clone() {
+        use crate::domain::models::profile::PortDimension;
+        let workspace = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+        let memory_adapter = profile_resolver_arc
+            .resolve_active()
+            .and_then(|r| {
+                r.selection
+                    .dimensions
+                    .get(&PortDimension::Memory)
+                    .map(|a| a.adapter.clone())
+            })
+            .unwrap_or_else(|| "noop".to_string());
+        return crate::adapters::daemon::run_daemon(action, workspace, app_config, memory_adapter)
+            .await
+            .map_err(|e| {
+                tracing::error!("Daemon subcommand failed: {e}");
+                SubcommandExit.into()
+            });
+    }
+
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
     // CONFORMANCE_EXCEPTION_ENV_LAYER_BYPASS: legacy env-var, see Story 8.1 Decision Gate item 1.2

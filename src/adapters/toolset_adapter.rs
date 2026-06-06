@@ -2091,10 +2091,7 @@ mod tests {
 
     impl ParkingMemory {
         async fn maybe_park(&self) {
-            if self
-                .armed
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 self.reached.notify_one();
                 self.proceed.notified().await;
             }
@@ -2128,7 +2125,11 @@ mod tests {
 
     fn parking(
         inner: Arc<dyn crate::domain::ports::MemoryPort>,
-    ) -> (Arc<ParkingMemory>, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    ) -> (
+        Arc<ParkingMemory>,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
         let reached = Arc::new(tokio::sync::Notify::new());
         let proceed = Arc::new(tokio::sync::Notify::new());
         let pm = Arc::new(ParkingMemory {
@@ -2148,11 +2149,13 @@ mod tests {
     async fn remember_fact_re_resolves_to_live_adapter_after_swap() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
-        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> =
-            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_a.path()));
+        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(dir_a.path()),
+        );
         let (old, reached, proceed) = parking(old_inner);
-        let new: Arc<dyn crate::domain::ports::MemoryPort> =
-            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()));
+        let new: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()),
+        );
         let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
 
         let s = Arc::clone(&slot);
@@ -2192,11 +2195,13 @@ mod tests {
     async fn store_fails_closed_on_swap_no_double_write() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
-        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> =
-            Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(dir_a.path()));
+        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::daily_log_memory::DailyLogMemory::new(dir_a.path()),
+        );
         let (old, reached, proceed) = parking(old_inner);
-        let new: Arc<dyn crate::domain::ports::MemoryPort> =
-            Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(dir_b.path()));
+        let new: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::daily_log_memory::DailyLogMemory::new(dir_b.path()),
+        );
         let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
 
         let s = Arc::clone(&slot);
@@ -2227,8 +2232,15 @@ mod tests {
             && std::fs::read_dir(&new_dir)
                 .unwrap()
                 .filter_map(|e| e.ok())
-                .any(|e| std::fs::read_to_string(e.path()).map(|c| c.contains("straddling append")).unwrap_or(false));
-        assert!(!new_has_entry, "Q1: store did NOT re-apply to the live adapter (no double-write)");
+                .any(|e| {
+                    std::fs::read_to_string(e.path())
+                        .map(|c| c.contains("straddling append"))
+                        .unwrap_or(false)
+                });
+        assert!(
+            !new_has_entry,
+            "Q1: store did NOT re-apply to the live adapter (no double-write)"
+        );
     }
 
     // Story 12.4 CARRY (checked in, #[ignore] — NOT deleted; party-mode 2026-06-05,
@@ -2243,11 +2255,13 @@ mod tests {
     async fn prevention_side_dead_arc_write_carried_to_12_4() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
-        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> =
-            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_a.path()));
+        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(dir_a.path()),
+        );
         let (old, reached, proceed) = parking(Arc::clone(&old_inner));
-        let new: Arc<dyn crate::domain::ports::MemoryPort> =
-            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()));
+        let new: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()),
+        );
         let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
 
         let s = Arc::clone(&slot);
@@ -2272,7 +2286,9 @@ mod tests {
         // nothing. Today it DID (detect-and-compensate), so this is red until 12.4.
         let old_file = dir_a.path().join(".rustain").join("MEMORY.md");
         let old_has = old_file.exists()
-            && std::fs::read_to_string(&old_file).map(|c| c.contains("fact A")).unwrap_or(false);
+            && std::fs::read_to_string(&old_file)
+                .map(|c| c.contains("fact A"))
+                .unwrap_or(false);
         assert!(
             !old_has,
             "12.4 prevention: the detached old adapter must receive NO write (12.0 only compensates)"

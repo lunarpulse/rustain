@@ -833,7 +833,10 @@ mod tests {
             max_tokens: active_tokens + a_gist_tokens,
         };
         let out = asm.assemble(&c, budget);
-        assert!(out.diagnostics.truncated, "the tight budget should force a trim");
+        assert!(
+            out.diagnostics.truncated,
+            "the tight budget should force a trim"
+        );
 
         let kept_ids: BTreeSet<u64> = out
             .messages

@@ -275,7 +275,10 @@ mod tests {
         let first = vec![(7u64, entry("the secret")), (9u64, entry("secret two"))];
         let evs = handle_forget_command(&mut state, &conv(), "secret", Some(Ok(first)));
         assert!(evs.is_empty(), "first matches open a card silently");
-        assert_eq!(state.pending_forget_card.as_ref().unwrap().candidates.len(), 2);
+        assert_eq!(
+            state.pending_forget_card.as_ref().unwrap().candidates.len(),
+            2
+        );
 
         // A second forget with DIFFERENT matches must be rejected, card untouched.
         let second = vec![(11u64, entry("another thing")), (13u64, entry("more"))];

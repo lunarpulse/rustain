@@ -984,6 +984,62 @@ pub fn build_for_port(
     }
 }
 
+/// Story 12.1a — compose ONLY the memory port for the headless daemon body.
+///
+/// Reuses [`build_memory`] (no duplicated adapter logic — AC9 of Story 12.0 /
+/// "harden the sink, not the call-sites"). 12.1a is a lifecycle skeleton with no
+/// message runtime (channels = Stories 12.2/12.3/12.4), so the daemon composes
+/// only the port whose graceful-shutdown / daily-reset flush seam
+/// (AC-12-1a-3/5) must route through 12.0's hardened `prepare_detach` sink — NOT
+/// the full `AgentCore` (a headless daemon needs no provider/terminal/sandbox
+/// layer in 12.1a; building them would pull network + TUI machinery into the
+/// skeleton for zero functional benefit). See Story 12.1a Completion Notes
+/// §"Headless composition scope" for this verified reconciliation vs. the
+/// literal Task-3 recipe.
+///
+    /// `domain_tx` is `None`: headless, with no event-bus consumers wired in 12.1a.
+    /// **Contract:** no code path triggered during `build_daemon_memory` may send
+    /// events through `domain_tx`. If a future memory adapter emits events during
+    /// construction, this helper must either wire a real sender or document the
+    /// silent-drop. Currently safe — `build_memory` does not emit events.
+pub fn build_daemon_memory(
+    workspace_path: &std::path::Path,
+    memory_adapter: &str,
+) -> Result<Arc<dyn MemoryPort>, AdapterCompositionError> {
+    use crate::adapters::sandbox::NoOpSandbox;
+    let ctx = ComposeContext {
+        workspace_path: workspace_path.to_path_buf(),
+        project_context: ProjectContext::empty(),
+        storage: Arc::new(crate::adapters::noop::NoOpStorage) as Arc<dyn StoragePort>,
+        skill_activator: Arc::new(SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
+        domain_tx: None,
+        tool_exposure: "static-full".into(),
+        assembler: "passthrough".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
+            crate::infrastructure::skill_cache::SkillCacheConfig::default(),
+        )),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
+        )),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
+        memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
+        )),
+        #[cfg(feature = "meta-search")]
+        search_config: crate::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
+    };
+    build_memory(memory_adapter, None, &ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

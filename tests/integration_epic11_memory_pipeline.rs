@@ -156,9 +156,14 @@ async fn golden_path_composite_dedups_across_tiers_before_assembly() {
         .filter(|e| e.content.contains(DUP))
         .count();
     assert_eq!(
-        occurrences, 1,
+        occurrences,
+        1,
         "same content in daily + long-term tiers must dedup to one before injection; \
          entries: {:?}",
-        bundle.entries.iter().map(|e| &e.content).collect::<Vec<_>>()
+        bundle
+            .entries
+            .iter()
+            .map(|e| &e.content)
+            .collect::<Vec<_>>()
     );
 }

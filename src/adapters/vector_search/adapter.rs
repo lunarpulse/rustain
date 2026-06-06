@@ -1530,9 +1530,10 @@ mod tests {
         );
         // The non-redacted neighbour is still indexed (the gate is surgical).
         assert!(
-            keys_on_disk(&index_path)
-                .await
-                .contains(&content_key(&super::super::index::tests_millis_to_local(2), NEIGHBOUR)),
+            keys_on_disk(&index_path).await.contains(&content_key(
+                &super::super::index::tests_millis_to_local(2),
+                NEIGHBOUR
+            )),
             "C4: the concurrent purge is surgical — the neighbour survives"
         );
     }
@@ -1550,7 +1551,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index_path = tmp.path().join("memory").join("index.bin");
         // A real inner that actually persists `store()`s.
-        let inner = Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()));
+        let inner = Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(
+            tmp.path(),
+        ));
         // Seed ONE entry so the index is non-empty (else `search` keyword-falls-
         // back to `inner`, which WOULD see the fresh store and mask the contract).
         inner

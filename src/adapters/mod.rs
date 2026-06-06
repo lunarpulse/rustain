@@ -6,6 +6,7 @@ pub mod builtin;
 pub mod cli;
 pub mod clipboard_adapter;
 pub mod command_registry;
+pub mod daemon;
 pub mod daily_log_memory;
 pub mod file_scanner;
 pub mod filesystem;

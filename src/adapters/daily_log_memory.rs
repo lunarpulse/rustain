@@ -656,8 +656,16 @@ mod tests {
             DailyLogMemory::local_at(day1, NaiveTime::from_hms_opt(23, 59, 30).unwrap());
         let after_midnight =
             DailyLogMemory::local_at(day2, NaiveTime::from_hms_opt(0, 0, 30).unwrap());
-        assert_eq!(before_midnight.date_naive(), day1, "pre-midnight is day one");
-        assert_eq!(after_midnight.date_naive(), day2, "post-midnight is day two");
+        assert_eq!(
+            before_midnight.date_naive(),
+            day1,
+            "pre-midnight is day one"
+        );
+        assert_eq!(
+            after_midnight.date_naive(),
+            day2,
+            "post-midnight is day two"
+        );
 
         mem.store(MemoryEntry {
             timestamp: before_midnight,
@@ -677,8 +685,14 @@ mod tests {
         let dir = tmp.path().join(".rustain").join("memory");
         let f1 = dir.join(format!("{}.md", day1.format("%Y-%m-%d")));
         let f2 = dir.join(format!("{}.md", day2.format("%Y-%m-%d")));
-        assert!(f1.exists(), "pre-midnight entry created day-one file {f1:?}");
-        assert!(f2.exists(), "post-midnight entry rolled into day-two file {f2:?}");
+        assert!(
+            f1.exists(),
+            "pre-midnight entry created day-one file {f1:?}"
+        );
+        assert!(
+            f2.exists(),
+            "post-midnight entry rolled into day-two file {f2:?}"
+        );
 
         let c1 = std::fs::read_to_string(&f1).unwrap();
         let c2 = std::fs::read_to_string(&f2).unwrap();
@@ -776,7 +790,9 @@ mod tests {
 
         // Exactly one H1 header (the corruption the fix prevents).
         assert_eq!(
-            content.matches(&format!("# {}", day.format("%Y-%m-%d"))).count(),
+            content
+                .matches(&format!("# {}", day.format("%Y-%m-%d")))
+                .count(),
             1,
             "exactly one H1 date header after {N} concurrent appends (no double header)"
         );
@@ -788,7 +804,10 @@ mod tests {
         got.sort();
         let mut want: Vec<String> = (0..N).map(|i| format!("concurrent entry {i:02}")).collect();
         want.sort();
-        assert_eq!(got, want, "every concurrent entry present exactly once, intact");
+        assert_eq!(
+            got, want,
+            "every concurrent entry present exactly once, intact"
+        );
     }
 
     // C1 (AC10) — deterministic single-writer proof via the interior seam. Writer
@@ -848,7 +867,9 @@ mod tests {
             .join(format!("{}.md", day.format("%Y-%m-%d")));
         let content = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
-            content.matches(&format!("# {}", day.format("%Y-%m-%d"))).count(),
+            content
+                .matches(&format!("# {}", day.format("%Y-%m-%d")))
+                .count(),
             1,
             "serialised writers emit exactly one H1 header"
         );

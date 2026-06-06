@@ -40,6 +40,7 @@ pub mod router;
 pub mod sandbox;
 pub mod search_hit;
 pub mod session;
+pub mod session_boundary;
 pub mod session_meta;
 mod skill;
 pub mod skill_catalog_delta;
@@ -81,8 +82,8 @@ pub use config::AppConfig;
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
 pub use config::{
-    AutoApprovePolicy, AutoPanelsConfig, LayoutConfig, MouseConfig, ProviderConfig, SearchConfig,
-    SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
+    AutoApprovePolicy, AutoPanelsConfig, DaemonConfig, LayoutConfig, MouseConfig, ProviderConfig,
+    SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
@@ -113,6 +114,7 @@ pub use plan::{
 pub use sandbox::SandboxPolicy;
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};
+pub use session_boundary::SessionBoundary;
 #[allow(unused_imports)]
 pub use session_meta::{
     ImportSource, SessionMeta, extract_title_from_first_message, now_unix, shorten_text,
