@@ -73,12 +73,38 @@ pub struct LongTermMemory {
     /// `{workspace}/.rustain/MEMORY.md` — resolved once at construction (no I/O).
     memory_file: PathBuf,
     /// In-memory snapshot, reloaded on mtime change (`ensure_fresh`).
+    ///
+    /// **Drain seam (Story 12.0 C3 / AC2, AC3, AC9).** `remember_fact` holds the
+    /// WRITE guard across its whole read-modify-render-`fs::write` window (Story
+    /// 16-0 AC2). `prepare_detach()` therefore drains an in-flight upsert simply
+    /// by acquiring (and dropping) this same write lock — the swap cannot complete
+    /// until the curated write is durable. This is the ONE hardened write sink the
+    /// profile swap funnels through (AC9): do NOT add a second per-call-site gate.
     loaded: RwLock<LoadedState>,
     /// Event bus for the once-per-session size warning. `None` (headless/eval)
     /// silently skips the notice.
     event_tx: Option<UnboundedSender<AppEvent>>,
     /// Once-per-session guard for the size warning (AC3). CAS to `true` on emit.
     warned: AtomicBool,
+    /// Test-only deterministic suspension seam (Story 12.0 AC10) — compiled out of
+    /// release builds.
+    #[cfg(test)]
+    seam: WriteSeam,
+}
+
+/// Test-only suspension seam pinning the C3 interior TOCTOU window between the
+/// DF-1 re-stat and the `tokio::fs::write` (Story 12.0 AC10). A test arms it; the
+/// first in-flight `remember_fact` to reach the seam disarms it, signals
+/// `reached`, and parks on `proceed` — all while holding the `loaded` write guard,
+/// so a concurrent `prepare_detach()` drain blocks behind it. Lets the C2/C3
+/// profile-swap lost-write / lost-update race be pinned deterministically without
+/// a `sleep`.
+#[cfg(test)]
+#[derive(Default)]
+struct WriteSeam {
+    armed: AtomicBool,
+    reached: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
 }
 
 impl LongTermMemory {
@@ -92,6 +118,8 @@ impl LongTermMemory {
             loaded: RwLock::new(LoadedState::default()),
             event_tx: None,
             warned: AtomicBool::new(false),
+            #[cfg(test)]
+            seam: WriteSeam::default(),
         }
     }
 
@@ -453,6 +481,20 @@ impl MemoryPort for LongTermMemory {
 
         let rendered = Self::render(&guard.sections);
 
+        // Test-only deterministic suspension seam (Story 12.0 AC10): pin the
+        // interior TOCTOU window AFTER the DF-1 re-stat and BEFORE the
+        // `tokio::fs::write`, while the `loaded` write guard is held. A profile
+        // swap's `prepare_detach()` drain blocks behind this parked writer.
+        #[cfg(test)]
+        if self
+            .seam
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.seam.reached.notify_one();
+            self.seam.proceed.notified().await;
+        }
+
         // Ensure `.rustain/` exists, then rewrite the whole file (curated).
         if let Some(parent) = self.memory_file.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -531,6 +573,22 @@ impl MemoryPort for LongTermMemory {
                 context: f.detail.clone(),
             })
             .collect())
+    }
+
+    /// Drain an in-flight curated upsert before a profile swap detaches this
+    /// adapter (Story 12.0 C3 / AC3, AC9). `remember_fact` holds the `loaded`
+    /// write guard across its whole read-modify-render-`fs::write` window, so
+    /// acquiring (and dropping) that same guard here cannot return until the
+    /// in-flight upsert has been written and the snapshot is consistent. The
+    /// newly-composed adapter (sharing the same `MEMORY.md`) then `ensure_fresh`-
+    /// reloads AFTER the drain, sees the just-written fact, and upserts on top of
+    /// it — closing the lost-update window (non-monotonic MEMORY.md across a swap).
+    async fn prepare_detach(
+        &self,
+    ) -> Result<crate::domain::models::TransitionState, crate::domain::errors::TransitionError>
+    {
+        let _drained = self.loaded.write().await;
+        Ok(crate::domain::models::TransitionState::empty("memory"))
     }
 }
 
@@ -999,5 +1057,71 @@ mod tests {
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("external edit"), "external edit preserved");
         assert!(content.contains("new fact"), "new fact also written");
+    }
+
+    // ── Story 12.0 C2/C3 — profile-swap write safety (AC2, AC3, AC9, AC10) ──
+
+    // C3 (AC3) — a profile swap straddling two `remember_fact` upserts to the
+    // SAME category must NOT lose either fact, and MEMORY.md must stay monotonic
+    // (curated count never goes backwards). Thread A's in-flight upsert parks at
+    // the interior seam holding the `loaded` write guard; the swap's
+    // `prepare_detach()` drain blocks behind it, so a freshly-composed adapter B
+    // (same MEMORY.md) only writes AFTER A is durable and reloads A's fact first
+    // → both survive. RED on the unfixed no-op `prepare_detach`: B composes and
+    // writes its stale snapshot, then A's resumed write clobbers it (lost-update,
+    // single fact remains). Deadlock-free under the drain fix; the unfixed
+    // lost-update was confirmed by reverting `prepare_detach` (see story Debug
+    // Log). No `sleep`.
+    #[tokio::test]
+    async fn prepare_detach_prevents_lost_update_across_swap() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mem_a = Arc::new(LongTermMemory::new(tmp.path()));
+        mem_a.seam.armed.store(true, Ordering::SeqCst);
+
+        // Thread A — in-flight upsert, parks mid-write holding the write guard.
+        let a = Arc::clone(&mem_a);
+        let a_handle = tokio::spawn(async move {
+            a.remember_fact(fact("Shared", "fact from A", None))
+                .await
+                .unwrap();
+        });
+        mem_a.seam.reached.notified().await;
+
+        // The warm swap: drain A, THEN compose adapter B over the SAME file and
+        // upsert a second fact to the same category.
+        let root = tmp.path().to_path_buf();
+        let mem_a2 = Arc::clone(&mem_a);
+        let swap = tokio::spawn(async move {
+            mem_a2.prepare_detach().await.unwrap();
+            let mem_b = LongTermMemory::new(&root);
+            mem_b
+                .remember_fact(fact("Shared", "fact from B", None))
+                .await
+                .unwrap();
+        });
+
+        // Release A so its parked write completes and the drain can finish.
+        mem_a.seam.proceed.notify_one();
+        swap.await.unwrap();
+        a_handle.await.unwrap();
+
+        let content =
+            std::fs::read_to_string(tmp.path().join(".rustain").join("MEMORY.md")).unwrap();
+        assert!(
+            content.contains("fact from A"),
+            "A's fact survives the swap (no lost write)"
+        );
+        assert!(
+            content.contains("fact from B"),
+            "B's fact present (no lost update)"
+        );
+        assert_eq!(
+            content.matches("## Shared").count(),
+            1,
+            "single canonical category section after the swap"
+        );
     }
 }

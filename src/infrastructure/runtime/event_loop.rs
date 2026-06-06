@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::file_scanner;
+use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
 use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
@@ -6253,10 +6254,10 @@ pub async fn run(
                                     message: "Consolidation declined — nothing promoted.".to_string(),
                                 });
                             } else {
-                                // Promote each accepted fact through the EXISTING remember_fact
-                                // path (composed port → LongTermMemory upsert+dedup). Daily-log
-                                // entries are NEVER deleted (AC4 — source of truth preserved).
-                                let memory = app_state.agent_core.memory.load_full();
+                                // Promote each accepted fact through the live-slot observe-
+                                // detach seam (Story 12.0 patch) so a profile swap mid-
+                                // consolidation cannot lose promoted facts onto a detached
+                                // adapter. Daily-log entries are NEVER deleted (AC4).
                                 let mut promoted = 0usize;
                                 let mut skipped = 0usize;
                                 for fact in accepted {
@@ -6272,7 +6273,12 @@ pub async fn run(
                                         skipped += 1;
                                         continue;
                                     }
-                                    match memory.remember_fact(fact).await {
+                                    match remember_fact_through_live_slot(
+                                        &app_state.agent_core.memory,
+                                        fact,
+                                    )
+                                    .await
+                                    {
                                         Ok(()) => promoted += 1,
                                         Err(e) => {
                                             tracing::warn!("consolidation: remember_fact failed: {e}");

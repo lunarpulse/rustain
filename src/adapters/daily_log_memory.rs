@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use chrono::{Local, NaiveDate, NaiveTime, TimeZone};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 
 use crate::domain::errors::MemoryError;
 use crate::domain::models::MemoryEntry;
@@ -40,6 +40,36 @@ pub struct DailyLogMemory {
     loaded: RwLock<Vec<MemoryEntry>>,
     /// Ensures the day-file load runs exactly once (lazy-init guard).
     init: OnceCell<()>,
+    /// Single-writer serialization for the append critical section (Story 12.0
+    /// C1 / AC1). THE single hardened write sink (AC9): every `store()` append
+    /// — and the `prepare_detach()` drain that funnels through it — acquires this
+    /// guard across the whole open→header-decision→`write_all`→`flush` window, so
+    /// two concurrent appends to the SAME day-file cannot both observe `len()==0`
+    /// (double H1 header) nor interleave their multi-line blocks. `tokio::sync`
+    /// per CLAUDE.md Async Lock Policy → the `MAX_KNOWN_STD_SYNC_LOCKS=4` ratchet
+    /// is untouched. Contention is low (NFR55 `<5ms`); a profile swap that wants
+    /// to detach this adapter drains by acquiring the same guard.
+    write_lock: Mutex<()>,
+    /// Test-only deterministic suspension seam (Story 12.0 AC10). Compiled out of
+    /// release builds — zero production behaviour change.
+    #[cfg(test)]
+    seam: WriteSeam,
+}
+
+/// Test-only suspension seam pinning the C1 interleave window between the
+/// header-decision and the `write_all` (Story 12.0 AC10). A test arms it, then
+/// the FIRST writer to reach the seam disarms it, signals `reached`, and parks
+/// on `proceed` — letting the test deterministically interleave a second writer
+/// (under the unfixed code) without a `sleep`. Under the `write_lock` fix the
+/// parked writer holds the lock, so a second writer simply blocks on the lock
+/// and the seam is moot. `notify_one` permits are stored when no waiter is yet
+/// registered, so arrival/release ordering is forgiving.
+#[cfg(test)]
+#[derive(Default)]
+struct WriteSeam {
+    armed: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
 }
 
 impl DailyLogMemory {
@@ -51,6 +81,9 @@ impl DailyLogMemory {
             memory_dir: workspace_path.join(".rustain").join("memory"),
             loaded: RwLock::new(Vec::new()),
             init: OnceCell::new(),
+            write_lock: Mutex::new(()),
+            #[cfg(test)]
+            seam: WriteSeam::default(),
         }
     }
 
@@ -241,32 +274,59 @@ impl MemoryPort for DailyLogMemory {
         let date = entry.timestamp.date_naive();
         let path = self.day_file(date);
 
-        // Append open — never truncates, never re-reads existing content (AC2).
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|e| {
-                MemoryError::IoError(format!("failed to open {}: {}", path.display(), e))
+        // ── Single-writer critical section (Story 12.0 C1 / AC1, AC9) ──
+        // Serialise the entire open→header-decision→write→flush window so two
+        // concurrent `store()` calls to the same day-file cannot both decide
+        // `include_header == true` (double H1) nor interleave their blocks. This
+        // is the ONE hardened write sink the profile-swap drain (`prepare_detach`,
+        // AC9) also funnels through — do NOT add a second per-call-site guard.
+        // The guard is released on block exit, before the `loaded` snapshot push.
+        {
+            let _write_guard = self.write_lock.lock().await;
+
+            // Append open — never truncates, never re-reads existing content (AC2).
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await
+                .map_err(|e| {
+                    MemoryError::IoError(format!("failed to open {}: {}", path.display(), e))
+                })?;
+
+            // Write the H1 header only when the file is new/empty (AC2: appears
+            // once). Under the `write_lock` no other writer can be between this
+            // decision and the `write_all`, so two new-file stores can no longer
+            // both render a header.
+            let include_header = file.metadata().await.map_or(true, |m| m.len() == 0);
+
+            // Test-only deterministic suspension seam (AC10): pin the interleave
+            // window between the header-decision and the `write_all`. The first
+            // writer to arrive parks here; under the fix it does so while holding
+            // `write_lock`, so a second writer blocks on the lock (seam moot).
+            #[cfg(test)]
+            if self
+                .seam
+                .armed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.seam.reached.notify_one();
+                self.seam.proceed.notified().await;
+            }
+
+            let block = Self::render_entry(&entry, include_header);
+
+            file.write_all(block.as_bytes()).await.map_err(|e| {
+                MemoryError::IoError(format!("failed to append {}: {}", path.display(), e))
             })?;
-
-        // Write the H1 header only when the file is new/empty (AC2: appears once).
-        // Check via the open handle (not a separate stat) to avoid TOCTOU with
-        // concurrent stores on a new/empty file.
-        let include_header = file.metadata().await.map_or(true, |m| m.len() == 0);
-
-        let block = Self::render_entry(&entry, include_header);
-
-        file.write_all(block.as_bytes()).await.map_err(|e| {
-            MemoryError::IoError(format!("failed to append {}: {}", path.display(), e))
-        })?;
-        // `tokio::fs::File` buffers writes and the background write is dispatched
-        // to the blocking pool — flush so the bytes are durable and visible to
-        // the next `metadata()` (header decision) and to readers, before drop.
-        file.flush().await.map_err(|e| {
-            MemoryError::IoError(format!("failed to flush {}: {}", path.display(), e))
-        })?;
+            // `tokio::fs::File` buffers writes and the background write is
+            // dispatched to the blocking pool — flush so the bytes are durable and
+            // visible to the next `metadata()` (header decision) and to readers,
+            // before drop.
+            file.flush().await.map_err(|e| {
+                MemoryError::IoError(format!("failed to flush {}: {}", path.display(), e))
+            })?;
+        }
 
         // Mirror the append into the loaded snapshot (tight guard, no `.await`).
         {
@@ -301,6 +361,23 @@ impl MemoryPort for DailyLogMemory {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    /// Drain in-flight appends before a profile swap detaches this adapter
+    /// (Story 12.0 C2 / AC2, AC9). Acquiring (and immediately dropping) the
+    /// single-writer `write_lock` cannot return until any `store()` currently
+    /// inside its critical section has flushed and released — so the swap only
+    /// proceeds once this adapter is quiescent and the in-flight write is durable
+    /// on disk. The newly-composed adapter (sharing the same backing day-files)
+    /// then lazily loads disk AFTER the drain, so the straddling write is never
+    /// lost. Reuses the existing `tokio::sync` lock → no new shared state, ratchet
+    /// neutral.
+    async fn prepare_detach(
+        &self,
+    ) -> Result<crate::domain::models::TransitionState, crate::domain::errors::TransitionError>
+    {
+        let _drained = self.write_lock.lock().await;
+        Ok(crate::domain::models::TransitionState::empty("memory"))
     }
 }
 
@@ -636,5 +713,209 @@ mod tests {
         let recent = mem.recent(10).await.unwrap();
         assert_eq!(recent.len(), 2, "both entries retained across the rollover");
         assert_eq!(recent[0].summary, "first note of day two", "newest first");
+    }
+
+    // ── Story 12.0 C1 — concurrent daily-log appends (AC1, AC10) ──
+
+    // C1 (AC1) — N=32 concurrent `store()` calls to the SAME day-file, released
+    // simultaneously via a `Barrier`, MUST yield exactly N well-formed entries
+    // and exactly ONE H1 header. This is the fix-agnostic invariant oracle: it
+    // asserts the property, not the mechanism. RED on the unfixed code (no
+    // `write_lock`): many of the 32 racers observe `len()==0` and each renders
+    // its own H1, so the file ends up with multiple `# <date>` headers. GREEN
+    // under the single-writer fix (writes serialise → header decided once).
+    // Deterministic-enough by construction: with 32 truly-concurrent racers a
+    // clean single-header file is not a 1-in-1000 fluke — the unfixed double
+    // header is overwhelming. (The seam test below pins the 2-writer window
+    // exactly.) No `sleep`.
+    #[tokio::test]
+    async fn concurrent_appends_single_header_n32() {
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
+        const N: usize = 32;
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = Arc::new(DailyLogMemory::new(tmp.path()));
+
+        // A DST-stable fixed day so every write targets ONE day-file and the test
+        // can never straddle a real midnight boundary mid-run.
+        let day = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        let barrier = Arc::new(Barrier::new(N));
+
+        let mut handles = Vec::with_capacity(N);
+        for i in 0..N {
+            let mem = Arc::clone(&mem);
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                // Distinct second-precision timestamps → distinct rendered entries.
+                let ts = DailyLogMemory::local_at(
+                    day,
+                    NaiveTime::from_hms_opt(12, 0, (i % 60) as u32).unwrap(),
+                );
+                // Release all writers into the critical section at once.
+                barrier.wait().await;
+                mem.store(MemoryEntry {
+                    timestamp: ts,
+                    summary: format!("concurrent entry {i:02}"),
+                    context: None,
+                })
+                .await
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let file = tmp
+            .path()
+            .join(".rustain")
+            .join("memory")
+            .join(format!("{}.md", day.format("%Y-%m-%d")));
+        let content = std::fs::read_to_string(&file).unwrap();
+
+        // Exactly one H1 header (the corruption the fix prevents).
+        assert_eq!(
+            content.matches(&format!("# {}", day.format("%Y-%m-%d"))).count(),
+            1,
+            "exactly one H1 date header after {N} concurrent appends (no double header)"
+        );
+        // Exactly N well-formed entries, zero phantom/garbled rows: re-parse and
+        // count, then confirm every summary survived intact.
+        let parsed = DailyLogMemory::parse_day_file(&content, day);
+        assert_eq!(parsed.len(), N, "exactly {N} well-formed entries re-parse");
+        let mut got: Vec<String> = parsed.iter().map(|e| e.summary.clone()).collect();
+        got.sort();
+        let mut want: Vec<String> = (0..N).map(|i| format!("concurrent entry {i:02}")).collect();
+        want.sort();
+        assert_eq!(got, want, "every concurrent entry present exactly once, intact");
+    }
+
+    // C1 (AC10) — deterministic single-writer proof via the interior seam. Writer
+    // A parks between the header-decision and `write_all` while holding the
+    // `write_lock`; writer B therefore BLOCKS on the lock and cannot enter. When
+    // A is released it finishes first; B then observes a non-empty file and writes
+    // NO second header. Pins the exact interleave window the unfixed code got
+    // wrong, with no `sleep` and no flakiness. (Reverting the `write_lock` turns
+    // this window into the double-header race — that is how RED-first was verified
+    // during dev; see story Debug Log.)
+    #[tokio::test]
+    async fn seam_serialises_two_writers() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mem = Arc::new(DailyLogMemory::new(tmp.path()));
+        let day = NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        mem.seam.armed.store(true, Ordering::SeqCst);
+
+        // Writer A — will arm-disarm the seam and park holding `write_lock`.
+        let a = Arc::clone(&mem);
+        let a_handle = tokio::spawn(async move {
+            a.store(MemoryEntry {
+                timestamp: DailyLogMemory::local_at(day, NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
+                summary: "writer A".into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        });
+
+        // Wait until A is parked at the interior seam (holding the lock).
+        mem.seam.reached.notified().await;
+
+        // Writer B — blocks on `write_lock` until A releases.
+        let b = Arc::clone(&mem);
+        let b_handle = tokio::spawn(async move {
+            b.store(MemoryEntry {
+                timestamp: DailyLogMemory::local_at(day, NaiveTime::from_hms_opt(9, 0, 1).unwrap()),
+                summary: "writer B".into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        });
+
+        // Release A; the lock guarantees A completes before B can enter.
+        mem.seam.proceed.notify_one();
+        a_handle.await.unwrap();
+        b_handle.await.unwrap();
+
+        let file = tmp
+            .path()
+            .join(".rustain")
+            .join("memory")
+            .join(format!("{}.md", day.format("%Y-%m-%d")));
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            content.matches(&format!("# {}", day.format("%Y-%m-%d"))).count(),
+            1,
+            "serialised writers emit exactly one H1 header"
+        );
+        let parsed = DailyLogMemory::parse_day_file(&content, day);
+        assert_eq!(parsed.len(), 2, "both serialised entries present");
+        let summaries: Vec<&str> = parsed.iter().map(|e| e.summary.as_str()).collect();
+        assert!(summaries.contains(&"writer A"));
+        assert!(summaries.contains(&"writer B"));
+    }
+
+    // C2 (AC2) — `prepare_detach()` drains an in-flight append before the swap.
+    // Writer A is parked mid-write (holding `write_lock`); a concurrent
+    // `prepare_detach()` (the warm-swap drain) MUST block until A flushes, then a
+    // freshly-composed adapter over the SAME day-files sees A's entry. Proves the
+    // drain seam closes the lost-write window. RED on the unfixed default
+    // `prepare_detach` (no-op → returns before A flushes → a new adapter that
+    // lazy-loaded in the gap would miss the entry).
+    #[tokio::test]
+    async fn prepare_detach_drains_in_flight_append() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mem_a = Arc::new(DailyLogMemory::new(tmp.path()));
+        // Use today's timestamp: the freshly-composed adapter's `recent()` loads
+        // the current + previous day, so the drained entry must land in today's
+        // file to be visible across the swap.
+        mem_a.seam.armed.store(true, Ordering::SeqCst);
+
+        let a = Arc::clone(&mem_a);
+        let a_handle = tokio::spawn(async move {
+            a.store(MemoryEntry {
+                timestamp: Local::now(),
+                summary: "straddling write".into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        });
+
+        // A is parked mid-write (header decided, not yet written), holding lock.
+        mem_a.seam.reached.notified().await;
+
+        // The warm-swap drain + new-adapter compose run as ONE causal chain: the
+        // new adapter loads disk ONLY after `prepare_detach()` returns. Under the
+        // drain fix, `prepare_detach()` cannot return until A has flushed and
+        // released `write_lock`, so the freshly-composed adapter (sharing the same
+        // day-files) loads disk AFTER A's flush and sees the entry. (On the
+        // unfixed no-op default, `prepare_detach` returns before A flushes and a
+        // new adapter that lazy-loaded in that gap would miss it — the lost write.)
+        let root = tmp.path().to_path_buf();
+        let mem_a2 = Arc::clone(&mem_a);
+        let drained_then_loaded = tokio::spawn(async move {
+            mem_a2.prepare_detach().await.unwrap();
+            let mem_b = DailyLogMemory::new(&root);
+            mem_b.initialize().await.unwrap();
+            mem_b.recent(10).await.unwrap()
+        });
+
+        // Release A so the parked write completes and the drain can finish.
+        mem_a.seam.proceed.notify_one();
+        let recent = drained_then_loaded.await.unwrap();
+        a_handle.await.unwrap();
+
+        assert!(
+            recent.iter().any(|e| e.summary == "straddling write"),
+            "the in-flight write survives the swap (visible on the live adapter)"
+        );
     }
 }

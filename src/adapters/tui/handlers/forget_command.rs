@@ -258,4 +258,49 @@ mod tests {
             }
         }
     }
+
+    // Story 12.0 AC7 (regression guard) — single-pending-forget-card mutual
+    // exclusion. Guards the 11-4a fix: a second `/memory forget` while a card is
+    // already open MUST be rejected with the "already open" notice and MUST NOT
+    // replace the pending card (the multiple-pending state was the 11-4a deadlock
+    // trap). `pending_forget_card` is single-threaded `TuiState` (event-loop
+    // owned), so the invariant is structural — the `is_some()` gate — not an async
+    // race; this test pins that gate so it cannot silently regress under the new
+    // daemon concurrency (12.4 routes forget through the same single-card seam).
+    #[test]
+    fn second_forget_is_rejected_while_card_pending() {
+        let mut state = TuiState::new(80, 24);
+
+        // Open the first card.
+        let first = vec![(7u64, entry("the secret")), (9u64, entry("secret two"))];
+        let evs = handle_forget_command(&mut state, &conv(), "secret", Some(Ok(first)));
+        assert!(evs.is_empty(), "first matches open a card silently");
+        assert_eq!(state.pending_forget_card.as_ref().unwrap().candidates.len(), 2);
+
+        // A second forget with DIFFERENT matches must be rejected, card untouched.
+        let second = vec![(11u64, entry("another thing")), (13u64, entry("more"))];
+        let evs = handle_forget_command(&mut state, &conv(), "another", Some(Ok(second)));
+        assert_eq!(evs.len(), 1, "second forget emits exactly one notice");
+        match &evs[0] {
+            AppEvent::SystemNotice { message, level, .. } => {
+                assert_eq!(*level, NoticeLevel::Info);
+                assert!(
+                    message.contains("already open"),
+                    "rejection notice surfaced: {message}"
+                );
+            }
+            _ => panic!("expected SystemNotice"),
+        }
+        // The ORIGINAL card is intact (not replaced by the second query's matches).
+        let card = state.pending_forget_card.as_ref().unwrap();
+        assert_eq!(card.candidates.len(), 2, "original card unchanged");
+        assert!(
+            card.candidates.iter().any(|(k, _, _)| *k == 7),
+            "still the FIRST card's candidates (key 7), not the second's"
+        );
+        assert!(
+            !card.candidates.iter().any(|(k, _, _)| *k == 11),
+            "the second forget's candidates did NOT leak in"
+        );
+    }
 }

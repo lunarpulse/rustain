@@ -1119,14 +1119,15 @@ impl ToolSetAdapter {
             });
         };
 
-        // load_full() so a profile swap (which re-publishes into the slot) is respected.
-        let memory = slot.load_full();
+        // Observe-detach + fail-closed (Story 12.0 C2/Q1): route the append through
+        // the shared live-slot seam so a warm-swap that lands mid-write cannot
+        // silently lose the entry into a detached profile (nor double-append it).
         let entry = crate::domain::models::MemoryEntry {
             timestamp: chrono::Local::now(),
             summary: summary.to_string(),
             context,
         };
-        match memory.store(entry).await {
+        match store_through_live_slot(slot, entry).await {
             Ok(()) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Remembered: {summary}"),
@@ -1217,14 +1218,16 @@ impl ToolSetAdapter {
             });
         };
 
-        // load_full() so a profile swap (re-published into the slot) is respected.
-        let memory = slot.load_full();
+        // Observe-detach + re-resolve (Story 12.0 C3/Q1): route the upsert through
+        // the shared live-slot seam so a warm-swap that lands mid-write re-applies
+        // the (idempotent) fact to the live adapter rather than losing it to a
+        // detached profile.
         let mem_fact = crate::domain::models::MemoryFact {
             category,
             fact: fact_text.clone(),
             detail,
         };
-        match memory.remember_fact(mem_fact).await {
+        match remember_fact_through_live_slot(slot, mem_fact).await {
             Ok(()) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Recorded durable fact: {fact_text}"),
@@ -1434,6 +1437,86 @@ impl ToolSetAdapter {
             tool_use_id: tool_use_id.to_string(),
         })
     }
+}
+
+// ── Story 12.0 C2/C3 (Q1) — held-writer observe-detach + re-resolve ──
+//
+// The drain in `prepare_detach()` closes the in-flight-AT-swap window (a write
+// already inside the adapter's lock). It does NOT close the held-old-Arc window:
+// a builtin that resolved the live adapter via `slot.load_full()` and is sitting
+// in an `await` before entering the write lock will, after a warm-swap publishes
+// a NEW adapter, land its write in the now-DETACHED old profile — invisible to
+// the live adapter (lost write / lost update). The RESOLVED fix shape (Story
+// Task 2) mandates the held writer "observe detach and re-resolve or fail-closed."
+//
+// We detect the swap by ArcSwap POINTER IDENTITY as the generation token — every
+// `build_memory` publish is a fresh `Arc`, so a post-write `Arc::ptr_eq` mismatch
+// means a swap landed under us (no separate epoch counter needed; party-mode
+// consensus 2026-06-05, Murat/Winston/Amelia). This is ONE shared seam every
+// builtin writer resolves through — 12.4 cron and future producers inherit it,
+// so it is not per-call-site discipline. Per-operation policy:
+//   • `remember_fact` (idempotent upsert) → re-apply to the live adapter so the
+//     user's fact is never lost.
+//   • `store` (non-idempotent append) → FAIL-CLOSED-AND-SURFACE: re-applying
+//     could double-append and we cannot tell whether the old write landed.
+//
+// Residual (carried to Story 12.4): this is detect-and-compensate, not prevent —
+// the old write already executed on the detached adapter. True prevention holds
+// the slot read-side across resolve+write (the 12.4 concurrency model); a checked-
+// in `#[ignore]` test (`prevention_side_dead_arc_write_carried_to_12_4`) pins it.
+
+/// Observe-detach + re-resolve for the curated upsert (idempotent → re-apply).
+pub(crate) async fn remember_fact_through_live_slot(
+    slot: &arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>,
+    fact: crate::domain::models::MemoryFact,
+) -> Result<(), crate::domain::errors::MemoryError> {
+    let mut adapter = slot.load_full();
+    let first_res = adapter.remember_fact(fact.clone()).await;
+
+    // If the first attempt already failed, preserve that error — do NOT mask it
+    // with a blind retry on the live adapter (Story 12.0 review patch).
+    if first_res.is_err() {
+        return first_res;
+    }
+
+    // Loop to catch rapid successive swaps (max 2 iterations — unbounded retry
+    // is impossible because each swap produces a fresh Arc). After the first
+    // re-apply we re-check; if the slot changed AGAIN we apply one more time.
+    let mut res = first_res;
+    for _ in 0..2 {
+        let live = slot.load_full();
+        if Arc::ptr_eq(&adapter, &live) {
+            break;
+        }
+        // A warm-swap published a new adapter under us — re-apply to the live one.
+        // The upsert is idempotent, so a fact that DID land on the old adapter is
+        // simply re-asserted here; one that was lost is recovered. Never dropped.
+        adapter = live;
+        res = adapter.remember_fact(fact.clone()).await;
+    }
+
+    res
+}
+
+/// Observe-detach + fail-closed for the non-idempotent daily-log append.
+pub(crate) async fn store_through_live_slot(
+    slot: &arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>,
+    entry: crate::domain::models::MemoryEntry,
+) -> Result<(), crate::domain::errors::MemoryError> {
+    let captured = slot.load_full();
+    let res = captured.store(entry).await;
+    let live = slot.load_full();
+    if !Arc::ptr_eq(&captured, &live) {
+        // A warm-swap landed mid-write. `store` is a non-idempotent append; re-
+        // applying risks a double entry and we cannot distinguish "old write lost"
+        // from "old write landed in the old profile." Fail closed and surface so
+        // the user can retry against the live adapter — never a silent loss, never
+        // a double-append.
+        return Err(crate::domain::errors::MemoryError::Other(
+            "memory profile changed mid-write; entry not persisted — please retry".into(),
+        ));
+    }
+    res
 }
 
 #[cfg(test)]
@@ -1990,5 +2073,209 @@ mod tests {
                 line
             );
         }
+    }
+
+    // ── Story 12.0 C2/C3 (Q1) — held-writer observe-detach + re-resolve ──
+    //
+    // A test-only `MemoryPort` wrapper that parks the first write at a `Notify`
+    // (idiom: tests/context_assembly_nfr58.rs `BarrierFlushMemory`), delegating to
+    // an inner adapter. Lets a test pin the held-old-Arc window deterministically:
+    // the writer captures this (old) adapter via `slot.load_full()` and parks
+    // mid-write while a warm-swap publishes a NEW adapter into the slot. No sleep.
+    struct ParkingMemory {
+        inner: Arc<dyn crate::domain::ports::MemoryPort>,
+        reached: Arc<tokio::sync::Notify>,
+        proceed: Arc<tokio::sync::Notify>,
+        armed: std::sync::atomic::AtomicBool,
+    }
+
+    impl ParkingMemory {
+        async fn maybe_park(&self) {
+            if self
+                .armed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.reached.notify_one();
+                self.proceed.notified().await;
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::domain::ports::MemoryPort for ParkingMemory {
+        async fn store(
+            &self,
+            entry: crate::domain::models::MemoryEntry,
+        ) -> Result<(), crate::domain::errors::MemoryError> {
+            self.maybe_park().await;
+            self.inner.store(entry).await
+        }
+        async fn remember_fact(
+            &self,
+            fact: crate::domain::models::MemoryFact,
+        ) -> Result<(), crate::domain::errors::MemoryError> {
+            self.maybe_park().await;
+            self.inner.remember_fact(fact).await
+        }
+        async fn recent(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<crate::domain::models::MemoryEntry>, crate::domain::errors::MemoryError>
+        {
+            self.inner.recent(limit).await
+        }
+    }
+
+    fn parking(
+        inner: Arc<dyn crate::domain::ports::MemoryPort>,
+    ) -> (Arc<ParkingMemory>, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let proceed = Arc::new(tokio::sync::Notify::new());
+        let pm = Arc::new(ParkingMemory {
+            inner,
+            reached: reached.clone(),
+            proceed: proceed.clone(),
+            armed: std::sync::atomic::AtomicBool::new(true),
+        });
+        (pm, reached, proceed)
+    }
+
+    // C3 (Q1) — a profile swap landing during an in-flight `remember_fact` re-
+    // resolves the idempotent upsert to the LIVE adapter: the fact is never lost.
+    // RED on the unfixed builtin (`memory.remember_fact` on the captured stale
+    // Arc): the fact lands ONLY in the old profile, invisible to the live adapter.
+    #[tokio::test]
+    async fn remember_fact_re_resolves_to_live_adapter_after_swap() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_a.path()));
+        let (old, reached, proceed) = parking(old_inner);
+        let new: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()));
+        let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
+
+        let s = Arc::clone(&slot);
+        let writer = tokio::spawn(async move {
+            remember_fact_through_live_slot(
+                &s,
+                crate::domain::models::MemoryFact {
+                    category: "Pref".into(),
+                    fact: "fact A".into(),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        reached.notified().await; // parked mid-write holding the OLD Arc
+        slot.store(Arc::new(new)); // warm-swap publishes the new adapter
+        proceed.notify_one(); // release the parked write
+        writer.await.unwrap();
+
+        // Re-resolved: the fact is durable in the LIVE (new) adapter's MEMORY.md.
+        let new_content =
+            std::fs::read_to_string(dir_b.path().join(".rustain").join("MEMORY.md")).unwrap();
+        assert!(
+            new_content.contains("fact A"),
+            "Q1: remember_fact re-resolves to the live adapter — fact never lost"
+        );
+    }
+
+    // C2 (Q1) — a profile swap during an in-flight `store` (non-idempotent append)
+    // FAILS CLOSED and surfaces, rather than silently losing the entry or double-
+    // appending. RED on the unfixed builtin: `store` returns Ok against the
+    // detached old adapter, reporting success for a write the live adapter cannot
+    // see.
+    #[tokio::test]
+    async fn store_fails_closed_on_swap_no_double_write() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(dir_a.path()));
+        let (old, reached, proceed) = parking(old_inner);
+        let new: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(dir_b.path()));
+        let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
+
+        let s = Arc::clone(&slot);
+        let writer = tokio::spawn(async move {
+            store_through_live_slot(
+                &s,
+                crate::domain::models::MemoryEntry {
+                    timestamp: chrono::Local::now(),
+                    summary: "straddling append".into(),
+                    context: None,
+                },
+            )
+            .await
+        });
+
+        reached.notified().await;
+        slot.store(Arc::new(new));
+        proceed.notify_one();
+        let result = writer.await.unwrap();
+
+        assert!(
+            result.is_err(),
+            "Q1: store fails closed on a mid-write swap (no silent loss, no double-append)"
+        );
+        // The live (new) adapter has NO entry — we did NOT re-apply (no double-write).
+        let new_dir = dir_b.path().join(".rustain").join("memory");
+        let new_has_entry = new_dir.exists()
+            && std::fs::read_dir(&new_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| std::fs::read_to_string(e.path()).map(|c| c.contains("straddling append")).unwrap_or(false));
+        assert!(!new_has_entry, "Q1: store did NOT re-apply to the live adapter (no double-write)");
+    }
+
+    // Story 12.4 CARRY (checked in, #[ignore] — NOT deleted; party-mode 2026-06-05,
+    // Amelia/Murat). 12.0 is detect-and-compensate: the held-Arc write DID execute
+    // on the detached adapter before re-resolution. True PREVENTION (the old
+    // adapter receives nothing) needs the writer to hold the slot read-side across
+    // resolve+write — the 12.4 concurrency model. This test asserts the prevention
+    // invariant and currently FAILS (the old adapter does receive the write), so it
+    // pins the residual until 12.4 closes it.
+    #[tokio::test]
+    #[ignore = "Story 12.4 carry: prevention-side (hold slot across resolve+write); 12.0 is detect-and-compensate"]
+    async fn prevention_side_dead_arc_write_carried_to_12_4() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let old_inner: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_a.path()));
+        let (old, reached, proceed) = parking(Arc::clone(&old_inner));
+        let new: Arc<dyn crate::domain::ports::MemoryPort> =
+            Arc::new(crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()));
+        let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
+
+        let s = Arc::clone(&slot);
+        let writer = tokio::spawn(async move {
+            remember_fact_through_live_slot(
+                &s,
+                crate::domain::models::MemoryFact {
+                    category: "Pref".into(),
+                    fact: "fact A".into(),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        });
+        reached.notified().await;
+        slot.store(Arc::new(new));
+        proceed.notify_one();
+        writer.await.unwrap();
+
+        // PREVENTION invariant (fails in 12.0): the detached OLD adapter received
+        // nothing. Today it DID (detect-and-compensate), so this is red until 12.4.
+        let old_file = dir_a.path().join(".rustain").join("MEMORY.md");
+        let old_has = old_file.exists()
+            && std::fs::read_to_string(&old_file).map(|c| c.contains("fact A")).unwrap_or(false);
+        assert!(
+            !old_has,
+            "12.4 prevention: the detached old adapter must receive NO write (12.0 only compensates)"
+        );
     }
 }

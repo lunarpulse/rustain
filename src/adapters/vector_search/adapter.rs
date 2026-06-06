@@ -36,7 +36,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::{Mutex, OnceCell, RwLock};
 
 use crate::domain::errors::{MemoryError, TransitionError};
 use crate::domain::events::AppEvent;
@@ -128,11 +128,34 @@ pub struct VectorSearchMemory {
     redactions_path: PathBuf,
     init: OnceCell<()>,
     refresh_limit: usize,
+    /// Drain gate for in-flight refresh/forget operations (Story 12.0 review
+    /// patch). `prepare_detach()` acquires this lock so the swap cannot complete
+    /// until any local `refresh()` or `forget()` currently in progress has
+    /// finished writing `index.bin` / `redactions.bin`. Reuses `tokio::sync`
+    // (ratchet-neutral) per CLAUDE.md Async Lock Policy.
+    drain_lock: Mutex<()>,
     /// Surfaces the guided-reindex notices (AC1). `None` (headless/eval) stays
     /// silent. Wired via [`Self::set_event_tx`] so `new()` is untouched.
     domain_tx: Option<UnboundedSender<AppEvent>>,
     /// Temporal-decay half-life in days (Q4). Adjustable in code; no user knob.
     half_life_days: f64,
+    /// Test-only deterministic suspension seam (Story 12.0 AC10) — parks
+    /// `refresh()` between the embed await and the final tombstone gate so a
+    /// concurrent `forget()` tombstone can be injected. Compiled out of release.
+    #[cfg(test)]
+    refresh_seam: RefreshSeam,
+}
+
+/// Test-only suspension seam pinning the C4 concurrency window between
+/// `refresh()`'s `embed()` await and its final persist (Story 12.0 AC10). Lets a
+/// test land a `forget()` tombstone DURING the embed and prove the refresh
+/// re-consults the LIVE redaction set before writing `index.bin` (no `sleep`).
+#[cfg(test)]
+#[derive(Default)]
+struct RefreshSeam {
+    armed: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    proceed: tokio::sync::Notify,
 }
 
 /// Stable content key for an entry: `blake3(timestamp_ms || summary)` → u64.
@@ -248,8 +271,11 @@ impl VectorSearchMemory {
             redactions_path,
             init: OnceCell::new(),
             refresh_limit: DEFAULT_REFRESH_LIMIT,
+            drain_lock: Mutex::new(()),
             domain_tx: None,
             half_life_days: fusion::DEFAULT_HALF_LIFE_DAYS,
+            #[cfg(test)]
+            refresh_seam: RefreshSeam::default(),
         }
     }
 
@@ -273,6 +299,15 @@ impl VectorSearchMemory {
             };
             let _ = tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 11-3b AC1 — guided-reindex provider-switch notice via adapter domain_tx (no event_bus access)
         }
+    }
+
+    /// Test-only: shrink the refresh window so a `> refresh_limit` scenario can be
+    /// constructed without seeding 10k entries (Story 12.0 C4 / AC4). Lets a test
+    /// age an entry PAST the window — the precondition Murat's exit gate requires
+    /// (a record aged only WITHIN the window would pass vacuously on broken code).
+    #[cfg(test)]
+    fn set_refresh_limit(&mut self, limit: usize) {
+        self.refresh_limit = limit;
     }
 
     /// Build/load + refresh the index now (idempotent — runs once). Public for
@@ -384,6 +419,11 @@ impl VectorSearchMemory {
     /// longer present, then persists. A full rebuild is just this run against an
     /// empty index.
     async fn refresh(&self) -> Result<(), MemoryError> {
+        // Drain gate: hold the local mutex so `prepare_detach` cannot return until
+        // any in-flight refresh/forget has finished writing index.bin (Story 12.0
+        // review patch).
+        let _drain = self.drain_lock.lock().await;
+
         // 0. Snapshot the redaction tombstone set (read guard released before any
         //    await). THE fix for the self-heal (Story 11.4a, Task 3): the source
         //    row of a redacted entry is still present (daily-log is append-only;
@@ -444,11 +484,55 @@ impl VectorSearchMemory {
                 .collect()
         };
 
-        // 4. Apply: drop vanished keys, append new (write guard, no await held).
+        // Test-only deterministic suspension seam (Story 12.0 AC10): park between
+        // the embed await above and the final tombstone gate below, so a test can
+        // land a `forget()` tombstone DURING the embed and prove the gate honors
+        // the LIVE redaction set (not the stale start-of-refresh snapshot).
+        #[cfg(test)]
+        if self
+            .refresh_seam
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
+            self.refresh_seam.reached.notify_one();
+            self.refresh_seam.proceed.notified().await;
+        }
+
+        // 4. Apply: drop vanished keys, append new (write guard, no await held).
+        //
+        // SINGLE HARDENED PURGE SINK (Story 12.0 C4 / AC4, AC9). Re-consult the
+        // LIVE redaction set at the LAST moment before persisting: a `forget()`
+        // that landed during the (long) embed await above is NOT in the
+        // start-of-refresh `redacted` snapshot, so without this its key would be
+        // retained/embedded and written into `index.bin` — surviving until the
+        // next refresh. Re-reading `redactions` here and dropping those keys from
+        // BOTH the freshly-embedded set and the retained index makes this one gate
+        // the sole concurrency-controlled path every redaction funnels through,
+        // regardless of producer. The 12.1c file-edit-honor path MUST reach purge
+        // through THIS seam too — its parity test `forget_and_fileedit_emit_
+        // identical_record` is 12.1c AC3's obligation (unwritable until that path
+        // exists), NOT 12.0's. (AC9 rationale — Winston.)
+        {
+            // Acquire the index write lock FIRST, THEN read the LIVE redaction set
+            // so a concurrent `forget()` tombstone cannot land in the window between
+            // snapshot and write (Story 12.0 review patch).
             let mut guard = self.index.write().await;
+            let redacted_final: HashSet<u64> = {
+                let rguard = self.redactions.read().await;
+                rguard.keys()
+            };
+            let new_indexed: Vec<IndexedEntry> = new_indexed
+                .into_iter()
+                .filter(|e| !redacted_final.contains(&e.key))
+                .collect();
             guard.retain_keys(&current_keys);
             guard.extend(new_indexed);
+            // Final tombstone gate: drop any key redacted concurrently during the
+            // embed await, independent of the recency window (the whole index, not
+            // just the refreshed slice).
+            if !redacted_final.is_empty() {
+                guard.entries.retain(|e| !redacted_final.contains(&e.key));
+            }
         }
 
         // 4b. Rebuild the key-aligned BM25 index over the FULL current corpus
@@ -541,6 +625,16 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), MemoryError> {
 impl MemoryPort for VectorSearchMemory {
     // ── Delegated to inner (the content source) ──
 
+    /// **In-session staleness contract (Story 12.0 C5 — documented P2, AC5).**
+    /// `store` writes only to `inner`; the vector + BM25 indexes update solely on
+    /// [`Self::refresh`]. So an entry stored mid-session is NOT semantically
+    /// searchable until the next refresh (lazy `OnceCell` init never re-runs a
+    /// refresh on its own). This is a CONSCIOUS, tested scope limit
+    /// (`store_is_stale_until_refresh_documented_p2`), not a silent gap: it is
+    /// conversation-scoped, not cross-job, and the keyword fallback still covers
+    /// the empty-index case. Re-open ONLY if Story 12.4 cron telemetry shows
+    /// cross-job staleness (then a post-`store` refresh hook or a dirty-flag would
+    /// be the fix). No behavioural change in 12.0.
     async fn store(&self, entry: MemoryEntry) -> Result<(), MemoryError> {
         self.inner.store(entry).await
     }
@@ -620,6 +714,9 @@ impl MemoryPort for VectorSearchMemory {
         if keys.is_empty() {
             return Ok(());
         }
+        // Drain gate: hold the local mutex so `prepare_detach` cannot return until
+        // any in-flight forget/refresh has finished (Story 12.0 review patch).
+        let _drain = self.drain_lock.lock().await;
         self.ensure_init().await?;
         // 1. Tombstone FIRST + persist to the sidecar (AC-R6).
         let now = Local::now();
@@ -775,6 +872,11 @@ impl MemoryPort for VectorSearchMemory {
     }
 
     async fn prepare_detach(&self) -> Result<TransitionState, TransitionError> {
+        // Drain any in-flight refresh/forget before delegating to inner (Story 12.0
+        // review patch). Acquiring (and dropping) the drain_lock cannot return until
+        // any concurrent `refresh()` or `forget()` has finished writing index.bin /
+        // redactions.bin, so the swap only proceeds once this adapter is quiescent.
+        let _drained = self.drain_lock.lock().await;
         self.inner.prepare_detach().await
     }
 
@@ -1252,6 +1354,300 @@ mod tests {
         assert!(
             retrievable(&mem2, "database postgres", NEIGHBOUR).await,
             "the neighbour is re-indexed by the rebuild (gate is surgical)"
+        );
+    }
+
+    // ───────────────────── Story 12.0 C4 — full-set tombstone gate ─────────────
+    //
+    // RED-FIRST PROBE (Murat's exit gate): a redacted entry aged PAST
+    // `refresh_limit` must be purged from vector + BM25 + index.bin. The record is
+    // the LAST inner entry with `refresh_limit = 2`, so `inner.recent(2)` never
+    // visits it. Per Task 3, this MUST be proven red on the unfixed gate first; if
+    // it does NOT go red, STOP and re-scope (the bug is not where we think).
+
+    /// DIAGNOSTIC — characterises the ACTUAL `refresh()` window behaviour so the
+    /// C4 scope is grounded in observed code, not assumption. Asserts that a
+    /// non-redacted entry aged PAST `refresh_limit` is DROPPED by refresh (because
+    /// `retain_keys(current_keys)` retains only the window). If this passes, the
+    /// hypothesised "redacted out-of-window entry LINGERS" cannot occur — the
+    /// window-limited retain already drops every out-of-window key, redacted or
+    /// not. (The inverse over-drop, not PII re-exposure.)
+    #[tokio::test]
+    async fn refresh_window_drops_out_of_window_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        // SECRET (ms=1) is the LAST inner entry → outside `recent(2)`.
+        let inner = || fake_inner(&[(2, NEIGHBOUR), (3, "the cache is redis"), (1, SECRET)]);
+        let stub = || Arc::new(StubEmbedder::new(64, "stub-v1"));
+
+        // Full index first (default window indexes all three).
+        let mem0 = VectorSearchMemory::new(inner(), stub(), index_path.clone());
+        mem0.initialize().await.unwrap();
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+        assert!(
+            keys_on_disk(&index_path).await.contains(&secret_key),
+            "precondition: SECRET is in index.bin before any windowing"
+        );
+        drop(mem0);
+
+        // Reopen with a SMALL window; the load+refresh applies `retain_keys`.
+        let mut mem = VectorSearchMemory::new(inner(), stub(), index_path.clone());
+        mem.set_refresh_limit(2);
+        mem.initialize().await.unwrap();
+        mem.refresh().await.unwrap();
+
+        // OBSERVED: the out-of-window (un-redacted) SECRET is dropped by the
+        // window-limited retain — the inverse of the "lingers" hypothesis.
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "window-limited retain_keys drops out-of-window entries (over-drop, not lingering)"
+        );
+    }
+
+    /// AI-12.0a tracked follow-up (party-mode consensus 2026-06-05, Murat/Winston;
+    /// checked in #[ignore], NOT deleted). The over-drop above is a latent
+    /// correctness bug: `refresh()` conflates "what to EMBED = the recency window"
+    /// with "what to RETAIN = the full live set", so any non-redacted entry aged
+    /// past `refresh_limit` is silently dropped from the index. Today
+    /// `refresh_limit = 10_000 = NFR56` cap ≥ corpus, so it never fires in prod —
+    /// but lower the cap below the corpus and refresh amputates live memory. The
+    /// long-term-correct fix: retain `full_live − redacted`, embed only `window`,
+    /// as two distinct inputs. This invariant test asserts the DESIRED behaviour
+    /// (a live out-of-window entry survives refresh) and currently FAILS — it goes
+    /// green when the conflation is fixed, so a future cap-lowering can't ship a
+    /// silent amputation.
+    #[tokio::test]
+    #[ignore = "AI-12.0a: refresh() retain-set/embed-window conflation; fails until retain=full_live−redacted lands"]
+    async fn refresh_must_not_drop_live_out_of_window_entries_12_0a() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        let inner = || fake_inner(&[(2, NEIGHBOUR), (3, "the cache is redis"), (1, SECRET)]);
+        let stub = || Arc::new(StubEmbedder::new(64, "stub-v1"));
+
+        // Full index first; SECRET (ms=1) is the LAST inner entry.
+        let mem0 = VectorSearchMemory::new(inner(), stub(), index_path.clone());
+        mem0.initialize().await.unwrap();
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+        drop(mem0);
+
+        // Shrink the window below the corpus; SECRET is now out-of-window but it is
+        // NOT redacted — a correct refresh MUST keep it.
+        let mut mem = VectorSearchMemory::new(inner(), stub(), index_path.clone());
+        mem.set_refresh_limit(2);
+        mem.initialize().await.unwrap();
+        mem.refresh().await.unwrap();
+
+        assert!(
+            keys_on_disk(&index_path).await.contains(&secret_key),
+            "AI-12.0a: a non-redacted out-of-window entry MUST survive refresh (retain ≠ embed-window)"
+        );
+    }
+
+    /// C4 (AC4) red-first oracle, exactly as Task 3 Test 1 specifies: redact the
+    /// out-of-window entry, run a scheduled-style refresh, assert absent from
+    /// index.bin AND retrieval. On the CURRENT gate this is GREEN — the entry was
+    /// already dropped by the window retain before redaction even applied — which
+    /// is the vacuous pass the exit gate warns about. Kept as the documented probe
+    /// (see Dev Agent Record / Debug Log: the C4 hypothesis did NOT reproduce).
+    #[tokio::test]
+    async fn redaction_survives_refresh_beyond_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        let inner = || fake_inner(&[(2, NEIGHBOUR), (3, "the cache is redis"), (1, SECRET)]);
+        let stub = || Arc::new(StubEmbedder::new(64, "stub-v1"));
+
+        let mem0 = VectorSearchMemory::new(inner(), stub(), index_path.clone());
+        mem0.initialize().await.unwrap();
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+        drop(mem0);
+
+        let mut mem = VectorSearchMemory::new(inner(), stub(), index_path.clone());
+        mem.set_refresh_limit(2);
+        mem.initialize().await.unwrap();
+        mem.forget(&[secret_key]).await.unwrap();
+        mem.refresh().await.unwrap();
+
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "C4: out-of-window redacted key absent from index.bin"
+        );
+        assert!(
+            !retrievable(&mem, "secret password", SECRET).await,
+            "C4: out-of-window redacted entry absent from vector+BM25 retrieval"
+        );
+    }
+
+    /// C4 (AC4) RED-FIRST ORACLE — the REAL concurrency edge (scope confirmed with
+    /// the author after the window hypothesis proved non-reproducing): a `forget()`
+    /// whose tombstone lands DURING `refresh()`'s long `embed()` await is missed by
+    /// the start-of-refresh redaction snapshot, so without the final live-set gate
+    /// the freshly-embedded redacted key is written into `index.bin` and survives
+    /// until the next refresh. The interior `refresh_seam` parks the build refresh
+    /// after embed; the tombstone is injected exactly then (tombstone-FIRST, like
+    /// `forget`, AC-R6); on resume the refresh MUST re-consult the live set and
+    /// purge the key. **Verified RED on the reverted gate** (index.bin retained the
+    /// redacted key) — see Dev Agent Record / Debug Log. No `sleep`.
+    #[tokio::test]
+    async fn refresh_honors_concurrent_forget() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        // SECRET is NEW (empty index → it WILL be embedded by the build refresh).
+        let inner = fake_inner(&[(2, NEIGHBOUR), (1, SECRET)]);
+        let stub = Arc::new(StubEmbedder::new(64, "stub-v1"));
+        let mem = Arc::new(VectorSearchMemory::new(inner, stub, index_path.clone()));
+        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
+
+        // Arm the seam, kick the build (refresh embeds NEIGHBOUR + SECRET).
+        mem.refresh_seam.armed.store(true, Ordering::SeqCst);
+        let m = Arc::clone(&mem);
+        let init = tokio::spawn(async move { m.initialize().await.unwrap() });
+
+        // Refresh is now parked AFTER embedding SECRET, BEFORE the final gate.
+        mem.refresh_seam.reached.notified().await;
+
+        // A concurrent forget() lands its tombstone during the embed window
+        // (tombstone FIRST + sidecar persist, exactly as `forget` does).
+        {
+            let mut g = mem.redactions.write().await;
+            g.insert(RedactionRecord::forget(secret_key, Local::now()));
+        }
+        mem.persist_redactions().await.unwrap();
+
+        // Resume: the final tombstone gate must honor the live set.
+        mem.refresh_seam.proceed.notify_one();
+        init.await.unwrap();
+
+        assert!(
+            !keys_on_disk(&index_path).await.contains(&secret_key),
+            "C4: forget() during refresh's embed is honored — redacted key absent from index.bin"
+        );
+        assert!(
+            !retrievable(&mem, "secret password", SECRET).await,
+            "C4: redacted entry not retrievable after the concurrent forget"
+        );
+        // The non-redacted neighbour is still indexed (the gate is surgical).
+        assert!(
+            keys_on_disk(&index_path)
+                .await
+                .contains(&content_key(&super::super::index::tests_millis_to_local(2), NEIGHBOUR)),
+            "C4: the concurrent purge is surgical — the neighbour survives"
+        );
+    }
+
+    /// C5 (AC5) — the in-session staleness contract is DELIBERATE and tested (a
+    /// documented P2 scope limit, not a silent gap). A `store()` mid-session lands
+    /// in `inner` but is NOT in the vector/BM25 index until the next `refresh()`.
+    /// The index is seeded non-empty first so the empty-index keyword fallback does
+    /// not mask the contract. No behavioural change — this pins the documented
+    /// limit so any future regression (or an accidental auto-refresh) is caught.
+    #[tokio::test]
+    async fn store_is_stale_until_refresh_documented_p2() {
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        // A real inner that actually persists `store()`s.
+        let inner = Arc::new(crate::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()));
+        // Seed ONE entry so the index is non-empty (else `search` keyword-falls-
+        // back to `inner`, which WOULD see the fresh store and mask the contract).
+        inner
+            .store(MemoryEntry {
+                timestamp: Local::now(),
+                summary: "seed entry about postgres".into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+
+        let stub = Arc::new(StubEmbedder::new(64, "stub-v1"));
+        let mem = VectorSearchMemory::new(inner.clone(), stub, index_path.clone());
+        mem.initialize().await.unwrap(); // index = {seed}
+
+        // A mid-session store lands in the inner source…
+        mem.store(MemoryEntry {
+            timestamp: Local::now(),
+            summary: "fresh insight just now".into(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+        // …but is stale-until-refresh: not yet in the vector/BM25 index (C5 / P2).
+        let stale = mem.search("fresh insight", 10).await.unwrap();
+        assert!(
+            !stale.iter().any(|e| e.summary == "fresh insight just now"),
+            "C5 (P2): a store() is stale-until-refresh — not yet semantically searchable"
+        );
+
+        // After a refresh it converges (the documented re-indexing point).
+        mem.refresh().await.unwrap();
+        let fresh = mem.search("fresh insight", 10).await.unwrap();
+        assert!(
+            fresh.iter().any(|e| e.summary == "fresh insight just now"),
+            "C5: refresh() converges — the entry is now indexed and retrievable"
+        );
+    }
+
+    /// AC6 (regression guard) — the vector index and the key-aligned BM25 index
+    /// stay aligned under concurrent `search()` + `refresh()` (guards the Epic 11
+    /// review fix at the `refresh()` BM25-rebuild path). Many concurrent refreshes
+    /// (each rebuilds BM25 over the FULL current corpus) interleave with many
+    /// concurrent searches (each fuses vector + BM25 by `content_key`). Every op
+    /// MUST succeed and the fused key→entry map MUST resolve — a desync would
+    /// surface as an `Err`, a panic, or a vanished seeded entry. Asserts
+    /// interleaving-invariant properties (all-Ok + seeded entry retrievable), so
+    /// it is not flaky.
+    #[tokio::test]
+    async fn concurrent_search_and_refresh_stay_aligned() {
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("memory").join("index.bin");
+        let inner = fake_inner(&[
+            (1, "alpha postgres database"),
+            (2, "beta redis cache"),
+            (3, "gamma kafka stream"),
+            (4, "delta object store"),
+        ]);
+        let stub = Arc::new(StubEmbedder::new(64, "stub-v1"));
+        let mem = Arc::new(VectorSearchMemory::new(inner, stub, index_path.clone()));
+        mem.initialize().await.unwrap();
+
+        let mut handles = Vec::new();
+        // Concurrent refreshers — each rebuilds BM25 over the full corpus.
+        for _ in 0..4 {
+            let m = Arc::clone(&mem);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    m.refresh().await.unwrap();
+                }
+            }));
+        }
+        // Concurrent searchers — each fuses the two indexes; none may error/panic.
+        for _ in 0..8 {
+            let m = Arc::clone(&mem);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    let hits = m.search("postgres database", 5).await.unwrap();
+                    // A desynced pair would map a ranked key to no/garbled entry.
+                    for h in &hits {
+                        assert!(!h.summary.is_empty(), "fused key resolved to a real entry");
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // After the churn the seeded entry is still retrievable through the fused
+        // path — alignment held end-to-end.
+        assert!(
+            retrievable(&mem, "postgres database", "alpha postgres database").await,
+            "AC6: vector/BM25 stay aligned under concurrent search()+refresh()"
         );
     }
 
