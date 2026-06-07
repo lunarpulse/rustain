@@ -155,6 +155,25 @@ pub enum DaemonAction {
         #[arg(long)]
         json: bool,
     },
+    /// Install a service-manager unit (systemd on Linux, launchd on macOS) so the
+    /// daemon is supervised + auto-restarts on crash (Story 12.1b, NFR50).
+    Install {
+        /// Render the unit/plist to stdout only — no filesystem write (for
+        /// inspection / piping).
+        #[arg(long)]
+        print: bool,
+        /// Install to the system location (`/etc/systemd/system`, writes `User=`,
+        /// needs root) instead of the default per-user scope.
+        #[arg(long)]
+        system: bool,
+    },
+    /// Remove the service-manager unit for this workspace (idempotent — a missing
+    /// file is a no-op success). Touches no daemon runtime state (Story 12.1b).
+    Uninstall {
+        /// Match the `--system` scope used at install time.
+        #[arg(long)]
+        system: bool,
+    },
     /// INTERNAL — the detached child entrypoint (re-exec target of `start`).
     /// Hidden because it is not a user verb: `start` re-execs the current binary
     /// with this action after `setsid`-detaching. Running it by hand runs the

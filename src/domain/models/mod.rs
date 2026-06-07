@@ -16,6 +16,7 @@ mod config;
 mod content;
 pub mod context_bundle;
 pub mod conversation;
+pub mod daemon_crash;
 pub mod doc_key;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
@@ -87,11 +88,12 @@ pub use config::{
 };
 #[allow(unused_imports)]
 pub use content::ContentBlockType;
-#[allow(unused_imports)]
 pub use conversation::{
     ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
     generate_conversation_id, generate_message_id,
 };
+#[allow(unused_imports)]
+pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
 pub use focus::FocusState;
 #[allow(unused_imports)]
 pub use message::{

@@ -997,11 +997,11 @@ pub fn build_for_port(
 /// §"Headless composition scope" for this verified reconciliation vs. the
 /// literal Task-3 recipe.
 ///
-    /// `domain_tx` is `None`: headless, with no event-bus consumers wired in 12.1a.
-    /// **Contract:** no code path triggered during `build_daemon_memory` may send
-    /// events through `domain_tx`. If a future memory adapter emits events during
-    /// construction, this helper must either wire a real sender or document the
-    /// silent-drop. Currently safe — `build_memory` does not emit events.
+/// `domain_tx` is `None`: headless, with no event-bus consumers wired in 12.1a.
+/// **Contract:** no code path triggered during `build_daemon_memory` may send
+/// events through `domain_tx`. If a future memory adapter emits events during
+/// construction, this helper must either wire a real sender or document the
+/// silent-drop. Currently safe — `build_memory` does not emit events.
 pub fn build_daemon_memory(
     workspace_path: &std::path::Path,
     memory_adapter: &str,

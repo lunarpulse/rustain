@@ -1,0 +1,164 @@
+# Running rustain as a supervised daemon
+
+`rustain daemon` runs the agent headless for a single workspace. Story 12.1b adds
+**service-manager supervision** (systemd / launchd auto-restart on crash, NFR50) and
+a **crash post-mortem** record. This doc covers install, uninstall, and reading crash
+state. (Unix only — Linux is P0, macOS P1; Windows is not supported, NFR33.)
+
+> **Scope.** "Crash recovery" here means **detect the unclean exit → persist a
+> post-mortem record → announce it on restart**. It does NOT replay conversations or
+> re-run a missed flush — there is no message runtime until Story 12.2. Durability of
+> your daily log is already guaranteed by Epic 11 / Story 12.0; the fresh daemon
+> composes fresh memory that loads it.
+
+## The load-bearing fact: supervisors run the **foreground** entrypoint
+
+The generated unit/plist always invokes:
+
+```
+rustain --profile <profile> daemon start --foreground
+```
+
+`--foreground` runs the lifecycle loop in-process so the supervisor owns the daemon
+directly. A bare `daemon start` re-execs and `setsid`-detaches a child, so the
+launcher would exit immediately and the supervisor would restart-loop the launcher
+instead of supervising the real daemon. The installer never generates a bare
+`daemon start`.
+
+## Install + enable
+
+`rustain daemon install` detects your platform and renders the correct service file
+(systemd unit on Linux, launchd plist on macOS). It embeds the **absolute** exe path,
+the workspace (cwd), the active profile, and the user. The file name embeds a
+workspace hash, so multiple workspaces install non-colliding services.
+
+```sh
+# Inspect what would be written (stdout only — no file written):
+rustain daemon install --print
+
+# Write it to the per-user location, then run the printed follow-up:
+rustain daemon install
+```
+
+### Linux (systemd)
+
+- **User scope (default, no root):** writes
+  `~/.config/systemd/user/rustain-<hash>.service`, then run:
+
+  ```sh
+  systemctl --user daemon-reload && systemctl --user enable --now rustain-<hash>.service
+  ```
+
+- **System scope (`--system`, needs root):** writes
+  `/etc/systemd/system/rustain-<hash>.service` with `User=<you>`, then run:
+
+  ```sh
+  sudo systemctl daemon-reload && sudo systemctl enable --now rustain-<hash>.service
+  ```
+
+The unit declares `Restart=on-failure` + `RestartSec=2` (restart on crash, **not** on
+a clean `stop`) and a crash-loop guard (`StartLimitIntervalSec` / `StartLimitBurst`)
+so a daemon that crashes immediately on boot does not spin forever.
+
+### macOS (launchd)
+
+Writes `~/Library/LaunchAgents/com.rustain.<hash>.plist`, then:
+
+```sh
+launchctl load ~/Library/LaunchAgents/com.rustain.<hash>.plist
+```
+
+`KeepAlive = { SuccessfulExit = false }` relaunches the daemon **only** on an unclean
+exit, so a clean `stop` is honored. `RunAtLoad = true` starts it at load/login.
+
+### Env pass-through
+
+If `RUSTAIN_DATA_DIR` / `RUSTAIN_CONFIG_DIR` are set when you run `install`, they are
+baked into the unit (`Environment=` / launchd `EnvironmentVariables`) so test/CI
+overrides survive under supervision. Default installs omit them and rely on `$HOME`.
+
+## Uninstall
+
+```sh
+rustain daemon uninstall            # matches the default --user scope
+rustain daemon uninstall --system   # matches a --system install
+```
+
+`uninstall` first prints the disable/unload step you should run, then removes the
+service file. It is **idempotent** — a second uninstall (file already gone) exits 0 as
+a no-op. It touches **no** daemon runtime state (PID file / socket / crash records).
+
+Disable/unload first:
+
+```sh
+# Linux user / system:
+systemctl --user disable --now rustain-<hash>.service
+sudo systemctl disable --now rustain-<hash>.service
+# macOS:
+launchctl unload ~/Library/LaunchAgents/com.rustain.<hash>.plist
+```
+
+## Crash records & recovery
+
+When the daemon (re)starts and finds a **leftover PID file whose process is dead**, it
+treats that as an unclean exit (graceful shutdown always removes the PID file, so a
+leftover one means the previous instance died via panic / SIGKILL / OOM / power loss).
+It records the crash, logs a recovery line, then starts normally — it never refuses to
+start or requires manual cleanup.
+
+Two artifacts, both under `{workspace}/.rustain/`:
+
+- **`daemon-crash.json`** — the latest crash only (machine state `daemon status`
+  reads). Overwritten atomically each crash. Carries a bounded `restart_count` and the
+  recent crash timestamps (`last_n_crash_unix`, cap 5) so a crash **loop** is visible
+  in a single read without unbounded growth. `reason` is `"stale-pidfile"` for
+  restart-side detection or `"panic: <message>"` for the panic path.
+- **`crash-<ts>.log`** — immutable timestamped backtrace files (the forensic trail,
+  written by the panic path). Capped to the newest 10 so a tight crash loop can't fill
+  the disk.
+
+Read the last crash via `daemon status`:
+
+```sh
+rustain daemon status          # human: a "Last crash:" line ("none" when clean)
+rustain daemon status --json   # scriptable: a "last_crash" object (null when none)
+```
+
+`last_crash` / `restart_count` are how you diagnose a flapping daemon: a high
+`restart_count` with tightly-clustered `last_n_crash_unix` is a crash loop — check the
+`crash-<ts>.log` backtraces (panic) or `journalctl --user -u rustain-<hash>` (systemd).
+
+## PID-ownership hardening (no innocent kills)
+
+After a crash the dead PID can be **recycled** by an unrelated process. `stop` /
+`status` / the already-running guard verify ownership before acting: the PID file
+records a self-authored **nonce** and the **boot id**, and on Linux the guard also
+checks `/proc/<pid>/comm` names `rustain`. A recycled/foreign PID is treated as
+**stale** (reclaimable), never `Running` — so `stop` never signals an innocent
+process. (No extra dependency; the residual macOS same-boot nonce-collision window is
+accepted risk, tracked for a macOS-hardening follow-up.)
+
+## Verifying auto-restart (NFR50)
+
+- **Generated policy** (every CI commit): template-content unit tests assert the
+  rendered unit/plist carries `--foreground`, `Restart=on-failure` / `StartLimit*`,
+  and launchd `KeepAlive { SuccessfulExit = false }`.
+- **Detect + record + announce** (every CI commit): an in-process simulated
+  crash-recovery cycle test (dead PID in the PID file → start → assert the crash
+  record + `status --json last_crash` + normal startup).
+- **Real init system** (gated): on a systemd-equipped lane, run the Linux P0 gate:
+
+  ```sh
+  cargo test --test daemon_crash_recovery --ignored daemon_real_systemd_recovery
+  ```
+
+  It installs the unit, `kill -9`s the daemon, and asserts systemd relaunches it AND
+  the relaunched instance records the crash. macOS/launchd (P1) is a manual sign-off.
+
+## Templates
+
+The checked-in templates the generator embeds (`include_str!`) live in
+[`dist/`](../dist):
+
+- [`dist/rustain.service.template`](../dist/rustain.service.template) (systemd)
+- [`dist/com.rustain.daemon.plist.template`](../dist/com.rustain.daemon.plist.template) (launchd)

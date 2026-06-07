@@ -137,6 +137,83 @@ pub fn daemon_log_path(workspace: &std::path::Path) -> Result<PathBuf> {
     Ok(rustain_workspace_dir(workspace)?.join("daemon.log"))
 }
 
+/// File name of the generated service file for `workspace` (Story 12.1b
+/// AC-12-1b-3). Embeds the workspace hash so multiple workspaces install
+/// non-colliding services (consistent with the per-workspace socket name).
+/// `rustain-<hash>.service` (systemd) / `com.rustain.<hash>.plist` (launchd).
+#[cfg(unix)]
+pub fn daemon_service_file_name(workspace: &std::path::Path) -> String {
+    let hash = workspace_hash(workspace);
+    #[cfg(target_os = "macos")]
+    {
+        format!("com.rustain.{hash}.plist")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        format!("rustain-{hash}.service")
+    }
+}
+
+/// launchd `Label` for `workspace` (`com.rustain.<hash>`) — the plist `Label` and
+/// the basename `launchctl` addresses the agent by.
+#[cfg(unix)]
+pub fn daemon_service_label(workspace: &std::path::Path) -> String {
+    format!("com.rustain.{}", workspace_hash(workspace))
+}
+
+/// Directory the service file installs into for the given scope (Story 12.1b
+/// AC-12-1b-3). `RUSTAIN_SERVICE_DIR` overrides it for tests/CI (the isolated
+/// install-root seam). Linux user units → `~/.config/systemd/user`; `--system` →
+/// `/etc/systemd/system`. macOS → `~/Library/LaunchAgents` (system LaunchDaemons are
+/// out of P1 scope).
+#[cfg(unix)]
+fn daemon_service_dir(system: bool) -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RUSTAIN_SERVICE_DIR") {
+        // CONFORMANCE_EXCEPTION: bootstrapping path resolution (test/CI override)
+        return Ok(PathBuf::from(dir));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = system;
+        let home = dirs::home_dir().context("Could not determine home directory")?;
+        Ok(home.join("Library").join("LaunchAgents"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if system {
+            Ok(PathBuf::from("/etc/systemd/system"))
+        } else {
+            let cfg = dirs::config_dir().context("Could not determine config directory")?;
+            Ok(cfg.join("systemd").join("user"))
+        }
+    }
+}
+
+/// Resolved absolute path of the service file for `workspace` + scope (Story 12.1b
+/// AC-12-1b-3). **Single source of truth** — `install` and `uninstall` MUST resolve
+/// the identical path through this one helper. Does not touch the filesystem; the
+/// installer creates the parent dir (user scope) as needed.
+#[cfg(unix)]
+pub fn daemon_service_path(workspace: &std::path::Path, system: bool) -> Result<PathBuf> {
+    Ok(daemon_service_dir(system)?.join(daemon_service_file_name(workspace)))
+}
+
+/// Path to the daemon's latest-only crash record (Story 12.1b AC-12-1b-5).
+/// `{workspace}/.rustain/daemon-crash.json` — single source of truth, mirrors the
+/// AC-12-1a-8 path-helper rule (no inline `join("daemon-crash.json")` elsewhere).
+/// Overwritten atomically on each crash; `daemon status` reads exactly this path.
+pub fn daemon_crash_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("daemon-crash.json"))
+}
+
+/// Path to a timestamped daemon backtrace file (Story 12.1b AC-12-1b-5). These are
+/// the immutable append-as-new-files forensic trail (capped/rotated by the writer so
+/// a crash loop can't fill the disk). Workspace-scoped + daemon-context, distinct
+/// from the TUI's `~/.rustain/crash-<ts>.log` ([`crash_log_path`]).
+pub fn daemon_crash_log_path(workspace: &std::path::Path, ts: u64) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join(format!("crash-{ts}.log")))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

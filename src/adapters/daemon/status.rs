@@ -5,7 +5,7 @@
 //! reports it truthfully rather than faking activity.
 
 use super::pidfile::DaemonPidFile;
-use crate::domain::models::AppConfig;
+use crate::domain::models::{AppConfig, DaemonCrashRecord};
 
 /// A structured daemon status snapshot. Rendered either as a human block or as
 /// JSON (`--json`, mirrors `profile list --json` for scriptability).
@@ -25,6 +25,10 @@ pub struct StatusSnapshot {
     pub last_activity_unix: u64,
     pub socket_path: String,
     pub workspace: String,
+    /// Last recorded unclean exit for this workspace's daemon (Story 12.1b
+    /// AC-12-1b-6), or `None`/`null` when there is no crash record. Read from
+    /// `paths::daemon_crash_path`.
+    pub last_crash: Option<DaemonCrashRecord>,
 }
 
 impl StatusSnapshot {
@@ -43,6 +47,7 @@ impl StatusSnapshot {
             last_activity_unix: pf.started_at_unix,
             socket_path: pf.socket_path.display().to_string(),
             workspace: pf.workspace.display().to_string(),
+            last_crash: super::crash::read_record(&pf.workspace),
         }
     }
 
@@ -57,6 +62,16 @@ impl StatusSnapshot {
         } else {
             self.channels.join(", ")
         };
+        let last_crash = match &self.last_crash {
+            Some(c) => format!(
+                "{} (prev PID {}, after {}, restart #{})",
+                c.reason,
+                c.pid,
+                fmt_uptime(c.uptime_secs),
+                c.restart_count
+            ),
+            None => "none".to_string(),
+        };
         format!(
             "Daemon running\n\
              PID:                  {}\n\
@@ -66,6 +81,7 @@ impl StatusSnapshot {
              Active conversations: {}\n\
              Resident memory:      {}\n\
              Last activity:        {} ago\n\
+             Last crash:           {}\n\
              Socket:               {}",
             self.pid,
             fmt_uptime(self.uptime_secs),
@@ -75,6 +91,7 @@ impl StatusSnapshot {
             rss,
             // 12.1a: no message source, so last activity == start → "uptime" ago.
             fmt_uptime(self.uptime_secs),
+            last_crash,
             self.socket_path,
         )
     }
@@ -149,12 +166,15 @@ mod tests {
 
     #[test]
     fn snapshot_json_includes_required_fields() {
+        // Non-existent workspace → no crash record → last_crash null (AC-12-1b-6).
         let pf = DaemonPidFile {
             pid: 7,
             socket_path: "/tmp/x.sock".into(),
-            workspace: "/ws".into(),
+            workspace: "/nonexistent-ws-12-1b".into(),
             started_at_unix: now_unix().saturating_sub(10),
             profile: "coding".into(),
+            nonce: String::new(),
+            boot_id: None,
         };
         let snap = StatusSnapshot::gather(&pf, &AppConfig::default());
         let json = snap.to_json();
@@ -164,10 +184,14 @@ mod tests {
             "\"uptime_secs\"",
             "\"profile\"",
             "\"active_conversations\"",
+            "\"last_crash\"",
         ] {
             assert!(json.contains(field), "json missing {field}: {json}");
         }
         assert_eq!(snap.active_conversations, 0);
         assert!(snap.uptime_secs >= 10);
+        assert!(snap.last_crash.is_none());
+        assert!(json.contains("\"last_crash\": null"));
+        assert!(snap.to_human().contains("Last crash:           none"));
     }
 }

@@ -3,14 +3,21 @@
 
 use clap::CommandFactory;
 
-/// Ratchet 1: EXPECTED_DAEMON_SUBCOMMANDS = 4.
+/// Ratchet 1: EXPECTED_DAEMON_SUBCOMMANDS = 6.
 ///
 /// The count includes the hidden `__run` re-exec target — `get_subcommands()`
-/// enumerates hidden subcommands too. Visible: `start`, `stop`, `status`.
-/// Hidden: `__run`. Guards against accidental add/remove/merge regressions.
+/// enumerates hidden subcommands too. Visible: `start`, `stop`, `status`, `install`,
+/// `uninstall`. Hidden: `__run`. Guards against accidental add/remove/merge
+/// regressions.
+///
+/// **4 → 6 (Story 12.1b, party-mode 2026-06-06):** added BOTH `install` AND
+/// `uninstall`. A tool that writes persistent system state must own its teardown —
+/// install-without-uninstall is a footgun (orphaned units that keep auto-restarting a
+/// daemon the operator thought they killed). The install↔uninstall round-trip is also
+/// the single highest-value deterministic test in 12.1b (pure FS + exit code).
 #[test]
 fn test_daemon_subcommand_count_pinned() {
-    const EXPECTED_DAEMON_SUBCOMMANDS: usize = 4;
+    const EXPECTED_DAEMON_SUBCOMMANDS: usize = 6;
     let cmd = rustain::adapters::cli::commands::Cli::command();
     let daemon_cmd = cmd
         .find_subcommand("daemon")
@@ -18,8 +25,8 @@ fn test_daemon_subcommand_count_pinned() {
     let subcommand_count = daemon_cmd.get_subcommands().count();
     assert_eq!(
         subcommand_count, EXPECTED_DAEMON_SUBCOMMANDS,
-        "Expected exactly {} daemon subcommands (start/stop/status + hidden __run), found {}. \
-         If you intentionally added/removed a subcommand, update EXPECTED_DAEMON_SUBCOMMANDS.",
+        "Expected exactly {} daemon subcommands (start/stop/status/install/uninstall + hidden __run), \
+         found {}. If you intentionally added/removed a subcommand, update EXPECTED_DAEMON_SUBCOMMANDS.",
         EXPECTED_DAEMON_SUBCOMMANDS, subcommand_count
     );
 }
@@ -33,7 +40,7 @@ fn test_daemon_subcommands_shape() {
         .find_subcommand("daemon")
         .expect("'daemon' subcommand should exist");
 
-    for verb in ["start", "stop", "status"] {
+    for verb in ["start", "stop", "status", "install", "uninstall"] {
         let sub = daemon_cmd
             .find_subcommand(verb)
             .unwrap_or_else(|| panic!("daemon subcommand '{}' should exist", verb));
@@ -73,6 +80,9 @@ fn test_daemon_adapter_lives_in_module_directory() {
         "socket.rs",
         "lifecycle.rs",
         "status.rs",
+        // Story 12.1b additions.
+        "crash.rs",
+        "service.rs",
     ] {
         assert!(
             daemon_dir.join(file).exists(),
