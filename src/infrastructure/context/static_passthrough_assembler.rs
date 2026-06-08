@@ -65,6 +65,7 @@ mod tests {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 
@@ -80,6 +81,7 @@ mod tests {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 
@@ -95,6 +97,7 @@ mod tests {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 

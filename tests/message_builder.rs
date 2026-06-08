@@ -38,6 +38,7 @@ fn test_build_api_messages_maps_roles() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
         ChatMessage {
             synthetic: false,
@@ -50,6 +51,7 @@ fn test_build_api_messages_maps_roles() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
     ]);
 
@@ -98,6 +100,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
         ChatMessage {
             synthetic: false,
@@ -110,6 +113,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
         ChatMessage {
             synthetic: true,
@@ -122,6 +126,7 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
     ]);
 

@@ -1880,6 +1880,7 @@ pub(crate) fn finish_plan(
         stop_reason: None,
         synthetic: true,
         images: vec![],
+        origin: crate::domain::models::ChannelKind::Terminal,
     };
     conversation.messages.push(msg);
 

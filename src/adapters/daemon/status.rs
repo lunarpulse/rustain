@@ -5,7 +5,7 @@
 //! reports it truthfully rather than faking activity.
 
 use super::pidfile::DaemonPidFile;
-use crate::domain::models::{AppConfig, DaemonCrashRecord};
+use crate::domain::models::{AppConfig, ChannelKind, DaemonCrashRecord};
 
 /// A structured daemon status snapshot. Rendered either as a human block or as
 /// JSON (`--json`, mirrors `profile list --json` for scriptability).
@@ -41,8 +41,13 @@ impl StatusSnapshot {
             pid: pf.pid,
             uptime_secs,
             profile: pf.profile.clone(),
-            channels: Vec::new(),
-            active_conversations: 0,
+            // Story 12.2b — the daemon now serves the interactive terminal/attach
+            // channel (Telegram/cron join in 12.3/12.4). Conversation count is read
+            // honestly from the session store (the per-process conversation persists
+            // after each turn). `status` runs out-of-process, so this reflects the
+            // on-disk session count rather than a live socket query.
+            channels: vec![ChannelKind::Terminal.as_prefix().to_string()],
+            active_conversations: count_persisted_conversations(&pf.workspace),
             rss_kb: read_rss_kb(pf.pid),
             last_activity_unix: pf.started_at_unix,
             socket_path: pf.socket_path.display().to_string(),
@@ -119,6 +124,20 @@ fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Story 12.2b AC4 — count persisted conversations in the workspace session store
+/// (each conversation is a subdirectory under `sessions_dir`). Best-effort: a
+/// missing/unreadable dir reads as `0` (honest for a never-used workspace).
+fn count_persisted_conversations(workspace: &std::path::Path) -> u64 {
+    let dir = crate::infrastructure::paths::sessions_dir(workspace);
+    std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .count() as u64
+        })
         .unwrap_or(0)
 }
 

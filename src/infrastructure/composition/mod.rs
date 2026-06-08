@@ -14,8 +14,8 @@ use crate::domain::errors::AdapterCompositionError;
 use crate::domain::models::profile::{AdapterRef, PortDimension, ProfileSelection};
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::ports::{
-    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SessionPort,
-    StoragePort, ToolSetPort,
+    ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SecurityPort,
+    SessionPort, StoragePort, StreamingProvider, ToolSetPort,
 };
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
@@ -1038,6 +1038,185 @@ pub fn build_daemon_memory(
         meta_search_engine: None,
     };
     build_memory(memory_adapter, None, &ctx)
+}
+
+/// Construct a daemon ComposeContext (Story 12.2b): like `build_daemon_memory`'s
+/// minimal context but with **real** session storage and the daemon's
+/// per-activation `domain_tx` wired, so `build_tools`/`build_context_assembler`
+/// compose live (connection-holding) adapters that emit capability events onto
+/// the daemon bus. Builtin tools only (no MCP servers) for the 12.2b producer.
+#[cfg(unix)]
+fn daemon_compose_context(
+    workspace_path: &std::path::Path,
+    storage: Arc<dyn StoragePort>,
+    domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+    assembler: String,
+) -> ComposeContext {
+    use crate::adapters::sandbox::NoOpSandbox;
+    ComposeContext {
+        workspace_path: workspace_path.to_path_buf(),
+        project_context: ProjectContext::empty(),
+        storage,
+        skill_activator: Arc::new(SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
+        domain_tx: Some(domain_tx),
+        tool_exposure: "static-full".into(),
+        assembler,
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
+            crate::infrastructure::skill_cache::SkillCacheConfig::default(),
+        )),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
+        )),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
+        memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
+        )),
+        #[cfg(feature = "meta-search")]
+        search_config: crate::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
+    }
+}
+
+/// Compose the daemon's runtime FACTORY, not an eager live core (Story 12.2b
+/// AC1/AC1b — Q7-SETTLED).
+///
+/// Eagerly composes ONLY the cheap, long-lived, connection-free parts (memory via
+/// [`build_daemon_memory`], real session storage, a `Normal`-mode security policy
+/// — **never `Yolo`** headless per AC6, and the persona). It captures a
+/// [`TurnRuntimeFactory`](crate::adapters::daemon::runtime::TurnRuntimeFactory)
+/// that builds the live, connection-holding parts (provider via
+/// [`init_provider_layer`](crate::infrastructure::startup::init_provider_layer),
+/// tools via [`build_tools`], the Message-tier assembler via
+/// [`build_context_assembler`], a deny-by-default [`ApprovalRuntime`], the
+/// `ToolScheduler`, ledger/telemetry/plan-injector) on **first activity** behind
+/// the core's single `OnceCell`. An idle daemon therefore holds no live provider
+/// connection (NFR46). Reuses the SAME `build_*` factories startup uses — no
+/// forked composition.
+#[cfg(unix)]
+pub fn build_daemon_core(
+    workspace: &std::path::Path,
+    config: Arc<arc_swap::ArcSwap<crate::domain::models::AppConfig>>,
+    profile_selection: ProfileSelection,
+    memory_adapter: &str,
+    domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
+    use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
+    use crate::adapters::filesystem::FileSystemStorage;
+    use crate::adapters::security_adapter::HeadlessSecurityAdapter;
+
+    let snapshot = config.load();
+    let assembler_name = snapshot.assembler.strategy.clone();
+    let raw_capacity = snapshot.runtime.event_bus.raw_capacity;
+
+    let pick = |dim: PortDimension, default: &str| -> String {
+        profile_selection
+            .dimensions
+            .get(&dim)
+            .map(|a| a.adapter.clone())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let persona_name = pick(PortDimension::Persona, "coding");
+    let tools_name = pick(PortDimension::Tools, "builtin-only");
+
+    // ── Eager parts (cheap, connection-free) ────────────────────────────────
+    let memory = build_daemon_memory(workspace, memory_adapter)?;
+    let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
+    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        sessions_dir.clone(),
+        workspace.to_path_buf(),
+    ));
+    // Headless security policy — permanently Normal (AC6).
+    // `HeadlessSecurityAdapter` ignores `set_mode` so Yolo is structurally
+    // unreachable, not just administratively avoided.
+    let security: Arc<dyn SecurityPort> =
+        Arc::new(HeadlessSecurityAdapter::new(workspace.to_path_buf()));
+    let eager_ctx = daemon_compose_context(
+        workspace,
+        storage.clone(),
+        domain_tx.clone(),
+        assembler_name.clone(),
+    );
+    let persona = build_persona(&persona_name, None, &eager_ctx)?;
+
+    // ── The lazy factory (built on first activity) ──────────────────────────
+    let factory = {
+        let workspace = workspace.to_path_buf();
+        let config = config.clone();
+        let storage = storage.clone();
+        let security = security.clone();
+        let domain_tx = domain_tx.clone();
+        Box::new(
+            move || -> Result<Arc<DaemonTurnRuntime>, AdapterCompositionError> {
+                let ctx = daemon_compose_context(
+                    &workspace,
+                    storage.clone(),
+                    domain_tx.clone(),
+                    assembler_name.clone(),
+                );
+                // Live, connection-holding parts — first activity only.
+                let provider: Arc<dyn StreamingProvider> = {
+                    let layer = crate::infrastructure::startup::init_provider_layer(&config.load());
+                    layer.router as Arc<dyn StreamingProvider>
+                };
+                let tools = build_tools(&tools_name, None, &ctx)?;
+                let context_assembler = build_context_assembler(&ctx)?;
+                // Deny-by-default approval (AC6): NoOp persistence so no stale
+                // "always-allow" rule can undermine the unattended deny policy.
+                let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
+                    raw_capacity,
+                    Arc::new(crate::adapters::noop::NoOpApprovalPersistence),
+                );
+                let tool_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+                    security.clone(),
+                    tools.clone(),
+                    approval.clone(),
+                    raw_capacity,
+                );
+                let fs_storage = Arc::new(FileSystemStorage::with_workspace_root(
+                    crate::infrastructure::paths::sessions_dir(&workspace),
+                    workspace.clone(),
+                ));
+                Ok(Arc::new(DaemonTurnRuntime {
+                    provider,
+                    app_config: config.clone(),
+                    security: security.clone(),
+                    tools,
+                    tool_scheduler,
+                    persona: build_persona(&persona_name, None, &ctx)?,
+                    context_assembler: Arc::new(arc_swap::ArcSwap::from_pointee(Some(
+                        context_assembler,
+                    ))),
+                    storage: storage.clone(),
+                    fs_storage,
+                    usage_ledger: Arc::new(crate::adapters::ledger::FileUsageLedger::new()),
+                    telemetry: crate::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
+                    plan_injector: Arc::new(
+                        crate::domain::services::plan_mode_injector::DefaultPlanInjector::new(),
+                    ),
+                    approval,
+                    workspace: workspace.clone(),
+                }))
+            },
+        )
+    };
+
+    Ok(DaemonCore::new(
+        workspace.to_path_buf(),
+        config,
+        memory,
+        storage,
+        security,
+        persona,
+        factory,
+    ))
 }
 
 #[cfg(test)]

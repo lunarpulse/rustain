@@ -174,6 +174,11 @@ pub enum DaemonAction {
         #[arg(long)]
         system: bool,
     },
+    /// Attach an interactive client to the running daemon over its Unix socket
+    /// (Story 12.2b). Streams the daemon's conversation; type a line to submit a
+    /// turn, Ctrl-D to detach (the daemon and any in-flight turn keep running).
+    /// The rich multi-channel TUI client lands in Story 12.2c.
+    Attach,
     /// INTERNAL — the detached child entrypoint (re-exec target of `start`).
     /// Hidden because it is not a user verb: `start` re-execs the current binary
     /// with this action after `setsid`-detaching. Running it by hand runs the

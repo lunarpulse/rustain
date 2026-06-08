@@ -54,6 +54,7 @@ fn user_chat(content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 
@@ -89,6 +90,7 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 

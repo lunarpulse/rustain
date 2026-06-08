@@ -154,6 +154,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 
@@ -325,6 +326,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         };
 
         let mut plans = std::collections::HashMap::new();

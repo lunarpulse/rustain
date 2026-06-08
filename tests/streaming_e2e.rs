@@ -87,6 +87,7 @@ fn test_e2e_message_to_streaming_response() {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 
     // Start streaming (typing indicator phase)

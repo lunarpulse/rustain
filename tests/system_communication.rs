@@ -62,6 +62,7 @@ fn test_error_feedback_block_in_conversation() {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }]);
     let streaming = StreamingState::default();
 

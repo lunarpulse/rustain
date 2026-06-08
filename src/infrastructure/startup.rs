@@ -485,21 +485,30 @@ pub async fn run() -> Result<()> {
         use crate::domain::models::profile::PortDimension;
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-        let memory_adapter = profile_resolver_arc
-            .resolve_active()
-            .and_then(|r| {
-                r.selection
-                    .dimensions
+        let resolved_selection = profile_resolver_arc.resolve_active().map(|r| r.selection);
+        let memory_adapter = resolved_selection
+            .as_ref()
+            .and_then(|sel| {
+                sel.dimensions
                     .get(&PortDimension::Memory)
                     .map(|a| a.adapter.clone())
             })
             .unwrap_or_else(|| "noop".to_string());
-        return crate::adapters::daemon::run_daemon(action, workspace, app_config, memory_adapter)
-            .await
-            .map_err(|e| {
-                tracing::error!("Daemon subcommand failed: {e}");
-                SubcommandExit.into()
-            });
+        // Story 12.2b — the daemon composes its full turn runtime (lazily) from the
+        // active profile selection, so thread it through (not just the memory name).
+        let selection = resolved_selection.unwrap_or_default();
+        return crate::adapters::daemon::run_daemon(
+            action,
+            workspace,
+            app_config,
+            memory_adapter,
+            selection,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Daemon subcommand failed: {e}");
+            SubcommandExit.into()
+        });
     }
 
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)

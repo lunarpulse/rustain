@@ -115,6 +115,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 

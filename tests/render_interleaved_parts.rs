@@ -65,6 +65,7 @@ fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 
@@ -225,6 +226,7 @@ fn user_message_renders_without_gutter() {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     };
     let conv = make_conversation(vec![um], vec![]);
     let clock = MockClock::at_wall_ms(1_700_000_000_000);

@@ -131,6 +131,7 @@ fn test_tool_block_in_full_layout() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
         ChatMessage {
             synthetic: false,
@@ -155,6 +156,7 @@ fn test_tool_block_in_full_layout() {
             token_count: None,
             stop_reason: Some(StopReason::ToolUse),
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         },
     ]);
 
@@ -201,6 +203,7 @@ fn test_feedback_block_in_full_layout() {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }]);
 
     let mut feedback_blocks = BTreeMap::new();

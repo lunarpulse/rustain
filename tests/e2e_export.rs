@@ -28,6 +28,7 @@ fn msg(role: MessageRole, content: &str, created_at: i64) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 
@@ -60,6 +61,7 @@ fn msg_with_tool_call(
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 

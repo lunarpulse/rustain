@@ -198,3 +198,60 @@ The checked-in templates the generator embeds (`include_str!`) live in
 
 - [`dist/rustain.service.template`](../dist/rustain.service.template) (systemd)
 - [`dist/com.rustain.daemon.plist.template`](../dist/com.rustain.daemon.plist.template) (launchd)
+
+## Attach & turn runtime (Story 12.2b)
+
+Since 12.2b the daemon is a **headless turn-processing agent**, not just a memory
+process. It holds one per-process conversation and drives turns over a framed,
+versioned wire protocol on its Unix socket.
+
+### Attaching a client
+
+```sh
+rustain daemon start          # start the background daemon
+rustain daemon attach         # connect an interactive client
+```
+
+`attach` performs the protocol handshake, prints the conversation as it streams,
+and submits a turn for each line you type. **Ctrl-D detaches** — the daemon and any
+in-flight turn keep running (the turn is driven on the daemon-owned event bus, not
+the socket, so it completes and persists even after you detach). The rich
+multi-channel TUI client (history paging, dimmed `[telegram]`/`[cron]` origin
+prefixes, read-only multi-attach indicator) arrives in Story 12.2c; 12.2b ships the
+daemon side plus this line-based client.
+
+### Lazy runtime (NFR46)
+
+`composition::build_daemon_core` eagerly composes only the cheap, connection-free
+parts (memory, session storage, a `Normal`-mode security policy, persona) and
+captures a `TurnRuntimeFactory` behind a single `OnceCell`. The live
+provider/tools/scheduler/approval runtime is built on **first activity** and never
+again (build-once), so an **idle daemon holds no live provider connection** and
+stays under 30 MB. The laziness invariant is checked two ways: a fast in-process
+unit gate (build-counter `0 → 1 → 1`) on every PR, and the `#[ignore]`d release
+idle-RSS gate on the systemd nightly lane.
+
+### Headless approval policy
+
+The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
+
+- **Attached writer** → the approval is forwarded as an `ApprovalRequest` frame; the
+  client renders the permission card and replies. An unresponsive writer times out
+  to a conservative **deny** (never an indefinite hang).
+- **Unattended** → **deny-by-default**: read-only/`Safe` tools auto-proceed; anything
+  mutating is denied and recorded as a visible, resumable transcript note
+  (`⏸ Skipped: … needed approval — no one was attached`), surfaced on the next
+  attach as an "N actions waiting on you" count. `Yolo` is unreachable headless.
+
+### Wire protocol
+
+Frames are a `u32` big-endian length prefix + a `serde_json` body (zero extra
+dependencies). The client speaks `ClientFrame` (`Attach`/`UserMessage`/
+`HistoryRequest`/`ApprovalResponse`/`Detach`); the daemon speaks `DaemonFrame`
+(`AttachAck`/`Event`/`History`/`ApprovalRequest`/`Detached`/`Error`). Forwarded
+turn events reuse the existing `RawEvent` projection (`ClientEvent = RawEvent`) — one
+`AppEvent → wire` mapping, in one place. A `protocol_version` mismatch is rejected
+with a clear `Error` frame (forward-compat for the Telegram/cron channels in
+12.3/12.4). Each message carries its originating `ChannelKind` (`terminal` today),
+**persisted** on `ChatMessage.origin` so the prefix survives a daemon restart /
+crash-recovery replay.

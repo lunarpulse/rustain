@@ -105,6 +105,7 @@ pub fn add_assistant_msg(conv: &mut Conversation, text: &str) {
         stop_reason: Some(rustain::domain::models::StopReason::EndTurn),
         synthetic: true,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 }
 

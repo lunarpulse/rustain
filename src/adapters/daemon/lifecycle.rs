@@ -32,6 +32,14 @@ pub struct DaemonRuntime {
     pub workspace: PathBuf,
     pub pid_path: PathBuf,
     pub socket_path: PathBuf,
+    /// Story 12.2b — the attach server (accept loop + forwarder + approval gate).
+    pub server: Arc<super::server::AttachServer>,
+    /// Story 12.2b — the daemon's per-activation event bus receiver, handed to the
+    /// server's single forwarder task. `Option` so `run_lifecycle` can `take()` it.
+    pub domain_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>>,
+    /// Story 12.2b — the per-process conversation (origin-tagged transcript). Fed
+    /// to `emit_session_boundary` (AC4) and snapshotted on attach.
+    pub conversation: Arc<tokio::sync::Mutex<crate::domain::models::Conversation>>,
 }
 
 /// THE single shared emit seam — AC-12-1a-7 "one code path, three triggers" +
@@ -41,10 +49,10 @@ pub struct DaemonRuntime {
 /// call exactly this function; there are no divergent boundary paths. The boundary
 /// action is, in order:
 ///   1. **finalize the daily log** (drain + flush) — 12.1a, the 12.0 hardened sink.
-///   2. **AC4** — `RecallProviderPort::on_session_end(&transcript)`, invoked
-///      UNCONDITIONALLY (the `Noop` default makes the no-op explicit). The
-///      transcript is empty headless (no message source until Story 12.2) and that
-///      emptiness is logged honestly.
+///   2. **AC4** — `RecallProviderPort::on_session_end(transcript)`, invoked
+///      UNCONDITIONALLY (the `Noop` default makes the no-op explicit). Since Story
+///      12.2b the daemon HAS a per-process conversation, so the **real** transcript
+///      is fed here (it was honestly empty in 12.1a–c, before the message runtime).
 ///   3. **AC3** — honor `MEMORY.md` hand-deletions LIVE through the SAME 12.0
 ///      `refresh()` redaction sink (`honor_md_removals`), then queue a durable
 ///      "N facts removed" audit notice (never silent, never a confirm-gate).
@@ -60,6 +68,7 @@ pub async fn emit_session_boundary(
     memory: &Arc<dyn MemoryPort>,
     recall: &Arc<dyn RecallProviderPort>,
     workspace: &Path,
+    transcript: &[ChatMessage],
 ) {
     tracing::info!(boundary = %boundary, "daemon SessionBoundary");
 
@@ -74,15 +83,15 @@ pub async fn emit_session_boundary(
         tracing::warn!(boundary = %boundary, error = %e, "memory flush at boundary failed");
     }
 
-    // 2. AC4 — on_session_end, unconditional. The transcript is EMPTY because the
-    //    headless daemon has no message source until Story 12.2 (NOT because the
-    //    provider short-circuits — the Noop must not bake in `if empty { return }`).
-    let transcript: Vec<ChatMessage> = Vec::new();
+    // 2. AC4 — on_session_end, unconditional with the REAL per-process transcript
+    //    (Story 12.2b: the daemon now drives turns, so the conversation is fed
+    //    through). The `Noop` default still must not bake in `if empty { return }`.
     tracing::debug!(
         boundary = %boundary,
-        "no transcript source until Story 12.2; on_session_end invoked with empty context"
+        transcript_len = transcript.len(),
+        "on_session_end invoked with the per-process conversation transcript"
     );
-    if let Err(e) = recall.on_session_end(&transcript).await {
+    if let Err(e) = recall.on_session_end(transcript).await {
         tracing::warn!(boundary = %boundary, error = %e, "on_session_end at boundary failed");
     }
 
@@ -150,7 +159,7 @@ fn next_daily_reset(target: chrono::NaiveTime) -> Duration {
 
 /// Run the headless lifecycle loop until a shutdown signal. Returns after the
 /// graceful-shutdown path has removed the PID file + socket.
-pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
+pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
     let idle = rt
         .config
         .daemon
@@ -168,6 +177,20 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())?;
     let listener = socket::bind(&rt.socket_path)?;
 
+    // Story 12.2b — the attach server owns the accept loop + forwarder. We hand it
+    // the listener + the bus receiver and a shutdown token; the lifecycle loop
+    // below keeps its timer/signal duties (boundaries + graceful shutdown).
+    let server_shutdown = tokio_util::sync::CancellationToken::new();
+    let domain_rx = rt
+        .domain_rx
+        .take()
+        .expect("DaemonRuntime.domain_rx must be set");
+    let server = rt.server.clone();
+    let server_handle = tokio::spawn({
+        let sd = server_shutdown.clone();
+        async move { server.run(listener, domain_rx, sd).await }
+    });
+
     // Timers. The idle timer arm is disabled (via the `if !low_power` guard) once
     // we are already in low-power, and re-armed on activity.
     let mut daily_timer = Box::pin(tokio::time::sleep(next_daily_reset(daily_target)));
@@ -177,7 +200,7 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
     tracing::info!(
         idle_secs = idle.as_secs(),
         daily_reset = %rt.config.daemon.daily_reset,
-        "daemon lifecycle ready (headless; no message source until Story 12.2)"
+        "daemon lifecycle ready (Story 12.2b: attach server live, headless turn runtime lazy)"
     );
 
     loop {
@@ -187,6 +210,7 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
             _ = sighup.recv()  => { tracing::info!("daemon received SIGHUP");  break; }
 
             _ = &mut daily_timer => {
+                let transcript = { rt.conversation.lock().await.messages.clone() };
                 if tokio::time::timeout(
                     Duration::from_secs(2),
                     emit_session_boundary(
@@ -194,6 +218,7 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
                         &rt.memory,
                         &rt.recall,
                         &rt.workspace,
+                        &transcript,
                     ),
                 )
                 .await
@@ -201,9 +226,6 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
                 {
                     tracing::warn!("daemon: daily_reset boundary emit timed out (>2s)");
                 }
-                // 12.1a boundary action: reset conversation context is a no-op
-                // (no conversation yet) + rearm both timers. A daily reset counts
-                // as activity, so leave low-power.
                 low_power = false;
                 daily_timer = Box::pin(tokio::time::sleep(next_daily_reset(daily_target)));
                 idle_timer = Box::pin(tokio::time::sleep(idle));
@@ -213,6 +235,7 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
                 low_power = true;
                 tracing::info!("daemon entered low-power state");
                 if low_power_emits {
+                    let transcript = { rt.conversation.lock().await.messages.clone() };
                     if tokio::time::timeout(
                         Duration::from_secs(2),
                         emit_session_boundary(
@@ -220,6 +243,7 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
                             &rt.memory,
                             &rt.recall,
                             &rt.workspace,
+                            &transcript,
                         ),
                     )
                     .await
@@ -228,29 +252,12 @@ pub async fn run_lifecycle(rt: DaemonRuntime) -> Result<()> {
                         tracing::warn!("daemon: idle_timeout boundary emit timed out (>2s)");
                     }
                 }
-                // Stay in low-power until activity reactivates us (the arm is now
-                // guarded off, so the elapsed timer won't busy-loop).
-            }
-
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, _addr)) => {
-                        // 12.1a: log + close stub. The attach wire protocol is 12.2.
-                        drop(stream);
-                        tracing::info!("daemon socket: accepted + closed (attach protocol = Story 12.2)");
-                    }
-                    Err(e) => tracing::warn!(error = %e, "daemon socket accept failed"),
-                }
-                // Activity → reactivate from low-power + reset the idle timer.
-                if low_power {
-                    low_power = false;
-                    tracing::info!("daemon reactivated from low-power");
-                }
-                idle_timer = Box::pin(tokio::time::sleep(idle));
             }
         }
     }
 
+    server_shutdown.cancel();
+    server_handle.abort();
     graceful_shutdown(&rt).await;
     Ok(())
 }
@@ -264,6 +271,7 @@ async fn graceful_shutdown(rt: &DaemonRuntime) {
     tracing::info!("daemon graceful shutdown begin");
 
     // Boundary emit (drain + flush) — capped so a stuck flush can't blow NFR48.
+    let transcript = { rt.conversation.lock().await.messages.clone() };
     if tokio::time::timeout(
         Duration::from_secs(3),
         emit_session_boundary(
@@ -271,6 +279,7 @@ async fn graceful_shutdown(rt: &DaemonRuntime) {
             &rt.memory,
             &rt.recall,
             &rt.workspace,
+            &transcript,
         ),
     )
     .await
@@ -367,9 +376,9 @@ mod tests {
         let recall_rec = Arc::new(RecordingRecall::default());
         let recall: Arc<dyn RecallProviderPort> = recall_rec.clone();
 
-        emit_session_boundary(SessionBoundary::DailyReset, &mem, &recall, ws.path()).await;
-        emit_session_boundary(SessionBoundary::IdleTimeout, &mem, &recall, ws.path()).await;
-        emit_session_boundary(SessionBoundary::Shutdown, &mem, &recall, ws.path()).await;
+        emit_session_boundary(SessionBoundary::DailyReset, &mem, &recall, ws.path(), &[]).await;
+        emit_session_boundary(SessionBoundary::IdleTimeout, &mem, &recall, ws.path(), &[]).await;
+        emit_session_boundary(SessionBoundary::Shutdown, &mem, &recall, ws.path(), &[]).await;
 
         // Each of the three boundaries drove the SAME sink + EACH 12.1c hook exactly
         // once → one path, three triggers (AC1).
@@ -415,13 +424,13 @@ mod tests {
         // Recording stub ⇒ called exactly once, transcript empty.
         let recall_rec = Arc::new(RecordingRecall::default());
         let recall: Arc<dyn RecallProviderPort> = recall_rec.clone();
-        emit_session_boundary(SessionBoundary::Shutdown, &mem, &recall, ws.path()).await;
+        emit_session_boundary(SessionBoundary::Shutdown, &mem, &recall, ws.path(), &[]).await;
         assert_eq!(recall_rec.calls.load(Ordering::SeqCst), 1);
         assert_eq!(recall_rec.max_seen_len.load(Ordering::SeqCst), 0);
 
         // Noop default ⇒ no panic, zero side-effects (reaching the assert is the pass).
         let noop: Arc<dyn RecallProviderPort> = Arc::new(crate::adapters::noop::NoopRecallProvider);
-        emit_session_boundary(SessionBoundary::DailyReset, &mem, &noop, ws.path()).await;
+        emit_session_boundary(SessionBoundary::DailyReset, &mem, &noop, ws.path(), &[]).await;
     }
 
     /// Review patch — `NoopRecallProvider` must tolerate a non-empty transcript
@@ -441,6 +450,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         };
         let result = noop.on_session_end(&[msg]).await;
         assert!(
@@ -459,9 +469,10 @@ mod tests {
         {
             let mem: Arc<dyn MemoryPort> = Arc::new(RecordingMemory::default());
             let recall: Arc<dyn RecallProviderPort> = Arc::new(RecordingRecall::default());
-            emit_session_boundary(SessionBoundary::DailyReset, &mem, &recall, ws.path()).await;
-            emit_session_boundary(SessionBoundary::IdleTimeout, &mem, &recall, ws.path()).await;
-            emit_session_boundary(SessionBoundary::Shutdown, &mem, &recall, ws.path()).await;
+            emit_session_boundary(SessionBoundary::DailyReset, &mem, &recall, ws.path(), &[]).await;
+            emit_session_boundary(SessionBoundary::IdleTimeout, &mem, &recall, ws.path(), &[])
+                .await;
+            emit_session_boundary(SessionBoundary::Shutdown, &mem, &recall, ws.path(), &[]).await;
             // Drop the memory/recall/runtime — only the on-disk queue remains.
         }
         let replayed = session_queue::read_consolidation_due(ws.path())

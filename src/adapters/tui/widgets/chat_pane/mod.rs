@@ -3025,6 +3025,7 @@ mod parts_aware_tests {
                 stop_reason: None,
                 synthetic: false,
                 images: vec![],
+                origin: crate::domain::models::ChannelKind::Terminal,
             }],
             turns: vec![turn.clone()],
             created_at: 0,

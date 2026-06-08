@@ -2691,6 +2691,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
                 ChatMessage {
                     id: "msg-test-002".to_string(),
@@ -2703,6 +2704,7 @@ mod tests {
                     stop_reason: Some(StopReason::EndTurn),
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
             ],
             created_at: 1700000000,
@@ -3807,6 +3809,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
                 ChatMessage {
                     id: "msg-2".to_string(),
@@ -3819,6 +3822,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
                 ChatMessage {
                     id: "msg-3".to_string(),
@@ -3831,6 +3835,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
             ],
             created_at: 1700000000,
@@ -3928,6 +3933,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
                 ChatMessage {
                     id: "msg-2".to_string(),
@@ -3940,6 +3946,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
                 ChatMessage {
                     id: "msg-3".to_string(),
@@ -3952,6 +3959,7 @@ mod tests {
                     stop_reason: None,
                     synthetic: false,
                     images: vec![],
+                    origin: crate::domain::models::ChannelKind::Terminal,
                 },
             ],
             created_at: 1700000000,

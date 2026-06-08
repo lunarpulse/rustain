@@ -33,6 +33,7 @@ fn user(id: &str, content: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 
@@ -48,6 +49,7 @@ fn assistant(id: &str, content: &str, tool_calls: Vec<ToolCallInfo>) -> ChatMess
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 
@@ -63,6 +65,7 @@ fn assistant_thinking(id: &str, content: &str, thinking: &str) -> ChatMessage {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 

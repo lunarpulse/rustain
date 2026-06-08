@@ -355,7 +355,7 @@ pub enum DelegationDecision {
 /// Flows through the existing `AppEvent` bus (NO new EventBus channel —
 /// the registry's `event_tx` is injected from `ComposeContext.domain_tx`
 /// per Epic 9 Flag 1).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CapabilityEvent {
     /// A new capability has been registered.
     Registered {

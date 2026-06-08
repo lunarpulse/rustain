@@ -105,6 +105,27 @@ pub struct TurnViewState<'a> {
     pub session_manager: &'a mut SessionManager,
 }
 
+/// The turn-origination seam (Story 12.2b — Rule-of-Three extraction).
+///
+/// One method: originate a turn from a [`UserSubmission`] + the caller's
+/// [`TurnViewState`]. Two impls:
+/// - [`LocalTurnDriver`] (impl #1) — the interactive local TUI (today).
+/// - `SocketTurnDriver` (impl #2, Story 12.2c) — the **attach client's** TUI,
+///   whose `submit` forwards the submission over the socket instead of spawning
+///   `run_turn`. It legitimately has a `TurnViewState` (it renders locally).
+///
+/// The **headless daemon is deliberately NOT a `TurnDriver` impl** — it has no
+/// `StreamingState`/`TuiState`/`SessionManager`. It owns
+/// [`DaemonTurnRuntime`](crate::adapters::daemon::runtime::DaemonTurnRuntime),
+/// which reuses the shared origination *primitives* (`build_api_messages` +
+/// `run_turn`) directly over its per-process conversation. See the Story 12.2b
+/// Dev Notes "Seam-shape reconciliation" (settled: factor-core / daemon-owns-runtime).
+#[async_trait::async_trait]
+pub trait TurnDriver {
+    /// Originate one turn. See [`LocalTurnDriver::submit`].
+    async fn submit(&self, sub: UserSubmission, view: TurnViewState<'_>);
+}
+
 /// Local turn driver: owns every agent-side dependency and originates a turn
 /// via [`submit`](Self::submit). This is the producer half of the event loop,
 /// extracted from the former `start_turn` / `start_turn_inner` free functions.
@@ -243,6 +264,7 @@ impl LocalTurnDriver {
             stop_reason: None,
             synthetic,
             images: persisted_refs,
+            origin: crate::domain::models::ChannelKind::Terminal,
         });
 
         // Build messages list for provider via the Story 11.0a Message-tier assembler
@@ -551,5 +573,17 @@ impl LocalTurnDriver {
 
         state.status = StatusState::Streaming;
         state.needs_redraw = true;
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnDriver for LocalTurnDriver {
+    /// Delegates to the inherent [`LocalTurnDriver::submit`]. Method-call syntax
+    /// resolves to the inherent method (inherent methods take precedence over
+    /// trait methods), so this is delegation, NOT recursion — and the 18 hot
+    /// call sites in `event_loop.rs` keep calling the inherent `submit` with zero
+    /// boxing/byte-identical behavior (the 12.2a snapshot suite is untouched).
+    async fn submit(&self, sub: UserSubmission, view: TurnViewState<'_>) {
+        self.submit(sub, view).await
     }
 }

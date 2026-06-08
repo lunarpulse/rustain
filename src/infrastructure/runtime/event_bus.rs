@@ -24,13 +24,20 @@
 //! }
 //! ```
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::domain::events::AppEvent;
 use crate::domain::models::{NoticeLevel, PermissionMode, StreamChunk, ToolCallTransition};
 
-#[derive(Clone, Debug, Serialize)]
+/// `Deserialize` (Story 12.2b): `RawEvent` is the single `AppEvent → wire`
+/// projection (`from_app_event`). The daemon attach protocol reuses it verbatim
+/// as [`crate::adapters::daemon::protocol::ClientEvent`] (a type alias) so the
+/// client can deserialize the same events the broadcast bus serializes — one
+/// projection, one place (AC2). Every nested payload already derived
+/// `Deserialize`; only `RawEvent`/`RawEventKind` + `ApprovalRuntimeEvent` +
+/// `CapabilityEvent`/`RegisteredCapability` needed it added.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RawEvent {
     pub conversation_id: Option<String>,
     pub timestamp_ms: i64,
@@ -38,7 +45,7 @@ pub struct RawEvent {
 }
 
 #[non_exhaustive]
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RawEventKind {
     Provider(StreamChunk),
     ModeChanged(PermissionMode),

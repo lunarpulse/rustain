@@ -139,6 +139,7 @@ pub fn make_msg(id: &str, role: MessageRole) -> ChatMessage {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 

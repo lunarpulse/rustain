@@ -119,6 +119,7 @@ fn add_user_message(conv: &mut Conversation, content: &str) {
         token_count: None,
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 }
 
@@ -360,6 +361,7 @@ fn test_no_title_generation_for_subsequent_turns() {
         token_count: None,
         stop_reason: Some(StopReason::EndTurn),
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 
     // Add another user message + assistant response (messages.len() will be 4)

@@ -429,6 +429,7 @@ impl TestHarness {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
 
         self.streaming.is_streaming = true;
@@ -979,6 +980,7 @@ fn test_e2e_api_messages_valid_after_tool_use() {
         token_count: None,
         stop_reason: Some(StopReason::ToolUse),
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 
     // Validate API messages — this is the critical regression test

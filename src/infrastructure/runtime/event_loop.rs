@@ -1070,6 +1070,7 @@ pub async fn run(
                                                         stop_reason: None,
                                                         synthetic: true,
                                                         images: vec![],
+                                                        origin: crate::domain::models::ChannelKind::Terminal,
                                                     }],
                                                     turns: vec![],
                                                     created_at: crate::domain::models::session_meta::now_unix(),
@@ -1297,6 +1298,7 @@ pub async fn run(
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
                                                 synthetic: false,
                                                 images: vec![],
+                                                origin: crate::domain::models::ChannelKind::Terminal,
                                             });
                                         }
                                         // Abort the active turn task
@@ -3378,6 +3380,7 @@ pub async fn run(
                                                 stop_reason: Some(crate::domain::models::StopReason::Cancelled),
                                                 synthetic: false,
                                                 images: vec![],
+                                                origin: crate::domain::models::ChannelKind::Terminal,
                                             });
                                         }
                                         // Abort the streaming task
@@ -5860,6 +5863,7 @@ pub async fn run(
                                     stop_reason: None,
                                     synthetic: true,
                                     images: vec![],
+                                    origin: crate::domain::models::ChannelKind::Terminal,
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -5883,6 +5887,7 @@ pub async fn run(
                                     stop_reason: None,
                                     synthetic: true,
                                     images: vec![],
+                                    origin: crate::domain::models::ChannelKind::Terminal,
                                 };
                                 conversation.messages.push(synthetic_msg);
                                 let text = conversation.messages.last().map(|m| m.content.clone()).unwrap_or_default();
@@ -5909,6 +5914,7 @@ pub async fn run(
                                     stop_reason: None,
                                     synthetic: true,
                                     images: vec![],
+                                    origin: crate::domain::models::ChannelKind::Terminal,
                                 };
                                 conversation.messages.push(synthetic_msg);
                             }
@@ -5954,6 +5960,7 @@ pub async fn run(
                                             stop_reason: None,
                                             synthetic: false,
                                             images: vec![],
+                                            origin: crate::domain::models::ChannelKind::Terminal,
                                         };
                                         conversation.messages.push(msg);
                                         turn_id.clone()
@@ -5971,6 +5978,7 @@ pub async fn run(
                                         stop_reason: None,
                                         synthetic: false,
                                         images: vec![],
+                                        origin: crate::domain::models::ChannelKind::Terminal,
                                     };
                                     conversation.messages.push(msg);
                                     id
@@ -5987,6 +5995,7 @@ pub async fn run(
                                     stop_reason: None,
                                     synthetic: false,
                                     images: vec![],
+                                    origin: crate::domain::models::ChannelKind::Terminal,
                                 };
                                 conversation.messages.push(msg);
                                 turn_id.clone()
@@ -6003,6 +6012,7 @@ pub async fn run(
                                     stop_reason: None,
                                     synthetic: false,
                                     images: vec![],
+                                    origin: crate::domain::models::ChannelKind::Terminal,
                                 };
                                 conversation.messages.push(msg);
                                 id
@@ -10053,6 +10063,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images,
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 
@@ -10068,6 +10079,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 

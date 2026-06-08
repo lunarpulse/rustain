@@ -15,6 +15,7 @@ fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         token_count: Some(10),
         stop_reason: None,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 

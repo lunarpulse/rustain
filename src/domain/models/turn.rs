@@ -386,6 +386,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         };
         let turn = migrate_chat_message_to_turn(&msg);
         assert_eq!(turn.parts.len(), 1);
@@ -417,6 +418,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         };
         let turn = migrate_chat_message_to_turn(&msg);
         assert_eq!(turn.parts.len(), 3);
@@ -451,6 +453,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         };
         let turn = migrate_chat_message_to_turn(&msg);
         assert!(matches!(
@@ -483,6 +486,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         };
         let turn = migrate_chat_message_to_turn(&msg);
         // No prose part because content is empty, but invocation part exists

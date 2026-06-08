@@ -146,6 +146,7 @@ fn make_conversation() -> Conversation {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         }],
         turns: Vec::new(),
         created_at: 0,

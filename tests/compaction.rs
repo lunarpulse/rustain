@@ -37,6 +37,7 @@ fn make_conversation_with_messages() -> Conversation {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
     conv.messages.push(ChatMessage {
         id: "m2".to_string(),
@@ -49,6 +50,7 @@ fn make_conversation_with_messages() -> Conversation {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
     conv.messages.push(ChatMessage {
         id: "m3".to_string(),
@@ -61,6 +63,7 @@ fn make_conversation_with_messages() -> Conversation {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
     conv.messages.push(ChatMessage {
         id: "m4".to_string(),
@@ -73,6 +76,7 @@ fn make_conversation_with_messages() -> Conversation {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
     conv.messages.push(ChatMessage {
         id: "m5".to_string(),
@@ -85,6 +89,7 @@ fn make_conversation_with_messages() -> Conversation {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 
     conv
@@ -173,6 +178,7 @@ fn test_first_kept_message_id_less_than_two_turns() {
         stop_reason: None,
         synthetic: false,
         images: vec![],
+        origin: rustain::domain::models::ChannelKind::Terminal,
     });
 
     assert_eq!(compaction::first_kept_message_id(&conv), None);

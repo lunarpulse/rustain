@@ -37,6 +37,7 @@ fn make_message_with_images(
         token_count: None,
         stop_reason: None,
         images,
+        origin: rustain::domain::models::ChannelKind::Terminal,
     }
 }
 

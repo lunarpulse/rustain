@@ -62,7 +62,12 @@ pub struct ImageReference {
 
 /// A single message in a conversation. Persisted to session files.
 /// Distinct from `Message` which is the provider-agnostic API request format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default` (Story 12.2b) lets new daemon/channel code build a message with
+/// `ChatMessage { content, role, origin, ..Default::default() }` instead of
+/// restating every field; `MessageRole`'s own `Default` (Assistant) and
+/// `ChannelKind`'s (`Terminal`) back it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     /// Unique message ID (nanoid). `#[serde(default)]` ensures old sessions without IDs still load.
@@ -86,6 +91,19 @@ pub struct ChatMessage {
     /// Empty vec is omitted from JSON output for backward compatibility with pre-4.3a.1 sessions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageReference>,
+    /// Originating channel (Story 12.2b AC5). Intrinsic provenance — persisted so a
+    /// re-attached / crash-replayed message still renders its `[telegram]`/`[cron]`
+    /// prefix. `#[serde(default)]` reads pre-12.2b sessions (no `origin` key) as
+    /// [`ChannelKind::Terminal`]; the default is omitted from JSON so unchanged
+    /// terminal-only sessions produce byte-identical files (snapshot stability).
+    #[serde(default, skip_serializing_if = "is_terminal_origin")]
+    pub origin: super::channel_kind::ChannelKind,
+}
+
+/// `skip_serializing_if` predicate: the `Terminal` default is omitted from JSON so
+/// pre-12.2b terminal-only session files round-trip byte-identically.
+fn is_terminal_origin(origin: &super::channel_kind::ChannelKind) -> bool {
+    *origin == super::channel_kind::ChannelKind::Terminal
 }
 
 /// Generate a unique message ID using nanoid.
@@ -247,6 +265,7 @@ impl Conversation {
                 stop_reason: turn.stop_reason.clone(),
                 synthetic: false,
                 images: vec![],
+                origin: crate::domain::models::ChannelKind::Terminal,
             };
 
             if let Some(&idx) = msg_indices.get(&turn.id.0) {
@@ -435,6 +454,7 @@ mod tests {
             stop_reason: None,
             synthetic: false,
             images,
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 

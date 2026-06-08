@@ -76,7 +76,11 @@ impl SessionApprovalSet {
 }
 
 /// Event emitted on the approval runtime broadcast channel.
-#[derive(Clone, Debug, serde::Serialize)]
+///
+/// `Deserialize` (Story 12.2b): forwarded over the daemon attach protocol inside
+/// [`crate::infrastructure::runtime::event_bus::RawEventKind::Approval`]; the
+/// attach client deserializes it to render the permission card.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ApprovalRuntimeEvent {
     Requested {
         id: RequestId,
@@ -96,7 +100,7 @@ pub enum ApprovalRuntimeEvent {
 }
 
 /// Reason an approval was cancelled.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum CancelReason {
     SourceAborted,
     RuntimeShutdown,

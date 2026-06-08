@@ -51,6 +51,7 @@ fn make_conversation(messages: Vec<(MessageRole, &str)>) -> Conversation {
                 token_count: None,
                 stop_reason: None,
                 images: vec![],
+                origin: rustain::domain::models::ChannelKind::Terminal,
             })
             .collect(),
         turns: Vec::new(),

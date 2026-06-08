@@ -26,6 +26,7 @@ fn make_conversation(msg_count: usize) -> Conversation {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         })
         .collect();
 
@@ -468,6 +469,7 @@ fn test_virtual_scroll_only_user_messages() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         })
         .collect();
     let conversation = Conversation {
@@ -570,6 +572,7 @@ fn make_turn_conversation_seeded(turn_count: usize) -> Conversation {
             token_count: None,
             stop_reason: Some(StopReason::EndTurn),
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
     }
 

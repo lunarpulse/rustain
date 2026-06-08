@@ -47,7 +47,7 @@ struct RegistryInner {
 /// This is the registry's working shape. Story 9.3b adds a `From`
 /// conversion to `ToolDescriptor` (the canonical domain catalog shape
 /// used by 9.4 / 9.4b consumers).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RegisteredCapability {
     /// Unique identifier.
     pub id: CapabilityId,

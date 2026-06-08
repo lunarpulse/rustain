@@ -267,6 +267,41 @@ impl SecurityPort for SecurityAdapter {
         self.mode.store(val, Ordering::Release);
     }
 }
+/// Headless security adapter — permanently Normal; `set_mode` is a no-op.
+/// Used by the daemon so Yolo can never leak via a future call site (AC6).
+pub struct HeadlessSecurityAdapter(SecurityAdapter);
+
+impl HeadlessSecurityAdapter {
+    pub fn new(workspace_path: PathBuf) -> Self {
+        Self(SecurityAdapter::new(workspace_path))
+    }
+}
+
+#[async_trait]
+impl SecurityPort for HeadlessSecurityAdapter {
+    fn check_blocklist(&self, command: &str) -> Result<(), PermissionError> {
+        self.0.check_blocklist(command)
+    }
+    fn check_workspace_access(
+        &self,
+        path: &Path,
+        op: FileOperation,
+    ) -> Result<PathAccessType, PermissionError> {
+        self.0.check_workspace_access(path, op)
+    }
+    fn add_active_skill_dir(&self, dir: PathBuf) {
+        self.0.add_active_skill_dir(dir)
+    }
+    fn remove_active_skill_dir(&self, dir: &Path) {
+        self.0.remove_active_skill_dir(dir)
+    }
+    fn current_mode(&self) -> PermissionMode {
+        PermissionMode::Normal
+    }
+    fn set_mode(&self, _mode: PermissionMode) {
+        tracing::debug!("headless security: set_mode ignored (permanently Normal)");
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -418,6 +453,22 @@ mod tests {
         adapter.set_mode(PermissionMode::Yolo);
         assert_eq!(adapter.current_mode(), PermissionMode::Yolo);
         adapter.set_mode(PermissionMode::Normal);
+        assert_eq!(adapter.current_mode(), PermissionMode::Normal);
+    }
+}
+
+#[cfg(test)]
+mod headless_tests {
+    use super::*;
+
+    /// AC6: HeadlessSecurityAdapter is permanently Normal; set_mode is a no-op.
+    #[test]
+    fn headless_security_never_yolo() {
+        let adapter = HeadlessSecurityAdapter::new(PathBuf::from("/tmp"));
+        assert_ne!(adapter.current_mode(), PermissionMode::Yolo);
+        assert_eq!(adapter.current_mode(), PermissionMode::Normal);
+        adapter.set_mode(PermissionMode::Yolo);
+        assert_ne!(adapter.current_mode(), PermissionMode::Yolo);
         assert_eq!(adapter.current_mode(), PermissionMode::Normal);
     }
 }

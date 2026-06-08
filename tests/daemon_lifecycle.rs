@@ -174,13 +174,26 @@ fn nfr47_startup_and_nfr48_shutdown_within_budget() {
     );
 }
 
-/// NFR46 — idle RSS < 30MB. `#[ignore]`d by default per the AC-12-1a-4 exemption
-/// clause: idle RSS depends on which cargo features are compiled in (default
-/// pulls anthropic/openai/ollama/mcp/meta-search) and on the build profile;
-/// constrained/instrumented CI cannot reliably honor a 30MB ceiling on a debug
-/// build. Validated manually on release builds. Run with `--ignored` to measure.
+/// NFR46 — idle RSS < 30MB. The **slow truth gate** of Story 12.2b's two-speed
+/// laziness check (AC1b): the in-process FAST gate
+/// (`daemon::runtime::tests::runtime_is_lazy_and_built_exactly_once` — build-counter
+/// 0/1/1, `OnceCell` unset-then-set) proves the daemon does not eagerly build its
+/// turn runtime; THIS gate proves the RSS consequence — an idle daemon that has
+/// NEVER been attached/messaged holds no live provider connection and stays under
+/// 30MB.
+///
+/// `#[ignore]`d by default per the AC-12-1a-4 exemption: idle RSS depends on which
+/// cargo features are compiled in (default pulls anthropic/openai/ollama/mcp/
+/// meta-search) and on the build profile; a debug+all-features build is a known
+/// ~39MB outlier. **Evidence = a dated recorded GREEN from the EXISTING 12.1a/12.1d
+/// systemd nightly lane on a release build** (per AC1b; never the mere existence of
+/// this `#[ignore]`d test — the 12.1b scar). Run with `--ignored` on `--release`.
+///
+/// Anti-theater (AC1b): the daemon is sampled while genuinely IDLE — the test never
+/// attaches or sends a `UserMessage`, so the lazy `OnceCell` is never initialised;
+/// and RSS is the PEAK over a sampling window, not a single lucky read.
 #[test]
-#[ignore = "NFR46 idle RSS<30MB — feature/profile dependent; manual on release builds (AC-12-1a-4 exemption)"]
+#[ignore = "NFR46 idle RSS<30MB (AC1b slow gate) — feature/profile dependent; release-only on the systemd nightly lane (AC-12-1a-4 exemption)"]
 #[cfg(target_os = "linux")]
 fn nfr46_idle_rss_under_30mb() {
     let d = dirs();
@@ -193,19 +206,29 @@ fn nfr46_idle_rss_under_30mb() {
         .and_then(|n| n.trim().parse().ok())
         .unwrap();
 
-    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
-    let rss_kb: u64 = status
-        .lines()
-        .find_map(|l| l.strip_prefix("VmRSS:"))
-        .and_then(|r| r.split_whitespace().next())
-        .and_then(|n| n.parse().ok())
-        .expect("VmRSS readable");
+    let read_rss = || -> u64 {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .expect("VmRSS readable")
+    };
+
+    // Sample the PEAK over a window (10×@200ms) — a single read could miss a
+    // transient allocation spike (AC1b "assert max — not a single read").
+    let mut peak_kb = 0u64;
+    for _ in 0..10 {
+        peak_kb = peak_kb.max(read_rss());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 
     d.cmd().args(["daemon", "stop"]).assert().success();
 
     assert!(
-        rss_kb < 30 * 1024,
-        "NFR46: idle RSS must be < 30MB, was {:.1}MB",
-        rss_kb as f64 / 1024.0
+        peak_kb < 30 * 1024,
+        "NFR46/AC1b: idle (never-activated) daemon peak RSS must be < 30MB, was {:.1}MB",
+        peak_kb as f64 / 1024.0
     );
 }

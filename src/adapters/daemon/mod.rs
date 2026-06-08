@@ -21,11 +21,19 @@ use crate::adapters::cli::commands::DaemonAction;
 use crate::domain::models::AppConfig;
 
 #[cfg(unix)]
+mod attach_client;
+#[cfg(unix)]
 mod crash;
 #[cfg(unix)]
 mod lifecycle;
 #[cfg(unix)]
 mod pidfile;
+#[cfg(unix)]
+pub mod protocol;
+#[cfg(unix)]
+pub mod runtime;
+#[cfg(unix)]
+pub mod server;
 #[cfg(unix)]
 mod service;
 #[cfg(unix)]
@@ -46,19 +54,23 @@ pub async fn run_daemon(
     workspace: PathBuf,
     config: AppConfig,
     memory_adapter: String,
+    selection: crate::domain::models::profile::ProfileSelection,
 ) -> Result<()> {
     #[cfg(unix)]
     {
         match action {
             DaemonAction::Start { foreground } => {
                 if foreground {
-                    run_daemon_foreground(workspace, config, memory_adapter).await
+                    run_daemon_foreground(workspace, config, memory_adapter, selection).await
                 } else {
                     run_daemon_start(workspace, config).await
                 }
             }
-            DaemonAction::Run => run_daemon_foreground(workspace, config, memory_adapter).await,
+            DaemonAction::Run => {
+                run_daemon_foreground(workspace, config, memory_adapter, selection).await
+            }
             DaemonAction::Stop => run_daemon_stop(workspace).await,
+            DaemonAction::Attach => attach_client::run_attach(&workspace).await,
             DaemonAction::Status { json } => run_daemon_status(workspace, config, json).await,
             // install/uninstall are pure generate/remove — no memory composition, no
             // async I/O (AC-12-1b-3/3b). Called synchronously inside the async fn.
@@ -70,7 +82,7 @@ pub async fn run_daemon(
     }
     #[cfg(not(unix))]
     {
-        let _ = (action, workspace, config, memory_adapter);
+        let _ = (action, workspace, config, memory_adapter, selection);
         windows_not_supported()
     }
 }
@@ -207,6 +219,7 @@ async fn run_daemon_foreground(
     workspace: PathBuf,
     config: AppConfig,
     memory_adapter: String,
+    selection: crate::domain::models::profile::ProfileSelection,
 ) -> Result<()> {
     config.daemon.validate().map_err(|e| anyhow::anyhow!(e))?;
 
@@ -236,27 +249,55 @@ async fn run_daemon_foreground(
         GuardOutcome::Free => {}
     }
 
-    // Compose ONLY the memory port (see composition::build_daemon_memory docs):
-    // 12.1a has no message runtime, so the only port with a shutdown obligation
-    // is memory (its flush must route through 12.0's hardened prepare_detach sink).
-    let memory =
-        crate::infrastructure::composition::build_daemon_memory(&workspace, &memory_adapter)
-            .map_err(|e| anyhow::anyhow!("composing daemon memory adapter: {e}"))?;
+    // Story 12.2b — compose the daemon CORE: eager memory/storage/security/persona
+    // + a lazy `TurnRuntimeFactory` behind a `OnceCell` (idle holds no live
+    // provider — NFR46). `build_daemon_core` reuses the same `build_*` factories
+    // startup uses (no forked composition). The per-activation event bus is created
+    // here so the factory can capture its `domain_tx` and the forwarder owns the rx.
+    let config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(config.clone()));
+    let (event_bus, domain_rx) = crate::infrastructure::runtime::event_bus::EventBus::new(
+        config.runtime.event_bus.raw_capacity.max(1),
+    );
+    let domain_tx = event_bus.domain_tx.clone();
+    let core = std::sync::Arc::new(
+        crate::infrastructure::composition::build_daemon_core(
+            &workspace,
+            config_swap,
+            selection,
+            &memory_adapter,
+            domain_tx.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
+    );
 
-    // Story 12.1c AC4 — the recall provider defaults to the explicit offline no-op
-    // (`NoopRecallProvider`). The daemon has no external recall backend composed; a
-    // real provider arrives with the message runtime (Story 11.5/12.2). The seam is
-    // still DRIVEN every boundary (prove-the-seam-is-called, 12.1b lesson).
+    // Story 12.2b AC4 — load/restore the per-process conversation from the
+    // workspace session (most-recent), else start fresh + persist. Re-attach
+    // (12.2c) and the boundary loop see this same transcript.
+    let conversation = std::sync::Arc::new(tokio::sync::Mutex::new(
+        load_or_new_conversation(core.storage.as_ref()).await,
+    ));
+
+    // The recall provider stays the offline no-op (a real backend arrives with
+    // Story 11.5); the seam is still DRIVEN every boundary with the REAL transcript.
     let recall: std::sync::Arc<dyn crate::domain::ports::RecallProviderPort> =
         std::sync::Arc::new(crate::adapters::noop::NoopRecallProvider);
 
+    let server = crate::adapters::daemon::server::AttachServer::new(
+        core.clone(),
+        conversation.clone(),
+        domain_tx,
+    );
+
     let rt = DaemonRuntime {
         config: config.clone(),
-        memory,
+        memory: core.memory.clone(),
         recall,
         workspace: workspace.clone(),
         pid_path: pid_path.clone(),
         socket_path: socket_path.clone(),
+        server,
+        domain_rx: Some(domain_rx),
+        conversation,
     };
 
     // Write the PID file LAST (after we know paths resolve) — it is the readiness
@@ -528,4 +569,43 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Story 12.2b AC4 — restore the daemon's per-process conversation from the
+/// workspace session (the most-recently-updated one), or start a fresh one. A
+/// fresh conversation is persisted immediately so `status`/re-attach see it.
+#[cfg(unix)]
+async fn load_or_new_conversation(
+    storage: &dyn crate::domain::ports::StoragePort,
+) -> crate::domain::models::Conversation {
+    use crate::domain::models::Conversation;
+    if let Ok(mut summaries) = storage.list_conversations().await {
+        summaries.sort_by_key(|s| s.updated_at);
+        if let Some(latest) = summaries.last() {
+            match storage.load_conversation(&latest.id).await {
+                Ok(Some(conv)) => {
+                    tracing::info!(id = %conv.id, "daemon: restored per-process conversation");
+                    return conv;
+                }
+                Ok(None) => {
+                    tracing::warn!(id = %latest.id, "daemon: latest conversation not found — starting fresh");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, id = %latest.id, "daemon: loading latest conversation failed — starting fresh");
+                }
+            }
+        }
+    }
+    let now = now_unix() as i64;
+    let conv = Conversation {
+        id: crate::domain::models::generate_conversation_id(),
+        title: "daemon".to_string(),
+        created_at: now,
+        updated_at: now,
+        ..Default::default()
+    };
+    if let Err(e) = storage.save_conversation(&conv).await {
+        tracing::warn!(error = %e, "daemon: persisting fresh conversation failed");
+    }
+    conv
 }

@@ -69,6 +69,7 @@ fn test_e2e_image_in_api_request() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
 
     // Build API messages
@@ -205,6 +206,7 @@ fn test_e2e_image_reference_stored() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
 
     // Message exists
@@ -238,6 +240,7 @@ fn test_e2e_copy_key_in_chat_focus() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
 
     // Press 'c' - action depends on implementation
@@ -277,6 +280,7 @@ fn test_e2e_copy_assistant_message() {
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
 
     // Verify message content available for copy

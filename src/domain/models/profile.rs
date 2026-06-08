@@ -95,7 +95,7 @@ pub struct ResolvedProfile {
     pub include_builtin_tools: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProfileSelection {
     pub dimensions: BTreeMap<PortDimension, AdapterRef>,
 }

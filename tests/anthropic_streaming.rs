@@ -153,6 +153,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
 
         // Usage
@@ -293,6 +294,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
         let mut streaming = make_streaming();
         let (mut reducer, clock) = test_reducer_state(1000);
@@ -638,6 +640,7 @@ data: {\"type\":\"message_stop\"}\n\
             token_count: None,
             stop_reason: None,
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
         let mut streaming = make_streaming();
         let (mut reducer, clock) = test_reducer_state(1000);

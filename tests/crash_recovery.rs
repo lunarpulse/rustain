@@ -37,6 +37,7 @@ fn make_conversation(id: &str, title: &str, msg_count: usize) -> Conversation {
                 None
             },
             images: vec![],
+            origin: rustain::domain::models::ChannelKind::Terminal,
         });
     }
 
