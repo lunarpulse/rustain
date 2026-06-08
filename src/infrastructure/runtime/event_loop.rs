@@ -544,6 +544,61 @@ pub async fn run(
     // Track active turn task for cancellation
     let mut _active_turn: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Story 12.2a — the turn-origination seam. `LocalTurnDriver` owns the
+    // agent-side dependencies (provider/security/tools/scheduler/persona/context/
+    // assembler/storage/usage-ledger/telemetry/plan-injector/config/workspace) so
+    // every turn is originated by a single `driver.submit(...)` call instead of
+    // the former 26-argument `start_turn` repeated across 18 sites. The view-state
+    // (`conversation`/`streaming`/`state`/`session_manager`/`active_turn`) stays on
+    // the consumer side and is passed per-call as `TurnViewState`. A remote
+    // (attach) driver plugs into this same seam in Story 12.2c — see `turn_driver.rs`.
+    let turn_driver = crate::infrastructure::runtime::turn_driver::LocalTurnDriver::new(
+        provider.clone(),
+        app_state.app_config.clone(),
+        domain_tx.clone(),
+        security.clone(),
+        tools.clone(),
+        tool_scheduler.clone(),
+        persona.clone(),
+        app_state.agent_core.context.clone(),
+        app_state.agent_core.context_assembler.clone(),
+        workspace_path.clone(),
+        fs_storage.clone(),
+        storage.clone(),
+        app_state.plan_injector.clone(),
+        app_state.usage_ledger.clone(),
+        app_state.telemetry.clone(),
+    );
+
+    // Story 12.2a — the single origination door. Every turn-origination site in
+    // this loop submits through `turn_driver` (party-mode Q3: no second back-door
+    // path). This macro is the call-site shorthand: it bundles the per-turn inputs
+    // into a `UserSubmission` and the view-state `&mut` group into a `TurnViewState`,
+    // both forwarded to `LocalTurnDriver::submit`. The view-state locals
+    // (`conversation`/`streaming`/`state`/`_active_turn`/`session_manager`) are read
+    // from this scope so the call sites stay short.
+    macro_rules! submit_turn {
+        ($text:expr, $images:expr, $synthetic:expr, $activation:expr, $agent:expr, $cancel:expr $(,)?) => {
+            turn_driver.submit(
+                crate::infrastructure::runtime::turn_driver::UserSubmission {
+                    text: $text,
+                    images: $images,
+                    synthetic: $synthetic,
+                    activation_set: $activation,
+                    agent_snapshot: $agent,
+                    turn_cancel: $cancel,
+                },
+                crate::infrastructure::runtime::turn_driver::TurnViewState {
+                    conversation: &mut conversation,
+                    streaming: &mut streaming,
+                    state: &mut state,
+                    active_turn: &mut _active_turn,
+                    session_manager: &mut session_manager,
+                },
+            )
+        };
+    }
+
     // Send recovery prompt if crash detected (before first render)
     if let Some((title, token_count)) = recovery_prompt {
         app_state.event_bus.emit_domain(AppEvent::RecoveryPrompt {
@@ -1152,29 +1207,7 @@ pub async fn run(
                                     } else {
                                          let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                          let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                          start_turn(
-                                              &send_text,
-                                              all_images,
-                                              &mut conversation,
-                                              &mut streaming,
-                                              &mut state,
-                                              &mut _active_turn,
-                                              &provider,
-                                              config,
-                                              &domain_tx,
-                                              &security,
-                                              &tools, &tool_scheduler,
-                                              &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                              &workspace_path,
-                                              &mut session_manager,
-                                              &fs_storage,
-                                              &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                              None,
-                                              _skill_snap,
-                                              _agent_snap,
-                                                                                tab_manager.reset_and_clone_turn_cancel(),
-                                          app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                          submit_turn!(send_text, all_images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
@@ -2271,29 +2304,7 @@ pub async fn run(
                                     } else {
                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                         let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                        start_turn(
-                                            &full_text,
-                                            all_images,
-                                            &mut conversation,
-                                            &mut streaming,
-                                            &mut state,
-                                            &mut _active_turn,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            &security,
-                                            &tools, &tool_scheduler,
-                                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                            &workspace_path,
-                                            &mut session_manager,
-                                            &fs_storage,
-                                            &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                            None,
-                                            _skill_snap,
-                                            _agent_snap,
-                                                                              tab_manager.reset_and_clone_turn_cancel(),
-                                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                        submit_turn!(full_text, all_images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
@@ -3468,8 +3479,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         // Update sidebar: mark closed tab as no longer open
@@ -3492,8 +3502,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -3508,8 +3517,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -3532,8 +3540,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -3675,8 +3682,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                 if should_drain {
                                                     if let Some(queued_msg) = turn_queue.dequeue() {
-                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                        { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                                     }
                                                 }
                                                 session_index.set_active(Some(&conv_id));
@@ -3827,8 +3833,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                                     if should_drain {
                                                         if let Some(queued_msg) = turn_queue.dequeue() {
-                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                            { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
@@ -4957,8 +4962,7 @@ pub async fn run(
                                         state.active_agent_name = agent_activator.active_agent_name(&conversation.id).await;
                                         if should_drain {
                                             if let Some(queued_msg) = turn_queue.dequeue() {
-                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; start_turn(&queued_msg.content, queued_msg.images, &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await; }
+                                                { let _snap = skill_activator.snapshot_for_turn(&conversation.id).await; let _agent_snap = agent_activator.snapshot(&conversation.id).await; submit_turn!(queued_msg.content, queued_msg.images, false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await; }
                                             }
                                         }
                                         session_index.set_active(Some(&conversation.id));
@@ -5476,30 +5480,7 @@ pub async fn run(
                                         tracing::debug!("Dispatching deferred AgentThenSubmit after stream complete");
                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                         let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                        start_turn_inner(
-                                            &text,
-                                            Vec::new(),
-                                            synthetic,
-                                            &mut conversation,
-                                            &mut streaming,
-                                            &mut state,
-                                            &mut _active_turn,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            &security,
-                                            &tools, &tool_scheduler,
-                                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                            &workspace_path,
-                                            &mut session_manager,
-                                            &fs_storage,
-                                            &storage,
-                                            &app_state.plan_manager, &app_state.plan_injector,
-                                            None,
-                                            _skill_snap,
-                                            _agent_snap,
-                                            tab_manager.reset_and_clone_turn_cancel(),
-                                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                        submit_turn!(text, Vec::new(), synthetic, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                     }
 
                                     // Update sidebar index on turn complete
@@ -5570,29 +5551,7 @@ pub async fn run(
                                     if let Some(queued_msg) = turn_queue.dequeue() {
                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                         let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                        start_turn(
-                                            &queued_msg.content,
-                                            queued_msg.images,
-                                            &mut conversation,
-                                            &mut streaming,
-                                            &mut state,
-                                            &mut _active_turn,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            &security,
-                                            &tools, &tool_scheduler,
-                                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                            &workspace_path,
-                                            &mut session_manager,
-                                            &fs_storage,
-                                            &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                            None,
-                                            _skill_snap,
-                                            _agent_snap,
-                                                                              tab_manager.reset_and_clone_turn_cancel(),
-                                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                        submit_turn!(queued_msg.content, queued_msg.images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
@@ -5726,7 +5685,7 @@ pub async fn run(
                                         .cloned()
                                         .unwrap_or_default();
                                     if !agent_model.is_empty() && agent_model != config.model {
-                                        // Find and remove the last user message so start_turn re-adds it
+                                        // Find and remove the last user message so the turn driver re-adds it
                                         let last_user_text = conversation
                                             .messages
                                             .iter()
@@ -5747,29 +5706,7 @@ pub async fn run(
                                                 ),
                                             });
                                             let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
-                                            start_turn(
-                                                &text,
-                                                vec![],
-                                                &mut conversation,
-                                                &mut streaming,
-                                                &mut state,
-                                                &mut _active_turn,
-                                                &provider,
-                                                config,
-                                                &domain_tx,
-                                                &security,
-                                                &tools, &tool_scheduler,
-                                                &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                                &workspace_path,
-                                                &mut session_manager,
-                                                &fs_storage,
-                                                &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                                None,
-                                                _skill_snap,
-                                                Some(fallback_agent),
-                                                                                  tab_manager.reset_and_clone_turn_cancel(),
-                                            app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                            submit_turn!(text, vec![], false, _skill_snap, Some(fallback_agent), tab_manager.reset_and_clone_turn_cancel()).await;
                                         }
                                     }
                                 }
@@ -5930,8 +5867,7 @@ pub async fn run(
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
-                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                submit_turn!(text, vec![], false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
                                 app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::AutoEdit));
@@ -5954,8 +5890,7 @@ pub async fn run(
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 state.plan_file_path = None;
                                 tool_scheduler.set_plan_file(None).await;
-                                start_turn(&text, vec![], &mut conversation, &mut streaming, &mut state, &mut _active_turn, &provider, config, &domain_tx, &security, &tools, &tool_scheduler, &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler, &workspace_path, &mut session_manager, &fs_storage, &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector, None, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel(), app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                submit_turn!(text, vec![], false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::Reject => {
                                 let _ = domain_tx.send(AppEvent::SystemNotice {
@@ -6673,29 +6608,7 @@ pub async fn run(
                         state.status = StatusState::Streaming;
                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                         let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                        start_turn(
-                            &text,
-                            vec![],
-                            &mut conversation,
-                            &mut streaming,
-                            &mut state,
-                            &mut _active_turn,
-                            &provider,
-                            config,
-                            &domain_tx,
-                            &security,
-                            &tools, &tool_scheduler,
-                            &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                            &workspace_path,
-                            &mut session_manager,
-                            &fs_storage,
-                            &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                            None,
-                            _skill_snap,
-                            _agent_snap,
-                                                              tab_manager.reset_and_clone_turn_cancel(),
-                        app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                        submit_turn!(text, vec![], false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                         state.active_context_window = _ctx_window;
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
@@ -7190,30 +7103,7 @@ pub async fn run(
                             } else {
                                 let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
                                 let _agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                start_turn_inner(
-                                &text,
-                                Vec::new(),
-                                synthetic,
-                                &mut conversation,
-                                &mut streaming,
-                                &mut state,
-                                &mut _active_turn,
-                                &provider,
-                                config,
-                                &domain_tx,
-                                &security,
-                                &tools, &tool_scheduler,
-                                &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                &workspace_path,
-                                &mut session_manager,
-                                &fs_storage,
-                                &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                None,
-                                _skill_snap,
-                                _agent_snap,
-                                                                  tab_manager.reset_and_clone_turn_cancel(),
-                            app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                submit_turn!(text, Vec::new(), synthetic, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                             }
                         }
                     }
@@ -7312,7 +7202,7 @@ pub async fn run(
                             // H6: Re-validate that the active conversation still matches the
                             // one the user was prompted for. The user may have switched tabs
                             // during `rx.await` — if so, skip activation + turn kickoff
-                            // (start_turn would run against the wrong conversation).
+                            // (the turn driver would run against the wrong conversation).
                             if conversation.id != conversation_id {
                                 app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
@@ -7338,29 +7228,7 @@ pub async fn run(
                                         .snapshot_for_turn(&conversation.id)
                                         .await;
                                     let agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                    start_turn(
-                                        &user_msg,
-                                        Vec::new(),
-                                        &mut conversation,
-                                        &mut streaming,
-                                        &mut state,
-                                        &mut _active_turn,
-                                        &provider,
-                                        config,
-                                        &domain_tx,
-                                        &security,
-                                        &tools, &tool_scheduler,
-                                        &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                        &workspace_path,
-                                        &mut session_manager,
-                                        &fs_storage,
-                                        &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                        None,
-                                        snap,
-                                        agent_snap,
-                                                                          tab_manager.reset_and_clone_turn_cancel(),
-                                    app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                    submit_turn!(user_msg, Vec::new(), false, snap, agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                     app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
@@ -7473,29 +7341,7 @@ pub async fn run(
                                     .snapshot_for_turn(&conversation.id)
                                     .await;
                                 let agent_snap = agent_activator.snapshot(&conversation.id).await;
-                                start_turn(
-                                    &user_msg,
-                                    Vec::new(),
-                                    &mut conversation,
-                                    &mut streaming,
-                                    &mut state,
-                                    &mut _active_turn,
-                                    &provider,
-                                    config,
-                                    &domain_tx,
-                                    &security,
-                                    &tools, &tool_scheduler,
-                                    &persona, &app_state.agent_core.context, &app_state.agent_core.context_assembler,
-                                    &workspace_path,
-                                    &mut session_manager,
-                                    &fs_storage,
-                                    &storage,
-                                              &app_state.plan_manager, &app_state.plan_injector,
-                                    None,
-                                    snap,
-                                    agent_snap,
-                                                                      tab_manager.reset_and_clone_turn_cancel(),
-                                app_state.usage_ledger.clone(), app_state.telemetry.clone()).await;
+                                submit_turn!(user_msg, Vec::new(), false, snap, agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                 app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
@@ -8307,15 +8153,18 @@ fn load_active_tab(
     !tab.streaming.is_streaming && !tab.turn_queue.is_empty()
 }
 
-/// Start a new turn: add user message, spawn provider streaming task.
-#[allow(clippy::too_many_arguments)]
 /// Decode, hash, and persist the `pending_images` drained on message submit.
+///
+/// `pub(crate)` since Story 12.2a: called from `turn_driver::LocalTurnDriver::submit`
+/// as part of the turn-origination seam. Kept in this module to avoid churning
+/// unit tests and `tests/e2e_image_persistence.rs` that import from this path.
 ///
 /// Returns the image refs to attach to the new user `ChatMessage` so they survive
 /// a reload (Story 4-3a.1 AC3). Failures are logged via `tracing::warn!` and the
 /// corresponding attachment is dropped from the persisted list — AC4's
 /// graceful-degradation on load handles missing files if a partial save occurs.
-fn persist_image_attachments(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn persist_image_attachments(
     conversation_id: &str,
     fs_storage: &crate::adapters::filesystem::FileSystemStorage,
     attachments: &[ImageAttachment],
@@ -8475,451 +8324,12 @@ fn cycle_mode(current: PermissionMode) -> PermissionMode {
     }
 }
 
-/// Wrapper that always creates a non-synthetic user message.
-/// Call `start_turn_inner` directly when you need `synthetic: true`.
-#[allow(dead_code)]
-async fn start_turn(
-    text: &str,
-    images: Vec<ImageAttachment>,
-    conversation: &mut Conversation,
-    streaming: &mut StreamingState,
-    state: &mut TuiState,
-    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-    provider: &Arc<dyn StreamingProvider>,
-    config: &AppConfig,
-    domain_tx: &mpsc::UnboundedSender<AppEvent>,
-    security: &Arc<dyn SecurityPort>,
-    tools: &Arc<dyn ToolSetPort>,
-    tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
-    persona: &Arc<dyn PersonaPort>,
-    // Story 11.4 — the context-assembly slot (read via `load_full()` at assemble
-    // time so warm profile swaps are seen). Passing the slot, not a loaded value,
-    // keeps the ~18 call sites a stable `&app_state.agent_core.context`.
-    context: &Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ContextPort>>>,
-    // Story 11.0a — the Message-tier assembler slot (load_full() at assemble time
-    // so warm profile swaps are seen). `None` = eval/replay bypass (falls back to
-    // build_api_messages). Threaded like `context`, sourced from agent_core.
-    context_assembler: &Arc<
-        arc_swap::ArcSwap<Option<Arc<dyn crate::domain::ports::ContextAssemblerPort>>>,
-    >,
-    workspace_path: &std::path::Path,
-    session_manager: &mut SessionManager,
-    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-    storage: &Arc<dyn StoragePort>,
-    _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
-    plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
-    _plan_file: Option<std::path::PathBuf>,
-    activation_set: Option<crate::domain::models::SkillActivationSet>,
-    agent_snapshot: Option<crate::domain::models::ActiveAgent>,
-    turn_cancel: CancellationToken,
-    usage_ledger: Arc<dyn UsageLedgerPort>,
-    telemetry: std::sync::Arc<crate::infrastructure::telemetry::ActiveRatioWindow>,
-) {
-    start_turn_inner(
-        text,
-        images,
-        false,
-        conversation,
-        streaming,
-        state,
-        active_turn,
-        provider,
-        config,
-        domain_tx,
-        security,
-        tools,
-        tool_scheduler,
-        persona,
-        context,
-        context_assembler,
-        workspace_path,
-        session_manager,
-        fs_storage,
-        storage,
-        _plan_manager,
-        plan_injector,
-        _plan_file,
-        activation_set,
-        agent_snapshot,
-        turn_cancel,
-        usage_ledger,
-        telemetry,
-    )
-    .await;
-}
-
-async fn start_turn_inner(
-    text: &str,
-    images: Vec<ImageAttachment>,
-    synthetic: bool,
-    conversation: &mut Conversation,
-    streaming: &mut StreamingState,
-    state: &mut TuiState,
-    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
-    provider: &Arc<dyn StreamingProvider>,
-    config: &AppConfig,
-    domain_tx: &mpsc::UnboundedSender<AppEvent>,
-    security: &Arc<dyn SecurityPort>,
-    tools: &Arc<dyn ToolSetPort>,
-    tool_scheduler: &Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
-    persona: &Arc<dyn PersonaPort>,
-    // Story 11.4 — the context-assembly slot (read via `load_full()` at assemble
-    // time so warm profile swaps are seen). Passing the slot, not a loaded value,
-    // keeps the ~18 call sites a stable `&app_state.agent_core.context`.
-    context: &Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::ContextPort>>>,
-    // Story 11.0a — the Message-tier assembler slot (load_full() at assemble time
-    // so warm profile swaps are seen). `None` = eval/replay bypass (falls back to
-    // build_api_messages). Threaded like `context`, sourced from agent_core.
-    context_assembler: &Arc<
-        arc_swap::ArcSwap<Option<Arc<dyn crate::domain::ports::ContextAssemblerPort>>>,
-    >,
-    workspace_path: &std::path::Path,
-    session_manager: &mut SessionManager,
-    fs_storage: &crate::adapters::filesystem::FileSystemStorage,
-    storage: &Arc<dyn StoragePort>,
-    _plan_manager: &Arc<crate::domain::services::plan_manager::PlanManager>,
-    plan_injector: &Arc<crate::domain::services::plan_mode_injector::DefaultPlanInjector>,
-    _plan_file: Option<std::path::PathBuf>,
-    activation_set: Option<crate::domain::models::SkillActivationSet>,
-    agent_snapshot: Option<crate::domain::models::ActiveAgent>,
-    turn_cancel: CancellationToken,
-    usage_ledger: Arc<dyn UsageLedgerPort>,
-    telemetry: std::sync::Arc<crate::infrastructure::telemetry::ActiveRatioWindow>,
-) {
-    tracing::debug!(
-        "start_turn_inner: synthetic={synthetic} text_len={}",
-        text.len()
-    );
-    // Persist any image attachments and collect their references. These are
-    // attached to the user ChatMessage so they survive a session reload
-    // (Story 4-3a.1 AC3 / DF-067).
-    let persisted_refs = if images.is_empty() {
-        Vec::new()
-    } else {
-        persist_image_attachments(&conversation.id, fs_storage, &images)
-    };
-
-    // Add user ChatMessage to conversation
-    conversation.messages.push(ChatMessage {
-        id: generate_conversation_id(),
-        role: MessageRole::User,
-        content: text.to_string(),
-        content_blocks: vec![],
-        tool_calls: vec![],
-        created_at: crate::domain::models::session_meta::now_unix(),
-        token_count: None,
-        stop_reason: None,
-        synthetic,
-        images: persisted_refs,
-    });
-
-    // Build messages list for provider via the Story 11.0a Message-tier assembler
-    // (ADR-10-4). `StaticPassthroughAssembler` is byte-identical to the legacy
-    // inline `build_api_messages` and ignores the budget; Story 11.6's
-    // `WindowingAssembler` trims to it. The budget is the model's FULL context
-    // window (Story 11.6 Q2 — NOT the compaction `*7/10` headroom; windowing and
-    // compaction are independent stages). `0`/unknown → `usize::MAX` (no trim).
-    // `None` is the reserved eval/replay bypass → fall back to
-    // `build_api_messages`. Everything below this line is post-assembly
-    // decoration and stays inline.
-    let assembly_budget = if state.active_context_window == 0 {
-        usize::MAX
-    } else {
-        state.active_context_window as usize
-    };
-    let mut messages = match context_assembler.load().as_ref() {
-        Some(assembler) => {
-            let assembled = assembler.assemble(
-                conversation,
-                crate::domain::models::AssemblyBudget {
-                    max_tokens: assembly_budget,
-                },
-            );
-            // Story 11.6 Task 7 — capture Message-tier diagnostics for `/context
-            // show` group info (kept separate from the Content-tier bundle).
-            state.last_assembler_diagnostics = Some(assembled.diagnostics);
-            assembled.messages
-        }
-        None => message_builder::build_api_messages(conversation),
-    };
-
-    // Story 7.4 AC7: reshape messages when compaction is present
-    crate::domain::services::compaction::shape_compacted_messages(conversation, &mut messages);
-
-    // Plan mode reminder injection (Story 6-0d AC2/AC8)
-    if security.current_mode() == PermissionMode::Plan {
-        if let Some(ref plan_path) = state.plan_file_path {
-            if let Some(reminder) = plan_injector.pre_turn(conversation, plan_path).await {
-                if let Some(first_user_msg) =
-                    messages.iter_mut().find(|m| m.role == MessageRole::User)
-                {
-                    first_user_msg.context_prefix =
-                        Some(crate::domain::services::compaction::compose_context_prefix(
-                            first_user_msg.context_prefix.take(),
-                            reminder,
-                        ));
-                }
-                let assistant_turns = conversation
-                    .messages
-                    .iter()
-                    .filter(|m| m.role == MessageRole::Assistant)
-                    .count() as u32;
-                state.pending_plan_reminder_at_turn = Some(assistant_turns);
-            } else {
-                state.pending_plan_reminder_at_turn = None;
-            }
-        }
-    }
-
-    // Attach images to the last user message in the API request
-    // Covers: FR112 (AC1, AC2)
-    if !images.is_empty() {
-        if let Some(last_user_msg) = messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == MessageRole::User && m.content == text)
-        {
-            last_user_msg.images = images;
-        }
-    }
-
-    // Rehydrate historical images from disk so the provider sees the same
-    // visual context on every subsequent turn (Story 4-3a.1 Addendum 2 /
-    // multi-turn image rehydration). `build_api_messages` is a pure domain
-    // function and cannot touch disk, so rehydration happens here — after
-    // the fresh-turn attachment above, so the just-submitted message is
-    // skipped (its `images` vec is already populated with the raw base64
-    // and we don't need to re-read it from disk).
-    rehydrate_historical_images(conversation, &mut messages, fs_storage);
-
-    // If session manager indicates history rebuild needed, prepend context
-    if session_manager.needs_history_rebuild() {
-        use crate::domain::services::history_rebuild;
-        let context = history_rebuild::build_history_context(
-            &conversation.messages[..conversation.messages.len().saturating_sub(1)],
-        );
-        // Attach context_prefix to the actual user input message (matching `text`),
-        // not to a synthetic tool-result message that build_api_messages may have appended.
-        if let Some(target_msg) = messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == MessageRole::User && m.content == text)
-        {
-            target_msg.context_prefix =
-                Some(crate::domain::services::compaction::compose_context_prefix(
-                    target_msg.context_prefix.take(),
-                    context,
-                ));
-        } else if let Some(last_msg) = messages.last_mut() {
-            // Fallback: attach to last message if exact match not found
-            last_msg.context_prefix =
-                Some(crate::domain::services::compaction::compose_context_prefix(
-                    last_msg.context_prefix.take(),
-                    context,
-                ));
-        }
-        let new_session_id = generate_conversation_id();
-        conversation.session_id = Some(new_session_id.clone());
-        session_manager.mark_active(new_session_id);
-        let msg_count = conversation.messages.len().saturating_sub(1);
-        domain_tx.send(AppEvent::SystemNotice {
-            conversation_id: Some(conversation.id.clone()),
-            level: crate::domain::models::NoticeLevel::Info,
-            message: format!(
-                "\u{2139}\u{fe0f} Session restarted with your conversation history ({} messages).",
-                msg_count
-            ),
-        }).ok();
-    }
-
-    // Story 7.4 AC11: consume pending context carryover on first turn of new conversation
-    if let Some(carry) = state.pending_context_carryover.take() {
-        if let Some(first_user) = messages.iter_mut().find(|m| m.role == MessageRole::User) {
-            first_user.context_prefix =
-                Some(crate::domain::services::compaction::compose_context_prefix(
-                    first_user.context_prefix.take(),
-                    format!("<conversation-summary>\n{}\n</conversation-summary>", carry),
-                ));
-        }
-    }
-
-    // Story 11.4 — Content-tier memory/context injection (AC1, AC3). Logic lives
-    // in the handler to respect the event_loop line budget; it short-circuits when
-    // the session toggle is OFF (AC7).
-    handlers::context_command::inject_assembled_context(state, context, text, &mut messages).await;
-
-    let all_tool_defs = tools.available_tools();
-    let persona_prompt = persona.system_prompt(workspace_path);
-    let empty_set = crate::domain::models::SkillActivationSet::new();
-    let activation = activation_set.as_ref().unwrap_or(&empty_set);
-    let agent_body = agent_snapshot.as_ref().map(|a| a.body.as_str());
-    let system_prompt = crate::domain::services::skill_context::assemble_system_prompt_with_agent(
-        &persona_prompt,
-        agent_body,
-        activation,
-        workspace_path,
-    );
-    let all_tool_names: Vec<String> = all_tool_defs.iter().map(|t| t.name.clone()).collect();
-    let agent_filter = agent_snapshot
-        .as_ref()
-        .and_then(|a| a.effective_tool_filter(&all_tool_names));
-    let skill_filter = activation.effective_allowed_tools();
-    let combined: Option<std::collections::HashSet<String>> = match (agent_filter, skill_filter) {
-        (None, None) => None,
-        (Some(a), None) => Some(a),
-        (None, Some(s)) => Some(s),
-        (Some(a), Some(s)) => Some(a.intersection(&s).cloned().collect()),
-    };
-    if let Some(ref allowed) = combined {
-        if allowed.is_empty() {
-            domain_tx.send(AppEvent::SystemNotice {
-                conversation_id: Some(conversation.id.clone()),
-                level: crate::domain::models::NoticeLevel::Warning,
-                message: "Active agent and skill tool filters are disjoint — no tools available for this turn".to_string(),
-            }).ok();
-        }
-    }
-    let tool_defs = match combined {
-        Some(allowed) => {
-            let mut filtered: Vec<_> = all_tool_defs
-                .into_iter()
-                .filter(|t| allowed.contains(&t.name) || t.name == "activate_skill")
-                .collect();
-            if !filtered.iter().any(|t| t.name == "activate_skill") {
-                let act_tool = crate::domain::models::ToolDefinition {
-                    name: "activate_skill".to_string(),
-                    description: "Activate an Agent Skill to gain its procedural instructions and tool restrictions. Arg: name of the skill to activate (must match a discovered skill).".to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "name": { "type": "string", "description": "Skill name (exact match, case-sensitive)" },
-                            "arguments": { "type": "string", "description": "Optional trailing arguments passed to the skill" }
-                        },
-                        "required": ["name"]
-                    }),
-                    parallel_safe: true,
-                };
-                filtered.push(act_tool);
-            }
-            filtered
-        }
-        None => all_tool_defs,
-    };
-    // Story 9.5 — emit telemetry after tool list is built (AC-9-5-7).
-    {
-        use crate::infrastructure::telemetry::{ProviderId, emit_tool_after_render};
-        let provider_id = ProviderId::Anthropic;
-        let catalog_len = tool_defs.len();
-        let diagnostics = crate::adapters::tool_exposure::RenderDiagnostics::clean();
-        emit_tool_after_render(provider_id, catalog_len, &diagnostics, &telemetry).await;
-    }
-    // --- Model resolution (Story 7.1c) ---
-    let retry_count = state.retry_state.as_ref().map_or(0, |r| r.attempt as u32);
-    let input_tokens = conversation.usage.as_ref().map_or(0, |u| u.input_tokens);
-    let explicit_override = agent_snapshot
-        .as_ref()
-        .and_then(|a| {
-            let m = a.model.as_ref()?;
-            if m.is_empty() { None } else { Some(m.clone()) }
-        })
-        .or_else(|| state.selected_model.clone());
-    let req = crate::domain::services::model_router::ModelResolutionRequest {
-        explicit_override,
-        tier_hint: None,
-        step_kind: None,
-        retry_count,
-        input_tokens,
-        fallback_model: config.model.clone(),
-    };
-    let resolved =
-        crate::domain::services::model_router::resolve_effective_model(&req, &config.router);
-    if resolved.escalation_reason != crate::domain::models::EscalationReason::None {
-        tracing::info!(
-            target: "router",
-            "tier escalated: reason={:?} model={}",
-            resolved.escalation_reason,
-            resolved.model
-        );
-    }
-    // Story 7.5 AC1.5 — capture resolved model for Turn.model stamping on the
-    // first subsequent TurnComplete (the reducer leaves Turn.model empty).
-    state.pending_resolved_model = Some(resolved.model.clone());
-    let options = CompletionOptions {
-        model: resolved.model.clone(),
-        max_tokens: 8192,
-        system_prompt: system_prompt.clone(),
-        temperature: None,
-        tools: tool_defs,
-    };
-
-    let session_id = conversation
-        .session_id
-        .clone()
-        .unwrap_or_else(|| conversation.id.clone());
-
-    // Clear any stale buffers from a previous turn (e.g. after TurnContinuing or SystemNotice)
-    streaming.current_text_buffer.clear();
-    streaming.current_blocks.clear();
-    streaming.active_tool_calls.clear();
-    streaming.is_streaming = true;
-    streaming.phase = crate::domain::models::StreamingPhase::AccumulatingText;
-
-    // Story 10.7 — rough parent context token estimate (1 token ≈ 4 chars)
-    let parent_ctx_tokens: u32 = conversation
-        .messages
-        .iter()
-        .map(|m| m.content.len() as u32 / 4)
-        .sum();
-
-    // Story 10.7 — generate W3C Trace Context for subagent propagation.
-    // AI-11.5 (Epic 11 retro): the prior `ts*31`/`ts*17` form was a pure function of
-    // the millisecond clock, so two turns minted in the same millisecond produced
-    // identical trace/span ids — a W3C uniqueness violation. Mix a per-process
-    // monotonic counter (+ pid) into the ids so collisions are impossible within a
-    // process and improbable across processes. No new dependency.
-    let parent_trace = {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
-        let ts = chrono::Utc::now().timestamp_millis() as u64;
-        let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id() as u64;
-        // SplitMix64 odd-constant multiply is bijective over u64, so distinct
-        // (seq, pid) pairs map to distinct `mixed` values — guaranteeing per-process
-        // uniqueness regardless of clock resolution.
-        let mixed = (seq ^ (pid << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let trace_id = format!("{:016x}{:016x}", ts.wrapping_mul(31), mixed);
-        let span_id = format!("{:016x}", ts.wrapping_mul(17) ^ mixed);
-        crate::domain::models::TraceContext::new(trace_id, span_id, 1).ok()
-    };
-
-    let handle = tokio::spawn(turn::run_turn(
-        provider.clone(),
-        messages,
-        options,
-        domain_tx.clone(),
-        security.clone(),
-        tools.clone(),
-        tool_scheduler.clone(),
-        conversation.id.clone(),
-        storage.clone(),
-        conversation.clone(),
-        activation_set,
-        turn_cancel,
-        usage_ledger.clone(),
-        resolved,
-        None,
-        parent_ctx_tokens,
-        parent_trace,
-        session_id,
-    ));
-    *active_turn = Some(handle);
-
-    state.status = StatusState::Streaming;
-    state.needs_redraw = true;
-}
-
 // `handle_render_error` extracted to `crate::adapters::tui::handlers::render_error`
 // per Story 8.0a Phase 4 Task 10 (render_error sub-task).
+//
+// Turn origination (`start_turn` / `start_turn_inner`) relocated to
+// `crate::infrastructure::runtime::turn_driver::LocalTurnDriver::submit` per
+// Story 12.2a — call sites go through the `submit_turn!` macro in `run()`.
 
 /// Advance the permission queue: pop next pending request or restore Input focus.
 fn advance_permission_queue(state: &mut TuiState) {
