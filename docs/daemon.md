@@ -98,6 +98,42 @@ sudo systemctl disable --now rustain-<hash>.service
 launchctl unload ~/Library/LaunchAgents/com.rustain.<hash>.plist
 ```
 
+## Session-boundary memory hooks (Story 12.1c)
+
+The daemon fires a **`SessionBoundary`** on each of `daily_reset`, `idle_timeout`
+(configurable), and graceful `Shutdown`. All three route through **one** code path
+(`emit_session_boundary`) — never a parallel path — which, after finalizing the daily
+log, drives three memory hooks:
+
+- **`on_session_end` (recall).** The (optional) `RecallProviderPort` is invoked
+  unconditionally at every boundary. The default is an explicit offline no-op
+  (`NoopRecallProvider`); the headless daemon has no message runtime until attach
+  (Story 12.2), so the transcript is **empty** (logged honestly — the emptiness comes
+  from the missing source, not from the provider short-circuiting).
+
+- **MEMORY.md file-edit auto-honor — hand-edit = consent, purged LIVE.** When you
+  hand-delete a fact from `{workspace}/.rustain/MEMORY.md`, the daemon detects it on
+  reload and **purges that fact from the search index immediately** — the deletion is
+  the consent, so there is **no confirmation prompt**. The purge funnels through the
+  exact same `RedactionRecord` + `refresh()` redaction sink that `/memory forget` uses
+  (a content-stable token suppresses the fact across both the `MEMORY.md` copy and its
+  daily-log re-derivation). "Never silent" is satisfied by a durable **audit notice**
+  (`memory-md-purge-notice.json`) surfaced at the next attach — NOT by withholding the
+  purge. **Daily logs are never deleted.** Under a non-vector memory profile there is
+  no search index to purge, so this is a documented no-op (the hand-edit still
+  self-heals the curated copy on reload).
+
+- **Consolidation suggested at session end.** The daemon cannot run an LLM
+  consolidation sub-turn (it has no provider headless), so it **queues** a durable
+  "consolidation-due" marker (`consolidation-queue.json`, latest-only) referencing the
+  daily-log slice to consolidate. It is **never auto-applied**. When a TUI later
+  attaches (Story 12.2), the marker surfaces through the existing 11.2a
+  propose→confirm consolidation card — no new approval grammar, and again **daily logs
+  are never deleted**.
+
+Both queue files live under `{workspace}/.rustain/`, are written atomically
+(temp→rename), and are latest-only so repeated boundaries don't grow them.
+
 ## Crash records & recovery
 
 When the daemon (re)starts and finds a **leftover PID file whose process is dead**, it

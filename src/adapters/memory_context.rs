@@ -33,12 +33,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use arc_swap::ArcSwap;
-use async_trait::async_trait;
-use chrono::Local;
-use serde::Deserialize;
-
-use crate::adapters::long_term_memory::normalize;
 use crate::domain::errors::ContextError;
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::models::{
@@ -46,6 +40,11 @@ use crate::domain::models::{
     ProvenancedEntry, Relevance, RetrievalMethod,
 };
 use crate::domain::ports::{ContextPort, MemoryPort};
+use crate::domain::services::normalize::normalize;
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
+use chrono::Local;
+use serde::Deserialize;
 
 /// Adapter-local configuration (read from the per-dimension `_config` seam).
 #[derive(Debug, Clone, Deserialize)]

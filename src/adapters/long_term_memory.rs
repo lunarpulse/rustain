@@ -27,6 +27,7 @@
 //!   disk write to prevent concurrent-writer data loss (tokio's RwLock safely
 //!   holds across `.await`).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
@@ -44,17 +45,7 @@ use crate::domain::ports::MemoryPort;
 /// File size beyond which the size/cost warning fires (AC3).
 const SIZE_WARN_BYTES: u64 = 20 * 1024;
 
-/// Normalize text for dedup: trim, collapse internal whitespace, lowercase.
-/// Two facts/entries are "the same information" iff their normalized text is
-/// equal. Shared by `LongTermMemory` (within-category dedup) and
-/// `ProjectScopedMemory` (cross-tier dedup, long-term wins).
-pub(crate) fn normalize(s: &str) -> String {
-    s.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
+use crate::domain::services::normalize::normalize;
 /// In-memory snapshot of `MEMORY.md`, preserving category (section) order.
 #[derive(Default)]
 struct LoadedState {
@@ -66,6 +57,15 @@ struct LoadedState {
     /// Whether a load has been attempted at least once (distinguishes
     /// "never loaded" from "loaded an empty/missing file").
     loaded_once: bool,
+    /// **Story 12.1c AC3 — pending hand-deletions.** Facts present in a PRIOR
+    /// snapshot whose text vanished from the file on a reparse reload, mapped to
+    /// `MemoryEntry` (timestamp = the PRIOR snapshot's mtime, so the key matches
+    /// the live index identity). Accumulated by `ensure_fresh`, drained by
+    /// `drain_md_removals` (the daemon's `SessionBoundary` honor pass). Each entry
+    /// drives one content-stable `RedactionRecord`. NOT cleared by a reload — only
+    /// by an explicit drain — so a removal can never be lost between detection and
+    /// honor.
+    pending_removals: Vec<MemoryEntry>,
 }
 
 /// File-backed curated long-term memory adapter.
@@ -197,6 +197,55 @@ impl LongTermMemory {
         let sections = Self::parse(&content);
         {
             let mut guard = self.loaded.write().await;
+            // Story 12.1c AC3 — detect hand-deletions on a real reparse reload.
+            // A fact is "removed" iff its normalized text is present in the PRIOR
+            // snapshot but absent from EVERY category of the new one (global
+            // absence — a fact merely MOVED between categories is NOT a removal, so
+            // the content-stable redaction token `normalize(fact)` can't over-
+            // suppress a still-present copy). Map each to a `MemoryEntry` stamped
+            // with the PRIOR mtime, so `content_key(ts, summary)` equals the live
+            // index identity the fact held while present (the `/memory forget`
+            // parity). Only on an actual prior load (skip the first load).
+            if guard.loaded_once {
+                let prev_ts = Self::entry_timestamp(guard.mtime);
+                let new_norms: HashSet<String> = sections
+                    .iter()
+                    .flat_map(|(_, fs)| fs.iter())
+                    .map(|f| normalize(&f.fact))
+                    .collect();
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut removed: Vec<MemoryEntry> = Vec::new();
+                for (_, facts) in &guard.sections {
+                    for f in facts {
+                        let n = normalize(&f.fact);
+                        // Skip empty-normalized facts — they would all collapse to
+                        // the same removal identity "" (review patch).
+                        if n.is_empty() {
+                            continue;
+                        }
+                        if !new_norms.contains(&n) && seen.insert(n) {
+                            removed.push(MemoryEntry {
+                                timestamp: prev_ts,
+                                summary: f.fact.clone(),
+                                context: f.detail.clone(),
+                            });
+                        }
+                    }
+                }
+                // Cap to prevent unbounded growth between drains (review patch).
+                const PENDING_REMOVALS_CAP: usize = 10_000;
+                let pending_len = guard.pending_removals.len();
+                if pending_len + removed.len() > PENDING_REMOVALS_CAP {
+                    let drop_count = pending_len + removed.len() - PENDING_REMOVALS_CAP;
+                    tracing::warn!(
+                        drop_count,
+                        cap = PENDING_REMOVALS_CAP,
+                        "MEMORY.md pending_removals exceeded cap; dropping oldest removals"
+                    );
+                    guard.pending_removals.drain(..drop_count.min(pending_len));
+                }
+                guard.pending_removals.extend(removed);
+            }
             guard.sections = sections;
             guard.mtime = disk_mtime;
             guard.loaded_once = true;
@@ -573,6 +622,18 @@ impl MemoryPort for LongTermMemory {
                 context: f.detail.clone(),
             })
             .collect())
+    }
+
+    /// Story 12.1c AC3 — drain the facts the user hand-deleted from `MEMORY.md`
+    /// since the last drain. Triggers an `ensure_fresh` reload first (so the very
+    /// latest edits are detected on this call), then returns AND clears the
+    /// accumulated removals. Returning `MemoryEntry`s stamped with the prior mtime
+    /// lets the caller (`VectorSearchMemory::honor_md_removals`) derive the SAME
+    /// `content_key` + token a `/memory forget` of that fact would.
+    async fn drain_md_removals(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
+        self.ensure_fresh().await?;
+        let mut guard = self.loaded.write().await;
+        Ok(std::mem::take(&mut guard.pending_removals))
     }
 
     /// Drain an in-flight curated upsert before a profile swap detaches this

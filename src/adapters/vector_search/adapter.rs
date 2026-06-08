@@ -44,8 +44,11 @@ use crate::domain::models::{
     HealthSummary, MemoryEntry, MemoryFact, NoticeLevel, RedactionRecord, TransitionState,
 };
 use crate::domain::ports::MemoryPort;
+use crate::domain::services::normalize::normalize;
 use crate::domain::services::redaction_mask;
-
+// The SAME normalization `ProjectScopedMemory::merge_dedup` dedups on — reused as
+// the content-stable redaction token identity (Story 12.1c AC3), so one tombstone
+// suppresses a fact across every timestamp namespace.
 use super::EmbeddingProvider;
 use super::fusion;
 use super::index::{INDEX_VERSION, IndexMeta, IndexedEntry, VectorIndex, load_index};
@@ -421,30 +424,51 @@ impl VectorSearchMemory {
     async fn refresh(&self) -> Result<(), MemoryError> {
         // Drain gate: hold the local mutex so `prepare_detach` cannot return until
         // any in-flight refresh/forget has finished writing index.bin (Story 12.0
-        // review patch).
+        // review patch). Callers that ALREADY hold this gate (`forget` /
+        // `honor_md_removals`) MUST call [`Self::refresh_inner`] directly — re-locking
+        // this non-reentrant `tokio::sync::Mutex` from the same task deadlocks
+        // (Story 12.1c: surfaced when the file-edit-honor path added a second
+        // lock-holding caller; the fix also resolves the latent `forget`→`refresh`
+        // self-deadlock under a `current_thread` runtime).
         let _drain = self.drain_lock.lock().await;
+        self.refresh_inner().await
+    }
 
+    /// The lock-free incremental-refresh body. Either reached through
+    /// [`Self::refresh`] (which acquires `drain_lock` first) or called directly by a
+    /// caller that ALREADY holds `drain_lock` (`forget` / `honor_md_removals`), so
+    /// the gate is held continuously across tombstone-then-purge without re-entry.
+    async fn refresh_inner(&self) -> Result<(), MemoryError> {
         // 0. Snapshot the redaction tombstone set (read guard released before any
         //    await). THE fix for the self-heal (Story 11.4a, Task 3): the source
         //    row of a redacted entry is still present (daily-log is append-only;
         //    a MEMORY.md fact may be outside the window), so without this gate the
         //    next refresh re-embeds it ("the ghost re-embeds"). Dropping redacted
         //    keys here makes the one-time purge idempotent under refresh + rebuild.
-        let redacted: HashSet<u64> = {
+        // Snapshot BOTH suppression identities (Story 12.1c AC3): the u64 key set
+        // (11.4a) AND the content-stable token set. The token set is what kills the
+        // daily-log re-derivation copy — a different timestamp namespace than the
+        // MEMORY.md-mtime copy, so a key alone cannot reach it.
+        let (redacted, redacted_tokens): (HashSet<u64>, HashSet<String>) = {
             let guard = self.redactions.read().await;
-            guard.keys()
+            (guard.keys(), guard.tokens())
         };
 
-        // 1. Snapshot the inner content set to index, MINUS any redacted key.
+        // 1. Snapshot the inner content set to index, MINUS any redacted key OR any
+        //    entry whose normalized text matches a content-stable redaction token.
         let entries = self.inner.recent(self.refresh_limit).await?;
         let current: Vec<(u64, MemoryEntry)> = entries
             .into_iter()
             .map(|e| (content_key(&e.timestamp, &e.summary), e))
-            .filter(|(k, _)| !redacted.contains(k))
+            .filter(|(k, e)| {
+                !redacted.contains(k) && !redacted_tokens.contains(&normalize(&e.summary))
+            })
             .collect();
-        // `current_keys` excludes redacted keys → `retain_keys` below drops any
-        // redacted entry already in the index (the one-time purge), and `to_embed`
-        // can never re-embed one.
+        // `current_keys` excludes redacted keys AND token-matched entries → the
+        // `retain_keys` below drops any such entry already in the index (the
+        // one-time purge), and `to_embed` can never re-embed one. This is the
+        // single change that makes ONE tombstone suppress BOTH the MEMORY.md-mtime
+        // copy and the daily-log-realts copy.
         let current_keys: HashSet<u64> = current.iter().map(|(k, _)| *k).collect();
 
         // 2. Which keys are already embedded? (read guard released before await)
@@ -508,30 +532,37 @@ impl VectorSearchMemory {
         // next refresh. Re-reading `redactions` here and dropping those keys from
         // BOTH the freshly-embedded set and the retained index makes this one gate
         // the sole concurrency-controlled path every redaction funnels through,
-        // regardless of producer. The 12.1c file-edit-honor path MUST reach purge
-        // through THIS seam too — its parity test `forget_and_fileedit_emit_
-        // identical_record` is 12.1c AC3's obligation (unwritable until that path
-        // exists), NOT 12.0's. (AC9 rationale — Winston.)
+        // regardless of producer. The 12.1c file-edit-honor path
+        // (`honor_md_removals`) reaches purge through THIS seam too, and the gate
+        // now also drops by the content-stable `token` (Story 12.1c AC3), so one
+        // tombstone suppresses a fact across every timestamp namespace. (AC9
+        // rationale — Winston.)
         {
             // Acquire the index write lock FIRST, THEN read the LIVE redaction set
             // so a concurrent `forget()` tombstone cannot land in the window between
             // snapshot and write (Story 12.0 review patch).
             let mut guard = self.index.write().await;
-            let redacted_final: HashSet<u64> = {
+            let (redacted_final, tokens_final): (HashSet<u64>, HashSet<String>) = {
                 let rguard = self.redactions.read().await;
-                rguard.keys()
+                (rguard.keys(), rguard.tokens())
             };
             let new_indexed: Vec<IndexedEntry> = new_indexed
                 .into_iter()
-                .filter(|e| !redacted_final.contains(&e.key))
+                .filter(|e| {
+                    !redacted_final.contains(&e.key)
+                        && !tokens_final.contains(&normalize(&e.entry.summary))
+                })
                 .collect();
             guard.retain_keys(&current_keys);
             guard.extend(new_indexed);
-            // Final tombstone gate: drop any key redacted concurrently during the
-            // embed await, independent of the recency window (the whole index, not
-            // just the refreshed slice).
-            if !redacted_final.is_empty() {
-                guard.entries.retain(|e| !redacted_final.contains(&e.key));
+            // Final tombstone gate: drop any key OR content-stable token redacted
+            // concurrently during the embed await, independent of the recency
+            // window (the whole index, not just the refreshed slice).
+            if !redacted_final.is_empty() || !tokens_final.is_empty() {
+                guard.entries.retain(|e| {
+                    !redacted_final.contains(&e.key)
+                        && !tokens_final.contains(&normalize(&e.entry.summary))
+                });
             }
         }
 
@@ -718,17 +749,91 @@ impl MemoryPort for VectorSearchMemory {
         // any in-flight forget/refresh has finished (Story 12.0 review patch).
         let _drain = self.drain_lock.lock().await;
         self.ensure_init().await?;
+        // Resolve each key's LIVE text so the tombstone carries the content-stable
+        // token (Story 12.1c AC3) = `normalize(summary)`, the SAME identity the
+        // file-edit honor path uses. This (a) makes `/memory forget X` and a
+        // hand-delete of X emit an IDENTICAL `RedactionRecord` (the parity test),
+        // and (b) suppresses the daily-log re-derivation copy of X — forget's own
+        // latent #4 leak — not just the keyed copy. A key with no live entry (the
+        // Resolve each key's LIVE text so the tombstone carries the content-stable
+        // token (Story 12.1c AC3) = `normalize(summary)`, the SAME identity the
+        // file-edit honor path uses. This (a) makes `/memory forget X` and a
+        // hand-delete of X emit an IDENTICAL `RedactionRecord` (the parity test),
+        // and (b) suppresses the daily-log re-derivation copy of X — forget's own
+        // latent #4 leak — not just the keyed copy.
+        //
+        // First check `inner.recent()` (the live source), then fall back to the
+        // persisted index for keys outside the refresh window — a key with no live
+        // entry in EITHER place tombstones key-only, exactly as 11.4a did.
+        let mut summary_by_key: HashMap<u64, String> = self
+            .inner
+            .recent(self.refresh_limit)
+            .await?
+            .into_iter()
+            .map(|e| (content_key(&e.timestamp, &e.summary), e.summary))
+            .collect();
+        // Fall back to the persisted index for stale keys (review patch).
+        {
+            let guard = self.index.read().await;
+            for entry in &guard.entries {
+                summary_by_key
+                    .entry(entry.key)
+                    .or_insert_with(|| entry.entry.summary.clone());
+            }
+        }
         // 1. Tombstone FIRST + persist to the sidecar (AC-R6).
         let now = Local::now();
         {
             let mut guard = self.redactions.write().await;
             for &key in keys {
-                guard.insert(RedactionRecord::forget(key, now));
+                let token = summary_by_key
+                    .get(&key)
+                    .map(|s| normalize(s))
+                    .unwrap_or_default();
+                guard.insert(RedactionRecord::redact(key, token, now));
             }
         }
         self.persist_redactions().await?;
-        // 2. One-time purge (vector retain + BM25 rebuild-excluding + persist).
-        self.refresh().await
+        // 2. One-time purge (vector retain + BM25 rebuild-excluding + persist). We
+        // ALREADY hold `drain_lock`, so call the lock-free body (re-locking would
+        // self-deadlock).
+        self.refresh_inner().await
+    }
+
+    /// Story 12.1c AC3 — honor `MEMORY.md` hand-deletions (the file-edit auto-honor
+    /// path; re-homes 11.4a AC-R0). Detects the facts the user removed from
+    /// `MEMORY.md` (draining the curated tier's removal buffer, which reloads on
+    /// mtime change first), writes a content-stable `RedactionRecord` per removed
+    /// fact FIRST, then purges through the SAME hardened `refresh()` sink
+    /// `/memory forget` uses — never a parallel purge path (12.0 AC9). The
+    /// hand-edit IS the consent (party-mode 2026-06-07): the purge proceeds live,
+    /// end-to-end, headless. Returns the purged entries so the daemon can queue the
+    /// "N facts removed" audit notice. Daily logs are NEVER touched.
+    async fn honor_md_removals(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
+        // Detect first (drains the long-term removal buffer; triggers its reload).
+        let removed = self.inner.drain_md_removals().await?;
+        if removed.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Drain gate (same discipline as `forget`).
+        let _drain = self.drain_lock.lock().await;
+        self.ensure_init().await?;
+        // Tombstone FIRST (AC-R6), content-stable — byte-identical to a `/memory
+        // forget` of the same fact (parity).
+        let now = Local::now();
+        {
+            let mut guard = self.redactions.write().await;
+            for e in &removed {
+                let key = content_key(&e.timestamp, &e.summary);
+                let token = normalize(&e.summary);
+                guard.insert(RedactionRecord::redact(key, token, now));
+            }
+        }
+        self.persist_redactions().await?;
+        // Purge through the single hardened sink. We hold `drain_lock`, so call the
+        // lock-free body (re-locking would self-deadlock).
+        self.refresh_inner().await?;
+        Ok(removed)
     }
 
     // ── Overridden: hybrid retrieval (AC2) with keyword fallback (AC4) ──
@@ -761,11 +866,15 @@ impl MemoryPort for VectorSearchMemory {
         // a successful purge the index holds no redacted key, but during the
         // AC-R6 window (tombstone persisted, purge not yet complete) it may — so
         // we mask redacted keys out of the ranked lists + the key→entry map so a
-        // redacted entry is NEVER retrievable, even mid-purge.
-        let redacted: HashSet<u64> = {
+        // redacted entry is NEVER retrievable, even mid-purge. Story 12.1c AC3
+        // adds the content-stable token mask alongside the key mask so a daily-log
+        // re-derivation copy is masked in the same window too.
+        let (redacted, redacted_tokens): (HashSet<u64>, HashSet<String>) = {
             let guard = self.redactions.read().await;
-            guard.keys()
+            (guard.keys(), guard.tokens())
         };
+        let token_masked =
+            |e: &MemoryEntry| -> bool { redacted_tokens.contains(&normalize(&e.summary)) };
 
         // Vector ranking + per-key recency weight + key→entry map, all under ONE
         // read guard with no `.await` held.
@@ -786,7 +895,7 @@ impl MemoryPort for VectorSearchMemory {
                 let mut hits = self.inner.search(query, limit).await?;
                 hits.retain(|e| {
                     let key = content_key(&e.timestamp, &e.summary);
-                    !redacted.contains(&key)
+                    !redacted.contains(&key) && !token_masked(e)
                 });
                 return Ok(hits);
             }
@@ -794,8 +903,10 @@ impl MemoryPort for VectorSearchMemory {
             let mut recency = HashMap::with_capacity(guard.entries.len());
             let mut entry_by_key = HashMap::with_capacity(guard.entries.len());
             for e in &guard.entries {
-                // Skip redacted entries so they never rank, never map back.
-                if redacted.contains(&e.key) {
+                // Skip redacted entries so they never rank, never map back — by
+                // key (11.4a) OR content-stable token (12.1c AC3, masks a
+                // daily-log re-derivation copy in the AC-R6 window).
+                if redacted.contains(&e.key) || token_masked(&e.entry) {
                     continue;
                 }
                 let age_days = (now - e.entry.timestamp).num_seconds() as f64 / 86_400.0;
@@ -824,7 +935,7 @@ impl MemoryPort for VectorSearchMemory {
             let mut hits = self.inner.search(query, limit).await?;
             hits.retain(|e| {
                 let key = content_key(&e.timestamp, &e.summary);
-                !redacted.contains(&key)
+                !redacted.contains(&key) && !token_masked(e)
             });
             return Ok(hits);
         }
@@ -836,7 +947,7 @@ impl MemoryPort for VectorSearchMemory {
             let mut hits = self.inner.search(query, limit).await?;
             hits.retain(|e| {
                 let key = content_key(&e.timestamp, &e.summary);
-                !redacted.contains(&key)
+                !redacted.contains(&key) && !token_masked(e)
             });
             return Ok(hits);
         }
@@ -855,7 +966,7 @@ impl MemoryPort for VectorSearchMemory {
             let mut hits = self.inner.search(query, limit).await?;
             hits.retain(|e| {
                 let key = content_key(&e.timestamp, &e.summary);
-                !redacted.contains(&key)
+                !redacted.contains(&key) && !token_masked(e)
             });
             return Ok(hits);
         }
@@ -1763,5 +1874,310 @@ mod tests {
         // Empty / blank query → no candidates.
         assert!(mem.forget_candidates("", 10).await.unwrap().is_empty());
         assert!(mem.forget_candidates("   ", 10).await.unwrap().is_empty());
+    }
+
+    // ───────────────── Story 12.1c AC3 — content-stable redaction ──────────────
+    //
+    // These exercise the file-edit-honor path over a REAL `project-scoped` inner
+    // (long-term `MEMORY.md` + daily-log), so `recent()` reflects hand-edits and the
+    // daily-log re-derivation leak (#4) is genuinely reproducible.
+
+    use std::time::{Duration as StdDuration, SystemTime};
+
+    fn memory_md_path(workspace: &std::path::Path) -> PathBuf {
+        workspace.join(".rustain").join("MEMORY.md")
+    }
+
+    /// Set a file's mtime (std-only; mirrors the long_term_memory test helper).
+    fn filetime_set(path: &std::path::Path, when: SystemTime) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
+    }
+
+    fn project_scoped_inner(workspace: &std::path::Path) -> Arc<dyn MemoryPort> {
+        Arc::new(crate::adapters::project_scoped_memory::ProjectScopedMemory::new(workspace))
+    }
+
+    /// Total bytes across the daily-log files — an append-only proxy: a tombstone
+    /// that ever touched a source log line would SHRINK this (Murat's invariant).
+    fn daily_log_bytes(workspace: &std::path::Path) -> u64 {
+        let dir = workspace.join(".rustain").join("memory");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+            .sum()
+    }
+
+    /// **AC3 parity — `forget_and_fileedit_emit_identical_record`.** ONE removal
+    /// identity, two producers: `/memory forget X` and a hand-delete of X both
+    /// tombstone the SAME content-stable token AND the same `u64` key, producing an
+    /// identical `RedactionRecord` (timestamp ignored — diagnostic only). Seeding X
+    /// at a FIXED mtime makes the `content_key(entry_timestamp(mtime), summary)`
+    /// deterministic across the two independent setups.
+    #[tokio::test]
+    async fn forget_and_fileedit_emit_identical_record() {
+        const X: &str = "the launch code is alpha";
+        let fixed = SystemTime::UNIX_EPOCH + StdDuration::from_secs(1_700_000_000);
+        let key = content_key(&DateTime::<Local>::from(fixed), X);
+
+        // Producer A — `/memory forget X`.
+        let ws_a = tempfile::tempdir().unwrap();
+        let inner_a = project_scoped_inner(ws_a.path());
+        inner_a
+            .remember_fact(MemoryFact {
+                category: "Secrets".into(),
+                fact: X.into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+        filetime_set(&memory_md_path(ws_a.path()), fixed);
+        let mem_a = VectorSearchMemory::new(
+            inner_a.clone(),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            ws_a.path().join("memory").join("index.bin"),
+        );
+        mem_a.initialize().await.unwrap();
+        mem_a.forget(&[key]).await.unwrap();
+        let rec_a = {
+            let g = mem_a.redactions.read().await;
+            g.get(key).cloned()
+        }
+        .expect("forget wrote a tombstone for the key");
+
+        // Producer B — hand-delete X from MEMORY.md, then honor the file edit.
+        let ws_b = tempfile::tempdir().unwrap();
+        let inner_b = project_scoped_inner(ws_b.path());
+        inner_b
+            .remember_fact(MemoryFact {
+                category: "Secrets".into(),
+                fact: X.into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+        filetime_set(&memory_md_path(ws_b.path()), fixed);
+        let mem_b = VectorSearchMemory::new(
+            inner_b.clone(),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            ws_b.path().join("memory").join("index.bin"),
+        );
+        mem_b.initialize().await.unwrap(); // loads X at the fixed mtime
+        // Hand-delete: rewrite MEMORY.md without X, bump mtime so the reload fires.
+        std::fs::write(memory_md_path(ws_b.path()), "# MEMORY\n").unwrap();
+        filetime_set(
+            &memory_md_path(ws_b.path()),
+            fixed + StdDuration::from_secs(2),
+        );
+        let purged = mem_b.honor_md_removals().await.unwrap();
+        assert_eq!(
+            purged.len(),
+            1,
+            "the hand-deleted fact is detected + purged"
+        );
+        let rec_b = {
+            let g = mem_b.redactions.read().await;
+            g.get(key).cloned()
+        }
+        .expect("file-edit honor wrote a tombstone for the same key");
+
+        // Byte-identical modulo the diagnostic timestamp.
+        assert_eq!(rec_a.key, rec_b.key, "same u64 content key");
+        assert_eq!(rec_a.op, rec_b.op, "same op (no new RedactionOp variant)");
+        assert_eq!(
+            rec_a.token, rec_b.token,
+            "same content-stable token (normalize(summary))"
+        );
+        assert_eq!(rec_a.token, normalize(X), "token IS normalize(summary)");
+    }
+
+    /// **AC3 discriminator — `daily_log_copy_stays_redacted_after_forget`.** Proves
+    /// the fix is REAL, not a false-green. Seed X in BOTH the daily-log AND
+    /// `MEMORY.md`; redact X; then hand-delete the `MEMORY.md` line (dropping the
+    /// long-term suppressor so the append-only daily-log copy would otherwise
+    /// re-derive under a DIFFERENT timestamp key). RED under timestamp-only keying
+    /// (the daily copy re-embeds); GREEN only with the content-stable token. A
+    /// sibling Y in the same category is the negative control (must survive).
+    #[tokio::test]
+    async fn daily_log_copy_stays_redacted_after_forget() {
+        const X: &str = "the launch code is alpha";
+        const Y: &str = "the backup code is beta";
+
+        let ws = tempfile::tempdir().unwrap();
+        let inner = project_scoped_inner(ws.path());
+
+        // Daily-log copy of X at a DISTINCT timestamp namespace (different key than
+        // the MEMORY.md-mtime copy) — this is what re-derives after the hand-delete.
+        inner
+            .store(MemoryEntry {
+                timestamp: super::super::index::tests_millis_to_local(1_600_000_000_000),
+                summary: X.into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        // MEMORY.md copy of X (suppresses the daily copy via merge_dedup) + sibling Y.
+        inner
+            .remember_fact(MemoryFact {
+                category: "Secrets".into(),
+                fact: X.into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+        inner
+            .remember_fact(MemoryFact {
+                category: "Secrets".into(),
+                fact: Y.into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+
+        let mem = VectorSearchMemory::new(
+            inner.clone(),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            ws.path().join("memory").join("index.bin"),
+        );
+        mem.initialize().await.unwrap();
+        assert!(
+            retrievable(&mem, "launch code", X).await,
+            "precondition: X is retrievable before redaction"
+        );
+
+        // Redact X via `/memory forget` (sets the content-stable token normalize(X)).
+        let cands = mem.forget_candidates("launch code", 10).await.unwrap();
+        let xkey = cands
+            .iter()
+            .find(|(_, e)| e.summary == X)
+            .map(|(k, _)| *k)
+            .expect("X is a forget candidate");
+        mem.forget(&[xkey]).await.unwrap();
+        assert!(
+            !retrievable(&mem, "launch code", X).await,
+            "X gone right after forget"
+        );
+
+        // Hand-delete the MEMORY.md X line (keep Y), drop the long-term suppressor.
+        std::fs::write(
+            memory_md_path(ws.path()),
+            format!("# MEMORY\n\n## Secrets\n\n- {Y}\n"),
+        )
+        .unwrap();
+        let bump = SystemTime::now() + StdDuration::from_secs(2);
+        filetime_set(&memory_md_path(ws.path()), bump);
+
+        // Refresh: under timestamp-only keying the daily-log X (different key) would
+        // re-embed → RED. The content-stable token suppresses it → GREEN.
+        mem.refresh().await.unwrap();
+        assert!(
+            !retrievable(&mem, "launch code", X).await,
+            "AC3 discriminator: the daily-log copy does NOT re-derive after the hand-delete"
+        );
+        assert!(
+            !keys_on_disk(&ws.path().join("memory").join("index.bin"))
+                .await
+                .contains(&content_key(
+                    &super::super::index::tests_millis_to_local(1_600_000_000_000),
+                    X
+                )),
+            "the daily-log-keyed X copy is absent from index.bin (vector side)"
+        );
+        // Idempotent across a second refresh.
+        mem.refresh().await.unwrap();
+        assert!(
+            !retrievable(&mem, "launch code", X).await,
+            "still gone after a second refresh (idempotent)"
+        );
+        // Negative control: the sibling Y survives (no over-broad normalization).
+        assert!(
+            retrievable(&mem, "backup code", Y).await,
+            "the sibling fact Y in the same category is unaffected"
+        );
+    }
+
+    /// **AC1/AC3 invariant — `daily_log_is_append_only_across_all_mutations`** (Murat).
+    /// Every story mutation (file-edit honor, `/memory forget`, refresh) leaves the
+    /// daily-log byte-count MONOTONIC non-decreasing — a tombstone marks a derived
+    /// fact dead, it NEVER touches a source log line. (The append-only log is the
+    /// foundation the re-derivation suppression leans on.)
+    #[tokio::test]
+    async fn daily_log_is_append_only_across_all_mutations() {
+        const X: &str = "the launch code is alpha";
+        let ws = tempfile::tempdir().unwrap();
+        let inner = project_scoped_inner(ws.path());
+        inner
+            .store(MemoryEntry {
+                timestamp: Local::now(),
+                summary: "operational record one".into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        inner
+            .store(MemoryEntry {
+                timestamp: Local::now(),
+                summary: X.into(),
+                context: None,
+            })
+            .await
+            .unwrap();
+        inner
+            .remember_fact(MemoryFact {
+                category: "Secrets".into(),
+                fact: X.into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+
+        let mem = VectorSearchMemory::new(
+            inner.clone(),
+            Arc::new(StubEmbedder::new(64, "stub-v1")),
+            ws.path().join("memory").join("index.bin"),
+        );
+        mem.initialize().await.unwrap();
+
+        let mut floor = daily_log_bytes(ws.path());
+        let mut check = |ws: &std::path::Path, label: &str, floor: &mut u64| {
+            let now = daily_log_bytes(ws);
+            assert!(
+                now >= *floor,
+                "daily-log shrank after {label}: {now} < {floor}"
+            );
+            *floor = now;
+        };
+
+        // /memory forget
+        let cands = mem.forget_candidates("launch code", 10).await.unwrap();
+        let xkey = cands
+            .iter()
+            .find(|(_, e)| e.summary == X)
+            .map(|(k, _)| *k)
+            .unwrap();
+        mem.forget(&[xkey]).await.unwrap();
+        check(ws.path(), "forget", &mut floor);
+
+        // file-edit redaction-honor (hand-delete X from MEMORY.md)
+        std::fs::write(memory_md_path(ws.path()), "# MEMORY\n").unwrap();
+        filetime_set(
+            &memory_md_path(ws.path()),
+            SystemTime::now() + StdDuration::from_secs(2),
+        );
+        mem.honor_md_removals().await.unwrap();
+        check(ws.path(), "honor_md_removals", &mut floor);
+
+        // refresh
+        mem.refresh().await.unwrap();
+        check(ws.path(), "refresh", &mut floor);
+
+        // consolidation-enqueue is a no-op for the daily log (writes to .rustain root).
+        assert!(
+            daily_log_bytes(ws.path()) >= floor,
+            "daily-log untouched by the consolidation queue"
+        );
     }
 }

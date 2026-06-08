@@ -88,6 +88,36 @@ pub trait MemoryPort: Send + Sync {
         Ok(())
     }
 
+    /// **Story 12.1c AC3 — detection half.** Drain (return AND clear) the facts the
+    /// user HAND-DELETED from the curated `MEMORY.md` since the last mtime-change
+    /// reload, mapped to `MemoryEntry` exactly as [`Self::recent`] maps a live fact
+    /// (so the key/text identity matches the search index). Default empty — only
+    /// the curated long-term tier (`LongTermMemory`) tracks removals; the
+    /// `project-scoped` composite delegates to it. A reload is triggered as a side
+    /// effect so the daemon's `SessionBoundary` honor pass sees the latest edits.
+    async fn drain_md_removals(
+        &self,
+    ) -> Result<Vec<crate::domain::models::MemoryEntry>, crate::domain::errors::MemoryError> {
+        Ok(Vec::new())
+    }
+
+    /// **Story 12.1c AC3 — honor half.** Detect hand-deletions ([`Self::
+    /// drain_md_removals`] on the curated tier) and HONOR them: write a
+    /// content-stable `RedactionRecord` per removed fact FIRST (AC-R6 tombstone-
+    /// first), then purge the derived search index through the SAME hardened
+    /// `refresh()` sink `/memory forget` uses (no parallel purge path). Returns the
+    /// purged entries (for the daemon's audit notice). Default no-op returning
+    /// empty — an adapter with no derived index (NoOp / DailyLog / LongTerm /
+    /// `project-scoped` under a NON-vector profile) has nothing to purge, so
+    /// file-edit-honor is a documented no-op there (the hand-edit still self-heals
+    /// the long-term copy on reload; only the vector/BM25 re-derivation needs this
+    /// active purge). Only `VectorSearchMemory` overrides it.
+    async fn honor_md_removals(
+        &self,
+    ) -> Result<Vec<crate::domain::models::MemoryEntry>, crate::domain::errors::MemoryError> {
+        Ok(Vec::new())
+    }
+
     /// Flush any pending/in-flight durable write to its backing store. Default
     /// is a no-op: the daily-log (append-on-`store` + `file.flush()`, 11.1) and
     /// long-term (`fs::write` on `remember_fact`, 11.2) tiers write synchronously,

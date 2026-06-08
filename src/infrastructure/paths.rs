@@ -214,6 +214,20 @@ pub fn daemon_crash_log_path(workspace: &std::path::Path, ts: u64) -> Result<Pat
     Ok(rustain_workspace_dir(workspace)?.join(format!("crash-{ts}.log")))
 }
 
+/// Path to the daemon's latest-only "consolidation-due" marker (Story 12.1c AC2).
+/// `{workspace}/.rustain/consolidation-queue.json` — queued at a `SessionBoundary`,
+/// consumed by a TUI attach (Story 12.2). Overwritten atomically each boundary.
+pub fn daemon_consolidation_queue_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("consolidation-queue.json"))
+}
+
+/// Path to the daemon's latest-only MEMORY.md purge audit notice (Story 12.1c AC3).
+/// `{workspace}/.rustain/memory-md-purge-notice.json` — the "never silent" audit
+/// record for a live file-edit purge, surfaced at the next attach (Story 12.2).
+pub fn daemon_purge_notice_path(workspace: &std::path::Path) -> Result<PathBuf> {
+    Ok(rustain_workspace_dir(workspace)?.join("memory-md-purge-notice.json"))
+}
+
 /// Path to a crash log file with timestamp.
 pub fn crash_log_path() -> Result<PathBuf> {
     let timestamp = std::time::SystemTime::now()

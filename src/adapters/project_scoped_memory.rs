@@ -30,11 +30,12 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::adapters::daily_log_memory::DailyLogMemory;
-use crate::adapters::long_term_memory::{LongTermMemory, normalize};
+use crate::adapters::long_term_memory::LongTermMemory;
 use crate::domain::errors::{MemoryError, TransitionError};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{HealthLevel, HealthSummary, MemoryEntry, MemoryFact, TransitionState};
 use crate::domain::ports::MemoryPort;
+use crate::domain::services::normalize::normalize;
 
 /// Composite of the daily-log and long-term memory tiers.
 pub struct ProjectScopedMemory {
@@ -112,6 +113,13 @@ impl MemoryPort for ProjectScopedMemory {
         let lt = self.long_term.search(query, limit).await?;
         let dl = self.daily.search(query, limit).await?;
         Ok(Self::merge_dedup(lt, dl, limit))
+    }
+
+    /// Story 12.1c AC3 — hand-deletions are a long-term (`MEMORY.md`) concern;
+    /// delegate detection to that tier. The daily log is append-only and never the
+    /// source of a hand-deletion.
+    async fn drain_md_removals(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
+        self.long_term.drain_md_removals().await
     }
 
     /// Worst-of the two children (minimal aggregate).

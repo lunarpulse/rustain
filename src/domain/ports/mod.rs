@@ -27,6 +27,8 @@ mod provider;
 #[allow(unused_imports)]
 mod provider_info;
 #[allow(unused_imports)]
+mod recall_provider;
+#[allow(unused_imports)]
 mod sandbox;
 #[allow(unused_imports)]
 mod scheduler;
@@ -62,6 +64,7 @@ pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::StreamingProvider;
 pub use provider_info::ProviderInfoPort;
+pub use recall_provider::RecallProviderPort;
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;

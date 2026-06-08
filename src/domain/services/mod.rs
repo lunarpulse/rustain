@@ -15,6 +15,7 @@ pub mod identity_color;
 pub mod import;
 pub mod message_builder;
 pub mod meta_search;
+pub mod normalize;
 pub use meta_search::compute_terse;
 pub mod delegation_decider;
 pub mod model_router;

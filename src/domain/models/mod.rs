@@ -43,6 +43,7 @@ pub mod search_hit;
 pub mod session;
 pub mod session_boundary;
 pub mod session_meta;
+pub mod session_queue;
 mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
@@ -121,6 +122,7 @@ pub use session_boundary::SessionBoundary;
 pub use session_meta::{
     ImportSource, SessionMeta, extract_title_from_first_message, now_unix, shorten_text,
 };
+pub use session_queue::{ConsolidationDueMarker, MemoryMdPurgeNotice, PURGE_NOTICE_PREVIEW_CAP};
 #[allow(unused_imports)]
 pub use skill::{
     ActiveSkill, MAX_SKILL_ACTIVATION_DEPTH, MAX_SKILL_FILE_SIZE, SkillActivationError,

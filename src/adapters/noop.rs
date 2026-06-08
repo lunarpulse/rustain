@@ -17,8 +17,9 @@ use crate::domain::models::{
     PermissionMode, StreamChunk, ToolDefinition, ToolResult,
 };
 use crate::domain::ports::{
-    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, SchedulerPort,
-    SecurityPort, SessionPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
+    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, RecallProviderPort,
+    SchedulerPort, SecurityPort, SessionPort, StoragePort, StreamingProvider, ToolSetPort,
+    UsageLedgerPort,
 };
 use crate::domain::services::approval_runtime::SessionApprovalSet;
 use tokio_util::sync::CancellationToken;
@@ -152,6 +153,31 @@ impl PersonaPort for NoOpPersona {
 pub struct NoOpMemory;
 
 impl MemoryPort for NoOpMemory {}
+
+// ── RecallProviderPort (Story 12.1c AC4) ────────────────────────
+//
+// The default offline recall provider — an EXPLICIT no-op (not an absence). The
+// daemon's `SessionBoundary` seam invokes `on_session_end` unconditionally so the
+// call site is always exercised (12.1b "prove the seam is called" lesson); this
+// impl makes the no-op explicit rather than faking work. It deliberately does NOT
+// short-circuit on an empty transcript — the emptiness is the headless daemon's
+// missing message source (Story 12.2), not a reason to skip; baking in
+// `if empty { return }` here would later mask a real bug.
+
+#[derive(Debug, Default)]
+pub struct NoopRecallProvider;
+
+#[async_trait]
+impl RecallProviderPort for NoopRecallProvider {
+    async fn on_session_end(
+        &self,
+        _transcript: &[crate::domain::models::ChatMessage],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Explicit no-op: no external recall backend in the default (offline)
+        // composition. Zero side-effects, never panics.
+        Ok(())
+    }
+}
 
 // ── SessionPort ─────────────────────────────────────────────────
 

@@ -27,7 +27,16 @@ use crate::domain::models::{RedactionOp, RedactionRecord};
 /// DTO change; a load with a different version discards (re-derived removals are
 /// safe — a lost tombstone is the ONE thing we never want, so a version bump that
 /// dropped tombstones would itself be a bug to catch in review).
-pub const REDACTIONS_VERSION: u32 = 1;
+///
+/// **v2 (Story 12.1c AC3)** adds the content-stable `token` per entry. To honor
+/// the "never drop a tombstone" contract across this bump, [`RedactionStore::
+/// from_bytes`] MIGRATES a v1 sidecar (token defaults to `""` → the record keeps
+/// suppressing via its `u64` key exactly as in 11.4a) rather than discarding it.
+pub const REDACTIONS_VERSION: u32 = 2;
+
+/// The previous (11.4a) on-disk version — key-only, no content-stable token.
+/// Read-migrated, never written.
+const REDACTIONS_VERSION_V1: u32 = 1;
 
 /// The full set of durable redaction tombstones, keyed by stable `u64` content
 /// key. Held in memory by the adapter (behind a `tokio::sync::RwLock`) and
@@ -53,6 +62,26 @@ struct PersistedRedaction {
     /// safe default for removal-integrity.
     op: u8,
     /// Redaction timestamp as Unix milliseconds.
+    ts_millis: i64,
+    /// Content-stable suppression token (Story 12.1c AC3). `""` = key-only / a
+    /// migrated v1 record.
+    token: String,
+}
+
+// ── v1 (11.4a) DTOs — read-only, for the no-drop migration in `from_bytes` ──
+
+#[derive(Decode)]
+#[cfg_attr(test, derive(Encode))]
+struct PersistedRedactionsV1 {
+    version: u32,
+    entries: Vec<PersistedRedactionV1>,
+}
+
+#[derive(Decode)]
+#[cfg_attr(test, derive(Encode))]
+struct PersistedRedactionV1 {
+    key: u64,
+    op: u8,
     ts_millis: i64,
 }
 
@@ -81,9 +110,28 @@ impl RedactionStore {
         self.records.iter().map(|r| r.key).collect()
     }
 
+    /// The set of **content-stable suppression tokens** (Story 12.1c AC3) —
+    /// `normalize(summary)` identities, empty tokens excluded. The gate drops a
+    /// candidate whose `normalize(text)` is in this set, so ONE tombstone
+    /// suppresses the same fact across every timestamp namespace (the
+    /// `MEMORY.md`-mtime copy AND the daily-log-realts re-derivation copy).
+    pub fn tokens(&self) -> HashSet<String> {
+        self.records
+            .iter()
+            .filter(|r| !r.token.is_empty())
+            .map(|r| r.token.clone())
+            .collect()
+    }
+
     /// Is this key redacted?
     pub fn contains(&self, key: u64) -> bool {
         self.records.iter().any(|r| r.key == key)
+    }
+
+    /// The full tombstone for `key`, if present (the parity test asserts the whole
+    /// `RedactionRecord` — key/op/token — is identical across both producers).
+    pub fn get(&self, key: u64) -> Option<&RedactionRecord> {
+        self.records.iter().find(|r| r.key == key)
     }
 
     /// Number of tombstones.
@@ -105,6 +153,7 @@ impl RedactionStore {
     }
 
     /// Encode to the binary `redactions.bin` payload (sync — safe under a guard).
+    /// Always writes the current (v2, token-bearing) layout.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MemoryError> {
         let dto = PersistedRedactions {
             version: REDACTIONS_VERSION,
@@ -115,6 +164,7 @@ impl RedactionStore {
                     key: r.key,
                     op: op_to_u8(r.op),
                     ts_millis: r.timestamp.timestamp_millis(),
+                    token: r.token.clone(),
                 })
                 .collect(),
         };
@@ -122,24 +172,50 @@ impl RedactionStore {
             .map_err(|e| MemoryError::IoError(format!("redactions encode failed: {e}")))
     }
 
-    /// Decode a `redactions.bin` payload. A version mismatch is treated as a
-    /// parse error (NOT silently empty) — losing tombstones on upgrade is a
-    /// data-integrity failure, not a recoverable state.
+    /// Decode a `redactions.bin` payload. Tries the current v2 (token-bearing)
+    /// layout first; if that doesn't yield `version == REDACTIONS_VERSION`, falls
+    /// back to MIGRATING a v1 (11.4a, key-only) sidecar rather than discarding it
+    /// — losing a tombstone is the ONE thing we never do (AC-R3). A migrated v1
+    /// record gets an empty `token`, so it keeps suppressing via its `u64` key
+    /// exactly as before. Any other version / a genuine decode failure is a parse
+    /// error (NOT silently empty).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MemoryError> {
-        let (dto, _read): (PersistedRedactions, usize) =
-            bincode::decode_from_slice(bytes, bincode::config::standard())
-                .map_err(|e| MemoryError::ParseError(format!("redactions decode failed: {e}")))?;
-        if dto.version != REDACTIONS_VERSION {
+        let cfg = bincode::config::standard();
+
+        // v2 first. We must check the version BEFORE trusting the decode, because a
+        // v1 buffer can decode into the v2 struct with trailing-byte slack — but it
+        // will carry `version == 1`, so the guard below rejects it and we migrate.
+        if let Ok((dto, _read)) = bincode::decode_from_slice::<PersistedRedactions, _>(bytes, cfg) {
+            if dto.version == REDACTIONS_VERSION {
+                let records = dto
+                    .entries
+                    .into_iter()
+                    .map(|p| RedactionRecord {
+                        key: p.key,
+                        token: p.token,
+                        op: u8_to_op(p.op),
+                        timestamp: millis_to_local(p.ts_millis),
+                    })
+                    .collect();
+                return Ok(Self { records });
+            }
+        }
+
+        // v1 migration (no-drop upgrade).
+        let (v1, _read): (PersistedRedactionsV1, usize) = bincode::decode_from_slice(bytes, cfg)
+            .map_err(|e| MemoryError::ParseError(format!("redactions decode failed: {e}")))?;
+        if v1.version != REDACTIONS_VERSION_V1 {
             return Err(MemoryError::ParseError(format!(
-                "redactions.bin version mismatch: loaded={}, expected={} — refusing to discard tombstones",
-                dto.version, REDACTIONS_VERSION
+                "redactions.bin version mismatch: loaded={}, expected={} (or v{} for migration) — refusing to discard tombstones",
+                v1.version, REDACTIONS_VERSION, REDACTIONS_VERSION_V1
             )));
         }
-        let records = dto
+        let records = v1
             .entries
             .into_iter()
             .map(|p| RedactionRecord {
                 key: p.key,
+                token: String::new(), // key-only; suppression via the u64 key (11.4a)
                 op: u8_to_op(p.op),
                 timestamp: millis_to_local(p.ts_millis),
             })
@@ -228,6 +304,55 @@ mod tests {
         let bytes = store.to_bytes().unwrap();
         let back = RedactionStore::from_bytes(&bytes).unwrap();
         assert!(back.is_empty());
+    }
+
+    #[test]
+    fn v2_round_trip_preserves_token() {
+        let mut store = RedactionStore::empty();
+        store.insert(RedactionRecord::redact(
+            7,
+            "the launch code".into(),
+            millis_to_local(1_700_000_000_000),
+        ));
+        let back = RedactionStore::from_bytes(&store.to_bytes().unwrap()).unwrap();
+        assert_eq!(store, back, "v2 token round-trips");
+        assert_eq!(
+            back.tokens(),
+            ["the launch code".to_string()].into_iter().collect()
+        );
+    }
+
+    /// Story 12.1c — a pre-12.1c (v1, key-only) sidecar MIGRATES rather than being
+    /// discarded (losing a tombstone is the one thing we never do). The migrated
+    /// record keeps its `u64` key (still suppresses) with an empty token.
+    #[test]
+    fn v1_sidecar_migrates_without_dropping_tombstones() {
+        let v1 = PersistedRedactionsV1 {
+            version: REDACTIONS_VERSION_V1,
+            entries: vec![
+                PersistedRedactionV1 {
+                    key: 42,
+                    op: 0,
+                    ts_millis: 1_700_000_000_000,
+                },
+                PersistedRedactionV1 {
+                    key: 99,
+                    op: 0,
+                    ts_millis: 1_700_000_500_000,
+                },
+            ],
+        };
+        let bytes = bincode::encode_to_vec(&v1, bincode::config::standard()).unwrap();
+        let store = RedactionStore::from_bytes(&bytes).expect("v1 migrates, never discards");
+        assert_eq!(
+            store.keys(),
+            [42, 99].into_iter().collect(),
+            "both tombstones kept"
+        );
+        assert!(
+            store.tokens().is_empty(),
+            "migrated records are key-only (empty token)"
+        );
     }
 
     #[test]

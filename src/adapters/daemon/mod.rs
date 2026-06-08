@@ -29,6 +29,8 @@ mod pidfile;
 #[cfg(unix)]
 mod service;
 #[cfg(unix)]
+pub mod session_queue;
+#[cfg(unix)]
 mod socket;
 #[cfg(unix)]
 pub mod status;
@@ -241,9 +243,18 @@ async fn run_daemon_foreground(
         crate::infrastructure::composition::build_daemon_memory(&workspace, &memory_adapter)
             .map_err(|e| anyhow::anyhow!("composing daemon memory adapter: {e}"))?;
 
+    // Story 12.1c AC4 — the recall provider defaults to the explicit offline no-op
+    // (`NoopRecallProvider`). The daemon has no external recall backend composed; a
+    // real provider arrives with the message runtime (Story 11.5/12.2). The seam is
+    // still DRIVEN every boundary (prove-the-seam-is-called, 12.1b lesson).
+    let recall: std::sync::Arc<dyn crate::domain::ports::RecallProviderPort> =
+        std::sync::Arc::new(crate::adapters::noop::NoopRecallProvider);
+
     let rt = DaemonRuntime {
         config: config.clone(),
         memory,
+        recall,
+        workspace: workspace.clone(),
         pid_path: pid_path.clone(),
         socket_path: socket_path.clone(),
     };
