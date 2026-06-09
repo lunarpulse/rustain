@@ -10,9 +10,12 @@
 //! AC4). On success it emits `MemoryConsolidationProposed`; on empty / error /
 //! timeout it emits `MemoryConsolidationFailed` (AC6 — never panics, never
 //! blocks the event loop).
+//!
+//! `generate_proposals` and `CONSOLIDATION_TIMEOUT` have been extracted to
+//! `domain::services::consolidation` (Story 12.2d AC8) so the daemon attach path
+//! can reuse them without adapter→adapter coupling.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -20,9 +23,8 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::tab::ConversationId;
 use crate::domain::ports::StreamingProvider;
 
-/// Background task timeout — mirrors `event_loop.rs::BACKGROUND_TASK_TIMEOUT`
-/// and `compaction::COMPACTION_TIMEOUT` (10s). Failures surface as events.
-const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Re-export the shared timeout from the domain service (Story 12.2d AC8).
+pub use crate::domain::services::consolidation::CONSOLIDATION_TIMEOUT;
 
 /// Data payload for the consolidation spawn (mirrors `CompactionPayload`).
 /// Carries DATA only — the `tokio::spawn(...)` future is constructed at the
@@ -49,7 +51,11 @@ pub async fn run_consolidation(payload: ConsolidationPayload) {
 
     let result = tokio::time::timeout(
         CONSOLIDATION_TIMEOUT,
-        generate_proposals(&*provider, &model, &prompt_body),
+        crate::domain::services::consolidation::generate_proposals(
+            &*provider,
+            &model,
+            &prompt_body,
+        ),
     )
     .await;
 
@@ -81,58 +87,6 @@ pub async fn run_consolidation(payload: ConsolidationPayload) {
         },
     };
     let _ = domain_tx.send(event); // CONFORMANCE_EXCEPTION_EVENTBUS_BYPASS: 11-2a — background sub-turn result (mirrors TitleGenerated/CompactionComplete)
-}
-
-/// Run the model sub-turn and parse its reply into proposed facts. Applies the
-/// AC5 defense-in-depth secret gate (daily-log content can predate the 11.2
-/// capture gate) — any proposal whose text trips `scan_for_secrets` is dropped.
-async fn generate_proposals(
-    provider: &dyn StreamingProvider,
-    model: &str,
-    prompt_body: &str,
-) -> anyhow::Result<Vec<crate::domain::models::MemoryFact>> {
-    use crate::domain::models::{CompletionOptions, Message, MessageRole};
-
-    let messages = vec![Message {
-        role: MessageRole::User,
-        content: prompt_body.to_string(),
-        images: vec![],
-        tool_results: vec![],
-        tool_uses: vec![],
-        context_prefix: None,
-        reasoning_content: None,
-    }];
-    let options = CompletionOptions {
-        model: model.to_string(),
-        max_tokens: 1024,
-        system_prompt: crate::domain::services::consolidation::CONSOLIDATION_SYSTEM_PROMPT
-            .to_string(),
-        temperature: None,
-        tools: vec![], // MANDATORY — the model must emit JSON, not call tools.
-    };
-
-    let stream = provider.stream_completion(messages, options).await?;
-    let text = crate::domain::services::streaming_collect::collect_text(stream).await?;
-    let mut proposals = crate::domain::services::consolidation::parse_proposals(&text);
-
-    // AC5 — defense-in-depth secret gate at the propose boundary.
-    proposals.retain(|f| {
-        let blob = format!(
-            "{}\n{}\n{}",
-            f.category,
-            f.fact,
-            f.detail.as_deref().unwrap_or("")
-        );
-        match crate::domain::services::secret_scan::scan_for_secrets(&blob) {
-            Some(pat) => {
-                tracing::warn!("consolidation: dropping proposal flagged as {pat}");
-                false
-            }
-            None => true,
-        }
-    });
-
-    Ok(proposals)
 }
 
 #[cfg(test)]

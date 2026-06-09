@@ -451,6 +451,12 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     let mut input = String::new();
     let mut scroll_offset = 0usize;
     let mut auto_scroll = true;
+    // Story 12.2d AC3 — consolidation card view-state (lives in loop locals, not AppState).
+    let mut pending_consolidation_card: Option<
+        crate::adapters::tui::state::PendingConsolidationCard,
+    > = None;
+    let mut pending_consolidation_token: Option<crate::adapters::daemon::protocol::ProposalToken> =
+        None;
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -492,6 +498,20 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 &tool_block_states,
                 &feedback_blocks,
             );
+            // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
+            // bottom-anchored inline grammar the local TUI uses (bordered + accent,
+            // event_loop.rs ~8925), not a hand-rolled borderless paragraph.
+            if let Some(ref card) = pending_consolidation_card {
+                use crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines;
+                use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
+                let card_lines = render_consolidation_card_lines(card, &state.theme, layout.chat_pane.width);
+                render_bottom_anchored_card(
+                    f.buffer_mut(),
+                    card_lines,
+                    state.theme.colors.accent,
+                    layout.chat_pane,
+                );
+            }
             status_bar::render(
                 f,
                 layout.status_bar,
@@ -549,6 +569,33 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
                         match (key.code, key.modifiers) {
+                            // Story 12.2d AC4/AC5 — consolidation card intercept.
+                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
+                                && pending_consolidation_token.is_some() =>
+                            {
+                                if let Some(token) = pending_consolidation_token.take() {
+                                    let _ = frame_tx.send(ClientFrame::ConsolidationResolve {
+                                        token,
+                                        accept: true,
+                                    });
+                                }
+                                pending_consolidation_card = None;
+                                state.needs_redraw = true;
+                            }
+                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
+                                if !m.contains(KeyModifiers::CONTROL)
+                                    && pending_consolidation_token.is_some() =>
+                            {
+                                // n or Esc while card shown → decline.
+                                if let Some(token) = pending_consolidation_token.take() {
+                                    let _ = frame_tx.send(ClientFrame::ConsolidationResolve {
+                                        token,
+                                        accept: false,
+                                    });
+                                }
+                                pending_consolidation_card = None;
+                                state.needs_redraw = true;
+                            }
                             // AC4 — detach (keybinding only, no CLI verb).
                             (KeyCode::Esc, _)
                             | (KeyCode::Char('d'), KeyModifiers::CONTROL)
@@ -647,6 +694,18 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             "[approval needed] {tool} (id {}) — approve from the local TUI for now.",
                             request_id.0
                         )));
+                    }
+                    Ok(Some(DaemonFrame::ConsolidationProposed { token, proposals })) => {
+                        // Story 12.2d AC3 — store token + build the card for rendering.
+                        // Unwrap the per-item `ProposedFact` to the card's (MemoryFact, bool)
+                        // shape (the id is the AI-12.2d-2 handle; 12.2d toggles all-on).
+                        let card = crate::adapters::tui::state::PendingConsolidationCard {
+                            conversation_id: String::new(),
+                            proposals: proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
+                        };
+                        pending_consolidation_card = Some(card);
+                        pending_consolidation_token = Some(token);
+                        state.needs_redraw = true;
                     }
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
                     // AttachAck/History are not expected post-handshake; ignore.
@@ -1072,6 +1131,7 @@ mod tests {
             | ClientFrame::UserMessage { .. }
             | ClientFrame::HistoryRequest { .. }
             | ClientFrame::ApprovalResponse { .. }
+            | ClientFrame::ConsolidationResolve { .. }
             | ClientFrame::Detach => {}
         }
     }

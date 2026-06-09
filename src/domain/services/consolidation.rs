@@ -1,19 +1,22 @@
-//! Pure memory-consolidation service — Story 11.2a (completes Story 11.2 AC4).
+//! Pure memory-consolidation service — Story 11.2a (completes Story 11.2 AC4) + 12.2d (AC8 shared generation).
 //!
-//! Two pure helpers + the model-facing system prompt that together drive the
-//! `/memory consolidate` propose step:
+//! Pure helpers + the model-facing system prompt + shared generation function:
 //! - [`build_proposal_prompt`] renders recent daily-log entries into the
 //!   user-message body for a background model sub-turn (mirrors
 //!   `compaction::build_compaction_prompt_input` — bounded token cost).
 //! - [`parse_proposals`] tolerantly parses the model's JSON reply into
 //!   `MemoryFact`s.
+//! - [`generate_proposals`] runs a structured model sub-turn and returns proposed
+//!   facts (shared by the TUI handler and the daemon attach path, extracted Story 12.2d AC8).
 //!
-//! domain/services discipline: PURE — no I/O, no async, string in /
-//! `Vec<MemoryFact>` out. The JSON parse maps through a PRIVATE
-//! `#[derive(Deserialize)] ProposedFact` DTO so `MemoryFact` itself stays
-//! serde-free (the markdown round-trip is its contract — 11.2 Q1). There is no
-//! JSON-schema enforcement in `CompletionOptions`; a deterministic system prompt
-//! plus this tolerant parse IS the contract (see story Latest Tech).
+//! domain/services discipline: the helpers are PURE — no I/O, no async, string in /
+//! `Vec<MemoryFact>` out. `generate_proposals` IS async (streaming provider call) but
+//! carries no adapter dependencies — it depends only on the `StreamingProvider` port.
+//! The JSON parse maps through a PRIVATE `#[derive(Deserialize)] ProposedFact` DTO so
+//! `MemoryFact` itself stays serde-free for on-disk use (the markdown round-trip is its
+//! contract — 11.2 Q1). Wire-protocol serialization uses the serde derives added in 12.2d.
+
+use std::time::Duration;
 
 use crate::domain::models::{MemoryEntry, MemoryFact};
 
@@ -23,6 +26,11 @@ const MAX_ENTRIES: usize = 30;
 const MAX_ENTRY_CHARS: usize = 600;
 /// Cap on proposals accepted from one model response (defensive bound).
 const MAX_PROPOSALS: usize = 20;
+
+/// Background task timeout for consolidation generation — mirrors
+/// `event_loop.rs::BACKGROUND_TASK_TIMEOUT` (10s). Shared between the TUI handler
+/// and the daemon attach path (Story 12.2d AC8).
+pub const CONSOLIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Model-facing instruction for the consolidation sub-turn. Deterministic and
 /// tight by design — flakiness > realism (project test-prompt principle).
@@ -116,6 +124,60 @@ pub fn parse_proposals(model_text: &str) -> Vec<MemoryFact> {
         })
         .take(MAX_PROPOSALS)
         .collect()
+}
+
+/// Run the model sub-turn and parse its reply into proposed facts. Shared between
+/// the TUI `/memory consolidate` handler and the daemon attach consolidation path
+/// (Story 12.2d AC8 — extracted from `handlers/consolidation.rs`).
+///
+/// Applies the AC5 defense-in-depth secret gate (daily-log content can predate the
+/// 11.2 capture gate) — any proposal whose text trips `scan_for_secrets` is dropped.
+pub async fn generate_proposals(
+    provider: &dyn crate::domain::ports::StreamingProvider,
+    model: &str,
+    prompt_body: &str,
+) -> anyhow::Result<Vec<MemoryFact>> {
+    use crate::domain::models::{CompletionOptions, Message, MessageRole};
+
+    let messages = vec![Message {
+        role: MessageRole::User,
+        content: prompt_body.to_string(),
+        images: vec![],
+        tool_results: vec![],
+        tool_uses: vec![],
+        context_prefix: None,
+        reasoning_content: None,
+    }];
+    let options = CompletionOptions {
+        model: model.to_string(),
+        max_tokens: 1024,
+        system_prompt: CONSOLIDATION_SYSTEM_PROMPT.to_string(),
+        temperature: None,
+        tools: vec![], // MANDATORY — the model must emit JSON, not call tools.
+    };
+
+    let stream = provider.stream_completion(messages, options).await?;
+    let text = crate::domain::services::streaming_collect::collect_text(stream).await?;
+    let mut proposals = parse_proposals(&text);
+
+    // AC5 — defense-in-depth secret gate at the propose boundary.
+    proposals.retain(|f| {
+        let blob = format!(
+            "{}\n{}\n{}",
+            f.category,
+            f.fact,
+            f.detail.as_deref().unwrap_or("")
+        );
+        match crate::domain::services::secret_scan::scan_for_secrets(&blob) {
+            Some(pat) => {
+                tracing::warn!("consolidation: dropping proposal flagged as {pat}");
+                false
+            }
+            None => true,
+        }
+    });
+
+    Ok(proposals)
 }
 
 /// Char-safe truncation with an ellipsis marker.

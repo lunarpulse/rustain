@@ -32,8 +32,8 @@ use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntime
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 use super::protocol::{
-    AttachMode, AttachSnapshot, ClientFrame, DaemonFrame, PROTOCOL_VERSION, ProtocolError,
-    read_frame, write_frame,
+    AttachMode, AttachSnapshot, ClientFrame, DaemonFrame, PROTOCOL_VERSION, ProposalToken,
+    ProtocolError, read_frame, write_frame,
 };
 use super::runtime::DaemonCore;
 
@@ -44,6 +44,17 @@ const CONN_QUEUE_DEPTH: usize = 1024;
 /// How long an attached-but-unresponsive writer has to answer an approval before
 /// the daemon falls back to the conservative unattended path (deny) (AC6 #2).
 const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// A consolidation proposal set retained by the daemon for token-gated resolve
+/// (Story 12.2d AC2/AC4). Keyed by the marker's `queued_at_unix` in
+/// `AttachServer::retained_consolidations`.
+struct RetainedConsolidation {
+    token: super::protocol::ProposalToken,
+    /// Story 12.2d AC2 / Fork-C — each proposal carries a stable `ProposalId`
+    /// (minted at generation via `.enumerate()`), the forward-compat handle for
+    /// the per-item-toggle fast-follow (AI-12.2d-2).
+    proposals: Vec<super::protocol::ProposedFact>,
+}
 
 /// One attached connection's outbound handle + grant.
 struct Conn {
@@ -105,6 +116,17 @@ pub struct AttachServer {
     approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
     turn_serial: Arc<Mutex<()>>,
     turn_complete: Arc<Notify>,
+    /// Story 12.2d AC2/AC6 — retained consolidation proposals keyed by the marker's
+    /// `queued_at_unix` (NOT `daily_log_ref`). Reused on re-attach (G7), evicted on
+    /// new marker or resolve (G8). tokio::sync per locks=4 discipline (AC7).
+    retained_consolidations: Arc<Mutex<std::collections::HashMap<u64, RetainedConsolidation>>>,
+    /// Monotonic counter for minting `ProposalToken`s (Story 12.2d AC2).
+    next_proposal_token: Arc<AtomicU64>,
+    /// Story 12.2d code-review P3 — `queued_at_unix` values with an in-flight
+    /// generation. A re-attach during the generation window (before the retained
+    /// entry lands) checks this set so it does NOT spawn a duplicate
+    /// `generate_proposals` call (G7: exactly one call per marker).
+    generating_consolidations: Arc<Mutex<std::collections::HashSet<u64>>>,
 }
 
 impl AttachServer {
@@ -123,6 +145,9 @@ impl AttachServer {
             approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             turn_serial: Arc::new(Mutex::new(())),
             turn_complete: Arc::new(Notify::new()),
+            retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            next_proposal_token: Arc::new(AtomicU64::new(1)),
+            generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
     }
 
@@ -429,6 +454,144 @@ impl AttachServer {
                 )
                 .await;
             }
+            // Story 12.2d AC4/AC5/AC6/AC7 — daemon-authoritative, token-gated resolve.
+            ClientFrame::ConsolidationResolve { token, accept } => {
+                // AC5 — reject from read-only (mutation frame).
+                if mode != AttachMode::ReadWrite {
+                    self.send_to(conn_id, DaemonFrame::Error(ProtocolError::ReadOnly))
+                        .await;
+                    return false;
+                }
+
+                // Look up retained entry by token (NOT by queued_at_unix — the
+                // resolve carries the token the client was actually shown; confused-deputy guard).
+                let resolved = {
+                    let mut retained = self.retained_consolidations.lock().await;
+                    let mut found: Option<(u64, RetainedConsolidation)> = None;
+                    for (&key, entry) in retained.iter() {
+                        if entry.token == token {
+                            found = Some((
+                                key,
+                                RetainedConsolidation {
+                                    token: entry.token,
+                                    proposals: entry.proposals.clone(),
+                                },
+                            ));
+                            break;
+                        }
+                    }
+                    if let Some((key, _)) = &found {
+                        retained.remove(key);
+                    }
+                    found
+                };
+
+                let Some((key, entry)) = resolved else {
+                    // No matching token — stale/reconnect/superseded. Reject, write nothing.
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::Internal(
+                            "stale or unknown consolidation token".into(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                };
+
+                if accept {
+                    // Accept: re-scan each fact for secrets (defense-in-depth, G10),
+                    // write via memory port, THEN clear marker (G9 ordering).
+                    let mut promoted = 0usize;
+                    let mut secret_skipped = 0usize;
+                    let mut write_errors = 0usize;
+                    for pf in &entry.proposals {
+                        let fact = &pf.fact;
+                        let blob = format!(
+                            "{}\n{}\n{}",
+                            fact.category,
+                            fact.fact,
+                            fact.detail.as_deref().unwrap_or("")
+                        );
+                        if crate::domain::services::secret_scan::scan_for_secrets(&blob).is_some() {
+                            tracing::warn!(
+                                category = %fact.category,
+                                "consolidation resolve: dropping secret-bearing fact"
+                            );
+                            secret_skipped += 1;
+                            continue;
+                        }
+                        if let Err(e) = self.core.memory.remember_fact(fact.clone()).await {
+                            tracing::warn!(error = %e, "daemon: consolidation remember_fact failed");
+                            write_errors += 1;
+                            continue;
+                        }
+                        promoted += 1;
+                    }
+                    // AC7 — await writes before clearing marker (G9).
+                    // flush() is a no-op for most adapters; calls it for durability if needed.
+                    if let Err(e) = self.core.memory.flush().await {
+                        tracing::warn!(error = %e, "daemon: consolidation flush failed");
+                    }
+                    // P1+P2 (code review): clear ONLY the marker this resolve was generated
+                    // from (`key`), and ONLY when no transient write error occurred. A
+                    // write-error path leaves the marker intact so the next writer-attach
+                    // re-proposes (never lose) — the inverse of the silent-loss G9 guards.
+                    if write_errors == 0 {
+                        if let Err(e) = super::session_queue::clear_consolidation_due_if(
+                            &self.core.workspace,
+                            key,
+                        ) {
+                            tracing::warn!(error = %e, "daemon: consolidation marker clear failed after apply");
+                        }
+                    } else {
+                        tracing::warn!(
+                            write_errors,
+                            "daemon: consolidation had write errors — preserving marker for retry"
+                        );
+                    }
+                    let msg = if write_errors > 0 {
+                        format!(
+                            "Promoted {promoted} facts ({secret_skipped} skipped, {write_errors} failed — will retry on next attach)"
+                        )
+                    } else if secret_skipped > 0 {
+                        format!("Promoted {promoted} facts ({secret_skipped} skipped)")
+                    } else {
+                        format!("Promoted {promoted} facts")
+                    };
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Event(RawEvent {
+                            conversation_id: None,
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            kind: RawEventKind::SystemNotice {
+                                level: crate::domain::models::NoticeLevel::Info,
+                                message: msg,
+                            },
+                        }),
+                    )
+                    .await;
+                } else {
+                    // Decline: clear marker (DQ4 — user resolved), no writes. P1 — clear
+                    // ONLY the resolved marker, never a newer one written meanwhile.
+                    if let Err(e) =
+                        super::session_queue::clear_consolidation_due_if(&self.core.workspace, key)
+                    {
+                        tracing::warn!(error = %e, "daemon: consolidation marker clear failed after decline");
+                    }
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Event(RawEvent {
+                            conversation_id: None,
+                            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                            kind: RawEventKind::SystemNotice {
+                                level: crate::domain::models::NoticeLevel::Info,
+                                message: "Consolidation declined".into(),
+                            },
+                        }),
+                    )
+                    .await;
+                }
+            }
         }
         false
     }
@@ -490,19 +653,18 @@ impl AttachServer {
         });
     }
 
-    /// Story 12.2c AC7 — surface the 12.1c boundary queues to a freshly-attached
-    /// writer via the existing `ClientEvent`/`RawEvent` `SystemNotice` path.
+    /// Story 12.2c AC7 + 12.2d AC1/AC2/AC6 — surface the 12.1c boundary queues to
+    /// a freshly-attached writer.
     ///
-    /// - **Purge notice:** emitted to the writer queue first, then removed so a
-    ///   closed/full connection cannot silently consume the durable notice.
-    /// - **Consolidation-due marker:** READ but NOT cleared — a no-LLM one-liner
-    ///   pointer is emitted, and the un-cleared marker is the durable hand-off to
-    ///   the rich consolidation card (Story 12.2d). No proposal/resolve frame is
-    ///   added here (phantom-seam guard).
+    /// - **Purge notice:** emitted then cleared (once-only delivery, 12.2c).
+    /// - **Consolidation-due marker:** the rich card path (12.2d). Checks retained
+    ///   proposals for reuse (G7), generates if needed, sends
+    ///   `DaemonFrame::ConsolidationProposed` to writer only.
     async fn emit_session_queue_notices(&self, conn_id: u64) {
         let workspace = &self.core.workspace;
         let now = chrono::Utc::now().timestamp_millis();
 
+        // ── Purge notice (12.2c AC7 — unchanged) ──
         if let Some(notice) = super::session_queue::read_purge_notice(workspace) {
             let enqueued = self
                 .send_to(
@@ -528,7 +690,86 @@ impl AttachServer {
             }
         }
 
-        if super::session_queue::read_consolidation_due(workspace).is_some() {
+        // ── Consolidation card (12.2d AC1/AC2/AC6) ──
+        // Replaces the 12.2c one-liner pointer. This is the ONE touch of the
+        // 12.2c-owned function.
+        if let Some(marker) = super::session_queue::read_consolidation_due(workspace) {
+            let queued_at = marker.queued_at_unix;
+
+            // G7 — check for a retained entry keyed by queued_at_unix (reuse, no respend).
+            // P7 (code review): clone the payload and DROP the guard before the socket
+            // write, so the retained-map lock is never held across `.await` (project
+            // async-lock policy — release guards before await points).
+            let reuse = {
+                let retained = self.retained_consolidations.lock().await;
+                retained
+                    .get(&queued_at)
+                    .map(|existing| (existing.token, existing.proposals.clone()))
+            };
+            if let Some((token, proposals)) = reuse {
+                // Reuse: re-emit the same token+proposals, zero LLM call.
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::ConsolidationProposed { token, proposals },
+                )
+                .await;
+                return;
+            }
+
+            // G8 — a new marker (different queued_at_unix) ⇒ the generation task evicts
+            // any superseded entry (`map.retain(|k,_| *k == queued_at)`) before inserting.
+
+            // AC1 step 3 — check for empty recent entries.
+            let entries = match self.core.memory.recent(30).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(error = %e, "daemon: failed to read recent entries for consolidation");
+                    return;
+                }
+            };
+            if entries.is_empty() {
+                // Nothing to consolidate → clear marker, emit info, no card.
+                if let Err(e) = super::session_queue::clear_consolidation_due(workspace) {
+                    tracing::warn!(error = %e, "daemon: could not clear consolidation marker on empty recent");
+                }
+                self.send_to(
+                    conn_id,
+                    DaemonFrame::Event(RawEvent {
+                        conversation_id: None,
+                        timestamp_ms: now,
+                        kind: RawEventKind::SystemNotice {
+                            level: crate::domain::models::NoticeLevel::Info,
+                            message: "Nothing to consolidate yet".into(),
+                        },
+                    }),
+                )
+                .await;
+                return;
+            }
+
+            // AC1 step 2+4 — ensure runtime built, emit "Reviewing…" notice, spawn generation.
+            let rt = match self.core.ensure_runtime().await {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "daemon: could not build runtime for consolidation generation");
+                    // Don't clear marker — retry next attach (AC6: timeout/provider-error).
+                    return;
+                }
+            };
+
+            // P3 (code review) — reserve this marker's generation slot. If a generation
+            // is already in flight for the same `queued_at_unix` (a re-attach during the
+            // window before the retained entry lands), do NOT spawn a duplicate
+            // `generate_proposals` call (G7: exactly one call per marker). The in-flight
+            // task delivers the card; this re-attach returns silently (no orphan notice).
+            {
+                let mut inflight = self.generating_consolidations.lock().await;
+                if !inflight.insert(queued_at) {
+                    return;
+                }
+            }
+
+            // Emit "Reviewing recent activity…" notice (matches event_loop.rs:2116-2120).
             self.send_to(
                 conn_id,
                 DaemonFrame::Event(RawEvent {
@@ -536,11 +777,119 @@ impl AttachServer {
                     timestamp_ms: now,
                     kind: RawEventKind::SystemNotice {
                         level: crate::domain::models::NoticeLevel::Info,
-                        message: "Memory consolidation pending — run /memory consolidate".into(),
+                        message: "Reviewing recent activity for durable facts…".into(),
                     },
                 }),
             )
             .await;
+
+            // Resolve model via the same pattern as DaemonTurnRuntime::drive_turn.
+            let model = {
+                let config = rt.app_config.load_full();
+                use crate::domain::services::model_router::{
+                    ModelResolutionRequest, resolve_effective_model,
+                };
+                let req = ModelResolutionRequest {
+                    explicit_override: None,
+                    tier_hint: None,
+                    step_kind: None,
+                    retry_count: 0,
+                    input_tokens: 0,
+                    fallback_model: config.model.clone(),
+                };
+                resolve_effective_model(&req, &config.router).model.clone()
+            };
+
+            // Spawn generation AFTER AttachAck (NFR49 safe — structurally off handshake path).
+            let prompt_body =
+                crate::domain::services::consolidation::build_proposal_prompt(&entries);
+            let provider = rt.provider.clone();
+            let retained = self.retained_consolidations.clone();
+            let token_counter = self.next_proposal_token.clone();
+            let generating = self.generating_consolidations.clone();
+            let send_tx = {
+                let reg = self.registry.lock().await;
+                reg.conns
+                    .iter()
+                    .find(|c| c.id == conn_id)
+                    .map(|c| c.tx.clone())
+            };
+            let workspace = workspace.to_path_buf();
+
+            tokio::spawn(async move {
+                use crate::domain::services::consolidation::CONSOLIDATION_TIMEOUT;
+
+                let result = tokio::time::timeout(
+                    CONSOLIDATION_TIMEOUT,
+                    crate::domain::services::consolidation::generate_proposals(
+                        &*provider,
+                        &model,
+                        &prompt_body,
+                    ),
+                )
+                .await;
+
+                match result {
+                    Ok(Ok(facts)) if !facts.is_empty() => {
+                        // Mint token + per-item ProposalId (Fork-C): the id is the stable
+                        // handle the per-item-toggle fast-follow (AI-12.2d-2) filters on.
+                        let token_val = token_counter.fetch_add(1, Ordering::SeqCst);
+                        let token = super::protocol::ProposalToken(token_val);
+                        let proposals: Vec<super::protocol::ProposedFact> = facts
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, fact)| super::protocol::ProposedFact {
+                                id: super::protocol::ProposalId(i as u32),
+                                fact,
+                            })
+                            .collect();
+                        let frame = DaemonFrame::ConsolidationProposed {
+                            token,
+                            proposals: proposals.clone(),
+                        };
+                        // Store in retained map. G8 — evict any superseded entry (a stale
+                        // `queued_at_unix` from an earlier boundary) before inserting, so the
+                        // map stays bounded and no stale token survives (review P4).
+                        {
+                            let mut map = retained.lock().await;
+                            map.retain(|k, _| *k == queued_at);
+                            map.insert(queued_at, RetainedConsolidation { token, proposals });
+                        }
+                        // Send to writer only.
+                        if let Some(tx) = send_tx {
+                            let _ = tx.send(frame);
+                        }
+                    }
+                    Ok(Ok(_)) => {
+                        // Empty proposals → clear marker, emit info (no card).
+                        if let Err(e) = super::session_queue::clear_consolidation_due(&workspace) {
+                            tracing::warn!(error = %e, "daemon: could not clear consolidation marker on empty proposals");
+                        }
+                        // Best-effort info notice (connection may be gone).
+                        if let Some(tx) = send_tx {
+                            let _ = tx.send(DaemonFrame::Event(RawEvent {
+                                conversation_id: None,
+                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                kind: RawEventKind::SystemNotice {
+                                    level: crate::domain::models::NoticeLevel::Info,
+                                    message: "Nothing worth promoting from recent activity".into(),
+                                },
+                            }));
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "daemon: consolidation generation failed");
+                        // Don't clear marker — retry next attach (AC6: transient).
+                    }
+                    Err(_) => {
+                        tracing::warn!("daemon: consolidation generation timed out");
+                        // Don't clear marker — retry next attach (AC6: transient).
+                    }
+                }
+                // P3 — release the in-flight slot on every completion path so the next
+                // writer-attach can reuse (G7 hit) or regenerate (transient failure).
+                generating.lock().await.remove(&queued_at);
+            });
         }
     }
 
@@ -680,6 +1029,7 @@ async fn record_blocked_action(
 mod tests {
     use super::*;
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
+    use crate::adapters::daemon::session_queue;
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::{
         NoOpApprovalPersistence, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet,
@@ -765,6 +1115,17 @@ mod tests {
         workspace: &Path,
         chunks: Vec<StreamChunk>,
     ) -> (Arc<DaemonCore>, Arc<dyn StoragePort>) {
+        mock_core_with_memory(workspace, chunks, Arc::new(NoOpMemory))
+    }
+
+    /// Like [`mock_core`] but with an injectable [`MemoryPort`] — lets a test drive the
+    /// consolidation-resolve apply path against a memory that errors on `remember_fact`
+    /// (Story 12.2d review P2/G9 — write-failure must preserve the marker).
+    fn mock_core_with_memory(
+        workspace: &Path,
+        chunks: Vec<StreamChunk>,
+        memory: Arc<dyn crate::domain::ports::MemoryPort>,
+    ) -> (Arc<DaemonCore>, Arc<dyn StoragePort>) {
         let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
             crate::infrastructure::paths::sessions_dir(workspace),
             workspace.to_path_buf(),
@@ -775,7 +1136,7 @@ mod tests {
         let core = DaemonCore::new(
             workspace.to_path_buf(),
             Arc::new(ArcSwap::from_pointee(AppConfig::default())),
-            Arc::new(NoOpMemory),
+            memory,
             storage.clone(),
             Arc::new(NoOpSecurity),
             Arc::new(NoOpPersona),
@@ -1416,9 +1777,11 @@ mod tests {
         .unwrap();
         let _ = read_frame::<_, DaemonFrame>(&mut c).await.unwrap(); // AttachAck
 
-        // Collect the two emitted SystemNotice events.
+        // Collect emitted events. With NoOpMemory (empty recent), the
+        // consolidation path emits "Nothing to consolidate yet" and clears
+        // the marker (AC1 step 3 — empty-recent fast path).
         let mut saw_purge = false;
-        let mut saw_consolidation = false;
+        let mut saw_consolidation_info = false;
         for _ in 0..4 {
             match tokio::time::timeout(
                 std::time::Duration::from_millis(500),
@@ -1431,31 +1794,31 @@ mod tests {
                         if message.contains("facts removed from MEMORY.md") {
                             saw_purge = true;
                         }
-                        if message.contains("run /memory consolidate") {
-                            saw_consolidation = true;
+                        if message.contains("Nothing to consolidate") {
+                            saw_consolidation_info = true;
                         }
                     }
                 }
                 _ => break,
             }
-            if saw_purge && saw_consolidation {
+            if saw_purge && saw_consolidation_info {
                 break;
             }
         }
         assert!(saw_purge, "purge notice must be emitted on writer attach");
         assert!(
-            saw_consolidation,
-            "consolidation one-liner must be emitted on writer attach"
+            saw_consolidation_info,
+            "consolidation empty-recent info must be emitted on writer attach"
         );
 
-        // Purge notice drained (consumed); consolidation marker NOT cleared.
+        // Both markers cleared (purge by emit+drain; consolidation by empty-recent fast path).
         assert!(
             session_queue::read_purge_notice(ws).is_none(),
             "purge notice must be drained after emit"
         );
         assert!(
-            session_queue::read_consolidation_due(ws).is_some(),
-            "consolidation marker must remain (durable hand-off to 12.2d)"
+            session_queue::read_consolidation_due(ws).is_none(),
+            "consolidation marker must be cleared (empty-recent fast path)"
         );
 
         shutdown.cancel();
@@ -1484,5 +1847,683 @@ mod tests {
             session_queue::read_purge_notice(ws).is_some(),
             "failed delivery must not consume the durable purge notice"
         );
+    }
+    // ── Story 12.2d gauntlet tests (G1-G14, G16) ────────────────────────────
+
+    /// Helper: set up an AttachServer + a fake writer conn + inject a retained proposal.
+    async fn setup_consolidation_test(
+        ws: &Path,
+    ) -> (
+        Arc<AttachServer>,
+        mpsc::Receiver<DaemonFrame>,
+        u64, /* conn_id of the writer */
+    ) {
+        setup_consolidation_test_with_memory(ws, Arc::new(NoOpMemory)).await
+    }
+
+    async fn setup_consolidation_test_with_memory(
+        ws: &Path,
+        memory: Arc<dyn crate::domain::ports::MemoryPort>,
+    ) -> (
+        Arc<AttachServer>,
+        mpsc::Receiver<DaemonFrame>,
+        u64, /* conn_id of the writer */
+    ) {
+        let (core, _storage) = mock_core_with_memory(ws, vec![], memory);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "g-conv".into(),
+            ..Default::default()
+        }));
+        let (bus, _domain_rx) = EventBus::new(64);
+        let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
+
+        // Register a writer connection.
+        let (tx, rx) = mpsc::channel(8);
+        let conn_id = 99u64;
+        {
+            let mut reg = server.registry.lock().await;
+            reg.conns.push(Conn {
+                id: conn_id,
+                tx,
+                mode: AttachMode::ReadWrite,
+            });
+        }
+        (server, rx, conn_id)
+    }
+
+    /// Wrap bare `MemoryFact`s into the wire `ProposedFact` shape (Story 12.2d Fork-C),
+    /// minting per-item ids the same way the daemon generation task does (`.enumerate()`).
+    fn proposed(
+        facts: Vec<crate::domain::models::MemoryFact>,
+    ) -> Vec<crate::adapters::daemon::protocol::ProposedFact> {
+        use crate::adapters::daemon::protocol::{ProposalId, ProposedFact};
+        facts
+            .into_iter()
+            .enumerate()
+            .map(|(i, fact)| ProposedFact {
+                id: ProposalId(i as u32),
+                fact,
+            })
+            .collect()
+    }
+
+    /// G1 — daemon-authoritative resolution: resolve {accept:true} → daemon writes
+    /// its OWN retained facts; client frame carries no fact payload.
+    #[tokio::test]
+    async fn g1_daemon_authoritative_resolution_writes_retained_facts() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+
+        // Inject a retained consolidation.
+        let facts = vec![MemoryFact {
+            category: "Preference".into(),
+            fact: "likes dark mode".into(),
+            detail: Some("always".into()),
+        }];
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                2000,
+                RetainedConsolidation {
+                    token: ProposalToken(42),
+                    proposals: proposed(facts.clone()),
+                },
+            );
+        }
+
+        // Set a consolidation marker so clear_consolidation_due has something to clear.
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 2000,
+                daily_log_ref: "2026-06-08".into(),
+            },
+        )
+        .unwrap();
+
+        // Resolve with accept=true.
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(42),
+                    accept: true,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+
+        // Daemon should have sent a "Promoted" notice.
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let DaemonFrame::Event(raw) = frame {
+            if let RawEventKind::SystemNotice { message, .. } = raw.kind {
+                assert!(
+                    message.contains("Promoted"),
+                    "expected promote notice, got: {message}"
+                );
+            } else {
+                panic!("expected SystemNotice, got {:?}", raw.kind);
+            }
+        } else {
+            panic!("expected Event frame, got {frame:?}");
+        }
+
+        // Marker cleared.
+        assert!(
+            session_queue::read_consolidation_due(ws).is_none(),
+            "marker must be cleared after accept"
+        );
+        // Retained entry evicted.
+        let map = server.retained_consolidations.lock().await;
+        assert!(
+            map.is_empty(),
+            "retained entry must be evicted after resolve"
+        );
+    }
+
+    /// G3 — stale/unknown token rejected, no write.
+    #[tokio::test]
+    async fn g3_stale_resolve_rejected_no_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+
+        // No retained entries exist. Send resolve with a random token.
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(9999),
+                    accept: true,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Must be an error, not a promote.
+        match frame {
+            DaemonFrame::Error(ProtocolError::Internal(msg)) => {
+                assert!(
+                    msg.contains("stale") || msg.contains("unknown"),
+                    "expected stale/unknown token error, got: {msg}"
+                );
+            }
+            other => panic!("expected Internal error for stale token, got: {other:?}"),
+        }
+    }
+
+    /// G10 — secret-laden fact is skipped at promotion.
+    #[tokio::test]
+    async fn g10_secret_fact_skipped_on_apply() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+        let secret_fact = MemoryFact {
+            category: "Note".into(),
+            fact: "my api key".into(),
+            detail: Some("sk-proj-1234567890abcdef1234567890abcdef12".into()),
+        };
+        let safe_fact = MemoryFact {
+            category: "Preference".into(),
+            fact: "likes tea".into(),
+            detail: None,
+        };
+
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                3000,
+                RetainedConsolidation {
+                    token: ProposalToken(10),
+                    proposals: proposed(vec![secret_fact, safe_fact]),
+                },
+            );
+        }
+
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 3000,
+                daily_log_ref: "2026-06-08".into(),
+            },
+        )
+        .unwrap();
+
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(10),
+                    accept: true,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let DaemonFrame::Event(raw) = frame {
+            if let RawEventKind::SystemNotice { message, .. } = raw.kind {
+                // 1 promoted, 1 skipped (the secret one).
+                assert!(
+                    message.contains("Promoted 1") && message.contains("1 skipped"),
+                    "expected 'Promoted 1 facts (1 skipped)', got: {message}"
+                );
+            } else {
+                panic!("expected SystemNotice");
+            }
+        }
+    }
+
+    /// G11 — read-only rejects the mutation frame.
+    #[tokio::test]
+    async fn g11_read_only_rejects_consolidation_resolve() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, _rx, _conn_id) = setup_consolidation_test(ws).await;
+
+        // Register a read-only connection.
+        let (ro_tx, mut ro_rx) = mpsc::channel(8);
+        {
+            let mut reg = server.registry.lock().await;
+            reg.conns.push(Conn {
+                id: 100,
+                tx: ro_tx,
+                mode: AttachMode::ReadOnly,
+            });
+        }
+
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(1),
+                    accept: true,
+                },
+                AttachMode::ReadOnly,
+                100,
+            )
+            .await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), ro_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            matches!(frame, DaemonFrame::Error(ProtocolError::ReadOnly)),
+            "read-only conn must get ReadOnly error, got: {frame:?}"
+        );
+    }
+
+    /// G13 — decline clears marker, no writes.
+    #[tokio::test]
+    async fn g13_decline_clears_marker_no_write() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                4000,
+                RetainedConsolidation {
+                    token: ProposalToken(20),
+                    proposals: proposed(vec![MemoryFact {
+                        category: "Test".into(),
+                        fact: "should not be written".into(),
+                        detail: None,
+                    }]),
+                },
+            );
+        }
+
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 4000,
+                daily_log_ref: "2026-06-08".into(),
+            },
+        )
+        .unwrap();
+
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(20),
+                    accept: false,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let DaemonFrame::Event(raw) = frame {
+            if let RawEventKind::SystemNotice { message, .. } = raw.kind {
+                assert!(
+                    message.contains("declined"),
+                    "expected decline notice, got: {message}"
+                );
+            }
+        }
+
+        // Marker cleared.
+        assert!(
+            session_queue::read_consolidation_due(ws).is_none(),
+            "marker must be cleared on decline"
+        );
+        // Retained entry evicted.
+        let map = server.retained_consolidations.lock().await;
+        assert!(map.is_empty(), "retained entry must be evicted on decline");
+    }
+
+    /// G2 — resolution token binds the set: only the matching token's proposals apply.
+    #[tokio::test]
+    async fn g2_token_binds_resolution_set() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+
+        // Two retained entries with different tokens.
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                5000,
+                RetainedConsolidation {
+                    token: ProposalToken(50),
+                    proposals: proposed(vec![MemoryFact {
+                        category: "A".into(),
+                        fact: "token-50-fact".into(),
+                        detail: None,
+                    }]),
+                },
+            );
+            map.insert(
+                5001,
+                RetainedConsolidation {
+                    token: ProposalToken(51),
+                    proposals: proposed(vec![MemoryFact {
+                        category: "B".into(),
+                        fact: "token-51-fact".into(),
+                        detail: None,
+                    }]),
+                },
+            );
+        }
+
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 5000,
+                daily_log_ref: "2026-06-08".into(),
+            },
+        )
+        .unwrap();
+
+        // Resolve with token 51 — only that entry should be applied and evicted.
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(51),
+                    accept: true,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let DaemonFrame::Event(raw) = frame {
+            if let RawEventKind::SystemNotice { message, .. } = raw.kind {
+                assert!(
+                    message.contains("Promoted 1"),
+                    "expected 1 promoted: {message}"
+                );
+            }
+        }
+
+        // Token 50's entry must still be retained.
+        let map = server.retained_consolidations.lock().await;
+        assert!(
+            map.contains_key(&5000),
+            "unresolved token's entry must remain"
+        );
+        assert!(
+            !map.contains_key(&5001),
+            "resolved token's entry must be evicted"
+        );
+    }
+
+    /// D1 (Fork-C, Murat's required gate) — serde round-trip of `ConsolidationProposed`
+    /// with TWO DISTINCT `ProposalId`s asserts the id↦fact PAIRING survives the wire
+    /// (order-independent, by id). A vacuous round-trip that drops/reorders the id-fact
+    /// association fails here — the non-vacuous proof the per-item handle is real.
+    #[test]
+    fn d1_consolidation_proposed_serde_preserves_id_fact_pairing() {
+        use crate::adapters::daemon::protocol::{ProposalId, ProposalToken, ProposedFact};
+        use crate::domain::models::MemoryFact;
+
+        let frame = DaemonFrame::ConsolidationProposed {
+            token: ProposalToken(7),
+            proposals: vec![
+                ProposedFact {
+                    id: ProposalId(11),
+                    fact: MemoryFact {
+                        category: "A".into(),
+                        fact: "alpha".into(),
+                        detail: None,
+                    },
+                },
+                ProposedFact {
+                    id: ProposalId(22),
+                    fact: MemoryFact {
+                        category: "B".into(),
+                        fact: "beta".into(),
+                        detail: Some("d".into()),
+                    },
+                },
+            ],
+        };
+
+        let bytes = serde_json::to_vec(&frame).unwrap();
+        let decoded: DaemonFrame = serde_json::from_slice(&bytes).unwrap();
+        let DaemonFrame::ConsolidationProposed { token, proposals } = decoded else {
+            panic!("expected ConsolidationProposed, got {decoded:?}");
+        };
+        assert_eq!(token, ProposalToken(7));
+        let by_id: std::collections::HashMap<u32, &ProposedFact> =
+            proposals.iter().map(|p| (p.id.0, p)).collect();
+        assert_eq!(by_id.len(), 2, "both distinct ids must survive the wire");
+        assert_eq!(
+            by_id[&11].fact.fact, "alpha",
+            "id 11 must still pair with alpha"
+        );
+        assert_eq!(
+            by_id[&22].fact.fact, "beta",
+            "id 22 must still pair with beta"
+        );
+        assert_eq!(by_id[&22].fact.detail.as_deref(), Some("d"));
+    }
+
+    /// P1 (code review, HIGH) — a resolve clears ONLY the marker it was generated from.
+    /// If a NEWER boundary marker landed between card-shown and resolve, it must SURVIVE.
+    #[tokio::test]
+    async fn p1_resolve_clears_only_the_resolved_marker() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+
+        // Retained entry generated from marker @ queued_at = 2000.
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                2000,
+                RetainedConsolidation {
+                    token: ProposalToken(70),
+                    proposals: proposed(vec![MemoryFact {
+                        category: "P".into(),
+                        fact: "old".into(),
+                        detail: None,
+                    }]),
+                },
+            );
+        }
+        // A NEWER boundary marker (queued_at = 9999) is on disk by resolve time.
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 9999,
+                daily_log_ref: "2026-06-09".into(),
+            },
+        )
+        .unwrap();
+
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(70),
+                    accept: true,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+
+        let m = session_queue::read_consolidation_due(ws);
+        assert!(
+            m.is_some(),
+            "a newer marker must NOT be deleted by a stale resolve"
+        );
+        assert_eq!(
+            m.unwrap().queued_at_unix,
+            9999,
+            "the surviving marker must be the newer one"
+        );
+    }
+
+    /// P2 / G9 (code review, HIGH) — a transient `remember_fact` write error must PRESERVE
+    /// the marker (re-propose on next attach, never silent-lose). The inverse of the
+    /// silent-data-loss G9 guards: marker-cleared + nothing-written must be impossible.
+    struct FailingMemory;
+    #[async_trait::async_trait]
+    impl crate::domain::ports::MemoryPort for FailingMemory {
+        async fn remember_fact(
+            &self,
+            _fact: crate::domain::models::MemoryFact,
+        ) -> Result<(), crate::domain::errors::MemoryError> {
+            Err(crate::domain::errors::MemoryError::IoError(
+                "disk full".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn p2_write_error_preserves_marker_for_retry() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) =
+            setup_consolidation_test_with_memory(ws, Arc::new(FailingMemory)).await;
+
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                2000,
+                RetainedConsolidation {
+                    token: ProposalToken(80),
+                    proposals: proposed(vec![MemoryFact {
+                        category: "X".into(),
+                        fact: "keep me".into(),
+                        detail: None,
+                    }]),
+                },
+            );
+        }
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 2000,
+                daily_log_ref: "2026-06-09".into(),
+            },
+        )
+        .unwrap();
+
+        server
+            .handle_client_frame(
+                ClientFrame::ConsolidationResolve {
+                    token: ProposalToken(80),
+                    accept: true,
+                },
+                AttachMode::ReadWrite,
+                conn_id,
+            )
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+
+        assert!(
+            session_queue::read_consolidation_due(ws).is_some(),
+            "marker must survive a remember_fact write error so the next attach retries"
+        );
+    }
+
+    /// G7 (code review) — retain-reuse-no-respend: with a retained entry already present
+    /// for the marker's `queued_at_unix`, `emit_session_queue_notices` re-emits the SAME
+    /// token via the reuse branch (zero generation), even across repeated attaches.
+    #[tokio::test]
+    async fn g7_reuse_emits_same_token_no_respend() {
+        use crate::domain::models::MemoryFact;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (server, mut rx, conn_id) = setup_consolidation_test(ws).await;
+
+        {
+            let mut map = server.retained_consolidations.lock().await;
+            map.insert(
+                6000,
+                RetainedConsolidation {
+                    token: ProposalToken(60),
+                    proposals: proposed(vec![MemoryFact {
+                        category: "R".into(),
+                        fact: "reused".into(),
+                        detail: None,
+                    }]),
+                },
+            );
+        }
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &crate::domain::models::ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 6000,
+                daily_log_ref: "2026-06-09".into(),
+            },
+        )
+        .unwrap();
+
+        // Two successive attaches → both must re-emit the SAME retained token, no respend.
+        for _ in 0..2 {
+            server.emit_session_queue_notices(conn_id).await;
+            let frame = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            match frame {
+                DaemonFrame::ConsolidationProposed { token, proposals } => {
+                    assert_eq!(
+                        token,
+                        ProposalToken(60),
+                        "reuse must re-emit the same token"
+                    );
+                    assert_eq!(proposals.len(), 1);
+                    assert_eq!(proposals[0].fact.fact, "reused");
+                }
+                other => panic!("expected reused ConsolidationProposed, got: {other:?}"),
+            }
+        }
+
+        // Still exactly one retained entry — no second generation occurred.
+        let map = server.retained_consolidations.lock().await;
+        assert_eq!(
+            map.len(),
+            1,
+            "reuse must not create a second retained entry"
+        );
+        assert!(map.contains_key(&6000));
     }
 }

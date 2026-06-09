@@ -85,6 +85,36 @@ pub fn read_consolidation_due(workspace: &Path) -> Option<ConsolidationDueMarker
     }
 }
 
+/// Remove the pending consolidation-due marker after it has been consumed by
+/// the daemon's consolidation card flow (Story 12.2d AC6). A missing file is
+/// already consumed and is therefore success; any other I/O error is returned.
+/// Modeled on [`clear_purge_notice`].
+pub fn clear_consolidation_due(workspace: &Path) -> Result<()> {
+    let path = paths::daemon_consolidation_queue_path(workspace)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+/// Clear the consolidation-due marker ONLY when the on-disk marker's
+/// `queued_at_unix` equals `expected_queued_at` (Story 12.2d code-review P1).
+/// A resolve carries the identity of the marker the card was generated from; if a
+/// NEWER boundary marker was written between card-shown and resolve, the unconditional
+/// [`clear_consolidation_due`] would silently delete that newer marker (data loss).
+/// Returns `Ok(true)` if a matching marker was cleared, `Ok(false)` if the marker was
+/// absent or superseded (left intact for its own resolve).
+pub fn clear_consolidation_due_if(workspace: &Path, expected_queued_at: u64) -> Result<bool> {
+    match read_consolidation_due(workspace) {
+        Some(m) if m.queued_at_unix == expected_queued_at => {
+            clear_consolidation_due(workspace)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 // ── AC3: MEMORY.md purge audit notice (latest-only) ──────────────────────────
 
 /// Queue (overwrite) the latest MEMORY.md purge audit notice for `workspace` — the

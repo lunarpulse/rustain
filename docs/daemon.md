@@ -238,9 +238,23 @@ next *new* attach after the writer detaches.
 
 On writer-attach the daemon drains the Story 12.1c boundary queues onto the event
 stream: a MEMORY.md **purge notice** (`N facts removed from MEMORY.md …`, consumed
-once) and a one-liner **consolidation pointer** (`Memory consolidation pending — run
-/memory consolidate`; the marker is left in place as the durable hand-off to the
-rich consolidation card in Story 12.2d).
+once) and, when a consolidation-due marker is pending, the **rich consolidation card**
+(Story 12.2d). The daemon generates proposals with its own provider (post-`AttachAck`,
+off the NFR49 handshake path), retains them keyed by the marker's `queued_at_unix`, and
+pushes a `DaemonFrame::ConsolidationProposed { token, proposals }` to the **writer only**.
+The attached TUI renders the same bottom-anchored `[mem] Consolidate memory — N proposals`
+card the local TUI shows (`[y] promote all  [n] decline`); the reply rides back as a
+`ClientFrame::ConsolidationResolve { token, accept }`. Apply is **daemon-authoritative**:
+the client never echoes fact content — the daemon re-scans its own retained proposals for
+secrets and writes them through the single hardened memory port, then clears the marker.
+The resolution **token** is a confused-deputy guard (a stale/superseded resolve is
+refused, writing nothing), and a read-only attachment that sends the mutation frame is
+refused with `ProtocolError::ReadOnly`. Re-attaching the same marker **reuses** the
+retained proposals (one generation per marker, not per connect); a new boundary marker
+evicts the old set and regenerates. A transient write error or generation timeout leaves
+the marker in place to retry on the next attach (never silent-loss). Per-item accept is a
+future fast-follow (AI-12.2d-2) — the wire already carries a stable `ProposalId` per
+proposal so that lands client-side with no protocol change.
 
 `--plain` selects the minimal line-based stdin/stdout client (Story 12.2b
 `run_attach`) for scripting / non-TTY contexts: it prints the conversation as it
