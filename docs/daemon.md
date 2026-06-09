@@ -199,6 +199,43 @@ The checked-in templates the generator embeds (`include_str!`) live in
 - [`dist/rustain.service.template`](../dist/rustain.service.template) (systemd)
 - [`dist/com.rustain.daemon.plist.template`](../dist/com.rustain.daemon.plist.template) (launchd)
 
+## Telegram channel setup (Story 12.3)
+
+Telegram is a **daemon-only** channel adapter. The local TUI continues to use the
+`terminal` channel; Telegram messages enter through the headless daemon and appear in
+attached scrollback with the `[telegram]` prefix.
+
+1. Create a bot with Telegram's **BotFather** and copy the bot token.
+2. Add a channel adapter to the active profile:
+
+   ```toml
+   [channels]
+   adapter = "telegram"
+
+   [channels.config]
+   bot_token = "7123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
+   allowed_chat_ids = [123456789]
+   ```
+
+3. Prefer keeping the token out of profile files in production:
+
+   ```sh
+   export TELEGRAM_BOT_TOKEN="7123456789:..."
+   ```
+
+   The profile still needs `[channels] adapter = "telegram"` and
+   `allowed_chat_ids = [...]`; the environment variable only overrides `bot_token`.
+
+Build/install with the feature enabled:
+
+```sh
+cargo install --path . --features telegram
+```
+
+Only `allowed_chat_ids` are accepted. Unknown chats are ignored. Non-text Telegram
+messages receive a short "Text messages only for now" reply; media support is a future
+adapter extension.
+
 ## Attach & turn runtime (Story 12.2b)
 
 Since 12.2b the daemon is a **headless turn-processing agent**, not just a memory

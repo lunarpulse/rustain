@@ -247,3 +247,15 @@ impl ApprovalPersistencePort for NoOpApprovalPersistence {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn noop_channel_start_shutdown_are_noop() {
+        let channel = NoOpChannel;
+        assert!(channel.start_loop().await.is_ok());
+        assert!(channel.shutdown_loop().await.is_ok());
+    }
+}

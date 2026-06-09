@@ -11,6 +11,7 @@ pub mod capability_kind;
 pub mod capability_registry;
 pub mod catalog_delta;
 pub mod channel_kind;
+pub mod channel_turn_request;
 pub mod checkpoint;
 mod completion;
 mod config;
@@ -78,6 +79,7 @@ pub use agent::{
 pub use approval::{ApprovalOutcome, ApprovalScope};
 #[allow(unused_imports)]
 pub use channel_kind::ChannelKind;
+pub use channel_turn_request::ChannelTurnRequest;
 pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
 #[allow(unused_imports)]
 pub use completion::CompletionOptions;

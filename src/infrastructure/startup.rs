@@ -997,6 +997,7 @@ pub async fn run() -> Result<()> {
         mcp_servers: resolved.mcp_servers.clone(),
         include_builtin_tools: resolved.include_builtin_tools,
         domain_tx: Some(domain_tx.clone()),
+        channel_turn_tx: None,
         tool_exposure: app_config.tools.exposure.clone(),
         assembler: app_config.assembler.strategy.clone(),
         skill_exposure: app_config.skill_exposure.kind.clone(),

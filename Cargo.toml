@@ -104,6 +104,9 @@ bincode = { version = "2", optional = true }
 # ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
 landlock = { version = "0.4", optional = true }
 
+# ── Telegram channel adapter (Story 12.3, feature-gated) ──────────
+teloxide = { version = "0.17.0", optional = true, default-features = false, features = ["macros", "rustls"] }
+
 # ── Rustycode path deps — uncomment in Story 1.2 ────────────────
 # Verify crossterm/ratatui version compatibility with rustycode before enabling
 # domain = { path = "../rustycode/domain" }
@@ -154,6 +157,7 @@ mcp = ["dep:rmcp"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]
+telegram = ["dep:teloxide"]
 # Story 11.3a — local semantic memory search. OUT of `default` (NFR9): the
 # embedding model is downloaded on first use, not bundled, and `ort` needs
 # network at build time. `cargo build|test --features vector-search` to enable.

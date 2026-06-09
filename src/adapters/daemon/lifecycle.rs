@@ -15,7 +15,7 @@ use anyhow::Result;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::domain::models::{AppConfig, ChatMessage, ConsolidationDueMarker, SessionBoundary};
-use crate::domain::ports::{MemoryPort, RecallProviderPort};
+use crate::domain::ports::{ChannelPort, MemoryPort, RecallProviderPort};
 
 use super::{pidfile, session_queue, socket};
 
@@ -34,9 +34,14 @@ pub struct DaemonRuntime {
     pub socket_path: PathBuf,
     /// Story 12.2b — the attach server (accept loop + forwarder + approval gate).
     pub server: Arc<super::server::AttachServer>,
+    /// Story 12.3 — composed daemon channel adapter (terminal noop or Telegram).
+    pub channel: Arc<dyn ChannelPort>,
     /// Story 12.2b — the daemon's per-activation event bus receiver, handed to the
     /// server's single forwarder task. `Option` so `run_lifecycle` can `take()` it.
     pub domain_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>>,
+    /// Story 12.3 — inbound channel-turn queue handed to the attach server.
+    pub channel_turn_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::domain::models::ChannelTurnRequest>>,
     /// Story 12.2b — the per-process conversation (origin-tagged transcript). Fed
     /// to `emit_session_boundary` (AC4) and snapshotted on attach.
     pub conversation: Arc<tokio::sync::Mutex<crate::domain::models::Conversation>>,
@@ -177,6 +182,10 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
     let mut sighup = signal(SignalKind::hangup())?;
     let listener = socket::bind(&rt.socket_path)?;
 
+    if let Err(e) = rt.channel.start_loop().await {
+        tracing::warn!(error = %e, "daemon: channel adapter start_loop failed — continuing without channel");
+    }
+
     // Story 12.2b — the attach server owns the accept loop + forwarder. We hand it
     // the listener + the bus receiver and a shutdown token; the lifecycle loop
     // below keeps its timer/signal duties (boundaries + graceful shutdown).
@@ -185,10 +194,11 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
         .domain_rx
         .take()
         .expect("DaemonRuntime.domain_rx must be set");
+    let channel_rx = rt.channel_turn_rx.take();
     let server = rt.server.clone();
     let server_handle = tokio::spawn({
         let sd = server_shutdown.clone();
-        async move { server.run(listener, domain_rx, sd).await }
+        async move { server.run(listener, domain_rx, channel_rx, sd).await }
     });
 
     // Timers. The idle timer arm is disabled (via the `if !low_power` guard) once
@@ -290,6 +300,10 @@ async fn graceful_shutdown(rt: &DaemonRuntime) {
 
     // Channels (`ChannelPort::shutdown_loop`) and MCP-client teardown are not
     // composed in 12.1a (no message runtime); they enter this same path in 12.2+.
+
+    if let Err(e) = rt.channel.shutdown_loop().await {
+        tracing::warn!(error = %e, "daemon: channel adapter shutdown_loop failed");
+    }
 
     socket::cleanup(&rt.socket_path);
     pidfile::remove(&rt.pid_path);

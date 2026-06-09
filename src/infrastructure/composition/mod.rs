@@ -35,6 +35,8 @@ pub struct ComposeContext {
     /// so only MCP tools are available (Story 9.1 AC-4, used by 9.2).
     pub include_builtin_tools: bool,
     pub domain_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>>,
+    pub channel_turn_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>>,
     /// Story 9.4 — exposure strategy name from AppConfig.tools.exposure.
     /// Phase A: always "static-full".
     pub tool_exposure: String,
@@ -560,11 +562,72 @@ pub fn build_tools(
 
 pub fn build_channels(
     name: &str,
-    _config: Option<&toml::Value>,
-    _ctx: &ComposeContext,
+    config: Option<&toml::Value>,
+    ctx: &ComposeContext,
 ) -> Result<Arc<dyn ChannelPort>, AdapterCompositionError> {
+    #[cfg(not(feature = "telegram"))]
+    let _ = (config, ctx);
     match name {
         "terminal" => Ok(Arc::new(NoOpChannel)),
+        #[cfg(feature = "telegram")]
+        "telegram" => {
+            use crate::adapters::channel::telegram::TelegramChannelAdapter;
+            let conf = config.ok_or_else(|| AdapterCompositionError::MissingComposeContext {
+                port: PortDimension::Channels,
+                name: "telegram".into(),
+                missing_field: "bot_token and allowed_chat_ids required in [channels.config]".into(),
+            })?;
+            let token = crate::infrastructure::utils::env_var_trimmed("TELEGRAM_BOT_TOKEN")
+                .or_else(|| {
+                    conf.get("bot_token")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                })
+                .ok_or_else(|| AdapterCompositionError::MissingComposeContext {
+                    port: PortDimension::Channels,
+                    name: "telegram".into(),
+                    missing_field:
+                        "bot_token required for telegram adapter (set in [channels.config] or TELEGRAM_BOT_TOKEN env var)"
+                            .into(),
+                })?;
+            let allowed_values = conf
+                .get("allowed_chat_ids")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| AdapterCompositionError::MissingComposeContext {
+                    port: PortDimension::Channels,
+                    name: "telegram".into(),
+                    missing_field: "allowed_chat_ids required in [channels.config]".into(),
+                })?;
+            let allowed_chat_ids: Vec<i64> = allowed_values
+                .iter()
+                .map(|v| {
+                    v.as_integer()
+                        .ok_or_else(|| AdapterCompositionError::MissingComposeContext {
+                            port: PortDimension::Channels,
+                            name: "telegram".into(),
+                            missing_field: "allowed_chat_ids must contain only integers".into(),
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+            let turn_tx =
+                ctx.channel_turn_tx
+                    .clone()
+                    .ok_or_else(|| AdapterCompositionError::MissingComposeContext {
+                        port: PortDimension::Channels,
+                        name: "telegram".into(),
+                        missing_field:
+                            "channel_turn_tx not wired (daemon-only; TUI mode cannot use telegram adapter)"
+                                .into(),
+                    })?;
+            Ok(Arc::new(TelegramChannelAdapter::new(
+                token,
+                allowed_chat_ids,
+                turn_tx,
+            )?))
+        }
+        #[cfg(not(feature = "telegram"))]
         "telegram" => Err(AdapterCompositionError::MissingComposeContext {
             port: PortDimension::Channels,
             name: name.to_string(),
@@ -1015,6 +1078,7 @@ pub fn build_daemon_memory(
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: None,
+        channel_turn_tx: None,
         tool_exposure: "static-full".into(),
         assembler: "passthrough".into(),
         skill_exposure: "l1-metadata".into(),
@@ -1046,11 +1110,14 @@ pub fn build_daemon_memory(
 /// compose live (connection-holding) adapters that emit capability events onto
 /// the daemon bus. Builtin tools only (no MCP servers) for the 12.2b producer.
 #[cfg(unix)]
-fn daemon_compose_context(
+pub(crate) fn daemon_compose_context(
     workspace_path: &std::path::Path,
     storage: Arc<dyn StoragePort>,
     domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
     assembler: String,
+    channel_turn_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>,
+    >,
 ) -> ComposeContext {
     use crate::adapters::sandbox::NoOpSandbox;
     ComposeContext {
@@ -1061,6 +1128,7 @@ fn daemon_compose_context(
         mcp_servers: Vec::new(),
         include_builtin_tools: true,
         domain_tx: Some(domain_tx),
+        channel_turn_tx,
         tool_exposure: "static-full".into(),
         assembler,
         skill_exposure: "l1-metadata".into(),
@@ -1107,6 +1175,9 @@ pub fn build_daemon_core(
     profile_selection: ProfileSelection,
     memory_adapter: &str,
     domain_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+    channel_turn_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::domain::models::ChannelTurnRequest>,
+    >,
 ) -> Result<crate::adapters::daemon::runtime::DaemonCore, AdapterCompositionError> {
     use crate::adapters::daemon::runtime::{DaemonCore, DaemonTurnRuntime};
     use crate::adapters::filesystem::FileSystemStorage;
@@ -1143,6 +1214,7 @@ pub fn build_daemon_core(
         storage.clone(),
         domain_tx.clone(),
         assembler_name.clone(),
+        channel_turn_tx.clone(),
     );
     let persona = build_persona(&persona_name, None, &eager_ctx)?;
 
@@ -1153,6 +1225,7 @@ pub fn build_daemon_core(
         let storage = storage.clone();
         let security = security.clone();
         let domain_tx = domain_tx.clone();
+        let channel_turn_tx = channel_turn_tx.clone();
         Box::new(
             move || -> Result<Arc<DaemonTurnRuntime>, AdapterCompositionError> {
                 let ctx = daemon_compose_context(
@@ -1160,6 +1233,7 @@ pub fn build_daemon_core(
                     storage.clone(),
                     domain_tx.clone(),
                     assembler_name.clone(),
+                    channel_turn_tx.clone(),
                 );
                 // Live, connection-holding parts — first activity only.
                 let provider: Arc<dyn StreamingProvider> = {
@@ -1236,6 +1310,7 @@ mod tests {
             mcp_servers: Vec::new(),
             include_builtin_tools: true,
             domain_tx: None,
+            channel_turn_tx: None,
             tool_exposure: "static-full".into(),
             assembler: "passthrough".into(),
             skill_exposure: "l1-metadata".into(),
@@ -1598,6 +1673,74 @@ mod tests {
             }
             other => panic!("expected MissingComposeContext"),
         }
+    }
+
+    #[test]
+    #[cfg(not(feature = "telegram"))]
+    fn test_build_channels_telegram_feature_off_message_unchanged() {
+        let ctx = test_compose_ctx();
+        let result = build_channels("telegram", None, &ctx);
+        match result {
+            Err(AdapterCompositionError::MissingComposeContext { missing_field, .. }) => {
+                assert_eq!(
+                    missing_field,
+                    "telegram feature not compiled — profile validator should have rewritten this to 'terminal'"
+                );
+            }
+            _ => panic!("expected MissingComposeContext"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "telegram")]
+    fn test_build_channels_telegram_with_feature() {
+        let mut ctx = test_compose_ctx();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.channel_turn_tx = Some(tx);
+        let config: toml::Value = r#"
+bot_token = "123:abc"
+allowed_chat_ids = [123456789]
+"#
+        .parse()
+        .unwrap();
+        assert!(build_channels("telegram", Some(&config), &ctx).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "telegram")]
+    fn test_build_channels_telegram_requires_allowed_chat_ids_key() {
+        let mut ctx = test_compose_ctx();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.channel_turn_tx = Some(tx);
+        let config: toml::Value = r#"
+bot_token = "123:abc"
+"#
+        .parse()
+        .unwrap();
+        match build_channels("telegram", Some(&config), &ctx) {
+            Err(AdapterCompositionError::MissingComposeContext { missing_field, .. }) => {
+                assert_eq!(
+                    missing_field,
+                    "allowed_chat_ids required in [channels.config]"
+                );
+            }
+            _ => panic!("expected MissingComposeContext"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "telegram")]
+    fn test_build_channels_telegram_allows_explicit_empty_allowed_chat_ids() {
+        let mut ctx = test_compose_ctx();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        ctx.channel_turn_tx = Some(tx);
+        let config: toml::Value = r#"
+bot_token = "123:abc"
+allowed_chat_ids = []
+"#
+        .parse()
+        .unwrap();
+        assert!(build_channels("telegram", Some(&config), &ctx).is_ok());
     }
 
     #[test]

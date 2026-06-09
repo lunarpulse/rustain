@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    ChannelKind, ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, ToolRisk,
-    generate_message_id,
+    ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole, StopReason,
+    StreamChunk, ToolRisk, generate_message_id,
 };
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
@@ -44,6 +44,9 @@ const CONN_QUEUE_DEPTH: usize = 1024;
 /// How long an attached-but-unresponsive writer has to answer an approval before
 /// the daemon falls back to the conservative unattended path (deny) (AC6 #2).
 const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+const CHANNEL_TURN_FAILED_REPLY: &str =
+    "Sorry, processing failed before the agent produced a response. Please try again.";
 
 /// A consolidation proposal set retained by the daemon for token-gated resolve
 /// (Story 12.2d AC2/AC4). Keyed by the marker's `queued_at_unix` in
@@ -116,6 +119,12 @@ pub struct AttachServer {
     approval_gate_started: Arc<std::sync::atomic::AtomicBool>,
     turn_serial: Arc<Mutex<()>>,
     turn_complete: Arc<Notify>,
+    /// Story 12.3 — current turn origin read by `commit_assistant_turn`.
+    /// tokio::sync — locks=4 held.
+    active_channel_origin: Arc<Mutex<ChannelKind>>,
+    /// Story 12.3 — response route for the current channel-originated turn.
+    /// tokio::sync — locks=4 held.
+    pending_channel_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     /// Story 12.2d AC2/AC6 — retained consolidation proposals keyed by the marker's
     /// `queued_at_unix` (NOT `daily_log_ref`). Reused on re-attach (G7), evicted on
     /// new marker or resolve (G8). tokio::sync per locks=4 discipline (AC7).
@@ -146,6 +155,8 @@ impl AttachServer {
             turn_serial: Arc::new(Mutex::new(())),
             turn_complete: Arc::new(Notify::new()),
             retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
+            pending_channel_response_tx: Arc::new(Mutex::new(None)),
             next_proposal_token: Arc::new(AtomicU64::new(1)),
             generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
         })
@@ -162,20 +173,37 @@ impl AttachServer {
         self: Arc<Self>,
         listener: UnixListener,
         mut domain_rx: mpsc::UnboundedReceiver<AppEvent>,
+        channel_rx: Option<mpsc::UnboundedReceiver<ChannelTurnRequest>>,
         shutdown: CancellationToken,
     ) {
         // The single forwarder task: fold → fan out (drains the one mpsc
-        // `domain_rx`; connections do NOT each subscribe).
+        // `domain_rx`; connections do NOT each subscribe). Channel turns enter
+        // this same forwarder so their response callback is resolved by the same
+        // assistant commit path as socket turns.
         let fwd = self.clone();
         let fwd_shutdown = shutdown.clone();
         let forwarder = tokio::spawn(async move {
             let mut assistant_buf = String::new();
+            let mut channel_rx = channel_rx;
             loop {
                 tokio::select! {
                     _ = fwd_shutdown.cancelled() => break,
                     maybe = domain_rx.recv() => {
                         let Some(event) = maybe else { break };
                         fwd.handle_bus_event(&event, &mut assistant_buf).await;
+                    }
+                    maybe = async {
+                        match &mut channel_rx {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending::<Option<ChannelTurnRequest>>().await,
+                        }
+                    } => {
+                        let Some(req) = maybe else {
+                            channel_rx = None;
+                            continue;
+                        };
+                        let srv = fwd.clone();
+                        tokio::spawn(async move { srv.drive_channel_turn(req).await; });
                     }
                 }
             }
@@ -227,6 +255,7 @@ impl AttachServer {
         if text.is_empty() {
             return;
         }
+        let origin = *self.active_channel_origin.lock().await;
         let mut conv = self.conversation.lock().await;
         conv.messages.push(ChatMessage {
             id: generate_message_id(),
@@ -239,10 +268,14 @@ impl AttachServer {
             stop_reason: Some(stop_reason.clone()),
             synthetic: false,
             images: vec![],
-            origin: ChannelKind::Terminal,
+            origin,
         });
         if let Err(e) = self.core.storage.save_conversation(&conv).await {
             tracing::warn!(error = %e, "daemon: persisting conversation after turn failed");
+        }
+        drop(conv);
+        if let Some(tx) = self.pending_channel_response_tx.lock().await.take() {
+            let _ = tx.send(text.to_string());
         }
     }
 
@@ -599,10 +632,27 @@ impl AttachServer {
     /// Build the runtime (first activity), spawn the approval gate once, drive
     /// the turn. The turn emits to the daemon bus; the forwarder fans out + folds.
     async fn drive_user_turn(&self, text: String) {
+        self.drive_user_turn_inner(text, ChannelKind::Terminal, None)
+            .await;
+    }
+
+    async fn drive_channel_turn(&self, req: ChannelTurnRequest) {
+        self.drive_user_turn_inner(req.text, req.origin, Some(req.response_tx))
+            .await;
+    }
+
+    async fn drive_user_turn_inner(
+        &self,
+        text: String,
+        origin: ChannelKind,
+        response_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    ) {
         // Serialize submitted turns FIFO. The forwarder has one assistant
         // accumulator, and each turn's context must include the prior assistant
         // response before the next user message is assembled.
         let _turn_guard = self.turn_serial.lock().await;
+        *self.active_channel_origin.lock().await = origin;
+        *self.pending_channel_response_tx.lock().await = response_tx;
 
         let rt = match self.core.ensure_runtime().await {
             Ok(rt) => rt,
@@ -611,6 +661,9 @@ impl AttachServer {
                 // (the daemon owns a bare bus; the EventBus-bypass ratchet stays
                 // locked). A client surfaces runtime-build failures in 12.2c.
                 tracing::error!(error = %e, "daemon: building turn runtime failed");
+                self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
+                    .await;
+                *self.active_channel_origin.lock().await = ChannelKind::Terminal;
                 return;
             }
         };
@@ -619,7 +672,13 @@ impl AttachServer {
         let turn_complete = self.turn_complete.notified();
         let (handle, snapshot) = {
             let mut conv = self.conversation.lock().await;
-            let handle = rt.drive_turn(text, &mut conv, &self.domain_tx, CancellationToken::new());
+            let handle = rt.drive_turn(
+                text,
+                origin,
+                &mut conv,
+                &self.domain_tx,
+                CancellationToken::new(),
+            );
             (handle, conv.clone())
         }; // lock dropped before save — avoid holding across .await
 
@@ -631,12 +690,29 @@ impl AttachServer {
 
         if let Err(e) = handle.await {
             tracing::warn!(error = ?e, "daemon turn task failed");
+            self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
+                .await;
+            *self.active_channel_origin.lock().await = ChannelKind::Terminal;
             return;
         }
         // Ensure the forwarder has folded the completed assistant message before
         // accepting the next queued turn. If a provider path ends without a
         // TurnComplete event, do not wedge the queue forever.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
+        let folded = tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
+        if folded.is_err() {
+            tracing::warn!(
+                "daemon turn completed but assistant commit was not observed before timeout"
+            );
+        }
+        self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
+            .await;
+        *self.active_channel_origin.lock().await = ChannelKind::Terminal;
+    }
+
+    async fn resolve_pending_channel_response(&self, fallback: &str) {
+        if let Some(tx) = self.pending_channel_response_tx.lock().await.take() {
+            let _ = tx.send(fallback.to_string());
+        }
     }
 
     /// Spawn the headless approval gate exactly once (AC6).
@@ -1182,7 +1258,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let handle = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+        let handle = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
 
         // ── Client side ──
         let mut stream = UnixStream::connect(&socket).await.unwrap();
@@ -1279,6 +1355,82 @@ mod tests {
         panic!("conversation was not persisted with an assistant turn");
     }
 
+    /// Story 12.3 G7/G8: channel turns are tagged with their origin and the
+    /// committed assistant text resolves the channel response oneshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_turn_tags_telegram_origin_and_routes_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let chunks = vec![
+            StreamChunk::Text {
+                content: "telegram response".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ];
+        let (core, storage) = mock_core(ws, chunks);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "telegram-conv".into(),
+            ..Default::default()
+        }));
+
+        let (bus, domain_rx) = EventBus::new(64);
+        let domain_tx = bus.domain_tx.clone();
+        let (channel_tx, channel_rx) = mpsc::unbounded_channel::<ChannelTurnRequest>();
+        let socket = ws.join("telegram.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let handle =
+            tokio::spawn(async move { srv.run(listener, domain_rx, Some(channel_rx), sd).await });
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        channel_tx
+            .send(ChannelTurnRequest {
+                text: "hi from telegram".into(),
+                origin: ChannelKind::Telegram,
+                response_tx,
+            })
+            .unwrap();
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), response_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, "telegram response");
+
+        for _ in 0..50 {
+            if let Ok(Some(conv)) = storage.load_conversation("telegram-conv").await {
+                if conv
+                    .messages
+                    .iter()
+                    .any(|m| m.role == MessageRole::Assistant)
+                {
+                    let user = conv
+                        .messages
+                        .iter()
+                        .find(|m| m.role == MessageRole::User)
+                        .expect("user message persisted");
+                    let asst = conv
+                        .messages
+                        .iter()
+                        .find(|m| m.role == MessageRole::Assistant)
+                        .expect("assistant message persisted");
+                    assert_eq!(user.origin, ChannelKind::Telegram);
+                    assert_eq!(asst.origin, ChannelKind::Telegram);
+                    shutdown.cancel();
+                    handle.abort();
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("telegram channel turn was not persisted");
+    }
     /// AC2: a protocol version mismatch is rejected with a clear Error frame.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn version_mismatch_is_rejected() {
@@ -1296,7 +1448,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
 
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         write_frame(
@@ -1346,7 +1498,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
 
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         write_frame(
@@ -1662,7 +1814,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
 
         // Client 1 → writer.
         let mut c1 = UnixStream::connect(&socket).await.unwrap();
@@ -1763,7 +1915,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
 
         let mut c = UnixStream::connect(&socket).await.unwrap();
         write_frame(

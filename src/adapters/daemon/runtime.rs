@@ -153,10 +153,11 @@ impl DaemonTurnRuntime {
     /// re-implementation (AC3). Returns the spawned turn `JoinHandle`; the turn
     /// runs independent of any socket, so it survives client detach (AC4).
     ///
-    /// The inbound message is tagged [`ChannelKind::Terminal`] (AC5).
+    /// The inbound message is tagged with the supplied channel origin (AC5/AC8).
     pub fn drive_turn(
         &self,
         text: String,
+        origin: ChannelKind,
         conversation: &mut Conversation,
         domain_tx: &mpsc::UnboundedSender<AppEvent>,
         turn_cancel: CancellationToken,
@@ -173,7 +174,7 @@ impl DaemonTurnRuntime {
             stop_reason: None,
             synthetic: false,
             images: vec![],
-            origin: ChannelKind::Terminal,
+            origin,
         });
 
         // Assemble the API message list via the Message-tier assembler (same seam
@@ -327,6 +328,26 @@ mod tests {
         assert_eq!(core.build_count(), 1, "still 1 after a second activation");
     }
 
+    #[tokio::test]
+    async fn drive_turn_tags_user_message_with_supplied_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = noop_runtime(tmp.path().to_path_buf());
+        let mut conversation = Conversation {
+            id: "origin-test".into(),
+            ..Default::default()
+        };
+        let (bus, _rx) = crate::infrastructure::runtime::event_bus::EventBus::new(8);
+        let handle = rt.drive_turn(
+            "hello".into(),
+            ChannelKind::Telegram,
+            &mut conversation,
+            &bus.domain_tx,
+            CancellationToken::new(),
+        );
+        handle.abort();
+        assert_eq!(conversation.messages.len(), 1);
+        assert_eq!(conversation.messages[0].origin, ChannelKind::Telegram);
+    }
     #[tokio::test]
     async fn ensure_runtime_returns_the_same_instance() {
         let core = noop_core();

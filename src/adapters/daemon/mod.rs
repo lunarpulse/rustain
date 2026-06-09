@@ -267,13 +267,16 @@ async fn run_daemon_foreground(
         config.runtime.event_bus.raw_capacity.max(1),
     );
     let domain_tx = event_bus.domain_tx.clone();
+    let (channel_turn_tx, channel_turn_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::domain::models::ChannelTurnRequest>();
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
             &workspace,
             config_swap,
-            selection,
+            selection.clone(),
             &memory_adapter,
             domain_tx.clone(),
+            Some(channel_turn_tx.clone()),
         )
         .map_err(|e| anyhow::anyhow!("composing daemon core: {e}"))?,
     );
@@ -290,6 +293,30 @@ async fn run_daemon_foreground(
     let recall: std::sync::Arc<dyn crate::domain::ports::RecallProviderPort> =
         std::sync::Arc::new(crate::adapters::noop::NoopRecallProvider);
 
+    let channel: std::sync::Arc<dyn crate::domain::ports::ChannelPort> = {
+        let chan_name = selection
+            .dimensions
+            .get(&crate::domain::models::PortDimension::Channels)
+            .map(|a| a.adapter.as_str())
+            .unwrap_or("terminal");
+        let chan_config = selection
+            .dimensions
+            .get(&crate::domain::models::PortDimension::Channels)
+            .and_then(|a| a._config.as_ref());
+        let chan_ctx = crate::infrastructure::composition::daemon_compose_context(
+            &workspace,
+            core.storage.clone(),
+            domain_tx.clone(),
+            config.assembler.strategy.clone(),
+            Some(channel_turn_tx),
+        );
+        crate::infrastructure::composition::build_channels(chan_name, chan_config, &chan_ctx)
+            .unwrap_or_else(|e| {
+                tracing::warn!(adapter = chan_name, error = %e, "daemon: channel adapter composition failed; using terminal noop channel");
+                std::sync::Arc::new(crate::adapters::noop::NoOpChannel)
+            })
+    };
+
     let server = crate::adapters::daemon::server::AttachServer::new(
         core.clone(),
         conversation.clone(),
@@ -304,7 +331,9 @@ async fn run_daemon_foreground(
         pid_path: pid_path.clone(),
         socket_path: socket_path.clone(),
         server,
+        channel,
         domain_rx: Some(domain_rx),
+        channel_turn_rx: Some(channel_turn_rx),
         conversation,
     };
 
