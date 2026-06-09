@@ -95,6 +95,7 @@ fn render_status_bar_ml(
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();
@@ -327,6 +328,7 @@ fn test_status_bar_shows_active_agent() {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();
@@ -378,6 +380,7 @@ fn test_status_bar_hides_agent_when_none() {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();
@@ -429,6 +432,7 @@ fn test_status_bar_agent_name_truncated() {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();

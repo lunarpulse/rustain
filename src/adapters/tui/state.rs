@@ -24,6 +24,23 @@ use crate::domain::services::search::SearchMatch;
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
 
+/// Attach-mode view descriptor for the status bar (Story 12.2c AC1/AC6).
+///
+/// Present only when the TUI is an attached client (`run_attached`); the local
+/// TUI passes `None`. Carries the bits the status bar needs to render the
+/// `attached` indicator and — when a second client holds the writer slot — the
+/// dimmed `read-only — another client holds write` segment. Uses only
+/// domain/tui-visible primitives (no `adapters::daemon::AttachMode`) so
+/// `status_bar` stays free of an adapter→adapter dependency.
+#[derive(Debug, Clone, Default)]
+pub struct AttachInfo {
+    /// This attachment is read-only because another client holds the writer slot
+    /// (the daemon granted `ReadOnly`). Drives the never-silent status segment.
+    pub read_only: bool,
+    /// Channels the daemon reports connected (for the `attached` summary chip).
+    pub channel_count: usize,
+}
+
 /// Pending permission request awaiting user response.
 pub struct PendingPermission {
     pub id: RequestId,

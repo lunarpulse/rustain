@@ -175,10 +175,16 @@ pub enum DaemonAction {
         system: bool,
     },
     /// Attach an interactive client to the running daemon over its Unix socket
-    /// (Story 12.2b). Streams the daemon's conversation; type a line to submit a
-    /// turn, Ctrl-D to detach (the daemon and any in-flight turn keep running).
-    /// The rich multi-channel TUI client lands in Story 12.2c.
-    Attach,
+    /// (Story 12.2b/12.2c). The default is the rich multi-channel TUI
+    /// (`run_attached`): unified scrollback with dimmed channel prefixes, history,
+    /// read-only multi-attach, and `Ctrl+D` to detach (the daemon and any in-flight
+    /// turn keep running). `--plain` selects the line-based client for scripting.
+    Attach {
+        /// Use the minimal line-based stdin/stdout client instead of the rich TUI
+        /// (scripting / non-TTY contexts; Story 12.2b `run_attach`).
+        #[arg(long)]
+        plain: bool,
+    },
     /// INTERNAL — the detached child entrypoint (re-exec target of `start`).
     /// Hidden because it is not a user verb: `start` re-execs the current binary
     /// with this action after `setsid`-detaching. Running it by hand runs the

@@ -245,6 +245,7 @@ fn render_message<'a>(
     is_bookmarked: bool,
     search_query: Option<&str>,
     focused_match_ordinal_in_message: Option<usize>,
+    show_terminal_origin_prefix: bool,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
@@ -263,6 +264,20 @@ fn render_message<'a>(
         MessageRole::System => theme.colors.fg_secondary,
     };
     let mut role_spans: Vec<Span<'a>> = Vec::new();
+    // Story 12.2c AC2 — dimmed, line-leading channel-origin prefix for the unified
+    // multi-channel scrollback. Rendered ONLY for non-Terminal origins: every
+    // pre-Epic-12 message is `Terminal` (the default), so gating on non-Terminal
+    // keeps the local single-channel TUI — and the render-snapshot suite —
+    // byte-unchanged, while the attach client shows `[telegram]`/`[cron]` on
+    // messages that came from those channels. Added before the fork/bookmark/
+    // synthetic markers so it leads the role line; one extra Span keeps the line
+    // count at 1 (the no-wrap height invariant, chat_pane contract :199).
+    if show_terminal_origin_prefix || msg.origin != crate::domain::models::ChannelKind::Terminal {
+        role_spans.push(Span::styled(
+            format!("{} ", msg.origin.as_prefix()),
+            theme.typography.meta.fg(theme.colors.fg_muted),
+        ));
+    }
     if is_fork_point {
         role_spans.push(Span::styled(
             "🔀 ".to_string(),
@@ -1292,6 +1307,47 @@ pub fn render(
     )
 }
 
+/// Attach-mode render wrapper: preserves the local TUI render contract while
+/// showing every persisted channel origin, including `[terminal]`, in the
+/// socket-sourced unified scrollback (Story 12.2c AC2).
+#[allow(clippy::too_many_arguments, dead_code)]
+pub fn render_attached(
+    frame: &mut Frame,
+    area: Rect,
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    scroll_offset: usize,
+    auto_scroll: bool,
+    theme: &Theme,
+    tab_render_state: &mut TabRenderState,
+    tool_block_states: &HashMap<String, ToolBlockState>,
+    feedback_blocks: &BTreeMap<String, FeedbackBlock>,
+) -> RenderResult {
+    render_with_search_impl(
+        frame,
+        area,
+        conversation,
+        None,
+        streaming,
+        &ViewState::default(),
+        &crate::domain::clock::SystemClock::default(),
+        scroll_offset,
+        auto_scroll,
+        theme,
+        tab_render_state,
+        tool_block_states,
+        feedback_blocks,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        None, // liveness
+        None, // open_prose
+        true,
+    )
+}
+
 /// Full chat pane render with optional search highlighting and bookmark
 /// marker overlays.
 ///
@@ -1333,6 +1389,55 @@ pub fn render_with_search(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
+) -> RenderResult {
+    render_with_search_impl(
+        frame,
+        area,
+        conversation,
+        open_turn,
+        streaming,
+        view_state,
+        clock,
+        scroll_offset,
+        auto_scroll,
+        theme,
+        tab_render_state,
+        tool_block_states,
+        feedback_blocks,
+        search_query,
+        focused_search_match,
+        search_matches,
+        bookmarks,
+        pending_plan_card,
+        liveness,
+        open_prose,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_with_search_impl(
+    frame: &mut Frame,
+    area: Rect,
+    conversation: &Conversation,
+    open_turn: Option<&Turn>,
+    streaming: &StreamingState,
+    view_state: &ViewState,
+    clock: &dyn Clock,
+    scroll_offset: usize,
+    auto_scroll: bool,
+    theme: &Theme,
+    tab_render_state: &mut TabRenderState,
+    tool_block_states: &HashMap<String, ToolBlockState>,
+    feedback_blocks: &BTreeMap<String, FeedbackBlock>,
+    search_query: Option<&str>,
+    focused_search_match: Option<&SearchMatch>,
+    search_matches: &[SearchMatch],
+    bookmarks: &[usize],
+    pending_plan_card: Option<&PendingPlanCard>,
+    liveness: Option<&crate::domain::models::LivenessSnapshot>,
+    open_prose: Option<&str>,
+    show_terminal_origin_prefix: bool,
 ) -> RenderResult {
     let empty = RenderResult {
         total_content_height: 0,
@@ -1718,6 +1823,7 @@ pub fn render_with_search(
                             is_bookmarked,
                             search_query,
                             focused_local_ordinal,
+                            show_terminal_origin_prefix,
                         );
                         let text_height = compute_message_height(
                             &msg.content,
@@ -1758,6 +1864,7 @@ pub fn render_with_search(
                         is_bookmarked,
                         search_query,
                         focused_local_ordinal,
+                        show_terminal_origin_prefix,
                     );
                     let text_height = compute_message_height(
                         &msg.content,

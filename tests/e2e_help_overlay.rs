@@ -368,6 +368,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();

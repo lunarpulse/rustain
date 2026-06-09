@@ -9272,6 +9272,7 @@ fn render(
                     state.active_profile.as_ref(),
                     density_mode,
                     tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
+                    None, // Story 12.2c — local TUI is not an attach client
                 );
                 input_box::render(
                     frame,

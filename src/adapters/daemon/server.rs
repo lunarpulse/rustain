@@ -341,6 +341,14 @@ impl AttachServer {
             }
         });
 
+        // Story 12.2c AC7 — drain the 12.1c durable boundary queues to the freshly
+        // attached WRITER and emit them onto the normal event stream (no new frame).
+        // The purge notice is daemon-owned state, so the DAEMON drains it (a
+        // read-only client reading/clearing it would violate the ownership boundary).
+        if granted_mode == AttachMode::ReadWrite {
+            self.emit_session_queue_notices(conn_id).await;
+        }
+
         // Reader loop.
         loop {
             match read_frame::<_, ClientFrame>(&mut read_half).await {
@@ -482,7 +490,61 @@ impl AttachServer {
         });
     }
 
-    async fn send_to(&self, conn_id: u64, frame: DaemonFrame) {
+    /// Story 12.2c AC7 — surface the 12.1c boundary queues to a freshly-attached
+    /// writer via the existing `ClientEvent`/`RawEvent` `SystemNotice` path.
+    ///
+    /// - **Purge notice:** emitted to the writer queue first, then removed so a
+    ///   closed/full connection cannot silently consume the durable notice.
+    /// - **Consolidation-due marker:** READ but NOT cleared — a no-LLM one-liner
+    ///   pointer is emitted, and the un-cleared marker is the durable hand-off to
+    ///   the rich consolidation card (Story 12.2d). No proposal/resolve frame is
+    ///   added here (phantom-seam guard).
+    async fn emit_session_queue_notices(&self, conn_id: u64) {
+        let workspace = &self.core.workspace;
+        let now = chrono::Utc::now().timestamp_millis();
+
+        if let Some(notice) = super::session_queue::read_purge_notice(workspace) {
+            let enqueued = self
+                .send_to(
+                    conn_id,
+                    DaemonFrame::Event(RawEvent {
+                        conversation_id: None,
+                        timestamp_ms: now,
+                        kind: RawEventKind::SystemNotice {
+                            level: crate::domain::models::NoticeLevel::Info,
+                            message: notice.message(),
+                        },
+                    }),
+                )
+                .await;
+            if enqueued {
+                if let Err(e) = super::session_queue::clear_purge_notice(workspace) {
+                    tracing::warn!(error = %e, "daemon: purge notice was emitted but could not be cleared");
+                }
+            } else {
+                tracing::warn!(
+                    "daemon: purge notice left queued because attach notice delivery failed"
+                );
+            }
+        }
+
+        if super::session_queue::read_consolidation_due(workspace).is_some() {
+            self.send_to(
+                conn_id,
+                DaemonFrame::Event(RawEvent {
+                    conversation_id: None,
+                    timestamp_ms: now,
+                    kind: RawEventKind::SystemNotice {
+                        level: crate::domain::models::NoticeLevel::Info,
+                        message: "Memory consolidation pending — run /memory consolidate".into(),
+                    },
+                }),
+            )
+            .await;
+        }
+    }
+
+    async fn send_to(&self, conn_id: u64, frame: DaemonFrame) -> bool {
         let tx = {
             let reg = self.registry.lock().await;
             reg.conns
@@ -491,7 +553,9 @@ impl AttachServer {
                 .map(|c| c.tx.clone())
         };
         if let Some(tx) = tx {
-            let _ = tx.try_send(frame);
+            tx.try_send(frame).is_ok()
+        } else {
+            false
         }
     }
 }
@@ -1216,5 +1280,209 @@ mod tests {
         assert_eq!(blocked.load(Ordering::SeqCst), 0, "no blocks");
 
         gate.abort();
+    }
+
+    /// AC6.4 (Story 12.2c) — a SECOND attach is granted `ReadOnly` and the daemon
+    /// REFUSES its write frames with `ProtocolError::ReadOnly`, end-to-end from the
+    /// client side (re-asserting the 12.2b enforcement the rich client relies on).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_attach_is_readonly_and_writes_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (core, _storage) = mock_core(ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "ro-conv".into(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let socket = ws.join("ro.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+
+        // Client 1 → writer.
+        let mut c1 = UnixStream::connect(&socket).await.unwrap();
+        write_frame(
+            &mut c1,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok: false,
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut c1).await.unwrap() {
+            Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
+                assert_eq!(
+                    granted_mode,
+                    AttachMode::ReadWrite,
+                    "first attach is writer"
+                );
+            }
+            other => panic!("expected AttachAck, got {other:?}"),
+        }
+
+        // Client 2 → read-only (a writer already holds the slot).
+        let mut c2 = UnixStream::connect(&socket).await.unwrap();
+        write_frame(
+            &mut c2,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok: false,
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut c2).await.unwrap() {
+            Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
+                assert_eq!(
+                    granted_mode,
+                    AttachMode::ReadOnly,
+                    "second attach must be read-only"
+                );
+            }
+            other => panic!("expected AttachAck(ReadOnly), got {other:?}"),
+        }
+
+        // The read-only client tries to write → daemon refuses with ReadOnly.
+        write_frame(
+            &mut c2,
+            &ClientFrame::UserMessage {
+                text: "i should be refused".into(),
+                images: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut c2).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::ReadOnly)) => {}
+            other => panic!("expected Error(ReadOnly), got {other:?}"),
+        }
+
+        shutdown.cancel();
+        h.abort();
+    }
+
+    /// AC7 (Story 12.2c) — on writer-attach the daemon DRAINS the 12.1c purge
+    /// notice and EMITS it as an Info `SystemNotice` event, plus a one-liner
+    /// consolidation pointer. The purge notice is consumed (gone); the
+    /// consolidation marker is NOT cleared (the durable hand-off to 12.2d).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_attach_emits_and_drains_boundary_queues() {
+        use crate::adapters::daemon::session_queue;
+        use crate::domain::models::ConsolidationDueMarker;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+
+        // Queue both 12.1c boundary records.
+        session_queue::enqueue_purge_notice(ws, 5, vec!["a fact".into()], 1_000).unwrap();
+        session_queue::enqueue_consolidation_due(
+            ws,
+            &ConsolidationDueMarker {
+                boundary: "daily_reset".into(),
+                queued_at_unix: 2_000,
+                daily_log_ref: "2026-06-08".into(),
+            },
+        )
+        .unwrap();
+
+        let (core, _storage) = mock_core(ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "q-conv".into(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let socket = ws.join("q.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, sd).await });
+
+        let mut c = UnixStream::connect(&socket).await.unwrap();
+        write_frame(
+            &mut c,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok: false,
+            },
+        )
+        .await
+        .unwrap();
+        let _ = read_frame::<_, DaemonFrame>(&mut c).await.unwrap(); // AttachAck
+
+        // Collect the two emitted SystemNotice events.
+        let mut saw_purge = false;
+        let mut saw_consolidation = false;
+        for _ in 0..4 {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                read_frame::<_, DaemonFrame>(&mut c),
+            )
+            .await
+            {
+                Ok(Ok(Some(DaemonFrame::Event(raw)))) => {
+                    if let RawEventKind::SystemNotice { message, .. } = raw.kind {
+                        if message.contains("facts removed from MEMORY.md") {
+                            saw_purge = true;
+                        }
+                        if message.contains("run /memory consolidate") {
+                            saw_consolidation = true;
+                        }
+                    }
+                }
+                _ => break,
+            }
+            if saw_purge && saw_consolidation {
+                break;
+            }
+        }
+        assert!(saw_purge, "purge notice must be emitted on writer attach");
+        assert!(
+            saw_consolidation,
+            "consolidation one-liner must be emitted on writer attach"
+        );
+
+        // Purge notice drained (consumed); consolidation marker NOT cleared.
+        assert!(
+            session_queue::read_purge_notice(ws).is_none(),
+            "purge notice must be drained after emit"
+        );
+        assert!(
+            session_queue::read_consolidation_due(ws).is_some(),
+            "consolidation marker must remain (durable hand-off to 12.2d)"
+        );
+
+        shutdown.cancel();
+        h.abort();
+    }
+
+    #[tokio::test]
+    async fn purge_notice_stays_queued_when_attach_notice_delivery_fails() {
+        use crate::adapters::daemon::session_queue;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        session_queue::enqueue_purge_notice(ws, 2, vec!["lost if removed".into()], 1_000).unwrap();
+
+        let (core, _storage) = mock_core(ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "q-conv".into(),
+            ..Default::default()
+        }));
+        let (bus, _domain_rx) = EventBus::new(64);
+        let server = AttachServer::new(core, conversation, bus.domain_tx.clone());
+
+        server.emit_session_queue_notices(404).await;
+
+        assert!(
+            session_queue::read_purge_notice(ws).is_some(),
+            "failed delivery must not consume the durable purge notice"
+        );
     }
 }

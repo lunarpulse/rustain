@@ -70,7 +70,15 @@ pub async fn run_daemon(
                 run_daemon_foreground(workspace, config, memory_adapter, selection).await
             }
             DaemonAction::Stop => run_daemon_stop(workspace).await,
-            DaemonAction::Attach => attach_client::run_attach(&workspace).await,
+            // Story 12.2c — default to the rich multi-channel TUI; `--plain` keeps
+            // the line-based 12.2b client for scripting/non-TTY use.
+            DaemonAction::Attach { plain } => {
+                if plain {
+                    attach_client::run_attach(&workspace).await
+                } else {
+                    crate::infrastructure::runtime::attach_loop::run_attached(&workspace).await
+                }
+            }
             DaemonAction::Status { json } => run_daemon_status(workspace, config, json).await,
             // install/uninstall are pure generate/remove — no memory composition, no
             // async I/O (AC-12-1b-3/3b). Called synchronously inside the async fn.

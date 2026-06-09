@@ -424,6 +424,7 @@ fn test_tui_renders_with_theme_colors() {
                     None,
                     rustain::domain::models::visual::DensityMode::Focus,
                     false,
+                    None,
                 );
             }
         })

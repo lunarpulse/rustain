@@ -209,16 +209,42 @@ versioned wire protocol on its Unix socket.
 
 ```sh
 rustain daemon start          # start the background daemon
-rustain daemon attach         # connect an interactive client
+rustain daemon attach         # connect the rich multi-channel TUI (default)
+rustain daemon attach --plain # connect the minimal line-based client (scripting)
 ```
 
-`attach` performs the protocol handshake, prints the conversation as it streams,
-and submits a turn for each line you type. **Ctrl-D detaches** — the daemon and any
-in-flight turn keep running (the turn is driven on the daemon-owned event bus, not
-the socket, so it completes and persists even after you detach). The rich
-multi-channel TUI client (history paging, dimmed `[telegram]`/`[cron]` origin
-prefixes, read-only multi-attach indicator) arrives in Story 12.2c; 12.2b ships the
-daemon side plus this line-based client.
+`attach` performs the protocol handshake and opens the **rich multi-channel TUI**
+(`run_attached`, Story 12.2c): the daemon's full current-session transcript
+rendered bottom-anchored with an honest `— session start — · Earlier sessions not
+loaded` top boundary, dimmed `[terminal]`/`[telegram]`/`[cron]` channel-origin
+prefixes in attach-mode scrollback (provenance that survives re-attach), an
+`attached` status indicator, and an `Esc/Ctrl+D/Ctrl+C detach` hint. Type a
+message and press Enter to submit; **`Esc`, `Ctrl+D`, or `Ctrl+C` detaches** —
+there is no `daemon detach` CLI verb (detach is a client keybinding).
+The daemon and any in-flight turn keep running across detach (the turn is driven on
+the daemon-owned event bus, not the socket, so it completes and persists).
+
+The TUI holds **no local agent core** — it forwards each turn as a
+`ClientFrame::UserMessage` (the `SocketTurnDriver`, the second `TurnDriver` impl)
+and renders the daemon's streamed events through the same `reduce()` path the local
+TUI uses. Memory recall rides a normal daemon turn (no client provider needed).
+
+**Multi-attach** is read-only: the first writer holds the write slot; later attaches
+are granted `ReadOnly` (daemon-enforced — a read-only client's writes are refused
+with `ProtocolError::ReadOnly`). A read-only client shows a persistent
+`read-only — another client holds write` status segment, a one-time notice, and an
+inert (dimmed `read-only — can't send here`) input box. Promotion happens by the
+next *new* attach after the writer detaches.
+
+On writer-attach the daemon drains the Story 12.1c boundary queues onto the event
+stream: a MEMORY.md **purge notice** (`N facts removed from MEMORY.md …`, consumed
+once) and a one-liner **consolidation pointer** (`Memory consolidation pending — run
+/memory consolidate`; the marker is left in place as the durable hand-off to the
+rich consolidation card in Story 12.2d).
+
+`--plain` selects the minimal line-based stdin/stdout client (Story 12.2b
+`run_attach`) for scripting / non-TTY contexts: it prints the conversation as it
+streams and submits a turn per line; Ctrl-D detaches.
 
 ### Lazy runtime (NFR46)
 

@@ -114,6 +114,20 @@ pub fn enqueue_purge_notice(
     write_atomic(&path, &body)
 }
 
+/// Remove the pending MEMORY.md purge notice after it has been successfully
+/// enqueued to a writer-attach connection (Story 12.2c AC7). A missing file is
+/// already drained and is therefore success; any other I/O error is returned so
+/// the daemon can leave an audit trail instead of silently breaking the once-only
+/// delivery contract.
+pub fn clear_purge_notice(workspace: &Path) -> Result<()> {
+    let path = paths::daemon_purge_notice_path(workspace)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// Read the pending MEMORY.md purge notice, or `None` when there is none / unreadable.
 pub fn read_purge_notice(workspace: &Path) -> Option<MemoryMdPurgeNotice> {
     let path = paths::daemon_purge_notice_path(workspace).ok()?;

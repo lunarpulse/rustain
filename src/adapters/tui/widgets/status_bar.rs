@@ -39,6 +39,7 @@ pub fn render(
     active_profile: Option<&ActiveProfileSnapshot>,
     density_mode: crate::domain::models::visual::DensityMode,
     tab_read_only: bool,
+    attached: Option<&crate::adapters::tui::state::AttachInfo>,
 ) {
     let status_text = status.display_text();
     let fg = theme.colors.status_fg;
@@ -98,6 +99,32 @@ pub fn render(
                 .fg(theme.colors.warning)
                 .add_modifier(Modifier::BOLD),
         ));
+    }
+
+    // Story 12.2c AC1/AC6 — attach-mode indicator. Shown only for an attached
+    // client (`run_attached`); the local TUI passes `None`. When this client was
+    // granted read-only (another client holds the writer slot) the segment is the
+    // dimmed never-silent `read-only — another client holds write` (AC6 #2);
+    // otherwise a plain `attached` chip.
+    if let Some(info) = attached {
+        left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
+        if info.read_only {
+            left_spans.push(Span::styled(
+                "read-only — another client holds write".to_string(),
+                theme.typography.meta.fg(theme.colors.fg_muted),
+            ));
+        } else {
+            left_spans.push(Span::styled(
+                "attached".to_string(),
+                Style::default().fg(theme.colors.accent),
+            ));
+        }
+        if info.channel_count > 1 {
+            left_spans.push(Span::styled(
+                format!(" ({} channels)", info.channel_count),
+                theme.typography.meta.fg(theme.colors.fg_muted),
+            ));
+        }
     }
 
     if let Some(breadcrumb) = drill_down_breadcrumb {
@@ -463,6 +490,7 @@ mod tests {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();
@@ -519,6 +547,7 @@ mod tests {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();
@@ -578,6 +607,7 @@ mod tests {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();
@@ -682,6 +712,7 @@ mod tests {
                 None,
                 DensityMode::Focus,
                 true,
+                None,
             );
         })
         .unwrap();
@@ -727,6 +758,7 @@ mod tests {
                     None,
                     DensityMode::Focus,
                     false,
+                    None,
                 );
             })
             .unwrap();
@@ -781,6 +813,7 @@ mod tests {
                 None,
                 DensityMode::Focus,
                 false,
+                None,
             );
         })
         .unwrap();

@@ -75,6 +75,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                     None,
                     DensityMode::Focus,
                 false,
+                    None,
                 );
                 input_box::render(
                     frame,

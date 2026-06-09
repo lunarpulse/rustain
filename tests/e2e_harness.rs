@@ -298,6 +298,7 @@ impl TestHarness {
                         None,
                         DensityMode::Focus,
                         false,
+                        None,
                     );
 
                     input_box::render(
