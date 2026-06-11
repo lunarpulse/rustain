@@ -15,7 +15,7 @@ use anyhow::Result;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::domain::models::{AppConfig, ChatMessage, ConsolidationDueMarker, SessionBoundary};
-use crate::domain::ports::{ChannelPort, MemoryPort, RecallProviderPort};
+use crate::domain::ports::{ChannelPort, MemoryPort, RecallProviderPort, SchedulerPort};
 
 use super::{pidfile, session_queue, socket};
 
@@ -36,12 +36,19 @@ pub struct DaemonRuntime {
     pub server: Arc<super::server::AttachServer>,
     /// Story 12.3 — composed daemon channel adapter (terminal noop or Telegram).
     pub channel: Arc<dyn ChannelPort>,
+    /// Story 12.4 — cron scheduler adapter (or NoOpScheduler).
+    pub scheduler: Arc<dyn SchedulerPort>,
     /// Story 12.2b — the daemon's per-activation event bus receiver, handed to the
     /// server's single forwarder task. `Option` so `run_lifecycle` can `take()` it.
     pub domain_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>>,
     /// Story 12.3 — inbound channel-turn queue handed to the attach server.
     pub channel_turn_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::domain::models::ChannelTurnRequest>>,
+    /// Story 12.4 — completed cron results injected into the forwarder.
+    #[cfg(feature = "cron")]
+    pub cron_completion_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::adapters::scheduler::cron::CronCompletion>,
+    >,
     /// Story 12.2b — the per-process conversation (origin-tagged transcript). Fed
     /// to `emit_session_boundary` (AC4) and snapshotted on attach.
     pub conversation: Arc<tokio::sync::Mutex<crate::domain::models::Conversation>>,
@@ -185,6 +192,9 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
     if let Err(e) = rt.channel.start_loop().await {
         tracing::warn!(error = %e, "daemon: channel adapter start_loop failed — continuing without channel");
     }
+    if let Err(e) = rt.scheduler.start_loop().await {
+        tracing::warn!(error = %e, "daemon: scheduler adapter start_loop failed — continuing without scheduler");
+    }
 
     // Story 12.2b — the attach server owns the accept loop + forwarder. We hand it
     // the listener + the bus receiver and a shutdown token; the lifecycle loop
@@ -195,10 +205,18 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
         .take()
         .expect("DaemonRuntime.domain_rx must be set");
     let channel_rx = rt.channel_turn_rx.take();
+    #[cfg(feature = "cron")]
+    let cron_completion_rx = rt.cron_completion_rx.take();
+    #[cfg(not(feature = "cron"))]
+    let cron_completion_rx = None;
     let server = rt.server.clone();
     let server_handle = tokio::spawn({
         let sd = server_shutdown.clone();
-        async move { server.run(listener, domain_rx, channel_rx, sd).await }
+        async move {
+            server
+                .run(listener, domain_rx, channel_rx, cron_completion_rx, sd)
+                .await
+        }
     });
 
     // Timers. The idle timer arm is disabled (via the `if !low_power` guard) once
@@ -210,14 +228,19 @@ pub async fn run_lifecycle(mut rt: DaemonRuntime) -> Result<()> {
     tracing::info!(
         idle_secs = idle.as_secs(),
         daily_reset = %rt.config.daemon.daily_reset,
-        "daemon lifecycle ready (Story 12.2b: attach server live, headless turn runtime lazy)"
+        "daemon lifecycle ready (Story 12.4: attach server + scheduler live, headless turn runtime lazy)"
     );
 
     loop {
         tokio::select! {
             _ = sigterm.recv() => { tracing::info!("daemon received SIGTERM"); break; }
             _ = sigint.recv()  => { tracing::info!("daemon received SIGINT");  break; }
-            _ = sighup.recv()  => { tracing::info!("daemon received SIGHUP");  break; }
+            _ = sighup.recv()  => {
+                tracing::info!("daemon received SIGHUP; reloading scheduler");
+                if let Err(e) = rt.scheduler.reload().await {
+                    tracing::warn!(error = %e, "daemon: scheduler reload failed");
+                }
+            }
 
             _ = &mut daily_timer => {
                 let transcript = { rt.conversation.lock().await.messages.clone() };
@@ -298,9 +321,10 @@ async fn graceful_shutdown(rt: &DaemonRuntime) {
         tracing::warn!("daemon shutdown: boundary flush timed out (>3s), proceeding to exit");
     }
 
-    // Channels (`ChannelPort::shutdown_loop`) and MCP-client teardown are not
-    // composed in 12.1a (no message runtime); they enter this same path in 12.2+.
-
+    // Stop cold-tier loops before removing runtime files.
+    if let Err(e) = rt.scheduler.shutdown_loop().await {
+        tracing::warn!(error = %e, "daemon: scheduler adapter shutdown_loop failed");
+    }
     if let Err(e) = rt.channel.shutdown_loop().await {
         tracing::warn!(error = %e, "daemon: channel adapter shutdown_loop failed");
     }

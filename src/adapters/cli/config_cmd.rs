@@ -9,8 +9,9 @@ use anyhow::Result;
 /// Prints cross-process-not-supported message and exits 0.
 pub async fn run_config_reload() -> Result<()> {
     println!(
-        "No running rustain instance found. To reload the running TUI, \
-         type /config reload in it, or send SIGHUP on Unix (kill -HUP <pid>)."
+        "To reload a running TUI, type /config reload in it. To reload daemon \
+         cron jobs on Unix, send SIGHUP to the daemon PID, for example: \
+         kill -HUP $(cat <workspace>/.rustain/daemon.pid)."
     );
     Ok(())
 }

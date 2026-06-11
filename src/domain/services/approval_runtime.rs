@@ -206,9 +206,6 @@ impl ApprovalRuntime {
             ApprovalSource::ForegroundTurn { .. } => {
                 // Root user: never short-circuit (AC-10-X-4)
             }
-            _ => {
-                tracing::debug!(tool = %tool, "subagent_auto_approve: unknown ApprovalSource variant, falling through to existing behavior");
-            }
         }
 
         {

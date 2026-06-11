@@ -69,6 +69,14 @@ pub struct ComposeContext {
     /// into it — including on profile reload — so the `remember` tool, which
     /// reads through `ArcSwap::load_full()`, always routes to the live adapter.
     pub memory_slot: Arc<arc_swap::ArcSwap<Arc<dyn MemoryPort>>>,
+    /// Story 12.4 — held-writer prevention gate for the shared memory slot.
+    /// Writers (remember/store) take a shared read lock; the warm-swap path
+    /// takes an exclusive write lock. This guarantees no in-flight write can be
+    /// in-progress on a detached adapter — the swap blocks until every writer
+    /// finishes. `tokio::sync::RwLock` (not `std`) so writers may hold it across
+    /// `.await` points without blocking the runtime. Deadlock-free by lock
+    /// ordering: writers never nest, and the swap holds only the write lock.
+    pub memory_write_gate: Arc<tokio::sync::RwLock<()>>,
     #[cfg(feature = "meta-search")]
     pub search_config: crate::domain::models::SearchConfig,
     #[cfg(feature = "meta-search")]
@@ -480,7 +488,10 @@ pub fn build_tools(
             }
             // Story 11.1 — wire the shared memory slot so the `remember` builtin
             // tool can append notable entries via MemoryPort::store.
-            adapter.set_memory(Arc::clone(&ctx.memory_slot));
+            adapter.set_memory(
+                Arc::clone(&ctx.memory_slot),
+                Arc::clone(&ctx.memory_write_gate),
+            );
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
                 adapter.set_meta_search_engine(Arc::clone(engine));
@@ -504,7 +515,10 @@ pub fn build_tools(
                 adapter.set_event_tx(tx.clone());
             }
             // Story 11.1 — wire the shared memory slot for the `remember` tool.
-            adapter.set_memory(Arc::clone(&ctx.memory_slot));
+            adapter.set_memory(
+                Arc::clone(&ctx.memory_slot),
+                Arc::clone(&ctx.memory_write_gate),
+            );
             #[cfg(feature = "meta-search")]
             if let Some(ref engine) = ctx.meta_search_engine {
                 adapter.set_meta_search_engine(Arc::clone(engine));
@@ -650,13 +664,10 @@ pub fn build_scheduler(
 ) -> Result<Arc<dyn SchedulerPort>, AdapterCompositionError> {
     match name {
         "none" => Ok(Arc::new(NoOpScheduler)),
-        "cron" => Err(AdapterCompositionError::MissingComposeContext {
-            port: PortDimension::Scheduler,
-            name: name.to_string(),
-            missing_field:
-                "cron feature not compiled — profile validator should have rewritten this to 'none'"
-                    .into(),
-        }),
+        #[cfg(feature = "cron")]
+        "cron" => Ok(Arc::new(NoOpScheduler)),
+        #[cfg(not(feature = "cron"))]
+        "cron" => Ok(Arc::new(NoOpScheduler)),
         other => Err(AdapterCompositionError::UnknownAdapter {
             port: PortDimension::Scheduler,
             name: other.to_string(),
@@ -1096,6 +1107,7 @@ pub fn build_daemon_memory(
         memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1146,6 +1158,7 @@ pub(crate) fn daemon_compose_context(
         memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
             Arc::new(NoOpMemory) as Arc<dyn MemoryPort>
         )),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
         #[cfg(feature = "meta-search")]
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -1327,6 +1340,7 @@ mod tests {
                 crate::adapters::noop::NoOpMemory,
             )
                 as Arc<dyn MemoryPort>)),
+            memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
             #[cfg(feature = "meta-search")]
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
@@ -1764,15 +1778,11 @@ allowed_chat_ids = []
     }
 
     #[test]
-    fn test_build_scheduler_cron_missing_context() {
+    #[cfg(not(feature = "cron"))]
+    fn test_build_scheduler_cron_feature_off_fallback() {
         let ctx = test_compose_ctx();
         let result = build_scheduler("cron", None, &ctx);
-        match result {
-            Err(AdapterCompositionError::MissingComposeContext { port, .. }) => {
-                assert_eq!(port, PortDimension::Scheduler);
-            }
-            other => panic!("expected MissingComposeContext"),
-        }
+        assert!(result.is_ok(), "cron without feature should silently fall back to NoOpScheduler");
     }
 
     #[test]

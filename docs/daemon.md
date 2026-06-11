@@ -236,6 +236,57 @@ Only `allowed_chat_ids` are accepted. Unknown chats are ignored. Non-text Telegr
 messages receive a short "Text messages only for now" reply; media support is a future
 adapter extension.
 
+## Cron scheduler setup (Story 12.4)
+
+Cron is a **daemon-only** scheduler adapter behind `--features cron`. The local TUI
+continues to use `[scheduler] adapter = "none"`; the daemon can run scheduled jobs
+and surfaces completed results to attached clients with `[cron]` origin plus an
+inline `[cron: job-name]` label.
+
+Build/install with the feature enabled:
+
+```sh
+cargo install --path . --features cron
+```
+
+Select the adapter in the active profile:
+
+```toml
+[scheduler]
+adapter = "cron"
+```
+
+Jobs live in a separate config file:
+
+```toml
+# ~/.config/rustain/cron.toml
+[[jobs]]
+name = "morning-briefing"
+schedule = "0 9 * * *" # 09:00 every day, five-field cron, 0=Sunday
+prompt = "Summarize yesterday's commits and today's calendar"
+forward = true          # optional: forward result to the loaded channel
+
+[[jobs]]
+name = "hourly-healthcheck"
+schedule = "0 * * * *"
+prompt = "Run the project health checks and report failures"
+# forward defaults to false: result is stored in the cron session and surfaced on attach
+```
+
+Missing or malformed `cron.toml` does not crash the daemon; it logs and runs with
+zero scheduled jobs. Invalid job schedules are skipped individually.
+
+Reload after editing `cron.toml`:
+
+```sh
+kill -HUP $(cat <workspace>/.rustain/daemon.pid)
+```
+
+`rustain daemon status` shows configured jobs and their next local run when the
+cron feature is compiled. `forward = true` is best-effort and uses the loaded
+channel adapter's default destination (for example, Telegram's first allowed chat);
+without a channel, results are still persisted and visible on attach.
+
 ## Attach & turn runtime (Story 12.2b)
 
 Since 12.2b the daemon is a **headless turn-processing agent**, not just a memory

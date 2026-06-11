@@ -25,6 +25,8 @@ pub mod project_context_loader;
 pub mod project_scoped_memory;
 pub mod provider;
 pub mod sandbox;
+#[cfg(feature = "cron")]
+pub mod scheduler;
 pub mod security_adapter;
 pub mod skill_activation;
 pub mod skill_exposure;

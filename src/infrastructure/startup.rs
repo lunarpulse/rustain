@@ -1012,6 +1012,7 @@ pub async fn run() -> Result<()> {
             crate::adapters::noop::NoOpMemory,
         )
             as Arc<dyn crate::domain::ports::MemoryPort>)),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
         #[cfg(feature = "meta-search")]
         search_config: app_config.search.clone(),
         #[cfg(feature = "meta-search")]

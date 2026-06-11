@@ -450,6 +450,13 @@ async fn execute_warm_swap(
 ) -> Result<(), TransitionError> {
     match diff.port {
         PortDimension::Memory => {
+            // Story 12.4 — acquire the exclusive write gate so no held-writer
+            // (remember/store through the live slot) is in-flight during the swap.
+            // Writers take shared read locks; this exclusive lock blocks until
+            // every in-flight write finishes, preventing a write landing on the
+            // soon-to-be-detached old adapter.
+            let _write_gate = compose_snapshot.memory_write_gate.write().await;
+
             let old_arc = agent_core.memory.load_full();
             let state = old_arc.prepare_detach().await?;
 

@@ -22,4 +22,7 @@ pub trait SchedulerPort: Send + Sync {
     async fn start_loop(&self) -> Result<(), crate::domain::errors::TransitionError> {
         Ok(())
     }
+    async fn reload(&self) -> Result<(), crate::domain::errors::TransitionError> {
+        Ok(())
+    }
 }

@@ -6220,6 +6220,7 @@ pub async fn run(
                                     }
                                     match remember_fact_through_live_slot(
                                         &app_state.agent_core.memory,
+                                        &app_state.compose_snapshot.memory_write_gate,
                                         fact,
                                     )
                                     .await

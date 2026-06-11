@@ -130,6 +130,20 @@ impl ChannelPort for TelegramChannelAdapter {
         }
         Ok(())
     }
+
+    async fn notify(&self, text: &str) -> Result<(), TransitionError> {
+        let Some(chat_id) = self.allowed_chat_ids.first().copied() else {
+            tracing::warn!("telegram: cron forward requested but allowed_chat_ids is empty");
+            return Ok(());
+        };
+        split_and_send_response(&self.bot, ChatId(chat_id), text)
+            .await
+            .map_err(|e| TransitionError::RestartFailed {
+                port_type: "channels",
+                adapter_id: "telegram".into(),
+                reason: format!("cron forward send failed: {e}"),
+            })
+    }
 }
 
 async fn run_long_poll_loop(
@@ -611,8 +625,9 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "telegram")]
     async fn live_telegram_round_trip() {
-        let token = std::env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN env var");
-        let chat_id: i64 = std::env::var("TELEGRAM_TEST_CHAT_ID")
+        let token = crate::infrastructure::utils::env_var_trimmed("TELEGRAM_BOT_TOKEN")
+            .expect("TELEGRAM_BOT_TOKEN env var");
+        let chat_id: i64 = crate::infrastructure::utils::env_var_trimmed("TELEGRAM_TEST_CHAT_ID")
             .expect("TELEGRAM_TEST_CHAT_ID env var")
             .parse()
             .expect("TELEGRAM_TEST_CHAT_ID must be an integer");

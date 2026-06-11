@@ -454,22 +454,21 @@ impl VectorSearchMemory {
             (guard.keys(), guard.tokens())
         };
 
-        // 1. Snapshot the inner content set to index, MINUS any redacted key OR any
-        //    entry whose normalized text matches a content-stable redaction token.
-        let entries = self.inner.recent(self.refresh_limit).await?;
-        let current: Vec<(u64, MemoryEntry)> = entries
+        // 1. Snapshot the FULL inner content set for retention, MINUS any
+        //    redacted key OR content-stable token. Embedding is still limited to
+        //    `refresh_limit`, but retention must use full_live − redacted
+        //    (AI-12.0a) so lowering the refresh window never amputates live memory.
+        let full_entries = self.inner.recent(usize::MAX).await?;
+        let full_current: Vec<(u64, MemoryEntry)> = full_entries
             .into_iter()
             .map(|e| (content_key(&e.timestamp, &e.summary), e))
             .filter(|(k, e)| {
                 !redacted.contains(k) && !redacted_tokens.contains(&normalize(&e.summary))
             })
             .collect();
-        // `current_keys` excludes redacted keys AND token-matched entries → the
-        // `retain_keys` below drops any such entry already in the index (the
-        // one-time purge), and `to_embed` can never re-embed one. This is the
-        // single change that makes ONE tombstone suppress BOTH the MEMORY.md-mtime
-        // copy and the daily-log-realts copy.
-        let current_keys: HashSet<u64> = current.iter().map(|(k, _)| *k).collect();
+        let current_keys: HashSet<u64> = full_current.iter().map(|(k, _)| *k).collect();
+        let current: Vec<(u64, MemoryEntry)> =
+            full_current.into_iter().take(self.refresh_limit).collect();
 
         // 2. Which keys are already embedded? (read guard released before await)
         let existing: HashSet<u64> = {
@@ -1476,15 +1475,15 @@ mod tests {
     // visits it. Per Task 3, this MUST be proven red on the unfixed gate first; if
     // it does NOT go red, STOP and re-scope (the bug is not where we think).
 
-    /// DIAGNOSTIC — characterises the ACTUAL `refresh()` window behaviour so the
-    /// C4 scope is grounded in observed code, not assumption. Asserts that a
-    /// non-redacted entry aged PAST `refresh_limit` is DROPPED by refresh (because
-    /// `retain_keys(current_keys)` retains only the window). If this passes, the
-    /// hypothesised "redacted out-of-window entry LINGERS" cannot occur — the
-    /// window-limited retain already drops every out-of-window key, redacted or
-    /// not. (The inverse over-drop, not PII re-exposure.)
+    /// AI-12.0a — `refresh_inner()` now separates the RETAIN set (`full_live −
+    /// redacted`) from the EMBED window (`refresh_limit`). An entry aged past
+    /// the window but still live (not redacted) MUST survive refresh. Before the
+    /// fix, `retain_keys` used the window-limited set, silently dropping
+    /// out-of-window entries on every refresh. Now `current_keys` comes from
+    /// `full_current` (all non-redacted entries), so lowering the refresh window
+    /// never amputates live memory.
     #[tokio::test]
-    async fn refresh_window_drops_out_of_window_entries() {
+    async fn refresh_retains_live_out_of_window_entries_ai_12_0a() {
         let tmp = tempfile::tempdir().unwrap();
         let index_path = tmp.path().join("memory").join("index.bin");
         // SECRET (ms=1) is the LAST inner entry → outside `recent(2)`.
@@ -1502,47 +1501,8 @@ mod tests {
         drop(mem0);
 
         // Reopen with a SMALL window; the load+refresh applies `retain_keys`.
-        let mut mem = VectorSearchMemory::new(inner(), stub(), index_path.clone());
-        mem.set_refresh_limit(2);
-        mem.initialize().await.unwrap();
-        mem.refresh().await.unwrap();
-
-        // OBSERVED: the out-of-window (un-redacted) SECRET is dropped by the
-        // window-limited retain — the inverse of the "lingers" hypothesis.
-        assert!(
-            !keys_on_disk(&index_path).await.contains(&secret_key),
-            "window-limited retain_keys drops out-of-window entries (over-drop, not lingering)"
-        );
-    }
-
-    /// AI-12.0a tracked follow-up (party-mode consensus 2026-06-05, Murat/Winston;
-    /// checked in #[ignore], NOT deleted). The over-drop above is a latent
-    /// correctness bug: `refresh()` conflates "what to EMBED = the recency window"
-    /// with "what to RETAIN = the full live set", so any non-redacted entry aged
-    /// past `refresh_limit` is silently dropped from the index. Today
-    /// `refresh_limit = 10_000 = NFR56` cap ≥ corpus, so it never fires in prod —
-    /// but lower the cap below the corpus and refresh amputates live memory. The
-    /// long-term-correct fix: retain `full_live − redacted`, embed only `window`,
-    /// as two distinct inputs. This invariant test asserts the DESIRED behaviour
-    /// (a live out-of-window entry survives refresh) and currently FAILS — it goes
-    /// green when the conflation is fixed, so a future cap-lowering can't ship a
-    /// silent amputation.
-    #[tokio::test]
-    #[ignore = "AI-12.0a: refresh() retain-set/embed-window conflation; fails until retain=full_live−redacted lands"]
-    async fn refresh_must_not_drop_live_out_of_window_entries_12_0a() {
-        let tmp = tempfile::tempdir().unwrap();
-        let index_path = tmp.path().join("memory").join("index.bin");
-        let inner = || fake_inner(&[(2, NEIGHBOUR), (3, "the cache is redis"), (1, SECRET)]);
-        let stub = || Arc::new(StubEmbedder::new(64, "stub-v1"));
-
-        // Full index first; SECRET (ms=1) is the LAST inner entry.
-        let mem0 = VectorSearchMemory::new(inner(), stub(), index_path.clone());
-        mem0.initialize().await.unwrap();
-        let secret_key = content_key(&super::super::index::tests_millis_to_local(1), SECRET);
-        drop(mem0);
-
-        // Shrink the window below the corpus; SECRET is now out-of-window but it is
-        // NOT redacted — a correct refresh MUST keep it.
+        // AI-12.0a: `retain_keys` uses `current_keys` from `full_current`, not
+        // the window-limited set, so SECRET survives.
         let mut mem = VectorSearchMemory::new(inner(), stub(), index_path.clone());
         mem.set_refresh_limit(2);
         mem.initialize().await.unwrap();

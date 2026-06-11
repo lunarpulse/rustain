@@ -23,6 +23,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "cron")]
+use crate::adapters::scheduler::cron::CronCompletion;
+#[cfg(not(feature = "cron"))]
+pub struct CronCompletion;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole, StopReason,
@@ -167,13 +171,12 @@ impl AttachServer {
         // best-effort, non-blocking read
         self.registry.try_lock().map(|r| r.conns.len()).unwrap_or(0)
     }
-
-    /// Run the forwarder + accept loop until `shutdown` is cancelled.
     pub async fn run(
         self: Arc<Self>,
         listener: UnixListener,
         mut domain_rx: mpsc::UnboundedReceiver<AppEvent>,
         channel_rx: Option<mpsc::UnboundedReceiver<ChannelTurnRequest>>,
+        cron_completion_rx: Option<mpsc::UnboundedReceiver<CronCompletion>>,
         shutdown: CancellationToken,
     ) {
         // The single forwarder task: fold → fan out (drains the one mpsc
@@ -185,6 +188,7 @@ impl AttachServer {
         let forwarder = tokio::spawn(async move {
             let mut assistant_buf = String::new();
             let mut channel_rx = channel_rx;
+            let mut cron_completion_rx = cron_completion_rx;
             loop {
                 tokio::select! {
                     _ = fwd_shutdown.cancelled() => break,
@@ -204,6 +208,18 @@ impl AttachServer {
                         };
                         let srv = fwd.clone();
                         tokio::spawn(async move { srv.drive_channel_turn(req).await; });
+                    }
+                    maybe = async {
+                        match &mut cron_completion_rx {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending::<Option<CronCompletion>>().await,
+                        }
+                    } => {
+                        let Some(completion) = maybe else {
+                            cron_completion_rx = None;
+                            continue;
+                        };
+                        fwd.commit_cron_completion(completion).await;
                     }
                 }
             }
@@ -270,6 +286,9 @@ impl AttachServer {
             images: vec![],
             origin,
         });
+        let now = crate::domain::models::session_meta::now_unix();
+        conv.updated_at = now;
+        conv.last_response_at = Some(now);
         if let Err(e) = self.core.storage.save_conversation(&conv).await {
             tracing::warn!(error = %e, "daemon: persisting conversation after turn failed");
         }
@@ -278,6 +297,34 @@ impl AttachServer {
             let _ = tx.send(text.to_string());
         }
     }
+
+    #[cfg(feature = "cron")]
+    async fn commit_cron_completion(&self, completion: CronCompletion) {
+        let text = format!("[cron: {}] {}", completion.job_name, completion.result_text);
+        let mut conv = self.conversation.lock().await;
+        conv.messages.push(ChatMessage {
+            id: generate_message_id(),
+            role: MessageRole::Assistant,
+            content: text,
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: crate::domain::models::session_meta::now_unix(),
+            token_count: None,
+            stop_reason: Some(StopReason::EndTurn),
+            synthetic: false,
+            images: vec![],
+            origin: ChannelKind::Cron,
+        });
+        let now = crate::domain::models::session_meta::now_unix();
+        conv.updated_at = now;
+        conv.last_response_at = Some(now);
+        if let Err(e) = self.core.storage.save_conversation(&conv).await {
+            tracing::warn!(error = %e, "daemon: persisting cron completion failed");
+        }
+    }
+
+    #[cfg(not(feature = "cron"))]
+    async fn commit_cron_completion(&self, _completion: CronCompletion) {}
 
     async fn fanout(&self, frame: DaemonFrame) {
         let dead = {
@@ -1258,7 +1305,8 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let handle = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
+        let handle =
+            tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         // ── Client side ──
         let mut stream = UnixStream::connect(&socket).await.unwrap();
@@ -1385,8 +1433,10 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let handle =
-            tokio::spawn(async move { srv.run(listener, domain_rx, Some(channel_rx), sd).await });
+        let handle = tokio::spawn(async move {
+            srv.run(listener, domain_rx, Some(channel_rx), None, sd)
+                .await
+        });
 
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         channel_tx
@@ -1448,7 +1498,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         write_frame(
@@ -1498,7 +1548,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         write_frame(
@@ -1744,6 +1794,11 @@ mod tests {
         let s = storage.clone();
         let gate = tokio::spawn(async move { run_approval_gate(a, r, b, c, s).await });
 
+        // Ensure the spawned approval gate has subscribed before issuing the
+        // request; otherwise the broadcast event can be missed under full-suite
+        // scheduler contention.
+        tokio::task::yield_now().await;
+
         // Register a writer connection.
         let (tx, mut rx) = mpsc::channel::<DaemonFrame>(1);
         registry.lock().await.conns.push(Conn {
@@ -1769,7 +1824,7 @@ mod tests {
         let request_id = id.expect("slow-path should return an id");
 
         // Writer receives ApprovalRequest.
-        match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
             Ok(Some(DaemonFrame::ApprovalRequest {
                 request_id: rid,
                 tool,
@@ -1785,7 +1840,7 @@ mod tests {
         approval.resolve(&request_id, ApprovalOutcome::Once).await;
 
         // Original caller receives the approval.
-        let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), recv).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), recv).await;
         assert!(
             matches!(outcome, Ok(Ok(ApprovalOutcome::Once))),
             "round-trip should deliver Once, got {outcome:?}"
@@ -1814,7 +1869,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         // Client 1 → writer.
         let mut c1 = UnixStream::connect(&socket).await.unwrap();
@@ -1915,7 +1970,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let srv = server.clone();
         let sd = shutdown.clone();
-        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, sd).await });
+        let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         let mut c = UnixStream::connect(&socket).await.unwrap();
         write_frame(
@@ -2677,5 +2732,151 @@ mod tests {
             "reuse must not create a second retained entry"
         );
         assert!(map.contains_key(&6000));
+    }
+
+    /// CronCompletion received via `cron_completion_rx` is injected into the
+    /// shared conversation with `ChannelKind::Cron` origin and `[cron: name]`
+    /// prefix. The forwarder is the single writer, so no interleaving.
+    #[cfg(feature = "cron")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cron_completion_injects_into_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        // No provider chunks needed — cron completion is injected directly.
+        let (core, storage) = mock_core(ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "cron-daemon-conv".into(),
+            ..Default::default()
+        }));
+
+        let (bus, domain_rx) = EventBus::new(64);
+        let domain_tx = bus.domain_tx.clone();
+        let (cron_tx, cron_rx) = mpsc::unbounded_channel::<CronCompletion>();
+        let socket = ws.join("cron.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let handle =
+            tokio::spawn(
+                async move { srv.run(listener, domain_rx, None, Some(cron_rx), sd).await },
+            );
+
+        // Send a cron completion.
+        cron_tx
+            .send(CronCompletion {
+                job_name: "morning-briefing".into(),
+                result_text: "3 commits yesterday".into(),
+            })
+            .unwrap();
+
+        // Wait for the completion to be committed to the conversation.
+        for _ in 0..50 {
+            if let Ok(Some(conv)) = storage.load_conversation("cron-daemon-conv").await {
+                if let Some(asst) = conv
+                    .messages
+                    .iter()
+                    .find(|m| m.role == MessageRole::Assistant)
+                {
+                    assert!(
+                        asst.content.contains("[cron: morning-briefing]"),
+                        "assistant content must include cron prefix: {}",
+                        asst.content
+                    );
+                    assert!(
+                        asst.content.contains("3 commits yesterday"),
+                        "assistant content must include result text: {}",
+                        asst.content
+                    );
+                    assert_eq!(
+                        asst.origin,
+                        ChannelKind::Cron,
+                        "cron completion must be tagged with Cron origin (AC5)"
+                    );
+                    shutdown.cancel();
+                    handle.abort();
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        shutdown.cancel();
+        handle.abort();
+        panic!("cron completion was not injected into the conversation");
+    }
+
+    /// Multiple cron completions arrive as separate messages in the shared
+    /// conversation — each with its own [cron: name] prefix and Cron origin.
+    #[cfg(feature = "cron")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multiple_cron_completions_are_sequential_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (core, storage) = mock_core(ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "cron-multi-conv".into(),
+            ..Default::default()
+        }));
+
+        let (bus, domain_rx) = EventBus::new(64);
+        let domain_tx = bus.domain_tx.clone();
+        let (cron_tx, cron_rx) = mpsc::unbounded_channel::<CronCompletion>();
+        let socket = ws.join("cron-multi.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+
+        let server = AttachServer::new(core, conversation.clone(), domain_tx);
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let handle =
+            tokio::spawn(
+                async move { srv.run(listener, domain_rx, None, Some(cron_rx), sd).await },
+            );
+
+        // Send two completions.
+        cron_tx
+            .send(CronCompletion {
+                job_name: "job-a".into(),
+                result_text: "result-a".into(),
+            })
+            .unwrap();
+        cron_tx
+            .send(CronCompletion {
+                job_name: "job-b".into(),
+                result_text: "result-b".into(),
+            })
+            .unwrap();
+
+        // Wait for both to appear.
+        for _ in 0..100 {
+            if let Ok(Some(conv)) = storage.load_conversation("cron-multi-conv").await {
+                let cron_msgs: Vec<_> = conv
+                    .messages
+                    .iter()
+                    .filter(|m| m.origin == ChannelKind::Cron)
+                    .collect();
+                if cron_msgs.len() >= 2 {
+                    assert!(
+                        cron_msgs[0].content.contains("[cron: job-a]"),
+                        "first cron message: {}",
+                        cron_msgs[0].content
+                    );
+                    assert!(
+                        cron_msgs[1].content.contains("[cron: job-b]"),
+                        "second cron message: {}",
+                        cron_msgs[1].content
+                    );
+                    shutdown.cancel();
+                    handle.abort();
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        shutdown.cancel();
+        handle.abort();
+        panic!("two cron completions were not injected");
     }
 }

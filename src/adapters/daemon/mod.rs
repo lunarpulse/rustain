@@ -317,6 +317,48 @@ async fn run_daemon_foreground(
             })
     };
 
+    #[cfg(feature = "cron")]
+    let (cron_completion_tx, cron_completion_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::adapters::scheduler::cron::CronCompletion>();
+
+    let scheduler: std::sync::Arc<dyn crate::domain::ports::SchedulerPort> = {
+        let sched_name = selection
+            .dimensions
+            .get(&crate::domain::models::PortDimension::Scheduler)
+            .map(|a| a.adapter.as_str())
+            .unwrap_or("none");
+        #[cfg(feature = "cron")]
+        {
+            if sched_name == "cron" {
+                let cron_path = crate::adapters::scheduler::cron::cron_toml_path()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("cron.toml"));
+                match crate::adapters::scheduler::cron::CronSchedulerAdapter::load(
+                    cron_path,
+                    core.clone(),
+                    cron_completion_tx,
+                    channel.clone(),
+                    core.storage.clone(),
+                )
+                .await
+                {
+                    Ok(adapter) => std::sync::Arc::new(adapter)
+                        as std::sync::Arc<dyn crate::domain::ports::SchedulerPort>,
+                    Err(e) => {
+                        tracing::warn!(adapter = sched_name, error = %e, "daemon: cron scheduler composition failed; using noop scheduler");
+                        std::sync::Arc::new(crate::adapters::noop::NoOpScheduler)
+                    }
+                }
+            } else {
+                std::sync::Arc::new(crate::adapters::noop::NoOpScheduler)
+            }
+        }
+        #[cfg(not(feature = "cron"))]
+        {
+            let _ = sched_name;
+            std::sync::Arc::new(crate::adapters::noop::NoOpScheduler)
+        }
+    };
+
     let server = crate::adapters::daemon::server::AttachServer::new(
         core.clone(),
         conversation.clone(),
@@ -332,8 +374,11 @@ async fn run_daemon_foreground(
         socket_path: socket_path.clone(),
         server,
         channel,
+        scheduler,
         domain_rx: Some(domain_rx),
         channel_turn_rx: Some(channel_turn_rx),
+        #[cfg(feature = "cron")]
+        cron_completion_rx: Some(cron_completion_rx),
         conversation,
     };
 

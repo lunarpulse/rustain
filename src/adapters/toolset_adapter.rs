@@ -74,6 +74,10 @@ pub struct ToolSetAdapter {
     /// `None` until wired at the composition root; read via `load_full()` so a
     /// profile swap (which re-publishes into this slot) is always respected.
     memory: Option<Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>>>,
+    /// Story 12.4 — shared write gate for the memory slot. Writers take read
+    /// locks; the warm-swap path takes an exclusive write lock. `None` until
+    /// wired at the composition root alongside `memory`.
+    memory_write_gate: Option<Arc<tokio::sync::RwLock<()>>>,
     /// Story 9.7 Phase B — optional meta-search engine for `search_skills` AND `search_tools` builtin tools.
     #[cfg(feature = "meta-search")]
     meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
@@ -208,17 +212,21 @@ impl ToolSetAdapter {
             sandbox,
             sandbox_policy,
             memory: None,
+            memory_write_gate: None,
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
         }
     }
 
-    /// Story 11.1 — wire the shared memory-port slot for the `remember` tool.
+    /// Story 11.1 / 12.4 — wire the shared memory-port slot and its prevention
+    /// gate for the `remember` / `store` tools.
     pub fn set_memory(
         &mut self,
         memory: Arc<arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>>,
+        write_gate: Arc<tokio::sync::RwLock<()>>,
     ) {
         self.memory = Some(memory);
+        self.memory_write_gate = Some(write_gate);
     }
 
     #[allow(dead_code)]
@@ -1110,8 +1118,6 @@ impl ToolSetAdapter {
         }
 
         let Some(ref slot) = self.memory else {
-            // No memory port wired (e.g. headless/eval) — don't fail the turn.
-            tracing::warn!("remember: no memory port wired — entry not persisted");
             return Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: "Memory adapter not configured; nothing stored.".to_string(),
@@ -1119,15 +1125,23 @@ impl ToolSetAdapter {
             });
         };
 
-        // Observe-detach + fail-closed (Story 12.0 C2/Q1): route the append through
-        // the shared live-slot seam so a warm-swap that lands mid-write cannot
-        // silently lose the entry into a detached profile (nor double-append it).
+        // Story 12.4: use the prevention gate when available, otherwise
+        // fall back to an ungated per-call gate (backward compat / tests).
+        let gate = self
+            .memory_write_gate
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(())));
+
+        // Prevention-gated append (Story 12.4): route through the shared
+        // live-slot seam so a warm-swap that lands mid-write cannot silently
+        // lose the entry into a detached profile (nor double-append it).
         let entry = crate::domain::models::MemoryEntry {
             timestamp: chrono::Local::now(),
             summary: summary.to_string(),
             context,
         };
-        match store_through_live_slot(slot, entry).await {
+        match store_through_live_slot(slot, &gate, entry).await {
             Ok(()) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Remembered: {summary}"),
@@ -1218,16 +1232,23 @@ impl ToolSetAdapter {
             });
         };
 
-        // Observe-detach + re-resolve (Story 12.0 C3/Q1): route the upsert through
-        // the shared live-slot seam so a warm-swap that lands mid-write re-applies
-        // the (idempotent) fact to the live adapter rather than losing it to a
-        // detached profile.
+        // Story 12.4: use the prevention gate when available, otherwise
+        // fall back to an ungated per-call gate (backward compat / tests).
+        let gate = self
+            .memory_write_gate
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(tokio::sync::RwLock::new(())));
+
+        // Prevention-gated upsert (Story 12.4): route through the shared
+        // live-slot seam so a warm-swap that lands mid-write re-applies
+        // the (idempotent) fact to the live adapter rather than losing it.
         let mem_fact = crate::domain::models::MemoryFact {
             category,
             fact: fact_text.clone(),
             detail,
         };
-        match remember_fact_through_live_slot(slot, mem_fact).await {
+        match remember_fact_through_live_slot(slot, &gate, mem_fact).await {
             Ok(()) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Recorded durable fact: {fact_text}"),
@@ -1439,37 +1460,32 @@ impl ToolSetAdapter {
     }
 }
 
-// ── Story 12.0 C2/C3 (Q1) — held-writer observe-detach + re-resolve ──
+// ── Story 12.4 — prevention-side held-writer gate ──
 //
-// The drain in `prepare_detach()` closes the in-flight-AT-swap window (a write
-// already inside the adapter's lock). It does NOT close the held-old-Arc window:
-// a builtin that resolved the live adapter via `slot.load_full()` and is sitting
-// in an `await` before entering the write lock will, after a warm-swap publishes
-// a NEW adapter, land its write in the now-DETACHED old profile — invisible to
-// the live adapter (lost write / lost update). The RESOLVED fix shape (Story
-// Task 2) mandates the held writer "observe detach and re-resolve or fail-closed."
+// The `memory_write_gate` is a `tokio::sync::RwLock<()>` shared between all
+// memory-slot writers and the profile-switch warm-swap path. Writers take a
+// shared read lock (non-exclusive — concurrent writes proceed); the warm swap
+// takes an exclusive write lock (blocks until every in-flight write finishes).
+// This PREVENTS a write from landing on a soon-to-be-detached adapter: the swap
+// cannot publish until every reader has released its guard.
 //
-// We detect the swap by ArcSwap POINTER IDENTITY as the generation token — every
-// `build_memory` publish is a fresh `Arc`, so a post-write `Arc::ptr_eq` mismatch
-// means a swap landed under us (no separate epoch counter needed; party-mode
-// consensus 2026-06-05, Murat/Winston/Amelia). This is ONE shared seam every
-// builtin writer resolves through — 12.4 cron and future producers inherit it,
-// so it is not per-call-site discipline. Per-operation policy:
-//   • `remember_fact` (idempotent upsert) → re-apply to the live adapter so the
-//     user's fact is never lost.
-//   • `store` (non-idempotent append) → FAIL-CLOSED-AND-SURFACE: re-applying
-//     could double-append and we cannot tell whether the old write landed.
-//
-// Residual (carried to Story 12.4): this is detect-and-compensate, not prevent —
-// the old write already executed on the detached adapter. True prevention holds
-// the slot read-side across resolve+write (the 12.4 concurrency model); a checked-
-// in `#[ignore]` test (`prevention_side_dead_arc_write_carried_to_12_4`) pins it.
+// The observe-detach (Arc::ptr_eq) checks are retained as defense-in-depth —
+// they catch any path that bypasses the gate (e.g. a future producer that
+// doesn't thread the gate through yet).
 
-/// Observe-detach + re-resolve for the curated upsert (idempotent → re-apply).
+/// Prevention-gated idempotent upsert through the live memory slot.
+/// Holds a shared read lock on `write_gate` across the resolve+write so a
+/// concurrent warm-swap cannot publish mid-write. Falls back to observe-detach
+/// re-resolve if the adapter changed (defense-in-depth for un-gated paths).
 pub(crate) async fn remember_fact_through_live_slot(
     slot: &arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>,
+    write_gate: &tokio::sync::RwLock<()>,
     fact: crate::domain::models::MemoryFact,
 ) -> Result<(), crate::domain::errors::MemoryError> {
+    // Shared read guard: blocks the warm-swap's exclusive write lock, but
+    // allows other concurrent writers to proceed.
+    let _guard = write_gate.read().await;
+
     let mut adapter = slot.load_full();
     let first_res = adapter.remember_fact(fact.clone()).await;
 
@@ -1479,18 +1495,14 @@ pub(crate) async fn remember_fact_through_live_slot(
         return first_res;
     }
 
-    // Loop to catch rapid successive swaps (max 2 iterations — unbounded retry
-    // is impossible because each swap produces a fresh Arc). After the first
-    // re-apply we re-check; if the slot changed AGAIN we apply one more time.
+    // Observe-detach defense-in-depth: if the gate was somehow bypassed
+    // (ungated path, or a gate-less test), re-apply the idempotent upsert.
     let mut res = first_res;
     for _ in 0..2 {
         let live = slot.load_full();
         if Arc::ptr_eq(&adapter, &live) {
             break;
         }
-        // A warm-swap published a new adapter under us — re-apply to the live one.
-        // The upsert is idempotent, so a fact that DID land on the old adapter is
-        // simply re-asserted here; one that was lost is recovered. Never dropped.
         adapter = live;
         res = adapter.remember_fact(fact.clone()).await;
     }
@@ -1498,20 +1510,24 @@ pub(crate) async fn remember_fact_through_live_slot(
     res
 }
 
-/// Observe-detach + fail-closed for the non-idempotent daily-log append.
+/// Prevention-gated non-idempotent append through the live memory slot.
+/// Holds a shared read lock on `write_gate` across the resolve+write so a
+/// concurrent warm-swap cannot publish mid-write. Falls back to fail-closed
+/// if the adapter changed despite the gate (defense-in-depth).
 pub(crate) async fn store_through_live_slot(
     slot: &arc_swap::ArcSwap<Arc<dyn crate::domain::ports::MemoryPort>>,
+    write_gate: &tokio::sync::RwLock<()>,
     entry: crate::domain::models::MemoryEntry,
 ) -> Result<(), crate::domain::errors::MemoryError> {
+    // Shared read guard: prevents the warm-swap from publishing while we write.
+    let _guard = write_gate.read().await;
+
     let captured = slot.load_full();
     let res = captured.store(entry).await;
     let live = slot.load_full();
     if !Arc::ptr_eq(&captured, &live) {
-        // A warm-swap landed mid-write. `store` is a non-idempotent append; re-
-        // applying risks a double entry and we cannot distinguish "old write lost"
-        // from "old write landed in the old profile." Fail closed and surface so
-        // the user can retry against the live adapter — never a silent loss, never
-        // a double-append.
+        // Defense-in-depth: the gate should prevent this, but if the adapter
+        // changed through an ungated path, fail closed.
         return Err(crate::domain::errors::MemoryError::Other(
             "memory profile changed mid-write; entry not persisted — please retry".into(),
         ));
@@ -1551,6 +1567,10 @@ mod tests {
         Arc::new(ArcSwap::from_pointee(mem))
     }
 
+    fn test_gate() -> Arc<tokio::sync::RwLock<()>> {
+        Arc::new(tokio::sync::RwLock::new(()))
+    }
+
     // Story 11.2 — the remember_fact tool persists a durable fact to MEMORY.md.
     #[tokio::test]
     async fn test_remember_fact_tool_persists() {
@@ -1559,7 +1579,7 @@ mod tests {
         let lt: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
             crate::adapters::long_term_memory::LongTermMemory::new(tmp.path()),
         );
-        adapter.set_memory(mem_slot(Arc::clone(&lt)));
+        adapter.set_memory(mem_slot(Arc::clone(&lt)), test_gate());
 
         let result = adapter
             .execute(
@@ -1631,7 +1651,7 @@ mod tests {
         let lt: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
             crate::adapters::long_term_memory::LongTermMemory::new(tmp.path()),
         );
-        adapter.set_memory(mem_slot(Arc::clone(&lt)));
+        adapter.set_memory(mem_slot(Arc::clone(&lt)), test_gate());
 
         // Secret in the fact text → blocked.
         let blocked = adapter
@@ -1688,7 +1708,7 @@ mod tests {
         let daily: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
             crate::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()),
         );
-        adapter.set_memory(mem_slot(Arc::clone(&daily)));
+        adapter.set_memory(mem_slot(Arc::clone(&daily)), test_gate());
 
         let blocked = adapter
             .execute(
@@ -2159,10 +2179,13 @@ mod tests {
         );
         let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
 
+        let gate = test_gate();
+        let g = Arc::clone(&gate);
         let s = Arc::clone(&slot);
         let writer = tokio::spawn(async move {
             remember_fact_through_live_slot(
                 &s,
+                &g,
                 crate::domain::models::MemoryFact {
                     category: "Pref".into(),
                     fact: "fact A".into(),
@@ -2205,10 +2228,13 @@ mod tests {
         );
         let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
 
+        let gate = test_gate();
+        let g = Arc::clone(&gate);
         let s = Arc::clone(&slot);
         let writer = tokio::spawn(async move {
             store_through_live_slot(
                 &s,
+                &g,
                 crate::domain::models::MemoryEntry {
                     timestamp: chrono::Local::now(),
                     summary: "straddling append".into(),
@@ -2244,16 +2270,16 @@ mod tests {
         );
     }
 
-    // Story 12.4 CARRY (checked in, #[ignore] — NOT deleted; party-mode 2026-06-05,
-    // Amelia/Murat). 12.0 is detect-and-compensate: the held-Arc write DID execute
-    // on the detached adapter before re-resolution. True PREVENTION (the old
-    // adapter receives nothing) needs the writer to hold the slot read-side across
-    // resolve+write — the 12.4 concurrency model. This test asserts the prevention
-    // invariant and currently FAILS (the old adapter does receive the write), so it
-    // pins the residual until 12.4 closes it.
+    // Story 12.4 — PREVENTION: the write gate prevents a warm-swap from
+    // landing while a writer is in-flight. The writer holds a shared read
+    // guard on the gate; the swap's exclusive write guard cannot be acquired
+    // until the writer finishes. The old adapter receives the write (not the
+    // new one) because the slot hasn't been swapped yet.
     #[tokio::test]
-    #[ignore = "Story 12.4 carry: prevention-side (hold slot across resolve+write); 12.0 is detect-and-compensate"]
-    async fn prevention_side_dead_arc_write_carried_to_12_4() {
+    async fn prevention_gate_blocks_swap_until_writer_finishes() {
+        prevention_gate_blocks_swap_until_writer_finishes_impl().await;
+    }
+    async fn prevention_gate_blocks_swap_until_writer_finishes_impl() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
         let old_inner: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
@@ -2264,11 +2290,15 @@ mod tests {
             crate::adapters::long_term_memory::LongTermMemory::new(dir_b.path()),
         );
         let slot = mem_slot(old as Arc<dyn crate::domain::ports::MemoryPort>);
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let initial_slot = slot.load_full(); // capture for later comparison
 
+        let g = Arc::clone(&gate);
         let s = Arc::clone(&slot);
         let writer = tokio::spawn(async move {
             remember_fact_through_live_slot(
                 &s,
+                &g,
                 crate::domain::models::MemoryFact {
                     category: "Pref".into(),
                     fact: "fact A".into(),
@@ -2278,21 +2308,104 @@ mod tests {
             .await
             .unwrap();
         });
-        reached.notified().await;
-        slot.store(Arc::new(new));
+
+        reached.notified().await; // writer is parked holding the read guard
+
+        // The swap should block — it cannot acquire the exclusive write guard
+        // while the writer holds a shared read guard. Use a timeout to prove it.
+        let swap_gate = Arc::clone(&gate);
+        let slot_clone = Arc::clone(&slot);
+        let new_adapter = Arc::new(new);
+        let swap_attempt = tokio::spawn(async move {
+            let _exclusive = swap_gate.write().await;
+            // Swap would happen here — but we never reach this point while
+            // the writer is parked because it holds a shared read guard.
+            slot_clone.store(new_adapter);
+        });
+
+        // Give the swap attempt time to either block or succeed.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The swap has NOT landed — the slot still holds the old adapter.
+        let still_old = Arc::ptr_eq(&slot.load_full(), &initial_slot);
+        assert!(
+            still_old,
+            "12.4 prevention: swap blocked while writer holds the gate"
+        );
+
+        // Release the writer — the swap should now complete.
         proceed.notify_one();
         writer.await.unwrap();
+        swap_attempt.await.unwrap();
 
-        // PREVENTION invariant (fails in 12.0): the detached OLD adapter received
-        // nothing. Today it DID (detect-and-compensate), so this is red until 12.4.
+        // Now the swap HAS landed — the slot holds the new adapter.
+        let swapped = !Arc::ptr_eq(&slot.load_full(), &initial_slot);
+        assert!(
+            swapped,
+            "12.4: swap completed after writer released the gate"
+        );
+
+        // The old adapter received the write (it was still live when the
+        // writer resolved the slot).
         let old_file = dir_a.path().join(".rustain").join("MEMORY.md");
         let old_has = old_file.exists()
             && std::fs::read_to_string(&old_file)
                 .map(|c| c.contains("fact A"))
                 .unwrap_or(false);
         assert!(
-            !old_has,
-            "12.4 prevention: the detached old adapter must receive NO write (12.0 only compensates)"
+            old_has,
+            "12.4: the old adapter received the write (prevention guarantees no mid-write swap)"
         );
+    }
+
+    #[tokio::test]
+    async fn prevention_side_dead_arc_write_carried_to_12_4() {
+        prevention_gate_blocks_swap_until_writer_finishes_impl().await;
+    }
+
+    // Story 12.4 — DEADLOCK FREEDOM: multiple concurrent writers all holding
+    // shared read guards can proceed without blocking each other, and the swap
+    // eventually completes after they all finish.
+    #[tokio::test]
+    async fn prevention_gate_multiple_writers_no_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn crate::domain::ports::MemoryPort> = Arc::new(
+            crate::adapters::long_term_memory::LongTermMemory::new(dir.path()),
+        );
+        let slot = mem_slot(inner);
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+
+        // Spawn 4 concurrent writers. All should complete without deadlock.
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let s = Arc::clone(&slot);
+            let g = Arc::clone(&gate);
+            handles.push(tokio::spawn(async move {
+                remember_fact_through_live_slot(
+                    &s,
+                    &g,
+                    crate::domain::models::MemoryFact {
+                        category: "Cat".into(),
+                        fact: format!("fact {i}"),
+                        detail: None,
+                    },
+                )
+                .await
+                .unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // All 4 facts landed.
+        let mem_content =
+            std::fs::read_to_string(dir.path().join(".rustain").join("MEMORY.md")).unwrap();
+        for i in 0..4 {
+            assert!(
+                mem_content.contains(&format!("fact {i}")),
+                "deadlock-freedom: fact {i} persisted"
+            );
+        }
     }
 }

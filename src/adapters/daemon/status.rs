@@ -29,11 +29,13 @@ pub struct StatusSnapshot {
     /// AC-12-1b-6), or `None`/`null` when there is no crash record. Read from
     /// `paths::daemon_crash_path`.
     pub last_crash: Option<DaemonCrashRecord>,
+    /// Configured cron jobs and their next local run time.
+    pub cron_jobs: Vec<(String, String)>,
 }
 
 impl StatusSnapshot {
     /// Gather a snapshot for a confirmed-running daemon.
-    pub fn gather(pf: &DaemonPidFile, _config: &AppConfig) -> Self {
+    pub fn gather(pf: &DaemonPidFile, config: &AppConfig) -> Self {
         let now = now_unix();
         let uptime_secs = now.saturating_sub(pf.started_at_unix);
         StatusSnapshot {
@@ -53,6 +55,7 @@ impl StatusSnapshot {
             socket_path: pf.socket_path.display().to_string(),
             workspace: pf.workspace.display().to_string(),
             last_crash: super::crash::read_record(&pf.workspace),
+            cron_jobs: gather_cron_jobs(config),
         }
     }
 
@@ -77,6 +80,18 @@ impl StatusSnapshot {
             ),
             None => "none".to_string(),
         };
+        let cron_jobs = if self.cron_jobs.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nScheduled cron jobs:  {}",
+                self.cron_jobs
+                    .iter()
+                    .map(|(name, next)| format!("{name} -> {next}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         format!(
             "Daemon running\n\
              PID:                  {}\n\
@@ -87,7 +102,7 @@ impl StatusSnapshot {
              Resident memory:      {}\n\
              Last activity:        {} ago\n\
              Last crash:           {}\n\
-             Socket:               {}",
+             Socket:               {}{}",
             self.pid,
             fmt_uptime(self.uptime_secs),
             self.profile,
@@ -98,12 +113,46 @@ impl StatusSnapshot {
             fmt_uptime(self.uptime_secs),
             last_crash,
             self.socket_path,
+            cron_jobs,
         )
     }
 
     /// Render as pretty JSON.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+fn gather_cron_jobs(_config: &AppConfig) -> Vec<(String, String)> {
+    #[cfg(feature = "cron")]
+    {
+        use croner::Cron;
+        use std::str::FromStr;
+
+        let path = match crate::infrastructure::paths::config_dir() {
+            Ok(dir) => dir.join("cron.toml"),
+            Err(_) => return Vec::new(),
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let Ok(config) = toml::from_str::<crate::domain::models::CronConfig>(&content) else {
+            return Vec::new();
+        };
+        let now = chrono::Local::now();
+        config
+            .jobs
+            .into_iter()
+            .filter_map(|job| {
+                let cron = Cron::from_str(&job.schedule).ok()?;
+                let next = cron.find_next_occurrence(&now, false).ok()?;
+                Some((job.name, next.format("%Y-%m-%d %H:%M:%S %Z").to_string()))
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "cron"))]
+    {
+        Vec::new()
     }
 }
 
@@ -212,5 +261,90 @@ mod tests {
         assert!(snap.last_crash.is_none());
         assert!(json.contains("\"last_crash\": null"));
         assert!(snap.to_human().contains("Last crash:           none"));
+    }
+    // ── Story 12.4: cron_jobs rendering in status output ──
+
+    #[test]
+    fn snapshot_human_omits_cron_line_when_empty() {
+        let snap = StatusSnapshot {
+            running: true,
+            pid: 42,
+            uptime_secs: 100,
+            profile: "default".into(),
+            channels: vec!["terminal".into()],
+            active_conversations: 0,
+            rss_kb: Some(50_000),
+            last_activity_unix: 100,
+            socket_path: "/tmp/s.sock".into(),
+            workspace: "/ws".into(),
+            last_crash: None,
+            cron_jobs: vec![],
+        };
+        let human = snap.to_human();
+        assert!(
+            !human.contains("Scheduled cron jobs"),
+            "no cron line when cron_jobs is empty: {human}"
+        );
+    }
+
+    #[test]
+    fn snapshot_human_renders_cron_jobs_line() {
+        let snap = StatusSnapshot {
+            running: true,
+            pid: 42,
+            uptime_secs: 100,
+            profile: "default".into(),
+            channels: vec!["terminal".into()],
+            active_conversations: 0,
+            rss_kb: Some(50_000),
+            last_activity_unix: 100,
+            socket_path: "/tmp/s.sock".into(),
+            workspace: "/ws".into(),
+            last_crash: None,
+            cron_jobs: vec![
+                ("morning".into(), "2026-06-11 09:00:00 UTC".into()),
+                ("evening".into(), "2026-06-11 17:00:00 UTC".into()),
+            ],
+        };
+        let human = snap.to_human();
+        assert!(
+            human.contains("Scheduled cron jobs:"),
+            "must include cron header line: {human}"
+        );
+        assert!(
+            human.contains("morning -> 2026-06-11 09:00:00 UTC"),
+            "must include first job: {human}"
+        );
+        assert!(
+            human.contains("evening -> 2026-06-11 17:00:00 UTC"),
+            "must include second job: {human}"
+        );
+    }
+
+    #[test]
+    fn snapshot_json_includes_cron_jobs() {
+        let snap = StatusSnapshot {
+            running: true,
+            pid: 1,
+            uptime_secs: 0,
+            profile: "test".into(),
+            channels: vec![],
+            active_conversations: 0,
+            rss_kb: None,
+            last_activity_unix: 0,
+            socket_path: "/s".into(),
+            workspace: "/w".into(),
+            last_crash: None,
+            cron_jobs: vec![("daily".into(), "2026-06-11 09:00:00 UTC".into())],
+        };
+        let json = snap.to_json();
+        assert!(
+            json.contains("\"cron_jobs\""),
+            "json must include cron_jobs field: {json}"
+        );
+        assert!(
+            json.contains("\"daily\""),
+            "json must include job name: {json}"
+        );
     }
 }

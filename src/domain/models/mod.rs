@@ -18,6 +18,7 @@ mod config;
 mod content;
 pub mod context_bundle;
 pub mod conversation;
+pub mod cron_config;
 pub mod daemon_crash;
 pub mod doc_key;
 pub mod filtered_catalog;
@@ -97,6 +98,7 @@ pub use conversation::{
     ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
     generate_conversation_id, generate_message_id,
 };
+pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
 pub use focus::FocusState;

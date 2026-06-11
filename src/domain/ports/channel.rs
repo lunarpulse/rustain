@@ -22,4 +22,10 @@ pub trait ChannelPort: Send + Sync {
     async fn start_loop(&self) -> Result<(), crate::domain::errors::TransitionError> {
         Ok(())
     }
+    /// Push an unsolicited message to the channel's configured destination (for
+    /// example a cron result forward). Default is no-op for terminal/noop
+    /// channels. Story 12.4 AC3.
+    async fn notify(&self, _text: &str) -> Result<(), crate::domain::errors::TransitionError> {
+        Ok(())
+    }
 }
