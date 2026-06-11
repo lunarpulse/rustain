@@ -1782,7 +1782,10 @@ allowed_chat_ids = []
     fn test_build_scheduler_cron_feature_off_fallback() {
         let ctx = test_compose_ctx();
         let result = build_scheduler("cron", None, &ctx);
-        assert!(result.is_ok(), "cron without feature should silently fall back to NoOpScheduler");
+        assert!(
+            result.is_ok(),
+            "cron without feature should silently fall back to NoOpScheduler"
+        );
     }
 
     #[test]

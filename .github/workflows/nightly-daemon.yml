@@ -1,0 +1,122 @@
+name: nightly-daemon
+
+# Story 12-1d: recurring L3 daemon supervision gates (NFR50 anti-rot).
+# ONE shared weekly cron + workflow_dispatch. ZERO schedule `if:` guards
+# (cron-string drift = silent never-run; dispatch leak forces OR-clauses).
+# NO pull_request trigger (per-PR coverage lives in ci.yml macos-unit job).
+# Gate reads are JOB-level: both jobs green in one dispatch = epic-close gate.
+
+on:
+  schedule:
+    # 04:41 UTC every Monday (off the top-of-hour rush).
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: nightly-daemon
+  cancel-in-progress: false
+
+jobs:
+  daemon-systemd:
+    name: "NFR50 — systemd --system L3 recovery"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTAIN_L3_PID_WAIT_SECS: "30"
+      RUSTAIN_L3_CRASH_WAIT_SECS: "60"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run systemd --system L3 recovery test
+        id: systemd-test
+        run: |
+          set -o pipefail
+          run_test() {
+            cargo test --test daemon_crash_recovery daemon_real_systemd_recovery_system -- --ignored --nocapture 2>&1 | tee systemd-l3.log
+          }
+          if ! run_test; then
+            echo "::warning::systemd L3 first attempt failed — retrying once (lane signal policy: one retry max)" >> "$GITHUB_STEP_SUMMARY"
+            run_test
+          fi
+
+      - name: Publish verdict to job summary
+        if: always()
+        run: |
+          {
+            echo "### NFR50 — systemd --system L3 recovery"
+            echo ""
+            echo '```'
+            if [ -f systemd-l3.log ]; then
+              tail -n 30 systemd-l3.log
+            else
+              echo "test did not produce output (build failure — see logs)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup (timeout kill safety net)
+        if: always()
+        run: |
+          unit="${{ steps.systemd-test.outputs.unit_name }}"
+          if [ -n "$unit" ] && [ -f "/etc/systemd/system/$unit" ]; then
+            sudo systemctl disable --now "$unit" 2>/dev/null || true
+            sudo rm -f "/etc/systemd/system/$unit"
+            sudo systemctl reset-failed "$unit" 2>/dev/null || true
+            sudo systemctl daemon-reload 2>/dev/null || true
+          fi
+
+  daemon-launchd:
+    name: "NFR50 — launchd L3 recovery"
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      RUSTAIN_L3_PID_WAIT_SECS: "30"
+      RUSTAIN_L3_CRASH_WAIT_SECS: "60"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run launchd L3 recovery test
+        id: launchd-test
+        run: |
+          set -o pipefail
+          run_test() {
+            cargo test --test daemon_crash_recovery daemon_real_launchd_recovery -- --ignored --nocapture 2>&1 | tee launchd-l3.log
+          }
+          if ! run_test; then
+            echo "::warning::launchd L3 first attempt failed — retrying once (lane signal policy: one retry max)" >> "$GITHUB_STEP_SUMMARY"
+            run_test
+          fi
+
+      - name: Publish verdict to job summary
+        if: always()
+        run: |
+          {
+            echo "### NFR50 — launchd L3 recovery"
+            echo ""
+            echo '```'
+            if [ -f launchd-l3.log ]; then
+              tail -n 30 launchd-l3.log
+            else
+              echo "test did not produce output (build failure — see logs)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup (timeout kill safety net)
+        if: always()
+        run: |
+          plist="${{ steps.launchd-test.outputs.plist_name }}"
+          if [ -n "$plist" ] && [ -f "$HOME/Library/LaunchAgents/$plist" ]; then
+            uid="$(id -u)"
+            label="$(basename "$plist" .plist)"
+            launchctl bootout "gui/${uid}/${label}" 2>/dev/null || \
+              launchctl unload -w "$HOME/Library/LaunchAgents/$plist" 2>/dev/null || true
+            rm -f "$HOME/Library/LaunchAgents/$plist"
+          fi

@@ -282,6 +282,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

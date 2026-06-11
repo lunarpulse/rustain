@@ -412,7 +412,7 @@ fn daemon_real_systemd_recovery() {
 /// Poll for the daemon PID file to exist + parse, up to `budget`. Returns the PID, or
 /// `None` on timeout. Bounded poll is the correct idiom for an external-writer file
 /// (Story 12.1c P3) — no in-process seam to await.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn wait_for_pid(pid_path: &Path, budget: std::time::Duration) -> Option<u32> {
     let deadline = std::time::Instant::now() + budget;
     loop {
@@ -431,3 +431,352 @@ fn wait_for_pid(pid_path: &Path, budget: std::time::Duration) -> Option<u32> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+/// Read an env-overridable wait budget in seconds (Story 12-1d AC-12-1d-1).
+/// CI lanes set 2-3× local defaults because shared runners are the #1 L3 flake source.
+#[cfg(unix)]
+fn env_budget_secs(var: &str, default: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(default),
+    )
+}
+
+/// **Layer 3 (AC-12-1d-1):** `--system` variant of the systemd recovery gate.
+///
+/// GH `ubuntu-latest` runs systemd as PID 1 but has NO user-session manager
+/// (`XDG_RUNTIME_DIR`/DBus absent), so the existing `--user` L3 correctly panics
+/// there. This variant uses `--system` scope + passwordless `sudo` to sidestep
+/// the user-session gap, proving NFR50 on CI. The `--user` test stays for local
+/// real-session runs.
+///
+/// Wait budgets are env-overridable (`RUSTAIN_L3_PID_WAIT_SECS`,
+/// `RUSTAIN_L3_CRASH_WAIT_SECS`) so CI lanes can set 2-3× local values.
+#[test]
+#[ignore = "Layer 3: requires systemd --system scope + passwordless sudo (CI lane / epic-close gate)"]
+#[cfg(target_os = "linux")]
+fn daemon_real_systemd_recovery_system() {
+    use std::process::Command as Proc;
+
+    struct SystemUnitGuard {
+        unit: String,
+        dest: std::path::PathBuf,
+    }
+    impl Drop for SystemUnitGuard {
+        fn drop(&mut self) {
+            let _ = Proc::new("sudo")
+                .args(["systemctl", "disable", "--now", &self.unit])
+                .status();
+            let _ = Proc::new("sudo")
+                .args(["rm", "-f", &self.dest.display().to_string()])
+                .status();
+            let _ = Proc::new("sudo")
+                .args(["systemctl", "reset-failed", &self.unit])
+                .status();
+            let _ = Proc::new("sudo")
+                .args(["systemctl", "daemon-reload"])
+                .status();
+        }
+    }
+
+    // ── Precondition: running system manager + passwordless sudo ──────────
+    let state = Proc::new("systemctl").args(["is-system-running"]).output();
+    let state_str = state
+        .as_ref()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "<systemctl missing>".to_string());
+    let manager_running = matches!(state_str.as_str(), "running" | "degraded" | "starting");
+    if !manager_running {
+        panic!(
+            "Layer 3 --system needs a RUNNING system manager — not present here \
+             (state={state_str:?}). This is an ENVIRONMENT gap, not a daemon bug."
+        );
+    }
+    let sudo_ok = Proc::new("sudo")
+        .args(["-n", "true"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !sudo_ok {
+        panic!(
+            "Layer 3 --system needs passwordless sudo (`sudo -n true` failed). \
+             On GH runners this is automatic; locally, configure NOPASSWD or use \
+             the --user L3 test instead. This is an ENVIRONMENT gap, not a daemon bug."
+        );
+    }
+
+    // Clean up any failed prior run before we start.
+    let d = dirs();
+
+    // 1. Render the unit via `daemon install --system` with isolated RUSTAIN_SERVICE_DIR.
+    d.cmd()
+        .args(["daemon", "install", "--system"])
+        .assert()
+        .success();
+    let unit = std::fs::read_dir(d.svc.path())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| e.file_name().into_string().unwrap())
+        .find(|name| name.ends_with(".service"))
+        .expect("installed unit");
+
+    // Verify the rendered unit carries User= and Environment= passthrough.
+    let unit_body = std::fs::read_to_string(d.svc.path().join(&unit)).unwrap();
+    assert!(
+        unit_body.contains("User="),
+        "--system unit must carry User= directive"
+    );
+    if std::env::var_os("RUSTAIN_DATA_DIR").is_some() {
+        assert!(
+            unit_body.contains("Environment=RUSTAIN_DATA_DIR="),
+            "unit must pass through RUSTAIN_DATA_DIR when set"
+        );
+    }
+
+    // Copy into the system unit directory with correct permissions.
+    let dest = std::path::PathBuf::from("/etc/systemd/system").join(&unit);
+    Proc::new("sudo")
+        .args([
+            "install",
+            "-m",
+            "644",
+            &d.svc.path().join(&unit).display().to_string(),
+            &dest.display().to_string(),
+        ])
+        .status()
+        .expect("sudo install");
+
+    // Guard armed BEFORE enable — every panic path cleans up.
+    let _guard = SystemUnitGuard {
+        unit: unit.clone(),
+        dest: dest.clone(),
+    };
+
+    // Reset any prior failed state for this unit name.
+    let _ = Proc::new("sudo")
+        .args(["systemctl", "reset-failed", &unit])
+        .status();
+    Proc::new("sudo")
+        .args(["systemctl", "daemon-reload"])
+        .status()
+        .unwrap();
+    Proc::new("sudo")
+        .args(["systemctl", "enable", "--now", &unit])
+        .status()
+        .unwrap();
+
+    // 2. Wait for the daemon to write its PID.
+    let pid_wait = env_budget_secs("RUSTAIN_L3_PID_WAIT_SECS", 10);
+    let pid = wait_for_pid(&d.pid_path(), pid_wait)
+        .expect("daemon must write its PID within the PID-wait budget after enable --now");
+
+    // 3. kill -9 the live daemon, let systemd Restart= relaunch.
+    Proc::new("sudo")
+        .args(["kill", "-9", &pid.to_string()])
+        .status()
+        .unwrap();
+
+    // 4. Bounded poll for the crash record.
+    let crash_wait = env_budget_secs("RUSTAIN_L3_CRASH_WAIT_SECS", 20);
+    let deadline = std::time::Instant::now() + crash_wait;
+    let recovered = loop {
+        if let Ok(body) = std::fs::read_to_string(d.crash_path()) {
+            if body.contains("stale-pidfile") {
+                break true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+
+    assert!(
+        recovered,
+        "systemd --system must relaunch the killed daemon AND the relaunch must record the crash"
+    );
+    let new_pid = wait_for_pid(&d.pid_path(), pid_wait)
+        .expect("relaunched daemon must write a new PID");
+    assert_ne!(new_pid, pid, "relaunched daemon must have a different PID from the killed one");
+}
+
+// ── Layer 3 — launchd real-init E2E (macOS P1) ─────────────────────────────────
+
+/// **Layer 3 (AC-12-1d-2):** launchd supervision + crash-recovery gate.
+///
+/// Installs the plist, bootstraps the agent, `kill -9`s the daemon, and asserts
+/// launchd relaunches it AND the relaunched instance records the crash. The 60s
+/// poll budget accounts for launchd's default `ThrottleInterval` (10s).
+///
+/// Wait budgets are env-overridable (`RUSTAIN_L3_PID_WAIT_SECS`,
+/// `RUSTAIN_L3_CRASH_WAIT_SECS`) so the CI lane sets defensive values.
+#[test]
+#[ignore = "Layer 3: requires a macOS launchd user domain (macos-latest CI lane / epic-close gate)"]
+#[cfg(target_os = "macos")]
+fn daemon_real_launchd_recovery() {
+    use std::process::Command as Proc;
+
+    struct PlistGuard {
+        label: String,
+        uid: String,
+        plist_path: std::path::PathBuf,
+    }
+    impl Drop for PlistGuard {
+        fn drop(&mut self) {
+            // bootout BEFORE any residual pid handling (KeepAlive races kill with respawn).
+            let target = format!("gui/{}/{}", self.uid, self.label);
+            let bootout_ok = Proc::new("launchctl")
+                .args(["bootout", &target])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !bootout_ok {
+                let _ = Proc::new("launchctl")
+                    .args(["unload", "-w", &self.plist_path.display().to_string()])
+                    .status();
+            }
+            let _ = std::fs::remove_file(&self.plist_path);
+        }
+    }
+
+    // ── Precondition: launchd user domain accessible ──────────────────────
+    let uid = Proc::new("id")
+        .arg("-u")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let domain_target = format!("gui/{uid}");
+    let domain_ok = Proc::new("launchctl")
+        .args(["print", &domain_target])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !domain_ok {
+        panic!(
+            "Layer 3 launchd needs a user domain (`launchctl print gui/{uid}` failed). \
+             On GH macos-latest the GUI domain should exist. This is an ENVIRONMENT gap \
+             — not a daemon bug. If `gui/{uid}` is unavailable, the launchd supervision \
+             claim cannot be proven on this runner."
+        );
+    }
+
+    let d = dirs();
+
+    // 1. Render the plist via `daemon install` with isolated RUSTAIN_SERVICE_DIR.
+    d.cmd().args(["daemon", "install"]).assert().success();
+    let plist_name = std::fs::read_dir(d.svc.path())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| e.file_name().into_string().unwrap())
+        .find(|name| name.ends_with(".plist"))
+        .expect("installed plist");
+    let label = plist_name.strip_suffix(".plist").unwrap().to_string();
+
+    // Copy into ~/Library/LaunchAgents.
+    let launch_agents = dirs::home_dir()
+        .unwrap()
+        .join("Library")
+        .join("LaunchAgents");
+    std::fs::create_dir_all(&launch_agents).unwrap();
+    let plist_dest = launch_agents.join(&plist_name);
+    std::fs::copy(d.svc.path().join(&plist_name), &plist_dest).unwrap();
+
+    // Re-run safety: bootout stale label before bootstrap.
+    let label_target = format!("gui/{uid}/{label}");
+    let label_exists = Proc::new("launchctl")
+        .args(["print", &label_target])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if label_exists {
+        let _ = Proc::new("launchctl")
+            .args(["bootout", &label_target])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // Guard armed BEFORE bootstrap.
+    let _guard = PlistGuard {
+        label: label.clone(),
+        uid: uid.clone(),
+        plist_path: plist_dest.clone(),
+    };
+
+    // Bootstrap ladder: bootstrap first, fall back to load -w on failure.
+    let bootstrap_ok = Proc::new("launchctl")
+        .args([
+            "bootstrap",
+            &domain_target,
+            &plist_dest.display().to_string(),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !bootstrap_ok {
+        let bootstrap_err = Proc::new("launchctl")
+            .args(["bootstrap", &domain_target, &plist_dest.display().to_string()])
+            .output()
+            .map(|o| format!("stdout={} stderr={}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+            .unwrap_or_else(|e| format!("failed to run: {e}"));
+        let load_ok = Proc::new("launchctl")
+            .args(["load", "-w", &plist_dest.display().to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !load_ok {
+            let load_err = Proc::new("launchctl")
+                .args(["load", "-w", &plist_dest.display().to_string()])
+                .output()
+                .map(|o| format!("stdout={} stderr={}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+                .unwrap_or_else(|e| format!("failed to run: {e}"));
+            panic!(
+                "Both `launchctl bootstrap gui/{uid} {plist}` and `launchctl load -w {plist}` failed.\n\
+                 Bootstrap output: {bootstrap_err}\n\
+                 Load output: {load_err}\n\
+                 This is descope evidence (AC-12-1d-2 showstopper): the runner \
+                 environment does not permit LaunchAgent bootstrap.",
+                uid = uid,
+                plist = plist_dest.display(),
+                bootstrap_err = bootstrap_err,
+                load_err = load_err,
+            );
+        }
+    }
+
+    // 2. Wait for daemon PID.
+    let pid_wait = env_budget_secs("RUSTAIN_L3_PID_WAIT_SECS", 15);
+    let pid = wait_for_pid(&d.pid_path(), pid_wait)
+        .expect("daemon must write its PID within the PID-wait budget after launchd bootstrap");
+
+    // 3. kill -9 → launchd KeepAlive{SuccessfulExit=false} relaunches.
+    Proc::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .unwrap();
+
+    // 4. Bounded poll for crash record. 60s to account for ThrottleInterval (10s default).
+    let crash_wait = env_budget_secs("RUSTAIN_L3_CRASH_WAIT_SECS", 60);
+    let deadline = std::time::Instant::now() + crash_wait;
+    let recovered = loop {
+        if let Ok(body) = std::fs::read_to_string(d.crash_path()) {
+            if body.contains("stale-pidfile") {
+                break true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    };
+
+    assert!(
+        recovered,
+        "launchd must relaunch the killed daemon AND the relaunch must record the crash"
+    );
+    let new_pid = wait_for_pid(&d.pid_path(), pid_wait)
+        .expect("relaunched daemon must write a new PID");
+    assert_ne!(new_pid, pid, "relaunched daemon must have a different PID from the killed one");
+}
+

@@ -89,6 +89,7 @@ fn test_app_state_honors_raw_capacity() {
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
@@ -166,6 +167,7 @@ fn test_app_state_session_cancel_is_root_token() {
         sandbox_policy: Arc::new(tokio::sync::RwLock::new(
             rustain::domain::models::sandbox::SandboxPolicy::Permissive,
         )),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
         #[cfg(feature = "meta-search")]
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]

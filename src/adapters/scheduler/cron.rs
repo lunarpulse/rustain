@@ -425,10 +425,14 @@ async fn run_job(task: CronJobTask) {
 
     // Only send completion and forward on successful completion (review patch 3).
     if completed {
-        if task.completion_tx.send(CronCompletion {
-            job_name: task.job.name.clone(),
-            result_text: assistant.clone(),
-        }).is_err() {
+        if task
+            .completion_tx
+            .send(CronCompletion {
+                job_name: task.job.name.clone(),
+                result_text: assistant.clone(),
+            })
+            .is_err()
+        {
             tracing::warn!(job = %task.job.name, "cron: completion dropped — forwarder exited");
         }
         if task.job.forward {
@@ -798,10 +802,18 @@ mod tests {
                 .boxed())
             }
         }
-        async fn abort(&self) -> Result<(), ProviderError> { Ok(()) }
-        fn provider_id(&self) -> String { "phase".into() }
-        fn list_models(&self) -> Vec<ModelDescriptor> { vec![] }
-        async fn health_check(&self) -> Result<(), ProviderError> { Ok(()) }
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "phase".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
     }
 
     struct ParkingMemory {
@@ -1695,7 +1707,10 @@ prompt = "nope"
             let _ = swap_handle.await;
         })
         .await;
-        assert!(result.is_ok(), "k=4 chaos test must complete without deadlock within 15s");
+        assert!(
+            result.is_ok(),
+            "k=4 chaos test must complete without deadlock within 15s"
+        );
 
         // Verify: all 4 completions received.
         let mut completions = Vec::new();
@@ -1706,7 +1721,11 @@ prompt = "nope"
 
         // Verify: all 4 sessions persisted with correct origin.
         for (i, name) in job_names.iter().enumerate() {
-            let session_id = format!("cron-{}-{}", sanitize_session_component(name), 800 + i as i64);
+            let session_id = format!(
+                "cron-{}-{}",
+                sanitize_session_component(name),
+                800 + i as i64
+            );
             let conv = storage
                 .load_conversation(&session_id)
                 .await

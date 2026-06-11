@@ -168,11 +168,26 @@ rustain daemon status --json   # scriptable: a "last_crash" object (null when no
 
 After a crash the dead PID can be **recycled** by an unrelated process. `stop` /
 `status` / the already-running guard verify ownership before acting: the PID file
-records a self-authored **nonce** and the **boot id**, and on Linux the guard also
-checks `/proc/<pid>/comm` names `rustain`. A recycled/foreign PID is treated as
-**stale** (reclaimable), never `Running` — so `stop` never signals an innocent
-process. (No extra dependency; the residual macOS same-boot nonce-collision window is
-accepted risk, tracked for a macOS-hardening follow-up.)
+records a self-authored **nonce** and the **boot id**, and both platforms introspect
+the live process before acting:
+
+- **Linux:** `/proc/<pid>/comm` exact-match + `/proc/<pid>/cmdline` daemon-body token
+  + `/proc/<pid>/environ` nonce round-trip. Zombie detection via `/proc/<pid>/stat`.
+- **macOS:** `kinfo_proc` via `sysctl(KERN_PROC_PID)` for `p_comm` exact-match +
+  `p_stat == SZOMB` zombie detection + `kern.boottime` boot-id; `KERN_PROCARGS2` via
+  `sysctl` for `cmdline_args` + `env_nonce` round-trip through a pure
+  `parse_procargs2` parser (compiled and fixture-tested on all targets).
+
+A recycled/foreign PID is treated as **stale** (reclaimable), never `Running` — so
+`stop` never signals an innocent process. `ownership_ok` precedence is unchanged.
+
+## Platform support matrix
+
+| Platform | TUI | Daemon supervision | CI evidence |
+|----------|-----|-------------------|-------------|
+| **Linux** (Tier 1) | Full | systemd `Restart=on-failure`, CI-proven | `ci.yml` unit tests every PR + `nightly-daemon.yml` systemd L3 weekly |
+| **macOS** (Tier 2) | Builds + unit-tested | launchd `KeepAlive` — see NFR50 outcome below | `ci.yml` `macos-unit` job + `nightly-daemon.yml` launchd L3 weekly |
+| **Windows** | Not supported (NFR33) | Not supported | — |
 
 ## Verifying auto-restart (NFR50)
 
@@ -182,14 +197,48 @@ accepted risk, tracked for a macOS-hardening follow-up.)
 - **Detect + record + announce** (every CI commit): an in-process simulated
   crash-recovery cycle test (dead PID in the PID file → start → assert the crash
   record + `status --json last_crash` + normal startup).
-- **Real init system** (gated): on a systemd-equipped lane, run the Linux P0 gate:
+- **Real init system — systemd** (`nightly-daemon.yml` `daemon-systemd` job):
 
   ```sh
-  cargo test --test daemon_crash_recovery --ignored daemon_real_systemd_recovery
+  cargo test --test daemon_crash_recovery daemon_real_systemd_recovery_system -- --ignored --nocapture
   ```
 
-  It installs the unit, `kill -9`s the daemon, and asserts systemd relaunches it AND
-  the relaunched instance records the crash. macOS/launchd (P1) is a manual sign-off.
+  Uses `--system` scope + passwordless `sudo` on `ubuntu-latest` (no user session
+  needed). Installs the unit, `kill -9`s the daemon, asserts systemd relaunches it AND
+  the relaunched instance records the crash. Wait budgets are env-overridable
+  (`RUSTAIN_L3_PID_WAIT_SECS`, `RUSTAIN_L3_CRASH_WAIT_SECS`).
+
+- **Real init system — launchd** (`nightly-daemon.yml` `daemon-launchd` job):
+
+  ```sh
+  cargo test --test daemon_crash_recovery daemon_real_launchd_recovery -- --ignored --nocapture
+  ```
+
+  Bootstraps the plist into `gui/$(id -u)`, `kill -9`s the daemon, asserts launchd
+  relaunches it. 60s poll budget accounts for launchd's default `ThrottleInterval`.
+
+- **Local `--user` test** (for real-session/local runs):
+
+  ```sh
+  cargo test --test daemon_crash_recovery daemon_real_systemd_recovery -- --ignored --nocapture
+  ```
+
+### CI lane signal policy
+
+- One automatic retry per job maximum (green-on-retry logged with cause in the
+  `$GITHUB_STEP_SUMMARY`).
+- ENVIRONMENT-gap panics (precondition guard fired) are waivable with written cause.
+  **Assertion failures are never waivable.**
+- Two consecutive scheduled reds = quarantine issue filed + gate RED.
+- `continue-on-error` is banned — an ignored lane gets deleted, not muted.
+
+### Epic-12 close gate
+
+One green `workflow_dispatch` run of `nightly-daemon.yml` (both jobs, job-level reads)
+is required before Epic 12 closes. The evidence table in the Dev Agent Record captures
+run URL + run ID + commit SHA for each lane. Escape hatch: if two distinct cron
+cadences ever become necessary, split into two workflow files rather than reintroduce
+schedule-string `if:` guards.
 
 ## Templates
 

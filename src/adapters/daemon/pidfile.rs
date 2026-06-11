@@ -97,15 +97,30 @@ pub fn process_alive(pid: u32) -> bool {
             Err(_) => false,
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        // SAFETY: `kill` with signal 0 performs error checking without sending a
-        // signal — the canonical liveness probe. No memory is touched.
+        // AC-12-1d-4: detect zombie on macOS via kinfo_proc.p_stat so `stop` doesn't
+        // spin to the 5s SIGKILL deadline. A zombie (reaped but not yet collected)
+        // reports alive to kill(pid,0) — kinfo_proc is the only userspace probe.
+        if let Some(info) = macos_kinfo_proc(pid) {
+            if info.kp_proc.p_stat == libc::SZOMB as i8 {
+                return false;
+            }
+        } else {
+            // sysctl failed (ESRCH = no process) → dead.
+            return false;
+        }
+        // Not a zombie and sysctl found it → alive. kill(0) confirms.
+        // EPERM on another user's process means we can't verify ownership → treat as dead.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
         let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
         if rc == 0 {
             return true;
         }
-        // EPERM: the process exists but we may not signal it → still "alive".
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 }
@@ -142,7 +157,33 @@ pub fn current_boot_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+pub fn current_boot_id() -> Option<String> {
+    // kern.boottime returns a timeval; we hash it into a stable string
+    // that changes on every reboot — same semantics as Linux's boot_id.
+    let mut tv = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    let mib = [libc::CTL_KERN, libc::KERN_BOOTTIME];
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_ptr() as *mut _,
+            2,
+            &mut tv as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    Some(format!("{}-{}", tv.tv_sec, tv.tv_usec))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn current_boot_id() -> Option<String> {
     None
 }
@@ -152,6 +193,81 @@ pub fn current_boot_id() -> Option<String> {
 /// `/proc/<pid>/environ` (Story 12.1c P1). This is what makes the nonce load-bearing
 /// for ownership: without it the nonce would be write-only.
 pub const DAEMON_NONCE_ENV: &str = "RUSTAIN_DAEMON_NONCE";
+
+/// Read `kinfo_proc` for `pid` via `sysctl([CTL_KERN, KERN_PROC, KERN_PROC_PID, pid])`.
+/// Returns `None` on sysctl error (ESRCH / EINVAL / EPERM).
+#[cfg(target_os = "macos")]
+fn macos_kinfo_proc(pid: u32) -> Option<libc::kinfo_proc> {
+    let mut info: libc::kinfo_proc = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::kinfo_proc>();
+    let mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_ptr() as *mut _,
+            4,
+            &mut info as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len == 0 {
+        return None;
+    }
+    Some(info)
+}
+
+/// Read the raw `KERN_PROCARGS2` buffer for `pid`. Returns `None` on sysctl failure.
+#[cfg(target_os = "macos")]
+fn macos_procargs2_raw(pid: u32) -> Option<Vec<u8>> {
+    let mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut retries = 3;
+    let mut len: usize = 0;
+    loop {
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_ptr() as *mut _,
+                3,
+                std::ptr::null_mut(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        let mut out_len = len;
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_ptr() as *mut _,
+                3,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                &mut out_len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 {
+            buf.truncate(out_len);
+            return Some(buf);
+        }
+        if unsafe { *libc::__errno_location() } != libc::ENOMEM {
+            return None;
+        }
+        retries -= 1;
+        if retries == 0 {
+            return None;
+        }
+        len = 0;
+    }
+}
 
 /// The per-process facts ownership needs, behind a trait so the predicate is
 /// unit-testable without real `/proc` (Story 12.1c P1 — Murat/Amelia).
@@ -181,16 +297,12 @@ impl ProcInspector for RealProc {
     fn current_boot_id(&self) -> Option<String> {
         current_boot_id()
     }
+    fn introspectable(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    }
+
     #[cfg(target_os = "linux")]
-    fn introspectable(&self) -> bool {
-        true
-    }
-    #[cfg(not(target_os = "linux"))]
-    fn introspectable(&self) -> bool {
-        false
-    }
     fn env_nonce(&self, pid: u32) -> Option<String> {
-        // /proc/<pid>/environ is NUL-separated KEY=VALUE. Linux-only; None elsewhere.
         let body = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
         let prefix = format!("{DAEMON_NONCE_ENV}=");
         body.split(|b| *b == 0)
@@ -198,11 +310,40 @@ impl ProcInspector for RealProc {
             .find_map(|kv| kv.strip_prefix(&prefix).map(|v| v.to_string()))
             .filter(|v| !v.is_empty())
     }
+    #[cfg(target_os = "macos")]
+    fn env_nonce(&self, pid: u32) -> Option<String> {
+        let buf = macos_procargs2_raw(pid)?;
+        let pa = super::procargs::parse_procargs2(&buf)?;
+        let prefix = format!("{DAEMON_NONCE_ENV}=");
+        pa.env
+            .iter()
+            .find_map(|kv| kv.strip_prefix(&prefix).map(|v| v.to_string()))
+            .filter(|v| !v.is_empty())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn env_nonce(&self, _pid: u32) -> Option<String> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
     fn comm(&self, pid: u32) -> Option<String> {
         std::fs::read_to_string(format!("/proc/{pid}/comm"))
             .ok()
             .map(|s| s.trim().to_string())
     }
+    #[cfg(target_os = "macos")]
+    fn comm(&self, pid: u32) -> Option<String> {
+        let info = macos_kinfo_proc(pid)?;
+        // p_comm is a [c_char; 17] (MAXCOMLEN+1) — same 16-byte truncation as Linux.
+        let cstr = unsafe { std::ffi::CStr::from_ptr(info.kp_proc.p_comm.as_ptr()) };
+        Some(cstr.to_string_lossy().into_owned())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn comm(&self, _pid: u32) -> Option<String> {
+        None
+    }
+
+    #[cfg(target_os = "linux")]
     fn cmdline_args(&self, pid: u32) -> Vec<String> {
         std::fs::read(format!("/proc/{pid}/cmdline"))
             .map(|b| {
@@ -213,8 +354,21 @@ impl ProcInspector for RealProc {
             })
             .unwrap_or_default()
     }
+    #[cfg(target_os = "macos")]
+    fn cmdline_args(&self, pid: u32) -> Vec<String> {
+        macos_procargs2_raw(pid)
+            .and_then(|buf| super::procargs::parse_procargs2(&buf))
+            .map(|pa| pa.argv)
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn cmdline_args(&self, _pid: u32) -> Vec<String> {
+        Vec::new()
+    }
+
     fn expected_comm(&self) -> String {
-        // `/proc/<pid>/comm` is truncated to TASK_COMM_LEN (15 chars + NUL → 15).
+        // Both Linux TASK_COMM_LEN (15) and macOS MAXCOMLEN (16) truncate.
+        // Use the shorter limit so exact-comm matching works on both.
         std::env::current_exe()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -631,5 +785,111 @@ mod tests {
             ..Default::default()
         };
         assert!(ownership_ok(&pf, &fake));
+    }
+
+    // ── macOS child-spawn introspection (AC-12-1d-3c) — NOT #[ignore] ────────────
+    //
+    // Spawns a child with known argv + RUSTAIN_DAEMON_NONCE, introspects via
+    // the real sysctl path + pure parser round-trip, and asserts the result.
+
+    /// Positive case: child carries a nonce → RealProc reads it back via KERN_PROCARGS2.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_child_introspection_positive() {
+        let nonce = "test-nonce-abc123";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .env(DAEMON_NONCE_ENV, nonce)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        // Give the child a moment to start.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let inspector = RealProc;
+
+        // comm should be "sleep"
+        let comm = inspector.comm(pid);
+        assert!(
+            comm.as_deref() == Some("sleep"),
+            "expected comm='sleep', got {:?}",
+            comm
+        );
+
+        // env_nonce round-trip through KERN_PROCARGS2 + parse_procargs2
+        let env = inspector.env_nonce(pid);
+        assert_eq!(
+            env.as_deref(),
+            Some(nonce),
+            "KERN_PROCARGS2 round-trip must recover the injected nonce"
+        );
+
+        // cmdline_args round-trip
+        let args = inspector.cmdline_args(pid);
+        assert!(
+            args.iter().any(|a| a == "60"),
+            "cmdline must contain the sleep argument '60', got {:?}",
+            args
+        );
+        assert!(
+            args.first().map(|s| s.as_str()) == Some("sleep"),
+            "argv[0] must be 'sleep', got {:?}",
+            args
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Negative case: child without a nonce → env_nonce returns None.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_child_introspection_negative() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let inspector = RealProc;
+        assert!(
+            inspector.env_nonce(pid).is_none(),
+            "a child without RUSTAIN_DAEMON_NONCE must return None"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// macOS zombie detection (AC-12-1d-4): a zombie must report as not alive.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_zombie_process_is_not_alive() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        // Do NOT call child.wait() — let the child become a zombie.
+        // The child will exit immediately (it's `true`), but we haven't reaped it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let is_zombie = loop {
+            if let Some(info) = macos_kinfo_proc(pid) {
+                if info.kp_proc.p_stat == libc::SZOMB as i8 {
+                    break true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert!(is_zombie, "child did not become zombie within timeout");
+        // On macOS, kinfo_proc.p_stat should show SZOMB.
+        assert!(
+            !process_alive(pid),
+            "a zombie process must report as NOT alive on macOS"
+        );
+        let _ = child.wait(); // reap
     }
 }

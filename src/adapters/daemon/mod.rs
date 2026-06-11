@@ -28,6 +28,7 @@ mod crash;
 mod lifecycle;
 #[cfg(unix)]
 mod pidfile;
+mod procargs;
 #[cfg(unix)]
 pub mod protocol;
 #[cfg(unix)]
