@@ -202,7 +202,9 @@ fn macos_process_stat(pid: u32) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// Query `ps -p <pid> -o comm=` for the process command name. The basename is

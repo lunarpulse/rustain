@@ -597,9 +597,12 @@ fn daemon_real_systemd_recovery_system() {
         recovered,
         "systemd --system must relaunch the killed daemon AND the relaunch must record the crash"
     );
-    let new_pid = wait_for_pid(&d.pid_path(), pid_wait)
-        .expect("relaunched daemon must write a new PID");
-    assert_ne!(new_pid, pid, "relaunched daemon must have a different PID from the killed one");
+    let new_pid =
+        wait_for_pid(&d.pid_path(), pid_wait).expect("relaunched daemon must write a new PID");
+    assert_ne!(
+        new_pid, pid,
+        "relaunched daemon must have a different PID from the killed one"
+    );
 }
 
 // ── Layer 3 — launchd real-init E2E (macOS P1) ─────────────────────────────────
@@ -716,9 +719,19 @@ fn daemon_real_launchd_recovery() {
         .unwrap_or(false);
     if !bootstrap_ok {
         let bootstrap_err = Proc::new("launchctl")
-            .args(["bootstrap", &domain_target, &plist_dest.display().to_string()])
+            .args([
+                "bootstrap",
+                &domain_target,
+                &plist_dest.display().to_string(),
+            ])
             .output()
-            .map(|o| format!("stdout={} stderr={}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+            .map(|o| {
+                format!(
+                    "stdout={} stderr={}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            })
             .unwrap_or_else(|e| format!("failed to run: {e}"));
         let load_ok = Proc::new("launchctl")
             .args(["load", "-w", &plist_dest.display().to_string()])
@@ -729,7 +742,13 @@ fn daemon_real_launchd_recovery() {
             let load_err = Proc::new("launchctl")
                 .args(["load", "-w", &plist_dest.display().to_string()])
                 .output()
-                .map(|o| format!("stdout={} stderr={}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)))
+                .map(|o| {
+                    format!(
+                        "stdout={} stderr={}",
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    )
+                })
                 .unwrap_or_else(|e| format!("failed to run: {e}"));
             panic!(
                 "Both `launchctl bootstrap gui/{uid} {plist}` and `launchctl load -w {plist}` failed.\n\
@@ -775,8 +794,10 @@ fn daemon_real_launchd_recovery() {
         recovered,
         "launchd must relaunch the killed daemon AND the relaunch must record the crash"
     );
-    let new_pid = wait_for_pid(&d.pid_path(), pid_wait)
-        .expect("relaunched daemon must write a new PID");
-    assert_ne!(new_pid, pid, "relaunched daemon must have a different PID from the killed one");
+    let new_pid =
+        wait_for_pid(&d.pid_path(), pid_wait).expect("relaunched daemon must write a new PID");
+    assert_ne!(
+        new_pid, pid,
+        "relaunched daemon must have a different PID from the killed one"
+    );
 }
-
