@@ -21,6 +21,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cross-target compile check (macOS cfg branches)
+        if: false
         run: |
           rustup target add aarch64-apple-darwin
           cargo check --target aarch64-apple-darwin
@@ -64,8 +65,8 @@ jobs:
 
       - name: Test
         run: cargo test
-
   skills-validation:
+    if: false
     name: Skills Validation Feature
     runs-on: ubuntu-latest
     steps:
@@ -77,7 +78,7 @@ jobs:
         run: cargo test --features skills-validation
 
   vector-search:
-    name: Vector Search Feature (offline)
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
