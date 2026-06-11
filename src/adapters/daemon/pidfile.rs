@@ -99,19 +99,16 @@ pub fn process_alive(pid: u32) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        // AC-12-1d-4: detect zombie on macOS via kinfo_proc.p_stat so `stop` doesn't
-        // spin to the 5s SIGKILL deadline. A zombie (reaped but not yet collected)
-        // reports alive to kill(pid,0) — kinfo_proc is the only userspace probe.
-        if let Some(info) = macos_kinfo_proc(pid) {
-            if info.kp_proc.p_stat == libc::SZOMB as i8 {
+        // AC-12-1d-4: detect zombie on macOS via `ps` so `stop` doesn't spin to the
+        // 5s SIGKILL deadline. A zombie reports alive to kill(pid,0), but `ps` stat
+        // starts with 'Z'.
+        if let Some(stat) = macos_process_stat(pid) {
+            if stat.starts_with('Z') {
                 return false;
             }
-        } else {
-            // sysctl failed (ESRCH = no process) → dead.
-            return false;
         }
-        // Not a zombie and sysctl found it → alive. kill(0) confirms.
-        // EPERM on another user's process means we can't verify ownership → treat as dead.
+        // Not a zombie (or ps couldn't resolve it). kill(0) is the final probe.
+        // EPERM on another user's process means we can't verify ownership → dead.
         let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
         rc == 0
     }
@@ -194,32 +191,37 @@ pub fn current_boot_id() -> Option<String> {
 /// for ownership: without it the nonce would be write-only.
 pub const DAEMON_NONCE_ENV: &str = "RUSTAIN_DAEMON_NONCE";
 
-/// Read `kinfo_proc` for `pid` via `sysctl([CTL_KERN, KERN_PROC, KERN_PROC_PID, pid])`.
-/// Returns `None` on sysctl error (ESRCH / EINVAL / EPERM).
+/// Query `ps -p <pid> -o stat=` for the process state. Returns `None` if the
+/// process is gone or `ps` is unavailable.
 #[cfg(target_os = "macos")]
-fn macos_kinfo_proc(pid: u32) -> Option<libc::kinfo_proc> {
-    let mut info: libc::kinfo_proc = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::kinfo_proc>();
-    let mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROC,
-        libc::KERN_PROC_PID,
-        pid as libc::c_int,
-    ];
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_ptr() as *mut _,
-            4,
-            &mut info as *mut _ as *mut libc::c_void,
-            &mut len,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || len == 0 {
+fn macos_process_stat(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
         return None;
     }
-    Some(info)
+    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+}
+
+/// Query `ps -p <pid> -o comm=` for the process command name. The basename is
+/// returned to match Linux `/proc/<pid>/comm` semantics.
+#[cfg(target_os = "macos")]
+fn macos_process_comm(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(output.stdout).ok()?;
+    let name = s.trim();
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str().map(String::from))
+        .or_else(|| Some(name.to_string()))
 }
 
 /// Read the raw `KERN_PROCARGS2` buffer for `pid`. Returns `None` on sysctl failure.
@@ -258,7 +260,7 @@ fn macos_procargs2_raw(pid: u32) -> Option<Vec<u8>> {
             buf.truncate(out_len);
             return Some(buf);
         }
-        if unsafe { *libc::__errno_location() } != libc::ENOMEM {
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOMEM) {
             return None;
         }
         retries -= 1;
@@ -324,23 +326,19 @@ impl ProcInspector for RealProc {
     fn env_nonce(&self, _pid: u32) -> Option<String> {
         None
     }
-
     #[cfg(target_os = "linux")]
     fn comm(&self, pid: u32) -> Option<String> {
         std::fs::read_to_string(format!("/proc/{pid}/comm"))
             .ok()
             .map(|s| s.trim().to_string())
     }
-    #[cfg(target_os = "macos")]
-    fn comm(&self, pid: u32) -> Option<String> {
-        let info = macos_kinfo_proc(pid)?;
-        // p_comm is a [c_char; 17] (MAXCOMLEN+1) — same 16-byte truncation as Linux.
-        let cstr = unsafe { std::ffi::CStr::from_ptr(info.kp_proc.p_comm.as_ptr()) };
-        Some(cstr.to_string_lossy().into_owned())
-    }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn comm(&self, _pid: u32) -> Option<String> {
         None
+    }
+    #[cfg(target_os = "macos")]
+    fn comm(&self, pid: u32) -> Option<String> {
+        macos_process_comm(pid)
     }
 
     #[cfg(target_os = "linux")]
@@ -874,8 +872,8 @@ mod tests {
         // The child will exit immediately (it's `true`), but we haven't reaped it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let is_zombie = loop {
-            if let Some(info) = macos_kinfo_proc(pid) {
-                if info.kp_proc.p_stat == libc::SZOMB as i8 {
+            if let Some(stat) = macos_process_stat(pid) {
+                if stat.starts_with('Z') {
                     break true;
                 }
             }
@@ -885,7 +883,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
         assert!(is_zombie, "child did not become zombie within timeout");
-        // On macOS, kinfo_proc.p_stat should show SZOMB.
+        // On macOS, `ps` state 'Z' means the process is a zombie.
         assert!(
             !process_alive(pid),
             "a zombie process must report as NOT alive on macOS"

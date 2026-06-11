@@ -58,7 +58,7 @@ figment = { version = "0.10", features = ["toml", "env", "json"] }
 thiserror = "2.0"
 anyhow = "1.0"
 
-# ── Logging / tracing ───────────────────────────────────────────
+# ── Logging / tracing ────────────────────────────────────────────
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
@@ -107,7 +107,7 @@ landlock = { version = "0.4", optional = true }
 # ── Telegram channel adapter (Story 12.3, feature-gated) ──────────
 teloxide = { version = "0.17.0", optional = true, default-features = false, features = ["macros", "rustls"] }
 
-# ── Cron scheduler adapter (Story 12.4, feature-gated) ────────────
+# ── Cron scheduler adapter (Story 12.4, feature-gated) ───────────
 # Parser only; rustain owns the tokio sleep/select loop.
 croner = { version = "3.0.1", optional = true }
 
@@ -140,7 +140,6 @@ async-trait = "0.1"
 # Epic 6 scaffolding (sprint-change-proposal-2026-04-24):
 # - insta: TUI snapshot testing for widgets (story 6-0d PlanApprovalCard; future widgets)
 insta = { version = "1.41", features = ["yaml"] }
-procfs = "0.17"
 libc = "0.2"  # perf-tests/subagent_spawn.rs: sysconf(_SC_PAGESIZE) for RSS-per-agent measurement
 wiremock = "0.6"
 assert_cmd = "2.0"
@@ -148,6 +147,9 @@ predicates = "3"
 tracing-test = "0.2"
 rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Story 9-7c)
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+procfs = "0.17"
 
 [features]
 default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search"]
