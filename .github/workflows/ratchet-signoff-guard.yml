@@ -14,7 +14,7 @@ name: ratchet-signoff-guard
 on:
   pull_request:
     paths:
-      - 'rustain/tests/conformance.rs'
+      - 'tests/conformance.rs'
 
 jobs:
   ratchet-signoff-gate:
@@ -34,7 +34,7 @@ jobs:
       - name: Detect whether a ratchet constant changed
         id: detect
         run: |
-          git diff "$BASE_SHA" "$HEAD_SHA" -- rustain/tests/conformance.rs > ratchet.diff || true
+          git diff "$BASE_SHA" "$HEAD_SHA" -- tests/conformance.rs > ratchet.diff || true
           # Added/removed content lines (exclude the +++/--- file headers) that touch a tracked const.
           if grep -E '^[+-][^+-]' ratchet.diff | grep -qE "$CONST_RE"; then
             echo "changed=1" >> "$GITHUB_OUTPUT"
