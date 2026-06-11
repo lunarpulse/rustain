@@ -66,7 +66,6 @@ jobs:
       - name: Test
         run: cargo test --lib
   skills-validation:
-    if: false
     name: Skills Validation Feature
     runs-on: ubuntu-latest
     steps:
@@ -74,27 +73,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test with skills-validation feature
-        run: cargo test --features skills-validation
+      - name: Test with skills-validation feature (lib only)
+        run: cargo test --lib --features skills-validation
 
   vector-search:
-    if: false
+    name: Vector Search Feature
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Compiles fastembed/ort + reqwest + bm25 and runs every NON-ignored test
-      # under the feature. This is the PR-level guard for:
-      #   - R-001 removal-integrity regression (tests/regression_removal_integrity.rs)
-      #   - 11-3b mockito dimension/auth/status locks (tests/vector_search.rs::remote_http)
-      #   - vector-search composition + delegation tests
-      # The #[ignore] real-network / model-download tests do NOT run here — they
-      # are exercised by the nightly-vector-search workflow.
-      - name: Test with vector-search feature (no ignored network tests)
-        run: cargo test --features vector-search
-
+      # Compiles fastembed/ort + reqwest + bm25 and runs vector-search lib tests
+      # plus the vector_search integration test (mockito-based, no real network).
+      # The #[ignore] real-model / network tests do NOT run here — they are
+      # exercised by the nightly-vector-search workflow.
+      - name: Test with vector-search feature
+        run: cargo test --features vector-search --test vector_search
   macos-unit:
     name: macOS Unit Tests (daemon/ProcInspector)
     runs-on: macos-latest
