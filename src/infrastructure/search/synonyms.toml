@@ -1,0 +1,36 @@
+# Synonym pairs for BM25 query-side expansion.
+# Anchor: only dev-partition failure synonym-fixable is `neat → format`.
+# Defensive cluster: tidy/clean/trim → summarize|format (covers adjacent
+# adversarial-paraphrase territory without speculative overreach).
+# Each pair must trace to (a) a documented dev-partition failure OR
+# (b) a property-test invariant Murat-justifiable for the pair.
+# NO re-curation after seeing holdout results (Winston Round-3 overfit-prevention).
+
+[[pair]]
+from = "neat"
+to = ["format"]
+justification = "Day-0 trace: 'how do i keep my code neat' → format-code fixture; only dev-partition adversarial-paraphrase failure with a synonym fix."
+
+[[pair]]
+from = "tidy"
+to = ["format"]
+justification = "Defensive cluster — semantically adjacent to neat; property-test invariant: paraphrase-equivalent to anchor."
+
+[[pair]]
+from = "clean"
+to = ["format"]
+justification = "Defensive cluster — same equivalence class. NB: ambiguous w.r.t. data-cleaning; coverage assertion in NN2 must verify no top-K precision degradation > 0.05."
+
+[[pair]]
+from = "trim"
+to = ["summarize", "format"]
+justification = "Defensive cluster — bidirectional pair (trim a doc / trim whitespace)."
+
+[[pair]]
+from = "shorter"
+to = ["summarize"]
+justification = "Defensive cluster — SCP-cited query 'make a pdf shorter'. Day-0 confirms now passing without this pair; pair kept as belt-and-suspenders against test-set drift."
+
+# ≥5 mandatory, ≤8 maximum. Mary may add up to 3 more pairs from dev-partition
+# failures discovered during C1 implementation, but MUST NOT add pairs whose
+# only justification is "improves holdout score" (overfit prevention).

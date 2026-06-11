@@ -1,0 +1,311 @@
+[
+  {
+    "query": "run SQL query",
+    "kind": null,
+    "expected_top3": [
+      "skill::query-db",
+      "mcp__postgres__query"
+    ],
+    "category": "cross_protocol",
+    "expected_kind": null,
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Cross-protocol: skill and MCP tool both handle SQL"
+  },
+  {
+    "query": "format python file",
+    "kind": null,
+    "expected_top3": [
+      "skill::python-debugpy",
+      "builtin::bash",
+      "mcp__github__search-repos"
+    ],
+    "category": "cross_protocol",
+    "expected_kind": null,
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Cross-protocol: skill + builtin + mcp tool mixed results"
+  },
+  {
+    "query": "apple notes sync",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::apple-notes"
+    ],
+    "category": "description_keyword",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Additional description-keyword match for minimum coverage"
+  },
+  {
+    "query": "apple notes integration",
+    "kind": null,
+    "expected_top3": [
+      "skill::apple-notes"
+    ],
+    "category": "description_keyword",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Description keyword match from name + description"
+  },
+  {
+    "query": "inspect GitHub codebase",
+    "kind": null,
+    "expected_top3": [
+      "skill::codebase-inspection"
+    ],
+    "category": "description_keyword",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Description keyword match across multiple words"
+  },
+  {
+    "query": "minecraft modpack server setup",
+    "kind": null,
+    "expected_top3": [
+      "skill::minecraft-modpack-server"
+    ],
+    "category": "description_keyword",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Multi-word description keyword match on gaming skill"
+  },
+  {
+    "query": "codebase-inspection",
+    "kind": null,
+    "expected_top3": [
+      "skill::codebase-inspection"
+    ],
+    "category": "exact_name",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Exact name match on github skill"
+  },
+  {
+    "query": "python-debugpy",
+    "kind": null,
+    "expected_top3": [
+      "skill::python-debugpy"
+    ],
+    "category": "exact_name",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Exact name match on a hermes-agent skill"
+  },
+  {
+    "query": "obsidian",
+    "kind": null,
+    "expected_top3": [
+      "skill::obsidian"
+    ],
+    "category": "exact_name",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Exact name match on note-taking skill"
+  },
+  {
+    "query": "gif-search",
+    "kind": null,
+    "expected_top3": [
+      "skill::gif-search"
+    ],
+    "category": "exact_name",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Exact name match on media skill"
+  },
+  {
+    "query": "auto format python code",
+    "kind": null,
+    "expected_top3": [
+      "skill::format-code"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Intent paraphrase: format code in different phrasing"
+  },
+  {
+    "query": "lint YAML",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::lint-yaml"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Override-present: short-override fixture. Tests A1-bis stratum with override_present=true"
+  },
+  {
+    "query": "validate kubernetes config",
+    "kind": null,
+    "expected_top3": [
+      "skill::lint-yaml"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Intent paraphrase: 'lint YAML' matches 'validate kubernetes config'"
+  },
+  {
+    "query": "create docker container",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::empty-string-override"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Override-present: empty-string-override fixture"
+  },
+  {
+    "query": "sentiment analysis NLP",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::unicode-boundary"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Override-present: unicode-boundary fixture"
+  },
+  {
+    "query": "search replace regex",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::noop-identical-override"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Override-present: noop-identical-override fixture"
+  },
+  {
+    "query": "send email campaign",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::semantic-contradiction"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Override-present: semantic-contradiction fixture"
+  },
+  {
+    "query": "xkcd_zzz_no_match_intent_void_query",
+    "kind": null,
+    "expected_top3": [],
+    "category": "negative",
+    "expected_kind": null,
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Negative case: no fixture matches this gibberish query"
+  },
+  {
+    "query": "quantum entanglement crypto arbitrage",
+    "kind": null,
+    "expected_top3": [],
+    "category": "negative",
+    "expected_kind": null,
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Negative case: unrelated domain terms with no fixture match"
+  },
+  {
+    "query": "delete all files",
+    "kind": "skill",
+    "expected_top3": [],
+    "category": "noun_conflation_adversarial_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Adversarial: query matches semantic-contradiction terse but NOT description. Noun-conflation trap test."
+  },
+  {
+    "query": "lint my code for errors",
+    "kind": null,
+    "expected_top3": [
+      "skill::lint-yaml"
+    ],
+    "category": "noun_conflation_adversarial_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Adversarial paraphrase under kind-omission: lint code = lint-yaml"
+  },
+  {
+    "query": "write file",
+    "kind": null,
+    "expected_top3": [
+      "skill::create-file"
+    ],
+    "category": "noun_conflation_cross_kind_contamination",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-003",
+    "notes": "Cross-kind contamination: create-file (skill) vs write-file (tool)"
+  },
+  {
+    "query": "search web",
+    "kind": null,
+    "expected_top3": [
+      "skill::search-web"
+    ],
+    "category": "noun_conflation_cross_kind_contamination",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-004",
+    "notes": "Cross-kind contamination: search-web (skill) vs web-search MCP tool"
+  },
+  {
+    "query": "send an email",
+    "kind": null,
+    "expected_top3": [
+      "skill::send-email"
+    ],
+    "category": "noun_conflation_invocation_intent",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-001",
+    "notes": "Noun-conflation invocation-intent: sending email - skill should NOT be confused with gmail tool"
+  },
+  {
+    "query": "create a new file on disk",
+    "kind": null,
+    "expected_top3": [
+      "skill::create-file"
+    ],
+    "category": "noun_conflation_invocation_intent",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-003",
+    "notes": "Noun-conflation: file creation - skill vs write-file MCP tool"
+  },
+  {
+    "query": "search the internet for information",
+    "kind": null,
+    "expected_top3": [
+      "skill::search-web"
+    ],
+    "category": "noun_conflation_invocation_intent",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-004",
+    "notes": "Noun-conflation: web search - skill vs Brave Search MCP"
+  }
+]

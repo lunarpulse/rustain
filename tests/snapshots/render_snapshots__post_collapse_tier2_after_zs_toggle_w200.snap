@@ -1,0 +1,5 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ ▸ Let me check the auth module files.… · 3 reads in src/auth/ ✓

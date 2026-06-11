@@ -1,0 +1,12 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ Analyzing.
+│
+│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│ ┄ ✓ Success Grep "{}" → running... (5.0s) ┄
+│ ┄ ✓ Success Bash "" → running... (5.0s) ┄
+│ ┄ ✓ Success Edit "{}" → running... (5.0s) ┄
+│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│

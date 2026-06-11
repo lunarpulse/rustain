@@ -1,0 +1,184 @@
+[package]
+name = "rustain"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A fast, extensible, terminal-native AI coding agent"
+license = "MIT"
+readme = "README.md"
+
+[lib]
+name = "rustain"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustain"
+path = "src/main.rs"
+
+[[bin]]
+name = "fake-mcp-server"
+path = "tests/common/fake_mcp_server.rs"
+test = true
+bench = false
+required-features = ["mcp"]
+
+[[test]]
+name = "scheduler_overhead"
+path = "perf-tests/scheduler_overhead.rs"
+
+[[test]]
+name = "subagent_spawn"
+path = "perf-tests/subagent_spawn.rs"
+
+[dependencies]
+# ── Async runtime ────────────────────────────────────────────────
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+globset = "0.4"
+
+# ── TUI framework ────────────────────────────────────────────────
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# ── CLI parsing ──────────────────────────────────────────────────
+clap = { version = "4.5", features = ["derive"] }
+
+# ── Serialization ────────────────────────────────────────────────
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+# Layered config merge (Epic 7 retro AI-7.2 / Path A). Provides field-level
+# merge across config layers — required by Epic 8 Story 8.1 AC. The `toml`
+# feature loads TOML files; `env` enables RUSTAIN_* env-var layer (Epic 8).
+figment = { version = "0.10", features = ["toml", "env", "json"] }
+
+# ── Error handling ───────────────────────────────────────────────
+thiserror = "2.0"
+anyhow = "1.0"
+
+# ── Logging / tracing ───────────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# ── HTTP client (provider adapters) ─────────────────────────────
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], optional = true }
+
+# ── Encoding ─────────────────────────────────────────────────────
+base64 = "0.22"
+
+# ── Utilities ────────────────────────────────────────────────────
+async-trait = "0.1"
+arc-swap = "1.7"
+nanoid = "0.4"
+petname = "2.0"
+dirs = "6.0"
+sha2 = "0.10"
+unicode-width = "0.2"
+arboard = { version = "3", optional = true }
+png = { version = "0.17", optional = true }
+pulldown-cmark = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+once_cell = "1"
+scopeguard = "1"
+shell-words = "1"
+lru = "0.12"
+blake3 = "1"
+bm25 = { version = "=2.3.2", optional = true }
+hex = "0.4"
+gray_matter = "0.2"
+
+# ── Local vector search (Story 11.3a, feature-gated `vector-search`) ──
+# Local ONNX embeddings (downloads + caches the model on first use → AC5) and
+# the binary `index.bin` codec (architecture.md:576). BOTH optional + kept OUT
+# of `default` so NFR9 (<30MB default binary) is untouched and no ONNX runtime
+# is pulled unless the feature is compiled in. fastembed transitively pulls
+# `ort` (ONNX Runtime), whose `download-binaries` fetches a prebuilt runtime at
+# build/first-run → `--features vector-search` requires network (see Dev Notes).
+fastembed = { version = "5.14", optional = true }
+bincode = { version = "2", optional = true }
+
+# ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
+landlock = { version = "0.4", optional = true }
+
+# ── Telegram channel adapter (Story 12.3, feature-gated) ──────────
+teloxide = { version = "0.17.0", optional = true, default-features = false, features = ["macros", "rustls"] }
+
+# ── Cron scheduler adapter (Story 12.4, feature-gated) ────────────
+# Parser only; rustain owns the tokio sleep/select loop.
+croner = { version = "3.0.1", optional = true }
+
+# ── Rustycode path deps — uncomment in Story 1.2 ────────────────
+# Verify crossterm/ratatui version compatibility with rustycode before enabling
+# domain = { path = "../rustycode/domain" }
+# adapters = { path = "../rustycode/adapters" }
+# llm-provider = { path = "../rustycode/llm-provider", features = ["config"] }
+
+# ── MCP SDK (Epic 9) ─────────────────────────────────────────────
+rmcp = { version = "1.0", default-features = false, features = ["client", "transport-child-process"], optional = true }
+
+tempfile = "3.0"
+
+# ── Unix daemon (Story 12.1a) ────────────────────────────────────
+# setsid() for detaching the re-exec child from the controlling terminal and
+# kill(pid, signal)/kill(pid, 0) liveness probing for the daemon lifecycle.
+# Already vendored (was a dev-dep + transitive); promoting to a runtime dep is
+# within Story 12.1a scope (Task 2 setsid / Task 5 kill(pid,0)).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"
+pretty_assertions = "1"
+mockito = "1"
+serial_test = "3"
+async-trait = "0.1"
+# Epic 6 scaffolding (sprint-change-proposal-2026-04-24):
+# - insta: TUI snapshot testing for widgets (story 6-0d PlanApprovalCard; future widgets)
+insta = { version = "1.41", features = ["yaml"] }
+procfs = "0.17"
+libc = "0.2"  # perf-tests/subagent_spawn.rs: sysconf(_SC_PAGESIZE) for RSS-per-agent measurement
+wiremock = "0.6"
+assert_cmd = "2.0"
+predicates = "3"
+tracing-test = "0.2"
+rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Story 9-7c)
+proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
+
+[features]
+default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search"]
+anthropic = ["dep:reqwest"]
+clipboard = ["dep:arboard", "dep:png"]
+# openai feature transitively enables anthropic because OpenAiAdapter reuses
+# SseLineBuffer from crate::adapters::anthropic::sse (Story 7.1b).
+openai = ["anthropic", "dep:reqwest"]
+ollama = ["dep:reqwest"]
+mcp = ["dep:rmcp"]
+skills-validation = []
+meta-search = ["dep:bm25"]
+sandbox = ["dep:landlock"]
+telegram = ["dep:teloxide"]
+cron = ["dep:croner"]
+# Story 11.3a — local semantic memory search. OUT of `default` (NFR9): the
+# embedding model is downloaded on first use, not bundled, and `ort` needs
+# network at build time. `cargo build|test --features vector-search` to enable.
+#
+# Story 11.3b extends the SAME feature (proposal 2026-05-30 Change 3 — "no new
+# cargo feature beyond `vector-search`"): `reqwest` is the remote OpenAI-compatible
+# `/embeddings` HTTP client (RemoteEmbeddingProvider, AC1) and `bm25` is the
+# keyword scorer for hybrid retrieval (AC2). Both already live in the tree
+# (`reqwest` is pulled by the default provider features; `bm25` is also behind
+# `meta-search`); listing them here makes `--features vector-search` self-
+# sufficient even when those features are off (Cargo features are additive).
+vector-search = ["dep:fastembed", "dep:bincode", "dep:reqwest", "dep:bm25"]
+
+[profile.release]
+opt-level =  3 #"z"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

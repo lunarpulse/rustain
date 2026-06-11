@@ -4,3 +4,13 @@ Cargo.lock
 *.swo
 .env
 .env.local
+*.nu
+.claude
+.rustain
+.rustain_data
+
+# python e2e tui tests
+__pycache__
+.opencode
+graphify-out
+AGENTS.md

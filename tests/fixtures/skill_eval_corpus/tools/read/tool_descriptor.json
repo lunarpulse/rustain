@@ -1,0 +1,6 @@
+{
+  "name": "read",
+  "description": "Read file contents from the filesystem with encoding detection.",
+  "kind": "builtin",
+  "provider_id": "builtin_provider"
+}

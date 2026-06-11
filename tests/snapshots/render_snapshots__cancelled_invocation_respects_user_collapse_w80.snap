@@ -1,0 +1,5 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ ▸ Running a long batch.… · 1 tool ✓

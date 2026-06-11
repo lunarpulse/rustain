@@ -1,0 +1,6 @@
+{
+  "name": "mcp__filesystem__read-file",
+  "description": "Read a file from the local filesystem with offset and limit support.",
+  "kind": "mcp",
+  "provider_id": "mcp:filesystem"
+}

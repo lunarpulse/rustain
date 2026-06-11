@@ -1,0 +1,6 @@
+{
+  "name": "mcp__slack__send-message",
+  "description": "Send a message to a Slack channel with optional thread support.",
+  "kind": "mcp",
+  "provider_id": "mcp:slack"
+}

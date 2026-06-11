@@ -1,0 +1,78 @@
+[project]
+name = "rustain-tui-tests"
+version = "0.1.0"
+description = "Pexpect-based E2E TUI tests for rustain"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0",
+    "pexpect>=4.9",
+    "pyte>=0.8,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest-timeout>=2.2",
+    "pytest-xdist>=3.5",
+    "pytest-rerunfailures>=14.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "requires_api: test requires a live API key and network access",
+    "slow: test takes >30s (tool execution + AI response)",
+    "story_3_1: Story 3.1 — Multi-line Input & History",
+    "story_3_2: Story 3.2 — Slash Commands & Autocomplete",
+    "story_3_3: Story 3.3 — Command Palette & Which-Key",
+    "story_3_4: Story 3.4 — Image Attachment & Clipboard",
+    "story_3_5: Story 3.5 — Help Overlay & Discoverability",
+    "story_3_6: Story 3.6 — Markdown Rendering",
+    "story_4_3a: Story 4-3a — Fork Conversations",
+    "story_4_3b: Story 4-3b — Rewind with File Snapshot",
+    "story_4_4: Story 4-4 — Search, Bookmarks & Export",
+    "story_4_5: Story 4-5 — History Import",
+    "story_4_6: Story 4-6 — Cleanup & Hardening",
+    "story_5_0: Story 5-0 — Python TUI Contract Test Infrastructure",
+    "story_5_0b: Story 5-0b — Permission System Redesign",
+    "story_5_1: Story 5-1 — Agent Skills Discovery & Catalog",
+    "story_5_2: Story 5-2 — Agent Skills Progressive Disclosure & Execution",
+    "story_5_3: Story 5-3 — Custom Slash Commands",
+    "story_5_4: Story 5-4 — Custom Agents",
+    "story_6_0a: Story 6-0a — Cancellation Token Tree & Dual-Channel EventBus",
+    "story_6_0b: Story 6-0b — ToolScheduler with ToolCall 7-Variant FSM",
+    "story_6_0c: Story 6-0c — ApprovalRuntime Pub/Sub",
+    "story_6_1a: Story 6-1a — Inline Plan Card",
+    "story_6_2a: Story 6-2a — Sequential Task Execution & Dependencies",
+    "story_6_3: Story 6-3 — Task Panel & Progress Monitoring",
+    "story_16_6: Story 16-6 — Vim Keymap (Fold & Motion)",
+    "story_9_1: Story 9-1 — MCP Server Configuration & Connection",
+    "story_9_2: Story 9-2 — MCP Tool Discovery & Invocation",
+    "story_9_3: Story 9-3 — Capability Provider Architecture / Built-in Refactor",
+    "story_9_4: Story 9-4 — Tool Exposure Strategy",
+    "story_9_5: Story 9-5 — Sandbox Policy (Landlock)",
+    "story_9_6: Story 9-6 — Skill Exposure Port",
+    "story_10_4: Story 10-4 — Subagent Panel & Agent Inspector",
+    "story_10_5: Story 10-5 — Task Delegation to Subagents",
+    "story_10_7: Story 10-7 — `task` Tool & Subagent Dispatch",
+    "story_10_x: Story 10-x — Live-LLM subagent / task-tool smoke",
+    "story_11: Story 11 — Memory Adapters & Context Assembly (memory/context commands)",
+    "mcp: Tests that exercise MCP (stdio) integration via the fixture server",
+    "subagent: Tests that exercise in-process subagent spawning / the task tool",
+]
+# Default: skip tests that need a live API unless explicitly requested.
+# Run all:      pytest
+# Skip API:     pytest -m "not requires_api"
+# Single story: pytest -m story_4_3b
+timeout = 180
+reruns = 2
+reruns_delay = 10
+addopts = "--dist loadgroup"
+filterwarnings = [
+    # pexpect.spawn uses pty.forkpty() in a multi-threaded parent (pytest-xdist).
+    # This is a known limitation of the PTY-based test harness; the warning
+    # adds no actionable signal and spams every test run.
+    "ignore::DeprecationWarning:pty.*:95",
+]

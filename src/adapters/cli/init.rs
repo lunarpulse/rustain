@@ -1,0 +1,341 @@
+use std::io::IsTerminal;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+
+use crate::domain::models::AppConfig;
+use crate::infrastructure::paths;
+
+/// Entry point for the `rustain init` wizard.
+///
+/// Runs in standard terminal mode (NOT ratatui). Uses println!/print! for output
+/// and std::io::stdin() for input. Must NOT trigger provider construction or terminal setup.
+pub async fn run_init() -> Result<()> {
+    run_init_with_paths(None, None).await
+}
+
+/// Testable init implementation that accepts optional path overrides.
+pub async fn run_init_with_paths(
+    config_dir_override: Option<PathBuf>,
+    workspace_override: Option<PathBuf>,
+) -> Result<()> {
+    // AC6: TTY detection — FIRST operation
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "rustain init requires an interactive terminal. Use `rustain init --non-interactive` for CI environments (available in a future release)."
+        );
+    }
+
+    let config_dir = match config_dir_override {
+        Some(d) => {
+            std::fs::create_dir_all(&d)
+                .with_context(|| format!("Failed to create config dir: {}", d.display()))?;
+            d
+        }
+        None => paths::config_dir()?,
+    };
+
+    let workspace = match workspace_override {
+        Some(w) => w,
+        None => paths::workspace_dir()?,
+    };
+
+    let config_toml_path = config_dir.join("config.toml");
+    let settings_json_path = workspace.join(".claude").join("settings.json");
+
+    // AC5: Existing configuration warning
+    if (config_toml_path.exists() || settings_json_path.exists())
+        && !prompt_yes_no("Configuration already exists. Overwrite?")?
+    {
+        println!("Init cancelled. Existing configuration preserved.");
+        return Ok(());
+    }
+
+    // AC2: API key detection
+    let api_key_found = detect_api_key()?;
+
+    // AC3: Directory creation
+    create_directories(&config_dir, &workspace)?;
+
+    // AC3: Write default config.toml
+    write_config_toml(&config_toml_path)?;
+
+    // AC3: Write default settings.json (skip if exists — preserves accumulated permissions)
+    if settings_json_path.exists() {
+        println!("Existing workspace permissions preserved.");
+    } else {
+        write_settings_json(&settings_json_path)?;
+    }
+
+    // AC4: Summary display
+    let sessions_dir = workspace.join(".claude").join("sessions");
+    display_summary(
+        &config_toml_path,
+        &settings_json_path,
+        &sessions_dir,
+        api_key_found,
+    );
+
+    Ok(())
+}
+
+/// Check which API key environment variable is set (if any).
+/// Returns the variable name if found, None otherwise.
+/// Checks ANTHROPIC_AUTH_TOKEN first (CC precedence), then ANTHROPIC_API_KEY.
+/// Filters out empty and whitespace-only values. NEVER returns the key value (NFR11).
+pub fn find_api_key_var() -> Option<&'static str> {
+    use crate::infrastructure::utils::env_var_is_set;
+
+    if env_var_is_set("ANTHROPIC_AUTH_TOKEN") {
+        return Some("ANTHROPIC_AUTH_TOKEN");
+    }
+    if env_var_is_set("ANTHROPIC_API_KEY") {
+        return Some("ANTHROPIC_API_KEY");
+    }
+    None
+}
+
+/// Detect API key presence from environment variables.
+/// Returns true if a key was found and user confirmed, false otherwise.
+/// NEVER displays the key value (NFR11).
+fn detect_api_key() -> Result<bool> {
+    if let Some(var_name) = find_api_key_var() {
+        if prompt_yes_no(&format!("Found {}. Use this?", var_name))? {
+            return Ok(true);
+        }
+    }
+
+    println!();
+    println!("Set ANTHROPIC_API_KEY in your shell profile:");
+    println!();
+    println!("  export ANTHROPIC_API_KEY=sk-ant-...");
+    println!();
+    println!("Get your API key at: https://console.anthropic.com/");
+    println!();
+
+    Ok(false)
+}
+
+/// Create required directories.
+pub fn create_directories(config_dir: &std::path::Path, workspace: &std::path::Path) -> Result<()> {
+    // config_dir is already created by paths::config_dir() or the override path
+    std::fs::create_dir_all(config_dir).with_context(|| {
+        format!(
+            "Failed to create config directory: {}",
+            config_dir.display()
+        )
+    })?;
+
+    let claude_dir = workspace.join(".claude");
+    std::fs::create_dir_all(&claude_dir).with_context(|| {
+        format!(
+            "Failed to create workspace config dir: {}",
+            claude_dir.display()
+        )
+    })?;
+
+    let sessions_dir = workspace.join(".claude").join("sessions");
+    std::fs::create_dir_all(&sessions_dir)
+        .with_context(|| format!("Failed to create sessions dir: {}", sessions_dir.display()))?;
+
+    Ok(())
+}
+
+/// Write default config.toml from AppConfig::default().
+pub fn write_config_toml(path: &std::path::Path) -> Result<()> {
+    let config = AppConfig::default();
+    let toml_content =
+        toml::to_string_pretty(&config).context("Failed to serialize default config to TOML")?;
+
+    let content = format!(
+        "# Rustain Configuration\n\
+         # Generated by rustain init\n\
+         \n\
+         {}\n\
+         # profile = \"coding\"  # Available in a future release\n",
+        toml_content
+    );
+
+    std::fs::write(path, content)
+        .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+
+    Ok(())
+}
+
+/// Write default settings.json (CC-compatible format).
+pub fn write_settings_json(path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("Failed to create settings directory: {}", parent.display())
+        })?;
+    }
+
+    let settings = serde_json::json!({
+        "permissions": {
+            "allow": []
+        }
+    });
+
+    let content =
+        serde_json::to_string_pretty(&settings).context("Failed to serialize settings to JSON")?;
+
+    std::fs::write(path, content)
+        .with_context(|| format!("Failed to write settings file: {}", path.display()))?;
+
+    Ok(())
+}
+
+/// Display completion summary with absolute paths.
+fn display_summary(
+    config_path: &std::path::Path,
+    settings_path: &std::path::Path,
+    sessions_path: &std::path::Path,
+    api_key_found: bool,
+) {
+    let api_status = if api_key_found {
+        "\u{2713} Found"
+    } else {
+        "\u{2717} Not set"
+    };
+
+    println!();
+    println!("rustain init completed!");
+    println!();
+    println!("Configuration:");
+    println!("  Global config:   {}", config_path.display());
+    println!("  Workspace config: {}", settings_path.display());
+    println!("  Sessions dir:    {}", sessions_path.display());
+    println!();
+    println!("Settings:");
+    println!("  API key:       {}", api_status);
+    println!("  Default model: {}", AppConfig::default().model);
+    println!();
+    println!("Next steps:");
+    println!("  Run `rustain` to start the TUI application");
+    println!("  Run `rustain doctor` to verify setup health (coming soon)");
+}
+
+/// Prompt the user with a yes/no question.
+/// Returns true for 'y'/'Y'/any string starting with y, false otherwise.
+fn prompt_yes_no(question: &str) -> std::io::Result<bool> {
+    use std::io::{self, BufRead, Write};
+    print!("{} [y/n] ", question);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().lock().read_line(&mut input)?;
+    Ok(input.trim().starts_with(['y', 'Y']))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_config_toml_creates_valid_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+
+        write_config_toml(&config_path).unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("# Rustain Configuration"));
+        assert!(content.contains("# Generated by rustain init"));
+        assert!(content.contains("claude-sonnet-4-6"));
+        assert!(content.contains("log_level"));
+        assert!(content.contains("log_max_size_mb"));
+        assert!(content.contains("log_retain_count"));
+        assert!(content.contains("# profile = \"coding\""));
+
+        // Round-trip: parse back to AppConfig
+        // Strip comment lines for TOML parsing
+        let toml_lines: String = content
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: AppConfig = toml::from_str(&toml_lines).unwrap();
+        let default = AppConfig::default();
+        assert_eq!(parsed.model, default.model);
+        assert_eq!(parsed.log_level, default.log_level);
+        assert_eq!(parsed.log_max_size_mb, default.log_max_size_mb);
+        assert_eq!(parsed.log_retain_count, default.log_retain_count);
+    }
+
+    #[test]
+    fn test_write_settings_json_creates_valid_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let settings_path = tmp.path().join(".claude").join("settings.json");
+
+        write_settings_json(&settings_path).unwrap();
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["permissions"]["allow"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_create_directories() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config").join("rustain");
+        let workspace = tmp.path().join("workspace");
+
+        create_directories(&config_dir, &workspace).unwrap();
+
+        assert!(config_dir.exists());
+        assert!(workspace.join(".claude").exists());
+        assert!(workspace.join(".claude").join("sessions").exists());
+    }
+
+    #[test]
+    fn test_find_api_key_var_prefers_auth_token() {
+        // Save originals
+        let orig_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
+        let orig_key = std::env::var("ANTHROPIC_API_KEY").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
+
+        // SAFETY: Test-only env manipulation. Tests using env vars must run
+        // with --test-threads=1 or accept potential flakiness.
+        unsafe {
+            // Both set — AUTH_TOKEN takes precedence
+            std::env::set_var("ANTHROPIC_AUTH_TOKEN", "tok");
+            std::env::set_var("ANTHROPIC_API_KEY", "key");
+            assert_eq!(find_api_key_var(), Some("ANTHROPIC_AUTH_TOKEN"));
+
+            // Only API_KEY set
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            assert_eq!(find_api_key_var(), Some("ANTHROPIC_API_KEY"));
+
+            // Neither set
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            assert_eq!(find_api_key_var(), None);
+
+            // Whitespace-only should be treated as absent
+            std::env::set_var("ANTHROPIC_API_KEY", "   ");
+            assert_eq!(find_api_key_var(), None);
+
+            // Empty string should be treated as absent
+            std::env::set_var("ANTHROPIC_API_KEY", "");
+            assert_eq!(find_api_key_var(), None);
+
+            // Restore originals
+            match orig_token {
+                Some(v) => std::env::set_var("ANTHROPIC_AUTH_TOKEN", v),
+                None => std::env::remove_var("ANTHROPIC_AUTH_TOKEN"),
+            }
+            match orig_key {
+                Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+                None => std::env::remove_var("ANTHROPIC_API_KEY"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_toml_roundtrip() {
+        let default = AppConfig::default();
+        let toml_str = toml::to_string_pretty(&default).unwrap();
+        let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.model, default.model);
+        assert_eq!(parsed.log_level, default.log_level);
+        assert_eq!(parsed.log_max_size_mb, default.log_max_size_mb);
+        assert_eq!(parsed.log_retain_count, default.log_retain_count);
+    }
+}

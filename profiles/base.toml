@@ -1,0 +1,23 @@
+name = "base"
+description = "Minimal agent — no memory, basic session, built-in tools only. Foundation for custom profiles."
+
+[persona]
+adapter = "minimal"
+
+[memory]
+adapter = "noop"
+
+[session]
+adapter = "basic"
+
+[tools]
+adapter = "builtin-only"
+
+[channels]
+adapter = "terminal"
+
+[scheduler]
+adapter = "none"
+
+[context]
+adapter = "default"

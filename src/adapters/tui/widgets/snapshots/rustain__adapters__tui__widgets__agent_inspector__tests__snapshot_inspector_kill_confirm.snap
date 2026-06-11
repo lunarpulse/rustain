@@ -1,0 +1,24 @@
+---
+source: src/adapters/tui/widgets/agent_inspector.rs
+expression: text
+---
+┌ Agent Inspector · reviewer ──────────────────────────────┐
+│Agent: reviewer                                           │
+│Model: (unknown — Story 10.7)                             │
+│Tools: (pending — Story 10.7)                             │
+│Spawned: 2h 0m 0s ago                                     │
+│                                                          │
+│Current task:                                             │
+│(no output yet)                                           │
+│                                                          │
+│Resource usage:                                           │
+│  Tokens: (pending — Story 10.7)                          │
+│  Cost: (pending — Story 10.7)                            │
+│  Turns: (pending — Story 10.7)                           │
+│  Memory: (n/a — in-process tier)                         │
+│                                                          │
+│Children:                                                 │
+│  (none)                                                  │
+│                                                          │
+│Conversation tail:                                        │
+└──────────────────────────────────────────────────────────┘

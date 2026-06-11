@@ -1,0 +1,6 @@
+{
+  "name": "mcp__postgres__query",
+  "description": "Execute parameterized SQL queries against a PostgreSQL database.",
+  "kind": "mcp",
+  "provider_id": "mcp:postgres"
+}

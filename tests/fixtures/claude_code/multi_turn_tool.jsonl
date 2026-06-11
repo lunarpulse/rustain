@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u1","timestamp":"2026-04-01T10:00:00Z","message":{"role":"user","content":"Read the README file"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-04-01T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the README for you."},{"type":"tool_use","id":"toolu_001","name":"Read","input":{"file_path":"/tmp/README.md"}}]}}
+{"type":"user","uuid":"u2","timestamp":"2026-04-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","content":"# README\nThis is the README content."}]}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-04-01T10:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"The README says: This is the README content."}]}}

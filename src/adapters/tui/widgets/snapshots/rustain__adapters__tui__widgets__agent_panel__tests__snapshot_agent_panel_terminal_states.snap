@@ -1,0 +1,9 @@
+---
+source: src/adapters/tui/widgets/agent_panel.rs
+expression: text
+---
+┌ Agents ──────────────────────────────────────────────────┐
+│✓ ♦ agent-ok  0s                                          │
+│✗ ♦ agent-fail  0s                                        │
+│⊘ ♦ agent-killed  0s                                      │
+└──────────────────────────────────────────────────────────┘

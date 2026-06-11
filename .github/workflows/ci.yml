@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross-target compile check (macOS cfg branches)
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo check --target aarch64-apple-darwin
+
+      # Pinned canonical invocation (Story 12-1d AC-12-1d-6). The workflow file
+      # IS the definition — not story notes. Pre-existing warnings are tracked;
+      # the merge-base diff below enforces 0-new on PRs.
+      - name: Clippy (canonical, warn-only)
+        run: cargo clippy --all-targets 2>&1 | tee /tmp/clippy-head.log
+
+      - name: Clippy (0-new vs merge-base)
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          # Baseline on merge-base via worktree (no stash/checkout mutation)
+          git worktree add /tmp/clippy-base "$BASE"
+          (cd /tmp/clippy-base && cargo clippy --all-targets --message-format=short 2>&1) \
+            | grep -E '^(src/|tests/|examples/|benches/)' | sed 's/:[0-9]*:[0-9]*:/:/' | sort -u > /tmp/clippy-base.txt
+          git worktree remove /tmp/clippy-base
+          # HEAD (already built above, re-run for message-format=short)
+          cargo clippy --all-targets --message-format=short 2>&1 \
+            | grep -E '^(src/|tests/|examples/|benches/)' | sed 's/:[0-9]*:[0-9]*:/:/' | sort -u > /tmp/clippy-head.txt
+          # Diff: new entries = fail
+          NEW=$(comm -13 /tmp/clippy-base.txt /tmp/clippy-head.txt)
+          if [ -n "$NEW" ]; then
+            echo "::error::New clippy warnings introduced vs merge-base:"
+            echo "$NEW"
+            exit 1
+          fi
+          echo "✅ No new clippy warnings vs merge-base."
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Event loop invariant check
+        run: |
+          if grep -nP '^\s*let\s+\w+\s*=\s*rx\.await' src/infrastructure/runtime/event_loop.rs; then
+              echo "ERROR: rx.await inside event_loop.rs — see module invariant docs"
+              exit 1
+          fi
+
+      - name: Test
+        run: cargo test
+
+  skills-validation:
+    name: Skills Validation Feature
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test with skills-validation feature
+        run: cargo test --features skills-validation
+
+  vector-search:
+    name: Vector Search Feature (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Compiles fastembed/ort + reqwest + bm25 and runs every NON-ignored test
+      # under the feature. This is the PR-level guard for:
+      #   - R-001 removal-integrity regression (tests/regression_removal_integrity.rs)
+      #   - 11-3b mockito dimension/auth/status locks (tests/vector_search.rs::remote_http)
+      #   - vector-search composition + delegation tests
+      # The #[ignore] real-network / model-download tests do NOT run here — they
+      # are exercised by the nightly-vector-search workflow.
+      - name: Test with vector-search feature (no ignored network tests)
+        run: cargo test --features vector-search
+
+  macos-unit:
+    name: macOS Unit Tests (daemon/ProcInspector)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Detect daemon-related path changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            daemon-paths:
+              - 'src/adapters/daemon/**'
+              - 'src/infrastructure/paths.rs'
+              - 'dist/**'
+              - 'tests/daemon_*'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/nightly-daemon.yml'
+
+      - name: Run macOS daemon lib tests
+        if: steps.filter.outputs.daemon-paths == 'true' || github.event_name == 'push'
+        run: |
+          cargo test --lib adapters::daemon::pidfile
+          cargo test --lib adapters::daemon::procargs
+
+      - name: Run macOS daemon integration tests (non-ignored)
+        if: steps.filter.outputs.daemon-paths == 'true' || github.event_name == 'push'
+        run: cargo test --test daemon_crash_recovery
+  tui-tests:
+    name: Python TUI Tests
+    runs-on: ubuntu-latest
+    needs: [check]
+    defaults:
+      run:
+        working-directory: rustain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rustain binary
+        run: cargo build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python TUI test dependencies
+        run: pip install -e "./tests_tui[dev]"
+
+      - name: Run non-API Python TUI tests
+        run: pytest tests_tui/ -m "not requires_api" --timeout=120 -v

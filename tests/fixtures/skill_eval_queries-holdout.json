@@ -1,0 +1,193 @@
+[
+  {
+    "query": "search github for a repo",
+    "kind": null,
+    "expected_top3": [
+      "mcp__github__search-repos",
+      "skill::codebase-inspection"
+    ],
+    "category": "cross_protocol",
+    "expected_kind": null,
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Cross-protocol: MCP tool + skill both search-related"
+  },
+  {
+    "query": "kanban orchestrator workflow",
+    "kind": null,
+    "expected_top3": [
+      "skill::kanban-orchestrator"
+    ],
+    "category": "description_keyword",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Description keyword match on devops skill name"
+  },
+  {
+    "query": "debugging hermes tui commands",
+    "kind": null,
+    "expected_top3": [
+      "skill::debugging-hermes-tui-commands"
+    ],
+    "category": "description_keyword",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Description keyword match - words appear verbatim in skill name"
+  },
+  {
+    "query": "python-debugpy",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::python-debugpy"
+    ],
+    "category": "exact_name",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Kind-filter: exact name with skill filter - tests kind_filter_accuracy"
+  },
+  {
+    "query": "jupyter-live-kernel",
+    "kind": null,
+    "expected_top3": [
+      "skill::jupyter-live-kernel"
+    ],
+    "category": "exact_name",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Exact name match on data-science skill"
+  },
+  {
+    "query": "kubernetes monitoring",
+    "kind": "skill",
+    "expected_top3": [
+      "skill::long-override"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": true,
+    "pair_id": null,
+    "notes": "Override-present: long-override fixture. Tests A1-bis stratum"
+  },
+  {
+    "query": "ship a microservice to production",
+    "kind": null,
+    "expected_top3": [
+      "skill::deploy-service"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Intent paraphrase: deploying service expressed differently"
+  },
+  {
+    "query": "TL;DR for a research paper",
+    "kind": null,
+    "expected_top3": [
+      "skill::summarize-pdf"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Intent paraphrase: 'summarize PDF' matches TL;DR for paper"
+  },
+  {
+    "query": "set up monitoring for my server",
+    "kind": null,
+    "expected_top3": [
+      "skill::monitor-alerts"
+    ],
+    "category": "intent_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Intent paraphrase: monitoring described in user language"
+  },
+  {
+    "query": "flargle wibble snorx",
+    "kind": null,
+    "expected_top3": [],
+    "category": "negative",
+    "expected_kind": null,
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Negative case: made-up words with no match"
+  },
+  {
+    "query": "make a pdf shorter",
+    "kind": null,
+    "expected_top3": [
+      "skill::summarize-pdf"
+    ],
+    "category": "noun_conflation_adversarial_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Adversarial paraphrase: non-obvious way to ask for PDF summarization"
+  },
+  {
+    "query": "how do i keep my code neat",
+    "kind": null,
+    "expected_top3": [
+      "skill::format-code"
+    ],
+    "category": "noun_conflation_adversarial_paraphrase",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": null,
+    "notes": "Adversarial paraphrase: vague natural language matching format-code"
+  },
+  {
+    "query": "query database",
+    "kind": null,
+    "expected_top3": [
+      "skill::query-db"
+    ],
+    "category": "noun_conflation_cross_kind_contamination",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-002",
+    "notes": "Cross-kind contamination: query-db (skill) vs postgres query (tool)"
+  },
+  {
+    "query": "send email",
+    "kind": null,
+    "expected_top3": [
+      "skill::send-email"
+    ],
+    "category": "noun_conflation_cross_kind_contamination",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-001",
+    "notes": "Cross-kind contamination: send-email (skill) vs gmail-send (tool), kind omitted"
+  },
+  {
+    "query": "execute SQL on database",
+    "kind": null,
+    "expected_top3": [
+      "skill::query-db"
+    ],
+    "category": "noun_conflation_invocation_intent",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-002",
+    "notes": "Noun-conflation: SQL query - skill vs postgres MCP tool"
+  },
+  {
+    "query": "run my test suite",
+    "kind": null,
+    "expected_top3": [
+      "skill::run-tests"
+    ],
+    "category": "noun_conflation_invocation_intent",
+    "expected_kind": "skill",
+    "override_present": false,
+    "pair_id": "pair-005",
+    "notes": "Noun-conflation: test running - skill vs jest MCP tool"
+  }
+]

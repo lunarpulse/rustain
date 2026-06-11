@@ -1,0 +1,10 @@
+---
+source: tests/render_snapshots.rs
+expression: text
+---
+│ Let me try building this.
+│
+│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│ ┄ ✗ Error Bash "" → running... (0.0s) ┄
+│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│
