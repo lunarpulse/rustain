@@ -14,7 +14,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "rustain"
 path = "src/main.rs"
-
+test = false
 [[bin]]
 name = "fake-mcp-server"
 path = "tests/common/fake_mcp_server.rs"
