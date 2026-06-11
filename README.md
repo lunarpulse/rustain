@@ -1,4 +1,4 @@
-# dev_ws
+# Rustain
 
 A multi-project research workspace for building, studying, and evolving AI coding agents.
 The workspace spans terminal-native agents, multi-channel assistants, orchestration platforms,
@@ -12,7 +12,6 @@ and protocol specifications — all under active development using the
 | Project | Stack | Description |
 |---------|-------|-------------|
 | [**rustain**](rustain/) | Rust (ratatui) | Fast, extensible, terminal-native AI coding agent with TUI, Agent Skills, MCP, and A2A protocol support. Hexagonal architecture. **Primary project** — currently in Epic 12. |
-| [**rustain-a2a-protocol**](rustain-a2a-protocol/) | Rust | Standalone Rustain Agent Protocol (RAP) and A2A v1.0 compatibility adapter. Pre-implementation with full architecture spec and ADRs. |
 | [**rustycode**](rustycode/) | Rust | AI coding assistant with hexagonal architecture; 9 built-in tools, 4 LLM providers (Anthropic, OpenAI, OpenRouter, Google Gemini). Production-ready CLI. |
 | [**maos**](maos/) | Rust (40+ crates) | Multi-Agent Operating Substrate — a runtime for safe, auditable multi-agent systems. Founding-sprint scaffold with CI-enforced build discipline. |
 
@@ -62,7 +61,7 @@ Patterns recurring across the original projects:
 
 - Rust (edition 2024) with cargo
 - Node.js / Bun (for TypeScript reference projects)
-- Python 3.x (for KIMI, hermes-agent, BMad scripts)
+- Python 3.x (tui)
 - Optional: VS Code with Dev Containers extension
 
 ### Dev Container
@@ -73,33 +72,6 @@ cp .devcontainer/.env_example .devcontainer/.env
 ```
 
 The container provides Rust, Python, PostgreSQL 15 with pgvector, and all development tooling pre-configured.
-
-### BMad Workflow
-
-This workspace uses the [BMad Method](https://github.com/bmadcode/BMAD-METHOD) for planning and delivery.
-Key commands (via Claude Code skills):
-
-| Command | Purpose |
-|---------|---------|
-| `/bmad-help` | Get guidance on next steps |
-| `/bmad-sprint-status` | View current sprint progress |
-| `/bmad-create-story` | Create the next implementation story |
-| `/bmad-dev-story` | Implement a story file |
-| `/bmad-code-review` | Run adversarial code review |
-
-### Knowledge Graph
-
-The workspace includes a [graphify](https://github.com/nichochar/graphify) knowledge graph for structural navigation:
-
-```bash
-# Query relationships
-graphify query "how does rustain's MCP adapter work?"
-graphify path "TurnDriver" "ContextAssemblerPort"
-graphify explain "WindowingAssembler"
-
-# Update after code changes (AST-only, no API cost)
-graphify update .
-```
 
 ## Project Status
 
