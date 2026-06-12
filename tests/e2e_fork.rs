@@ -15,10 +15,9 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{SearchState, TabRenderState, TuiState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
-use rustain::domain::models::StatusState;
 use rustain::domain::models::checkpoint::CheckpointId;
 use rustain::domain::models::conversation::{
     ChatMessage, Conversation, ForkSource, generate_conversation_id,

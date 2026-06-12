@@ -447,7 +447,7 @@ impl SubagentProvider {
                         conversation_id: conversation_id.clone(),
                         provider_id: "subagent".into(),
                         model: effective_model.clone(),
-                        tier: tier,
+                        tier,
                         step_kind: Some(crate::domain::models::StepKind::Plan),
                         escalation_reason: crate::domain::models::router::EscalationReason::None,
                         usage: crate::domain::models::usage::TokenUsage {

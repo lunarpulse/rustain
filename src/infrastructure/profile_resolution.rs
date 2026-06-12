@@ -90,9 +90,8 @@ mod tests {
         let orig = std::env::var("RUSTAIN_PROFILE").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
         unsafe { std::env::remove_var("RUSTAIN_PROFILE") };
         let result = effective_profile_name(&cli, &config);
-        match orig {
-            Some(v) => unsafe { std::env::set_var("RUSTAIN_PROFILE", v) },
-            None => {}
+        if let Some(v) = orig {
+            unsafe { std::env::set_var("RUSTAIN_PROFILE", v) }
         }
         assert_eq!(result, "coding");
     }
@@ -105,9 +104,8 @@ mod tests {
         let orig = std::env::var("RUSTAIN_PROFILE").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
         unsafe { std::env::remove_var("RUSTAIN_PROFILE") };
         let result = effective_profile_name(&cli, &config);
-        match orig {
-            Some(v) => unsafe { std::env::set_var("RUSTAIN_PROFILE", v) },
-            None => {}
+        if let Some(v) = orig {
+            unsafe { std::env::set_var("RUSTAIN_PROFILE", v) }
         }
         // Empty CLI string → falls through → config
         assert_eq!(result, "coding");

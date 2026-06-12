@@ -99,7 +99,7 @@ fn collect_rs_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>
             let path = entry.path();
             if path.is_dir() {
                 collect_rs_recursive(&path, out);
-            } else if path.extension().map_or(false, |e| e == "rs") {
+            } else if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
             }
         }

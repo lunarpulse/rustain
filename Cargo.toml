@@ -2,7 +2,7 @@
 name = "rustain"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 description = "A fast, extensible, terminal-native AI coding agent"
 license = "MIT"
 readme = "README.md"
@@ -177,6 +177,17 @@ cron = ["dep:croner"]
 # `meta-search`); listing them here makes `--features vector-search` self-
 # sufficient even when those features are off (Cargo features are additive).
 vector-search = ["dep:fastembed", "dep:bincode", "dep:reqwest", "dep:bm25"]
+
+# Package-wide lint posture (Epic 12 retro AI-12.1). Unlike the `#![allow]` block in
+# src/lib.rs + src/main.rs (which only covers lib + bin), Cargo `[lints]` applies to
+# EVERY target — integration tests, build.rs, examples. `collapsible_if`/`else_if` are
+# already an accepted project-wide allow (see the lib.rs "flatten nested ifs" TODO);
+# bumping MSRV to 1.91 unlocked let-chains, so clippy now also suggests collapsing
+# nested `if let`s inside the test crates. Keep them allowed here so the `-D warnings`
+# gate stays meaningful without hand-flattening test scaffolding.
+[lints.clippy]
+collapsible_if = "allow"
+collapsible_else_if = "allow"
 
 [profile.release]
 opt-level =  3 #"z"

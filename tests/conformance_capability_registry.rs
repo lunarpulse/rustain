@@ -1,3 +1,4 @@
+#![allow(clippy::assertions_on_constants)] // AI-12.1: compile/structural assertion
 //! Conformance tests for Capability Provider Architecture — Story 9.3a.
 //!
 //! Discharges AC-1, AC-2, AC-3, AC-4, AC-5, AC-7, AC-8, AC-9, AC-10.
@@ -149,7 +150,7 @@ fn collect_rs_recursive(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>
             let path = entry.path();
             if path.is_dir() {
                 collect_rs_recursive(&path, out);
-            } else if path.extension().map_or(false, |e| e == "rs") {
+            } else if path.extension().is_some_and(|e| e == "rs") {
                 out.push(path);
             }
         }
@@ -228,7 +229,7 @@ fn test_re_export_surface_compiles() {
         CatalogDelta,
         Box<dyn CapabilityProvider>,
         Box<dyn CatalogObserver>,
-    )>::default();
+    )>;
 }
 
 // ── AC-4: Registry event emission ────────────────────────────────────
@@ -379,7 +380,7 @@ fn test_mcp_provider_discover_round_trip() {
         .parent()
         .expect("parent")
         .to_path_buf();
-    let candidates = vec![
+    let candidates = [
         exe_dir.join(binary_name),
         exe_dir.parent().expect("deps parent").join(binary_name),
     ];
@@ -506,7 +507,7 @@ async fn test_builtin_provider_discover_returns_expected_tools() {
     ));
     let composite = CompositeToolsetAdapter::new(adapter, vec![], vec![], true, None, None, None);
 
-    let _ = composite.populate_registry().await.unwrap();
+    composite.populate_registry().await.unwrap();
     let snap = composite.capability_registry().snapshot();
     let mut builtin_names: Vec<String> = snap
         .iter()
@@ -685,7 +686,7 @@ async fn test_registry_holds_all_three_protocols() {
         .parent()
         .expect("parent")
         .to_path_buf();
-    let candidates = vec![
+    let candidates = [
         exe_dir.join(binary_name),
         exe_dir.parent().expect("deps parent").join(binary_name),
     ];
@@ -952,7 +953,7 @@ async fn test_catalog_delta_added_removed_correctness() {
         .parent()
         .expect("parent")
         .to_path_buf();
-    let candidates = vec![
+    let candidates = [
         exe_dir.join(binary_name),
         exe_dir.parent().expect("deps parent").join(binary_name),
     ];
@@ -987,7 +988,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
 
     // Initial populate: version=1, registry has 9 builtin (incl. skill_view from 9.6, remember from 11.1, remember_fact from 11.2) + 2 MCP = 11 (13 with meta-search)
-    let _ = composite.populate_registry().await.unwrap();
+    composite.populate_registry().await.unwrap();
     assert_eq!(composite.catalog_version(), 1);
     let snap1 = composite.capability_registry().snapshot();
     assert_eq!(
@@ -997,7 +998,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
 
     // Emit another delta with no changes: version=2, added=0 removed=0
-    let _ = composite.emit_catalog_delta().await.unwrap();
+    composite.emit_catalog_delta().await.unwrap();
     assert_eq!(composite.catalog_version(), 2);
     let snap2 = composite.capability_registry().snapshot();
     assert_eq!(
@@ -1036,7 +1037,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
 
     // Emit delta: version=3, should detect 1 added
-    let _ = composite.emit_catalog_delta().await.unwrap();
+    composite.emit_catalog_delta().await.unwrap();
     assert_eq!(composite.catalog_version(), 3);
 
     // Verify the multiply tool is present after delta emit

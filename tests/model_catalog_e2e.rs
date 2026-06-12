@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use rustain::adapters::model_catalog_cache::{
-    CachedCatalog, CachedModelEntry, CachedProviderEntry, ModelCatalogCache, merge_with_live,
+    CachedCatalog, CachedModelEntry, CachedProviderEntry, ModelCatalogCache,
 };
 use rustain::domain::models::provider::ModelDescriptor;
 

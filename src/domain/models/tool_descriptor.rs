@@ -248,13 +248,13 @@ impl crate::domain::ports::search::IndexableItem for ToolDescriptor {
             provider: None,
             matched_terms,
         };
-        if !crate::domain::models::capability_id::CapabilityId::from_mcp_wire_name(&hit.name)
-            .is_some()
-            && !crate::domain::models::capability_id::CapabilityId::parse(&format!(
+        if crate::domain::models::capability_id::CapabilityId::from_mcp_wire_name(&hit.name)
+            .is_none()
+            && crate::domain::models::capability_id::CapabilityId::parse(&format!(
                 "builtin::{}",
                 hit.name
             ))
-            .is_some()
+            .is_none()
         {
             debug_assert!(
                 false,

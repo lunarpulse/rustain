@@ -13,7 +13,7 @@ use rustain::domain::models::{
     StreamingState, generate_conversation_id,
 };
 use rustain::domain::ports::StreamingProvider;
-use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
+use rustain::domain::services::reducer::{apply_chunk_for_tests, test_reducer_state};
 
 // ── Mock Provider ──────────────────────────────────────────────
 

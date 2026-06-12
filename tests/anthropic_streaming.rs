@@ -33,7 +33,7 @@ mod streaming_integration {
 
     /// Helper: create streaming state.
     fn make_streaming() -> StreamingState {
-        let (mut reducer, clock) = test_reducer_state(1000);
+        let (_reducer, _clock) = test_reducer_state(1000);
         StreamingState {
             is_streaming: true,
             ..StreamingState::default()

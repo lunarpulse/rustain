@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rustain::domain::events::AppEvent;
-use rustain::domain::models::router::{EscalationReason, ModelTier, StepKind};
+use rustain::domain::models::router::{EscalationReason, ModelTier};
 use rustain::domain::models::{
     ChatMessage, CompletionOptions, Conversation, Message, MessageRole, StopReason, StreamChunk,
     ToolDefinition, ToolResult, generate_conversation_id,

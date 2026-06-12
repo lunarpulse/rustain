@@ -119,6 +119,7 @@ mod tests {
         // Can't easily construct a real McpClientAdapter in unit tests,
         // but we verify the type compiles and the protocol is correct
         // via a smoke test that only exercises the trait method signature.
-        assert!(true); // Integration test in conformance_capability_registry.rs covers the real path
+        // No runtime assertion possible without a live McpClientAdapter; the real
+        // protocol round-trip is covered by conformance_capability_registry.rs.
     }
 }

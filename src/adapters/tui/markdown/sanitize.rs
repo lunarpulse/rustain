@@ -17,7 +17,7 @@ pub fn sanitize(input: &str) -> String {
     let fence_count = count_fences(&normalized);
 
     // Odd number of fences → append a closing fence
-    if fence_count % 2 != 0 {
+    if !fence_count.is_multiple_of(2) {
         let mut out = normalized;
         if !out.ends_with('\n') {
             out.push('\n');

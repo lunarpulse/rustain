@@ -7,10 +7,7 @@
 
 use std::fs;
 
-use rustain::domain::events::ChunkAction;
-use rustain::domain::models::{
-    InvocationStatus, PartId, StopReason, StreamChunk, ToolOutput, TurnPart,
-};
+use rustain::domain::models::{InvocationStatus, PartId, StreamChunk, ToolOutput, TurnPart};
 use rustain::domain::services::reducer::{reduce, test_reducer_state};
 
 #[test]
@@ -41,7 +38,7 @@ fn conformance_interleaved_streaming_produces_correct_parts() {
     // 1. Prose "I'll search" (part 0)
     // 2. ToolInvocation "Bash" (part 1)
     // 3. ToolResult for Bash (part 2)
-    let expected = vec![
+    let expected = [
         TurnPart::Prose {
             id: PartId(0),
             text: "I'll search".into(),

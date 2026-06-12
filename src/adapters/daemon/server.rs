@@ -980,7 +980,9 @@ impl AttachServer {
                         }
                         // Send to writer only.
                         if let Some(tx) = send_tx {
-                            let _ = tx.send(frame);
+                            // bounded mpsc::Sender::send is async — must await or the
+                            // frame future is dropped and the card never reaches the writer.
+                            let _ = tx.send(frame).await;
                         }
                     }
                     Ok(Ok(_)) => {
@@ -990,14 +992,17 @@ impl AttachServer {
                         }
                         // Best-effort info notice (connection may be gone).
                         if let Some(tx) = send_tx {
-                            let _ = tx.send(DaemonFrame::Event(RawEvent {
-                                conversation_id: None,
-                                timestamp_ms: chrono::Utc::now().timestamp_millis(),
-                                kind: RawEventKind::SystemNotice {
-                                    level: crate::domain::models::NoticeLevel::Info,
-                                    message: "Nothing worth promoting from recent activity".into(),
-                                },
-                            }));
+                            let _ = tx
+                                .send(DaemonFrame::Event(RawEvent {
+                                    conversation_id: None,
+                                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                                    kind: RawEventKind::SystemNotice {
+                                        level: crate::domain::models::NoticeLevel::Info,
+                                        message: "Nothing worth promoting from recent activity"
+                                            .into(),
+                                    },
+                                }))
+                                .await;
                         }
                     }
                     Ok(Err(e)) => {

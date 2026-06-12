@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_path_falls_through_to_filePath() {
+    fn extract_path_falls_through_to_file_path() {
         let args = json!({"filePath": "b", "path": "c"});
         assert_eq!(extract_path_from_args(&args), Some("b"));
     }

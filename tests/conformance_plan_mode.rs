@@ -364,7 +364,7 @@ fn ac5_slash_plan_on_activates() {
 #[test]
 fn ac5_shift_tab_cycle_order() {
     // Verify the cycle logic by exercising mode ordering
-    let modes = vec![
+    let modes = [
         PermissionMode::Normal,
         PermissionMode::AutoEdit,
         PermissionMode::Plan,

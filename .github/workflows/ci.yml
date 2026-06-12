@@ -17,7 +17,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      # Toolchain PINNED (Epic 12 retro AI-12.1) so the clippy lint set is reproducible.
+      # The 12-1d Q5 "47-vs-0" discrepancy was clippy-version drift between runners;
+      # bump this pin deliberately when adopting a newer toolchain.
+      - uses: dtolnay/rust-toolchain@1.94
       - uses: Swatinem/rust-cache@v2
 
       - name: Cross-target compile check (macOS cfg branches)
@@ -26,32 +29,18 @@ jobs:
           rustup target add aarch64-apple-darwin
           cargo check --target aarch64-apple-darwin
 
-      # Pinned canonical invocation (Story 12-1d AC-12-1d-6). The workflow file
-      # IS the definition — not story notes. Pre-existing warnings are tracked;
-      # the merge-base diff below enforces 0-new on PRs.
-      - name: Clippy (canonical, warn-only)
-        run: cargo clippy --all-targets 2>&1 | tee /tmp/clippy-head.log
+      # Zero-warning gate (Epic 12 retro AI-12.1). The baseline was burned down to 0
+      # across all feature lanes on 2026-06-12; `-D warnings` makes ANY warning a hard
+      # failure. This REPLACES the prior warn-only + merge-base "0-new" diff, which let
+      # a 257-warning baseline accumulate silently (every story reported "0-new" while
+      # the baseline rotted). Documented per-lint exemptions live in src/lib.rs +
+      # src/main.rs (kept in sync). vector-search is gated in nightly-vector-search.yml
+      # (its `ort`/`fastembed` build pulls network and would slow per-PR CI).
+      - name: Clippy (zero-warning gate — default)
+        run: cargo clippy --all-targets -- -D warnings
 
-      - name: Clippy (0-new vs merge-base)
-        if: github.event_name == 'pull_request'
-        run: |
-          BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
-          # Baseline on merge-base via worktree (no stash/checkout mutation)
-          git worktree add /tmp/clippy-base "$BASE"
-          (cd /tmp/clippy-base && cargo clippy --all-targets --message-format=short 2>&1) \
-            | grep -E '^(src/|tests/|examples/|benches/)' | sed 's/:[0-9]*:[0-9]*:/:/' | sort -u > /tmp/clippy-base.txt
-          git worktree remove /tmp/clippy-base
-          # HEAD (already built above, re-run for message-format=short)
-          cargo clippy --all-targets --message-format=short 2>&1 \
-            | grep -E '^(src/|tests/|examples/|benches/)' | sed 's/:[0-9]*:[0-9]*:/:/' | sort -u > /tmp/clippy-head.txt
-          # Diff: new entries = fail
-          NEW=$(comm -13 /tmp/clippy-base.txt /tmp/clippy-head.txt)
-          if [ -n "$NEW" ]; then
-            echo "::error::New clippy warnings introduced vs merge-base:"
-            echo "$NEW"
-            exit 1
-          fi
-          echo "✅ No new clippy warnings vs merge-base."
+      - name: Clippy (zero-warning gate — telegram+cron)
+        run: cargo clippy --all-targets --features "telegram cron" -- -D warnings
 
       - name: Format
         run: cargo fmt --check
@@ -144,4 +133,6 @@ jobs:
         run: pip install -e "./tests_tui[dev]"
 
       - name: Run non-API Python TUI tests
-        run: pytest tests_tui/ -m "not requires_api" --timeout=120 -v
+        run: pytest tests_tui/ -m "not requires_api" -n auto --timeout=120 -v
+        env:
+          RUST_LOG: debug

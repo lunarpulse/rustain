@@ -164,9 +164,8 @@ pub fn compute_layout(
     let effective_sidebar_visible =
         if density_mode == crate::domain::models::visual::DensityMode::Focus {
             false
-        } else if density_mode == crate::domain::models::visual::DensityMode::Monitor {
-            sidebar_visible
         } else {
+            // Monitor and Standard both honour the caller's sidebar_visible.
             sidebar_visible
         };
 

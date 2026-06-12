@@ -1,3 +1,4 @@
+#![allow(dead_code)] // AI-12.1: test fixture scaffolding
 //! Integration tests for profile loading — Story 8.2.
 //!
 //! Exercises TomlProfileResolver end-to-end with temp directories,
@@ -157,7 +158,7 @@ fn test_coding_profile_composes_seven_ports() {
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
@@ -222,7 +223,7 @@ fn test_base_profile_composes_all_noop() {
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
@@ -274,7 +275,7 @@ fn test_personal_assistant_preview_composes_with_fallback() {
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
@@ -336,7 +337,7 @@ fn test_reload_recomposes_agent_core() {
     let ctx = rustain::infrastructure::composition::ComposeContext {
         workspace_path: tmpdir.path().to_path_buf(),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),

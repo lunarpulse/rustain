@@ -271,8 +271,11 @@ fn millis_to_local(ms: i64) -> DateTime<Local> {
 mod tests {
     use super::*;
 
+    // Key-only tombstone (empty token): these helpers feed the KEY-dimension tests
+    // (idempotency-by-key, bincode key round-trip). Token round-trip is covered
+    // separately by `v2_round_trip_preserves_token`.
     fn rec(key: u64, ms: i64) -> RedactionRecord {
-        RedactionRecord::forget(key, millis_to_local(ms))
+        RedactionRecord::redact(key, String::new(), millis_to_local(ms))
     }
 
     #[test]

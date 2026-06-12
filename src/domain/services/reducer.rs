@@ -1731,7 +1731,7 @@ mod tests {
         );
 
         assert!(
-            state.progress.get("tool_1").is_none(),
+            !state.progress.contains_key("tool_1"),
             "progress entry should be removed on ToolResult"
         );
     }

@@ -313,7 +313,7 @@ fn prose_anchor_jump_skips_turns_without_prose_part() {
     // Turn "bb" (index 1) is tool-only and SHOULD be skipped by the keymap logic.
     // Here we test the VIEWPORT OUTCOME: when the target is "cc", reconcile
     // correctly sets focus and pin.
-    let (vs, offset) = jump_and_reconcile(
+    let (vs, _offset) = jump_and_reconcile(
         &conv, view_state, &ids[0], // "aa"
         &ids[2], // "cc" - skip "bb"
         &clock, 80, VPORT,

@@ -308,7 +308,7 @@ pub fn validate_skill_frontmatter(
         // Non-fatal lint: name starts with a digit. However, NameDirectoryMismatch
         // (fatal) must take precedence — check directory first to avoid masking
         // a fatal error with a non-fatal warning.
-        let starts_with_digit = name.chars().next().map_or(false, |c| c.is_ascii_digit());
+        let starts_with_digit = name.chars().next().is_some_and(|c| c.is_ascii_digit());
         if starts_with_digit && name != expected_name {
             return Err(SkillValidationError::NameDirectoryMismatch {
                 name: name.to_string(),

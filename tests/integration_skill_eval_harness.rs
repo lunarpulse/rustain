@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    clippy::only_used_in_recursion,
+    clippy::empty_line_after_doc_comments
+)] // AI-12.1: test scaffolding
 #![cfg(feature = "meta-search")]
 
 //! ## Canonical invocation
@@ -767,7 +772,7 @@ async fn test_noun_conflation_invocation_intent() {
                 let wrong_kind_in_top3 = hits
                     .iter()
                     .take(3)
-                    .filter(|h| expected_kind.map_or(false, |ek| h.kind != ek))
+                    .filter(|h| expected_kind.is_some_and(|ek| h.kind != ek))
                     .count();
                 wrong_kind_in_top3 == 0
             }
@@ -1429,7 +1434,7 @@ fn test_holdout_sha256_matches_sprint_status() {
         .and_then(|l| l.split("holdout_sha256:").nth(1))
         .map(|s| {
             // Extract just the 64-char hex hash, ignoring trailing comment text.
-            s.trim().split_whitespace().next().unwrap_or("").to_string()
+            s.split_whitespace().next().unwrap_or("").to_string()
         })
         .expect("holdout_sha256 not found in sprint-status.yaml 9-7c entry");
 

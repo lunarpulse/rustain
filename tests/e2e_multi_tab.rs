@@ -482,7 +482,7 @@ use tokio_util::sync::CancellationToken;
 fn test_tab_turn_cancel_reset_allows_new_turn() {
     let session = CancellationToken::new();
     let mut tm = TabManager::new(session.clone());
-    let id = tm.active_tab_id();
+    let _id = tm.active_tab_id();
 
     // Simulate a cancelled turn
     tm.active_tab_mut().turn_cancel.cancel();

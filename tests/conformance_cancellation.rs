@@ -250,7 +250,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let provider_swap = Arc::new(ArcSwap::from_pointee(
-        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
+        Arc::new(NoOpProvider) as Arc<dyn StreamingProvider>
     ));
     let provider_registry = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
     let (event_bus, domain_rx) = EventBus::new(16);
@@ -259,7 +259,7 @@ async fn ac4_signal_cancel_before_shutdown() {
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(NoOpStorage::default()) as Arc<dyn rustain::domain::ports::StoragePort>,
+        storage: Arc::new(NoOpStorage) as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
         include_builtin_tools: true,

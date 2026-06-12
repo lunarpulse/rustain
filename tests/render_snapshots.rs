@@ -1,3 +1,4 @@
+#![allow(clippy::empty_line_after_doc_comments)] // AI-12.1: doc formatting
 //! Snapshot tests for Story 16.4 parts-aware render at 80/120/200 columns.
 //!
 //! All snapshots use `Theme::dark()` (Theme has no Default impl — the spec's

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // shared test-support module; helpers used by a subset of integration-test binaries
 //! Eval query set partition selector (Story 9-7c, AC-9-7c-3).
 //!
 //! ## Stratified split algorithm

@@ -169,7 +169,7 @@ async fn make_provider() -> (
 
 #[tokio::test]
 async fn concurrent_task_calls_run_in_parallel() {
-    let (provider, runner, _tmp) = make_provider().await;
+    let (provider, _runner, _tmp) = make_provider().await;
 
     // Launch two task calls concurrently
     let input1 = serde_json::json!({"description": "task 1", "prompt": "hello 1"});

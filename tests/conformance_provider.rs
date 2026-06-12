@@ -9,7 +9,7 @@ use futures::StreamExt;
 use rustain::adapters::noop::NoOpProvider;
 use rustain::adapters::provider::ProviderRegistry;
 use rustain::domain::models::provider::ModelDescriptor;
-use rustain::domain::models::{CompletionOptions, Message, MessageRole, StreamChunk, UserMessage};
+use rustain::domain::models::{CompletionOptions, Message, StreamChunk};
 use rustain::domain::ports::StreamingProvider;
 use tokio::runtime::Runtime;
 
@@ -51,7 +51,7 @@ fn assert_streaming_provider_conformance(provider: &dyn StreamingProvider) {
 
 #[test]
 fn test_noop_provider_conformance() {
-    let provider = NoOpProvider::default();
+    let provider = NoOpProvider;
     assert_streaming_provider_conformance(&provider);
     assert_eq!(provider.provider_id(), "noop");
     assert!(provider.list_models().is_empty());
@@ -70,7 +70,7 @@ fn test_noop_provider_conformance() {
 #[test]
 fn test_registry_list_models() {
     let registry = ProviderRegistry::new();
-    registry.register(Box::new(NoOpProvider::default()));
+    registry.register(Box::new(NoOpProvider));
 
     // NoOp returns empty model list
     let all = registry.list_all_models();
@@ -88,7 +88,7 @@ fn test_registry_list_models() {
 #[test]
 fn test_registry_health_check_on_noop_succeeds() {
     let registry = ProviderRegistry::new();
-    registry.register(Box::new(NoOpProvider::default()));
+    registry.register(Box::new(NoOpProvider));
 
     let providers = registry.list_providers();
     assert_eq!(providers[0].model_count, 0);
@@ -433,7 +433,7 @@ fn test_router_set_active_unknown_id_returns_error() {
     use rustain::adapters::provider::ProviderRouter;
 
     let router = ProviderRouter::new("noop".to_string());
-    router.register(Arc::new(NoOpProvider::default()));
+    router.register(Arc::new(NoOpProvider));
     let result = router.set_active("nope");
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -506,7 +506,7 @@ fn test_router_conformance() {
     use rustain::adapters::provider::ProviderRouter;
 
     let router = Arc::new(ProviderRouter::new("noop".to_string()));
-    router.register(Arc::new(NoOpProvider::default()));
+    router.register(Arc::new(NoOpProvider));
     assert_streaming_provider_conformance(router.as_ref());
 }
 

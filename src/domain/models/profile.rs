@@ -180,7 +180,7 @@ default_plan_mode = false
 "#;
         let def: ProfileDefinition = toml::from_str(toml_str).unwrap();
         assert_eq!(def.extends.as_deref(), Some("base"));
-        assert_eq!(def.overrides.is_some(), true);
+        assert!(def.overrides.is_some());
     }
 
     #[test]

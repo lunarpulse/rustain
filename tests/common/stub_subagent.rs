@@ -1,3 +1,4 @@
+#![allow(dead_code)] // shared test-support module; helpers used by a subset of integration-test binaries
 //! Stub subagent runner for integration tests.
 //!
 //! Emits a chosen terminal status immediately and writes a known string into the spool.

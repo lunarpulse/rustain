@@ -464,7 +464,7 @@ fn new_cron_conversation(session_id: &str, job_name: &str, created_at: i64) -> C
 
 fn sanitize_session_component(name: &str) -> String {
     const MAX_LEN: usize = 64;
-    let mut out = String::with_capacity(name.len().max(1).min(MAX_LEN));
+    let mut out = String::with_capacity(name.len().clamp(1, MAX_LEN));
     for ch in name.chars() {
         if out.len() >= MAX_LEN {
             break;

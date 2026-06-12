@@ -21,7 +21,7 @@ fn test_compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-conformance"),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
@@ -129,14 +129,14 @@ fn test_no_domain_imports_concrete_adapters() {
     ).unwrap();
 
     let mut violations = Vec::new();
-    let mut walk = |dir: &std::path::Path, v: &mut Vec<String>| {
+    let walk = |dir: &std::path::Path, v: &mut Vec<String>| {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "rs") {
+            if path.extension().is_some_and(|e| e == "rs") {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
                 for line in content.lines() {
                     if line.trim().starts_with("//") || line.trim().starts_with("//!") {

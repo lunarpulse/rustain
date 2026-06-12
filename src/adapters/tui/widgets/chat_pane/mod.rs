@@ -2904,7 +2904,7 @@ mod parts_aware_tests {
     #[test]
     fn cache_metrics_miss_increments_on_uncached_turn() {
         crate::adapters::tui::widgets::chat_pane::height_cache::metrics::reset();
-        let mut cache = crate::adapters::tui::state::HeightCache::default();
+        let cache = crate::adapters::tui::state::HeightCache::default();
         let key = crate::adapters::tui::state::HeightKey {
             turn_id: crate::domain::models::TurnId("t1".into()),
             expansion: true,
@@ -3118,7 +3118,7 @@ mod parts_aware_tests {
             ],
             None,
         );
-        let mut conversation = Conversation {
+        let conversation = Conversation {
             id: "test-spinner".into(),
             title: String::new(),
             messages: vec![ChatMessage {

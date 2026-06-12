@@ -5,7 +5,7 @@
 //! tool calls. The new reducer preserves interleaving: ≥3 distinct Prose parts,
 //! first Prose precedes first ToolInvocation, and ToolResult.refs matches.
 
-use rustain::domain::models::{InvocationStatus, StopReason, StreamChunk, TurnPart};
+use rustain::domain::models::{StopReason, StreamChunk, TurnPart};
 use rustain::domain::services::reducer::{reduce, test_reducer_state};
 
 /// Mirror the pattern recorded in `tests/fixtures/regression/concat_prose_2026_04_22.jsonl`

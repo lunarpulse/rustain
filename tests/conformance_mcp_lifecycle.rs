@@ -1,3 +1,4 @@
+#![allow(dead_code)] // AI-12.1: test fixture scaffolding
 //! Conformance tests for MCP lifecycle — Story 9.1 reconnect & shutdown.
 //!
 //! Uses the `fake-mcp-server` binary to exercise real stdio MCP sessions.

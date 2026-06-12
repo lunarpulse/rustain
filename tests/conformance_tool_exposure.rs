@@ -198,7 +198,7 @@ fn test_compose_with_default_config_binds_static_full() {
     let ctx = ComposeContext {
         workspace_path: PathBuf::from("/tmp/test"),
         project_context: ProjectContext::empty(),
-        storage: std::sync::Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: std::sync::Arc::new(rustain::adapters::noop::NoOpStorage)
             as std::sync::Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: std::sync::Arc::new(
             rustain::adapters::skill_activation::SkillActivator::new(),
@@ -252,7 +252,7 @@ fn test_compose_with_unknown_exposure_returns_error() {
     let ctx = ComposeContext {
         workspace_path: PathBuf::from("/tmp/test"),
         project_context: ProjectContext::empty(),
-        storage: std::sync::Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: std::sync::Arc::new(rustain::adapters::noop::NoOpStorage)
             as std::sync::Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: std::sync::Arc::new(
             rustain::adapters::skill_activation::SkillActivator::new(),

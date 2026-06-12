@@ -25,7 +25,7 @@ fn test_compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-adapter-override-e2e"),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),

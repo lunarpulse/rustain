@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)] // AI-12.1: test fixture tuple types
 //! Story 16.6 AC9 + Story 16.8 AC8 — No keymap conflicts.
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::state::TuiState;

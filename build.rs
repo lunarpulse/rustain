@@ -45,10 +45,10 @@ fn main() {
     // Re-run if HEAD changes (branch checkout)
     println!("cargo:rerun-if-changed=.git/HEAD");
     // Also track the ref file that HEAD points to (new commits on current branch)
-    if let Ok(head_contents) = std::fs::read_to_string(".git/HEAD") {
-        if let Some(ref_path) = head_contents.trim().strip_prefix("ref: ") {
-            println!("cargo:rerun-if-changed=.git/{}", ref_path);
-        }
+    if let Ok(head_contents) = std::fs::read_to_string(".git/HEAD")
+        && let Some(ref_path) = head_contents.trim().strip_prefix("ref: ")
+    {
+        println!("cargo:rerun-if-changed=.git/{}", ref_path);
     }
 }
 

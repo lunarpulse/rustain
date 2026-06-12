@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // AI-12.1: test setup
 use std::collections::HashMap;
 
 use ratatui::Terminal;
@@ -788,7 +789,7 @@ fn test_eviction_skipped_when_turn_count_unchanged() {
     // Turn count equals last_seen — eviction should NOT fire
     let turn_count = 10;
     assert!(
-        !(turn_count < cache.last_seen_turn_count),
+        (turn_count >= cache.last_seen_turn_count),
         "eviction gate should skip when turn_count == last_seen"
     );
 }
@@ -796,7 +797,7 @@ fn test_eviction_skipped_when_turn_count_unchanged() {
 /// AC5: Width divergence triggers invalidate_all.
 #[test]
 fn test_width_divergence_invalidates_cache() {
-    use rustain::adapters::tui::state::{CachedTurnLayout, HeightCache, HeightKey};
+    use rustain::adapters::tui::state::{CachedTurnLayout, HeightKey};
     use rustain::domain::models::TurnId;
     use rustain::domain::models::view_state::SummaryTier;
 
@@ -834,7 +835,6 @@ fn test_width_divergence_invalidates_cache() {
 #[test]
 fn test_user_system_messages_use_message_cache() {
     use rustain::adapters::tui::state::{HeightCache, MessageHeightKey};
-    use rustain::domain::models::view_state::SummaryTier;
 
     let mut cache = HeightCache::default();
     let key = MessageHeightKey {

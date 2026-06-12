@@ -9,9 +9,7 @@
 
 use assert_cmd::Command;
 use clap::Parser;
-use predicates::prelude::*;
 use rustain::adapters::cli::commands::{Cli, ProfileAction};
-use std::io::Write;
 
 /// Test 1: `profile list` exits 0 with 3 built-in profile names visible.
 #[test]

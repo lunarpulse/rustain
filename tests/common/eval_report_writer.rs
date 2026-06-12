@@ -1,3 +1,4 @@
+#![allow(dead_code)] // shared test-support module; helpers used by a subset of integration-test binaries
 //! Eval report writer with `LazyLock<Mutex<EvalMetrics>>` accumulator (Story 9-7c, AC-9-7c-4).
 //!
 //! Metric-bearing tests write their measured values to the `METRICS` accumulator
@@ -163,7 +164,7 @@ pub fn drain_and_write_report(report_path: &Path) -> std::io::Result<()> {
     }
 
     // Verdict
-    let (overall_pass, mut blockers) = compute_verdict(&metrics);
+    let (overall_pass, blockers) = compute_verdict(&metrics);
     report.overall_pass = overall_pass;
     report.blockers = blockers;
 

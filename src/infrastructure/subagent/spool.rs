@@ -206,7 +206,7 @@ impl SubagentSpool {
             }
         })
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(|e| std::io::Error::other(e))?;
         result
     }
 }

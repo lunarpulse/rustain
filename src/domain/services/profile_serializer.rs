@@ -214,7 +214,7 @@ adapter = "default"
         let mut overrides_toml = toml::Table::new();
         overrides_toml.insert("default_plan_mode".to_string(), toml::Value::Boolean(false));
         let override_val =
-            figment::value::Value::serialize(&toml::Value::Table(overrides_toml)).ok();
+            figment::value::Value::serialize(toml::Value::Table(overrides_toml)).ok();
 
         let resolved = make_resolved("test", override_val);
         let flat = to_flat_toml(&resolved, false, ProfileSource::Builtin).unwrap();

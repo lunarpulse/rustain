@@ -7,7 +7,7 @@ use futures::StreamExt;
 use rustain::adapters::sandbox::NoOpSandbox;
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
-use rustain::domain::models::{CompletionOptions, Message, StopReason, StreamChunk};
+use rustain::domain::models::{CompletionOptions, Message, StreamChunk};
 use rustain::domain::ports::{CapabilityProvider, StreamingProvider};
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;

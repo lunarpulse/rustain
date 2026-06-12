@@ -101,7 +101,7 @@ impl PlanModeInjector for DefaultPlanInjector {
                 "<plan-mode>\n{}\n</plan-mode>",
                 self.full_reminder(plan_file)
             )),
-            n if (n as u32) % self.reminder_every_n_turns == 0 => Some(format!(
+            n if (n as u32).is_multiple_of(self.reminder_every_n_turns) => Some(format!(
                 "<plan-mode-reminder>\n{}\n</plan-mode-reminder>",
                 self.sparse_reminder(plan_file)
             )),

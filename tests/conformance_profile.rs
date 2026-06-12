@@ -9,7 +9,7 @@ use std::time::Instant;
 use rustain::adapters::profile_resolver::embedded::EmbeddedProfileSource;
 use rustain::domain::models::PortDimension;
 use rustain::domain::services::adapter_catalog::AdapterCatalog;
-use rustain::domain::services::profile_loader::{ProfileLoader, ProfileSource};
+use rustain::domain::services::profile_loader::ProfileLoader;
 
 #[test]
 fn test_embedded_profiles_parse_cleanly() {

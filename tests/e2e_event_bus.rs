@@ -56,7 +56,7 @@ fn test_app_state_honors_raw_capacity() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let provider_swap = Arc::new(ArcSwap::from_pointee(
-        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
+        Arc::new(NoOpProvider) as Arc<dyn StreamingProvider>
     ));
     let provider_registry = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
     let (event_bus, domain_rx) = EventBus::new(64);
@@ -65,7 +65,7 @@ fn test_app_state_honors_raw_capacity() {
     let compose_snapshot = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
@@ -134,7 +134,7 @@ fn test_app_state_session_cancel_is_root_token() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let provider_swap2 = Arc::new(ArcSwap::from_pointee(
-        Arc::new(NoOpProvider::default()) as Arc<dyn StreamingProvider>
+        Arc::new(NoOpProvider) as Arc<dyn StreamingProvider>
     ));
     let provider_registry2 = Arc::new(rustain::adapters::provider::ProviderRegistry::new());
     let (event_bus2, domain_rx2) = EventBus::new(16);
@@ -143,7 +143,7 @@ fn test_app_state_session_cancel_is_root_token() {
     let compose_snapshot2 = Arc::new(ComposeContext {
         workspace_path: std::path::PathBuf::from("."),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),

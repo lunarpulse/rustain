@@ -1,3 +1,4 @@
+#![allow(clippy::doc_overindented_list_items)] // AI-12.1: doc-list formatting
 //! Handler-naming reflection test per ADR-08-01 §D6.4 + Story 8.0a AC-3.
 //!
 //! **Phase 5 disposition:** the architectural ratchets (handler count, spawn-stays

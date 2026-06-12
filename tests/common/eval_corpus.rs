@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::only_used_in_recursion)] // shared test-support module; helpers used by a subset of integration-test binaries
 //! Shared production-corpus building helpers (Story 9-7c).
 //!
 //! Used by both `integration_skill_eval_harness.rs` and `prop_synonym_collisions.rs`
@@ -9,7 +10,6 @@ use rustain::domain::models::capability_kind::CapabilityKind;
 use rustain::domain::models::doc_key::DocKey;
 use rustain::domain::models::search_hit::SearchHit;
 use rustain::domain::ports::search::IndexableItem;
-use rustain::domain::services::frontmatter;
 use rustain::infrastructure::search::MergedIndex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

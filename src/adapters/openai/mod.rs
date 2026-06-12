@@ -533,7 +533,7 @@ mod tests {
                 is_error: false,
             };
 
-            let messages = vec![
+            let messages = [
                 Message {
                     role: MessageRole::User,
                     content: "what files are in .?".to_string(),
@@ -605,7 +605,7 @@ mod tests {
                 is_error: false,
             };
 
-            let messages = vec![
+            let messages = [
                 Message {
                     role: MessageRole::User,
                     content: "what files are in .?".to_string(),
@@ -662,7 +662,7 @@ mod tests {
                 is_error: true,
             };
 
-            let messages = vec![
+            let messages = [
                 Message {
                     role: MessageRole::Assistant,
                     content: String::new(),

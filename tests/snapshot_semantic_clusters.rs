@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // AI-12.1: test setup
 //! Snapshot lock for the 8 representative semantic-label clusters from S16.4.5.
 //!
 //! Each entry is the visual realization of the labeler unit test of the same name

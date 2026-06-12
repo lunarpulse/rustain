@@ -237,7 +237,7 @@ mod tests {
         let compose_snapshot_arc = Arc::new(crate::infrastructure::composition::ComposeContext {
             workspace_path: std::path::PathBuf::from("."),
             project_context: crate::domain::models::project_context::ProjectContext::empty(),
-            storage: Arc::new(crate::adapters::noop::NoOpStorage::default())
+            storage: Arc::new(crate::adapters::noop::NoOpStorage)
                 as Arc<dyn crate::domain::ports::StoragePort>,
             skill_activator: Arc::new(crate::adapters::skill_activation::SkillActivator::new()),
             mcp_servers: Vec::new(),

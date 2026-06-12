@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)] // AI-12.1: test fixture tuple types
 #![cfg(feature = "meta-search")]
 
 //! Router-level conformance tests for the two-door `search_skills` /

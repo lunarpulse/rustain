@@ -199,7 +199,7 @@ async fn memory_rss_per_agent() {
         .unwrap()
         .resident;
     let page_size_kb = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 / 1024 };
-    let delta_kb = (after - before) as u64 * page_size_kb;
+    let delta_kb = (after - before) * page_size_kb;
     println!(
         "RSS delta for 10 agents: {} KB ({} KB/agent)",
         delta_kb,

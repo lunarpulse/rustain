@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use rustain::domain::events::{AppEvent, CapabilityEvent};
-use rustain::domain::models::{AgentId, Op, SubagentRunStatus};
+use rustain::domain::models::{AgentId, SubagentRunStatus};
 use rustain::infrastructure::subagent::SubagentRegistry;
 use tokio::sync::mpsc;
 use tokio::sync::watch;

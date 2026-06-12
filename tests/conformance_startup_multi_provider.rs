@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default, dead_code)] // AI-12.1: test setup + scaffold
 //! Conformance tests for multi-provider startup wiring.
 //!
 //! Tests the `init_provider_layer` extraction from `startup.rs`.
@@ -120,7 +121,7 @@ fn test_startup_legacy_fallback_when_provider_map_empty() {
     assert!(config.provider.is_empty());
 
     let ProviderLayer {
-        router,
+        router: _,
         registry,
         deferred_notices: deferred,
         active_id,

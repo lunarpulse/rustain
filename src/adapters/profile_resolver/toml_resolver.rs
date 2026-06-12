@@ -194,7 +194,7 @@ impl ProfileResolver for TomlProfileResolver {
         if let Ok(entries) = std::fs::read_dir(&self.config_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "toml") {
+                if path.extension().is_some_and(|e| e == "toml") {
                     if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
                         if name.contains(['/', '\\']) {
                             continue;
@@ -220,7 +220,7 @@ impl ProfileResolver for TomlProfileResolver {
         if let Ok(entries) = std::fs::read_dir(&community_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "toml") {
+                if path.extension().is_some_and(|e| e == "toml") {
                     if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
                         if name.contains(['/', '\\']) {
                             continue;

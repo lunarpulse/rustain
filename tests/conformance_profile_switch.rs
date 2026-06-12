@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use rustain::domain::models::{AdapterRef, PortDimension, ProfileIdentityColor};
+use rustain::domain::models::{AdapterRef, PortDimension};
 use rustain::domain::services::identity_color;
 use rustain::domain::services::swap_tier::{SwapTier, TransitionPlan, swap_tier};
 
@@ -107,7 +107,7 @@ fn test_identity_color_in_range() {
         let name = format!("profile_{i}");
         let color = identity_color::derive_identity_color(&name, None).0;
         assert!(
-            color >= 1 && color <= 14,
+            (1..=14).contains(&color),
             "color {} for '{}' out of range [1, 14]",
             color,
             name

@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default, dead_code)] // AI-12.1: test setup + scaffolding
 //! Integration test: fold-toggle anchor preservation (AC7).
 //!
 //! Constructs a 5-turn fixture with deterministic line heights, toggles a fold

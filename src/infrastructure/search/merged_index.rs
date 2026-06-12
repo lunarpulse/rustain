@@ -232,7 +232,7 @@ mod tests {
             std::borrow::Cow::Borrowed(&self.desc)
         }
 
-        fn to_search_hit(&self, score: f32, matched_terms: Option<Vec<String>>) -> SearchHit {
+        fn to_search_hit(&self, score: f32, _matched_terms: Option<Vec<String>>) -> SearchHit {
             SearchHit::minimal(self.name.clone(), self.kind, &self.desc, score)
         }
     }

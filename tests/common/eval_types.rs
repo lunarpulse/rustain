@@ -1,3 +1,4 @@
+#![allow(dead_code)] // shared test-support module; helpers used by a subset of integration-test binaries
 //! Shared eval report types (Story 9-7b/9-7c).
 //!
 //! Both `integration_skill_eval_harness.rs` and `eval_report_writer.rs`

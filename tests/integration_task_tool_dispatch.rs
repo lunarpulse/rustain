@@ -5,7 +5,6 @@ use rustain::adapters::noop::NoOpProvider;
 use rustain::adapters::sandbox::NoOpSandbox;
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::adapters::toolset_adapter::ToolSetAdapter;
-use rustain::domain::models::{ModelTier, ToolPolicy};
 use rustain::domain::ports::CapabilityProvider;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;

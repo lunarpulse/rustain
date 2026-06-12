@@ -63,7 +63,7 @@ mod tests {
             let name = format!("profile_{i}");
             let color = derive_identity_color(&name, None).0;
             assert!(
-                color >= 1 && color <= 14,
+                (1..=14).contains(&color),
                 "color {} for '{}' out of range",
                 color,
                 name

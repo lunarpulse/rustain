@@ -11,7 +11,7 @@ use rustain::adapters::tui::app::handle_input;
 use rustain::adapters::tui::color_detect::ColorCapability;
 use rustain::adapters::tui::state::{TaskPanelState, TuiState};
 use rustain::adapters::tui::widgets::task_panel::{render_task_panel, resolve_panel_plan};
-use rustain::domain::events::{AppEvent, DomainInputEvent, DomainKey};
+use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{
     Conversation, FocusState, NoticeLevel, Plan, PlanStatus, PlanTask, PlanTaskStatus,

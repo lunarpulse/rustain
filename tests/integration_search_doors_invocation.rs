@@ -269,7 +269,7 @@ async fn test_search_door_no_match_returns_empty_hits() {
 /// tracked in conformance_meta_search.rs.
 #[tokio::test]
 async fn test_search_door_provider_collision_populates_provider_field() {
-    let items = vec![
+    let items = [
         ScenarioTestItem {
             dk: DocKey::new(CapabilityKind::Tool, "query".to_string()),
             text: "query database with postgres".to_string(),

@@ -7,7 +7,7 @@ fn walk_rs_files(dir: &Path, files: &mut Vec<std::path::PathBuf>) {
             let path = entry.path();
             if path.is_dir() {
                 walk_rs_files(&path, files);
-            } else if path.extension().map_or(false, |ext| ext == "rs") {
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
                 files.push(path);
             }
         }
@@ -70,7 +70,7 @@ fn test_no_std_sync_in_subagent_async_modules() {
                 }
                 if !trimmed.starts_with("use ") {
                     for bare in &bare_types {
-                        if use_imports.contains(&bare.to_string())
+                        if use_imports.contains(*bare)
                             && (trimmed.contains(&format!("{}::", bare))
                                 || trimmed.contains(&format!("{}(", bare))
                                 || trimmed.contains(&format!("{}::new", bare)))

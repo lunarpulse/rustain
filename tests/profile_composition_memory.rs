@@ -14,7 +14,7 @@ fn compose_ctx() -> ComposeContext {
     ComposeContext {
         workspace_path: std::path::PathBuf::from("/tmp/test-memory"),
         project_context: rustain::domain::models::project_context::ProjectContext::empty(),
-        storage: Arc::new(rustain::adapters::noop::NoOpStorage::default())
+        storage: Arc::new(rustain::adapters::noop::NoOpStorage)
             as Arc<dyn rustain::domain::ports::StoragePort>,
         skill_activator: Arc::new(rustain::adapters::skill_activation::SkillActivator::new()),
         mcp_servers: Vec::new(),
@@ -376,13 +376,7 @@ fn read_rss_kb() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let n: u64 = rest
-                .trim()
-                .split_whitespace()
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
+            let n: u64 = rest.split_whitespace().next().unwrap().parse().unwrap();
             return n;
         }
     }

@@ -9,7 +9,6 @@ use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
-use rustain::domain::clock::MockClock;
 use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, StreamingPhase,

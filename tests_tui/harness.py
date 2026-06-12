@@ -191,6 +191,9 @@ class RustainTUI:
         env["RUSTAIN_DATA_DIR"] = str(self._workspace_path / ".rustain_data")
         # Isolate logs per test (P0 flakiness fix: prevents cross-test log pollution)
         env["RUSTAIN_LOG_PATH"] = str(self._workspace_path / "rustain.log")
+        # Ensure RUST_LOG is set to debug for E2E tests since assertions check debug-level logs.
+        if "RUST_LOG" not in env:
+            env["RUST_LOG"] = "debug"
         # Per-test env overrides (e.g. RUSTAIN_PROFILE for MCP tests).
         if self.env_overrides:
             env.update(self.env_overrides)

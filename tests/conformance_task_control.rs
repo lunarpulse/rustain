@@ -5,13 +5,13 @@
 
 use std::collections::HashMap;
 
-use rustain::adapters::tui::state::{TaskPanelState, TuiState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::task_panel_handlers::{
     dependents, drill_down_task_status, handle_task_pause, handle_task_skip,
     resolve_panel_task_number,
 };
 use rustain::domain::models::{
-    Conversation, FocusState, Plan, PlanStatus, PlanTask, PlanTaskStatus, generate_conversation_id,
+    Conversation, Plan, PlanStatus, PlanTask, PlanTaskStatus, generate_conversation_id,
 };
 
 fn make_task(number: u32, title: &str, status: PlanTaskStatus) -> PlanTask {
@@ -68,7 +68,7 @@ fn make_plan(status: PlanStatus, tasks: Vec<PlanTask>) -> Plan {
 
 fn make_conv(plan: Plan) -> (Conversation, TuiState) {
     let plan_id = plan.id.clone();
-    let mut conv = Conversation {
+    let conv = Conversation {
         id: generate_conversation_id(),
         title: "Test".to_string(),
         messages: vec![],
@@ -217,7 +217,7 @@ fn ac2_skip_pending_no_dependents() {
     );
     let (mut conv, mut state) = make_conv(plan);
 
-    let notices = handle_task_skip(&mut state, &mut conv, 1);
+    let _notices = handle_task_skip(&mut state, &mut conv, 1);
     let plan = conv.plans.get("test-plan").unwrap();
     assert_eq!(plan.tasks[0].status, PlanTaskStatus::Skipped);
     assert_eq!(plan.tasks[0].error.as_deref(), Some("Skipped by user"));

@@ -1,3 +1,4 @@
+#![allow(unreachable_code, clippy::diverging_sub_expression)] // AI-12.1: compile-only type-nameability test
 #![cfg(feature = "meta-search")]
 
 //! Phase B conformance tests for the shared meta-search infrastructure.
@@ -412,7 +413,7 @@ fn test_merged_index_from_items_with_overrides() {
             SearchHit::minimal(self.name.clone(), self.kind, &self.desc, score)
         }
     }
-    let items = vec![TestItem {
+    let items = [TestItem {
         name: "review-code".into(),
         desc: "Review code for style violations.".into(),
         kind: CapabilityKind::Skill,
@@ -479,7 +480,7 @@ fn test_bm25_engine_index_swap() {
     let hits = rt.block_on(async { engine.search("test", None, 5).await.unwrap() });
     assert!(hits.is_empty(), "empty index returns no hits");
 
-    let items = vec![TestItem {
+    let items = [TestItem {
         name: "query".into(),
         desc: "Run SQL queries".into(),
         kind: CapabilityKind::Tool,

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // AI-12.1: test fixture scaffolding
 //! Conformance tests for `ToolCall` 7-variant FSM and `ToolScheduler` pipeline.
 //!
 //! Source of truth:
@@ -390,7 +391,7 @@ async fn ac4_parallel_batch_all_safe() {
 
 #[tokio::test]
 async fn ac4_sequential_when_any_unsafe() {
-    let (sched, _rx) = make_test_scheduler(PermissionMode::Yolo, 50);
+    let (_sched, _rx) = make_test_scheduler(PermissionMode::Yolo, 50);
     // Override tools with parallel_safe=false
     let tools: Arc<dyn ToolSetPort> = Arc::new(SleepToolSet {
         delay_ms: 50,

@@ -1491,6 +1491,8 @@ pub(crate) async fn remember_fact_through_live_slot(
 
     // If the first attempt already failed, preserve that error — do NOT mask it
     // with a blind retry on the live adapter (Story 12.0 review patch).
+    #[allow(clippy::question_mark)]
+    // explicit early-return preserves the original error; do not collapse to `?`
     if first_res.is_err() {
         return first_res;
     }

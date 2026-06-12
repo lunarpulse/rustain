@@ -94,7 +94,7 @@ mod tests {
         buf.extend_from_slice(&argc.to_le_bytes());
         buf.extend_from_slice(exec);
         buf.push(0); // NUL-terminate exec_path
-        buf.extend(std::iter::repeat(0).take(padding));
+        buf.extend(std::iter::repeat_n(0, padding));
         for _arg in argv.iter() {
             buf.extend_from_slice(_arg);
             buf.push(0);

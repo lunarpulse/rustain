@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // AI-12.1: test setup
 //! Integration test: AnchorMode round-trip (AC6, AC8, AC9).
 //!
 //! Tests the full three-mode round-trip from `Following` → `Reading` →

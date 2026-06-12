@@ -226,7 +226,7 @@ mod tests {
         let hits_without = engine_without.search(query, None, 3).await.unwrap();
 
         let with_has_format_code = hits_with.iter().any(|h| h.name == "format-code");
-        let without_has_format_code = hits_without.iter().any(|h| h.name == "format-code");
+        let _without_has_format_code = hits_without.iter().any(|h| h.name == "format-code");
 
         // With synonyms, format-code must appear in top-3 (AC-9-7c-2).
         assert!(

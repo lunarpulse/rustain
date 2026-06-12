@@ -165,7 +165,7 @@ fn get_subagent_provider(
     agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Option<Arc<crate::adapters::subagent::SubagentProvider>> {
     let tools_arc = agent_core.tools.load_full();
-    let any_ref: &dyn std::any::Any = (&*tools_arc).as_any();
+    let any_ref: &dyn std::any::Any = (*tools_arc).as_any();
     let composite = any_ref
         .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()?;
     composite.subagent_provider().cloned()
@@ -1845,11 +1845,8 @@ pub async fn run(
                                         &mut state, &app_state.agent_core, &app_state.compose_snapshot,
                                         port, crate::domain::models::AdapterRef { adapter, _config: None },
                                     ).await;
-                                    match outcome {
-                                        HandlerOutcome::Notify(event) => {
-                                            app_state.event_bus.emit_domain(event);
-                                        }
-                                        _ => {}
+                                    if let HandlerOutcome::Notify(event) = outcome {
+                                        app_state.event_bus.emit_domain(event);
                                     }
                                 }
                                 InputAction::ClearAdapterOverride { port } => {
@@ -1857,11 +1854,8 @@ pub async fn run(
                                         &mut state, &app_state.agent_core, &app_state.compose_snapshot,
                                         &app_state.profile_resolver, port,
                                     ).await;
-                                    match outcome {
-                                        HandlerOutcome::Notify(event) => {
-                                            app_state.event_bus.emit_domain(event);
-                                        }
-                                        _ => {}
+                                    if let HandlerOutcome::Notify(event) = outcome {
+                                        app_state.event_bus.emit_domain(event);
                                     }
                                 }
                                 InputAction::SubmitQuestionAnswer(answer) => {
@@ -2169,8 +2163,7 @@ pub async fn run(
                                         }
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
-                                        let cmd_arg = cmd_arg;
-                                        match cmd_arg.as_deref().map(str::trim).filter(|s: &&str| !s.is_empty()) {
+                                        match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
                                             Some(adapter_name) => {
                                                 let outcome = handlers::adapter_override::handle_apply_adapter_override(
                                                     &mut state, &app_state.agent_core, &app_state.compose_snapshot,
@@ -6962,7 +6955,7 @@ pub async fn run(
                         {
                             let skill_cache = std::sync::Arc::clone(&app_state.compose_snapshot.skill_cache);
                             let registry = state.skill_registry.read().await;
-                            skill_cache.populate_from_registry(&*registry).await;
+                            skill_cache.populate_from_registry(&registry).await;
                         }
                         // Story 9.7 Phase B — rebuild the merged BM25 index so that
                         // `search_skills` AND `search_tools` see the newly-discovered skills.

@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::too_many_arguments)] // shared test-support module; helpers used by a subset of integration-test binaries
 //! Shared render & fixture helpers for S16.x snapshot suite.
 //!
 //! All consumers MUST inject `MockClock` (no `Instant::now()` calls).

@@ -1,9 +1,7 @@
 use async_trait::async_trait;
 use rustain::domain::errors::{PermissionError, ToolError};
 use rustain::domain::models::tool_call::ApprovalSource;
-use rustain::domain::models::{
-    ActiveSkill, PermissionMode, SandboxPolicy, SkillSource, SkillTrustResponse,
-};
+use rustain::domain::models::{ActiveSkill, PermissionMode, SkillSource};
 use rustain::domain::ports::{SecurityPort, ToolSetPort};
 use rustain::domain::services::permission_chain;
 use std::sync::Arc;

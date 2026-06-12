@@ -1583,7 +1583,14 @@ mod tests {
         // (tombstone FIRST + sidecar persist, exactly as `forget` does).
         {
             let mut g = mem.redactions.write().await;
-            g.insert(RedactionRecord::forget(secret_key, Local::now()));
+            // Key-only tombstone (empty token): this test exercises the KEY dimension
+            // (concurrent-purge / read-masking by key). Content-stable token suppression
+            // of daily-log re-derivation is covered by 12.1c's discriminator test.
+            g.insert(RedactionRecord::redact(
+                secret_key,
+                String::new(),
+                Local::now(),
+            ));
         }
         mem.persist_redactions().await.unwrap();
 
@@ -1784,7 +1791,14 @@ mod tests {
         // Tombstone lands but the purge is "interrupted": the index STILL has it.
         {
             let mut g = mem.redactions.write().await;
-            g.insert(RedactionRecord::forget(secret_key, Local::now()));
+            // Key-only tombstone (empty token): this test exercises the KEY dimension
+            // (concurrent-purge / read-masking by key). Content-stable token suppression
+            // of daily-log re-derivation is covered by 12.1c's discriminator test.
+            g.insert(RedactionRecord::redact(
+                secret_key,
+                String::new(),
+                Local::now(),
+            ));
         }
         assert!(
             mem.index.read().await.keys().contains(&secret_key),
@@ -2102,7 +2116,7 @@ mod tests {
         mem.initialize().await.unwrap();
 
         let mut floor = daily_log_bytes(ws.path());
-        let mut check = |ws: &std::path::Path, label: &str, floor: &mut u64| {
+        let check = |ws: &std::path::Path, label: &str, floor: &mut u64| {
             let now = daily_log_bytes(ws);
             assert!(
                 now >= *floor,

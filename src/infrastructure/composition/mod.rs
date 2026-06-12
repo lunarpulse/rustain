@@ -1318,7 +1318,7 @@ mod tests {
         ComposeContext {
             workspace_path: PathBuf::from("/tmp/test"),
             project_context: ProjectContext::empty(),
-            storage: Arc::new(NoOpStorage::default()) as Arc<dyn StoragePort>,
+            storage: Arc::new(NoOpStorage) as Arc<dyn StoragePort>,
             skill_activator: Arc::new(SkillActivator::new()),
             mcp_servers: Vec::new(),
             include_builtin_tools: true,
@@ -1407,7 +1407,7 @@ mod tests {
                 assert_eq!(port, PortDimension::Persona);
                 assert!(!available.is_empty());
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 
@@ -1583,7 +1583,7 @@ mod tests {
             Err(AdapterCompositionError::UnknownAdapter { port, .. }) => {
                 assert_eq!(port, PortDimension::Memory);
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 
@@ -1609,7 +1609,7 @@ mod tests {
             Err(AdapterCompositionError::UnknownAdapter { port, .. }) => {
                 assert_eq!(port, PortDimension::Session);
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 
@@ -1635,7 +1635,7 @@ mod tests {
             Err(AdapterCompositionError::UnknownAdapter { port, .. }) => {
                 assert_eq!(port, PortDimension::Tools);
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 
@@ -1648,7 +1648,7 @@ mod tests {
             Err(AdapterCompositionError::MissingComposeContext { port, .. }) => {
                 assert_eq!(port, PortDimension::Tools);
             }
-            other => panic!("expected MissingComposeContext for composite with empty mcp_servers"),
+            _ => panic!("expected MissingComposeContext for composite with empty mcp_servers"),
         }
     }
 
@@ -1685,7 +1685,7 @@ mod tests {
             Err(AdapterCompositionError::MissingComposeContext { port, .. }) => {
                 assert_eq!(port, PortDimension::Channels);
             }
-            other => panic!("expected MissingComposeContext"),
+            _ => panic!("expected MissingComposeContext"),
         }
     }
 
@@ -1765,7 +1765,7 @@ allowed_chat_ids = []
             Err(AdapterCompositionError::UnknownAdapter { port, .. }) => {
                 assert_eq!(port, PortDimension::Channels);
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 
@@ -1796,7 +1796,7 @@ allowed_chat_ids = []
             Err(AdapterCompositionError::UnknownAdapter { port, .. }) => {
                 assert_eq!(port, PortDimension::Scheduler);
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 
@@ -1822,7 +1822,7 @@ allowed_chat_ids = []
             Err(AdapterCompositionError::UnknownAdapter { port, .. }) => {
                 assert_eq!(port, PortDimension::Context);
             }
-            other => panic!("expected UnknownAdapter"),
+            _ => panic!("expected UnknownAdapter"),
         }
     }
 }
