@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.94 # pin matches ci.yml clippy gate (AI-12.1)
+      - uses: dtolnay/rust-toolchain@stable # matches ci.yml (AI-12.1)
       - uses: Swatinem/rust-cache@v2
 
       # Zero-warning gate for the vector-search lane (Epic 12 retro AI-12.1). Lives in

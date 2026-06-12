@@ -59,7 +59,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build with default features (meta-search ON)
         run: cargo build
-      - name: Build with --no-default-features (opt-out path)
-        run: cargo build --no-default-features
+      # "Opt-out path" = the new default MINUS meta-search — the flip this guard exists
+      # to protect. Bare `--no-default-features` also strips every LLM provider, mcp, and
+      # reqwest — combos the codebase has never supported (daemon/doctor/event_loop use
+      # tokio::net / reqwest / adapters::mcp unconditionally), so it tested the wrong
+      # thing and had silently rotted red. Verify meta-search specifically is removable.
+      - name: Build with meta-search opted out (default minus meta-search)
+        run: cargo build --no-default-features --features "anthropic openai ollama clipboard mcp"
       - name: Test with default features (lib only)
         run: cargo test --lib --no-fail-fast

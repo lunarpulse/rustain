@@ -17,10 +17,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Toolchain PINNED (Epic 12 retro AI-12.1) so the clippy lint set is reproducible.
-      # The 12-1d Q5 "47-vs-0" discrepancy was clippy-version drift between runners;
-      # bump this pin deliberately when adopting a newer toolchain.
-      - uses: dtolnay/rust-toolchain@1.94
+      # Use the same `@stable` toolchain as every other job in this file (they pass).
+      # An earlier `@1.94` pin (AI-12.1) resolved to a different 1.94.x lint set than
+      # local and broke the `-D warnings` gate; if a future clippy bump adds lints, fix
+      # them rather than re-pinning to a ref that drifts from contributors' `stable`.
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       - name: Cross-target compile check (macOS cfg branches)

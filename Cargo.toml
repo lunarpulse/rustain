@@ -32,7 +32,11 @@ path = "perf-tests/subagent_spawn.rs"
 
 [dependencies]
 # ── Async runtime ────────────────────────────────────────────────
-tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal"] }
+# `net` + `io-util` are required by the always-on daemon (UnixListener/UnixStream,
+# AsyncReadExt/WriteExt). They were previously only present transitively via `reqwest`
+# (a default feature), so `--no-default-features` failed to compile the daemon. Declare
+# them explicitly so every feature combo builds.
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal", "net", "io-util"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
