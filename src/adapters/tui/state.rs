@@ -578,6 +578,8 @@ impl Default for CrossSearchState {
 pub struct ResolvedMention {
     /// File path relative to workspace.
     pub path: String,
+    /// Who named the path: the user via the TUI, or a model tool call.
+    pub source: crate::domain::models::FileContextProvenance,
 }
 
 /// State for inline autocomplete popup (/ commands and @ file mentions).

@@ -113,7 +113,8 @@ pub use notice::{
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
 pub use permission::{
-    FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome, ToolRisk, risk_for_builtin,
+    FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,
+    ToolRisk, risk_for_builtin,
 };
 #[allow(unused_imports)]
 pub use plan::{

@@ -4,12 +4,12 @@ use crate::domain::models::{
 
 /// Resolved file content to be attached to a message.
 /// Created by the adapter layer (file I/O happens there), consumed by the domain.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedFileContext {
     pub path: String,
     pub content: String,
+    pub provenance: crate::domain::models::FileContextProvenance,
 }
-
 /// Resolved slash command content to be prepended as a system instruction.
 /// Created by the adapter layer (file I/O happens there), consumed by the domain.
 #[derive(Debug, Clone)]

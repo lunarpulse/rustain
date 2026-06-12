@@ -66,3 +66,18 @@ pub enum PlanApprovalOutcome {
     Reject,
     Revise,
 }
+
+/// Provenance of a file path included in conversation context.
+/// Distinguishes user-supplied paths (CLI `--file`, TUI `@mention`) from paths
+/// suggested by the model via a tool call, so workspace gating can key on who
+/// named the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileContextProvenance {
+    /// Path was provided by the user; workspace boundary checks are skipped
+    /// for reads, but blocklist/traversal checks still apply.
+    #[default]
+    UserProvided,
+    /// Path was suggested by the model (e.g. a Read tool argument); subject to
+    /// workspace boundary checks.
+    ModelSuggested,
+}

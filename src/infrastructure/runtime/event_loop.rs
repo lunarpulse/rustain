@@ -9757,10 +9757,11 @@ fn resolve_file_context(
 ) {
     use crate::adapters::tui::image;
     use crate::domain::models::FileOperation;
-
     let mut resolved = Vec::new();
     let mut images = Vec::new();
     let mut errors = Vec::new();
+
+    use crate::domain::models::FileContextProvenance;
     for mention in mentions {
         let full_path = workspace_path.join(&mention.path);
 
@@ -9775,7 +9776,11 @@ fn resolve_file_context(
                 continue;
             }
         };
-        if let Err(e) = security.check_workspace_access(&canonical, FileOperation::Read) {
+        if let Err(e) = security.check_workspace_access_with_provenance(
+            &canonical,
+            FileOperation::Read,
+            mention.source,
+        ) {
             tracing::warn!("Security check failed for mention {}: {}", mention.path, e);
             errors.push(FileContextError {
                 path: mention.path.clone(),
@@ -9854,6 +9859,7 @@ fn resolve_file_context(
                     resolved.push(message_builder::ResolvedFileContext {
                         path: mention.path.clone(),
                         content: truncated,
+                        provenance: mention.source,
                     });
                 }
                 Err(_) => {

@@ -36,7 +36,7 @@ path = "perf-tests/subagent_spawn.rs"
 # AsyncReadExt/WriteExt). They were previously only present transitively via `reqwest`
 # (a default feature), so `--no-default-features` failed to compile the daemon. Declare
 # them explicitly so every feature combo builds.
-tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal", "net", "io-util"] }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal", "net", "io-util", "io-std"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"

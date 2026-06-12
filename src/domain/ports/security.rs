@@ -1,10 +1,9 @@
-#![allow(dead_code)]
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
 use crate::domain::errors::PermissionError;
-use crate::domain::models::{FileOperation, PathAccessType, PermissionMode};
+use crate::domain::models::{FileContextProvenance, FileOperation, PathAccessType, PermissionMode};
 
 /// Security enforcement: blocklist, workspace boundaries, permission mode.
 ///
@@ -24,6 +23,20 @@ pub trait SecurityPort: Send + Sync {
 
     /// Get the current permission mode.
     fn current_mode(&self) -> PermissionMode;
+
+    /// Check workspace boundaries with explicit provenance.
+    /// User-provided paths bypass the workspace check but still respect the
+    /// blocklist and traversal rules. Defaults to [`FileContextProvenance::ModelSuggested`]
+    /// so existing call sites remain gated.
+    fn check_workspace_access_with_provenance(
+        &self,
+        path: &Path,
+        op: FileOperation,
+        provenance: FileContextProvenance,
+    ) -> Result<PathAccessType, PermissionError> {
+        let _ = provenance;
+        self.check_workspace_access(path, op)
+    }
 
     /// Update the permission mode (interior mutability).
     fn set_mode(&self, mode: PermissionMode);

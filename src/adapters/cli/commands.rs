@@ -136,6 +136,21 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Run a one-shot query and print the assistant's response to stdout (Story 13.1a).
+    /// Non-interactive: no TUI launched. Composable with pipes and scripts.
+    Ask {
+        /// The query to send to the LLM
+        query: String,
+        /// Attach file(s) as context (repeatable; read OS-permission-bound, no workspace check)
+        #[arg(long)]
+        file: Vec<PathBuf>,
+        /// Auto-approve all tool calls (blocklist still enforced)
+        #[arg(long)]
+        yolo: bool,
+        /// Print only the final assistant text block; quiet stderr
+        #[arg(long)]
+        final_message_only: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

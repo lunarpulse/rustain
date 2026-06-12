@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{RwLock, broadcast, oneshot};
 
 use crate::domain::models::ToolRisk;
@@ -132,8 +132,8 @@ pub struct ApprovalRuntime {
     session: Arc<RwLock<SessionApprovalSet>>,
     persistence: Arc<dyn ApprovalPersistencePort>,
     subagent_auto_approve: AutoApprovePolicy,
+    rejected_count: AtomicUsize,
 }
-
 impl ApprovalRuntime {
     /// Construct a new runtime. `event_capacity` defaults to 1024 when 0.
     /// Defaults `subagent_auto_approve` to `Ask` (preserves existing behavior).
@@ -160,10 +160,17 @@ impl ApprovalRuntime {
             session: Arc::new(RwLock::new(SessionApprovalSet::default())),
             persistence,
             subagent_auto_approve,
+            rejected_count: AtomicUsize::new(0),
         })
     }
-
     /// Subscribe to runtime events.
+
+    /// Return the number of approvals resolved with [`ApprovalOutcome::Reject`].
+    /// This is the authoritative count for CLI auto-deny summaries; it is updated
+    /// inside `resolve`, so lagged broadcast consumers cannot under-report it.
+    pub fn rejected_count(&self) -> usize {
+        self.rejected_count.load(Ordering::Relaxed)
+    }
     pub fn subscribe(&self) -> broadcast::Receiver<ApprovalRuntimeEvent> {
         self.events.subscribe()
     }
@@ -281,7 +288,9 @@ impl ApprovalRuntime {
                             tracing::warn!("failed to persist approval scope: {}", e);
                         }
                     }
-                    ApprovalOutcome::Reject { .. } => {}
+                    ApprovalOutcome::Reject { .. } => {
+                        self.rejected_count.fetch_add(1, Ordering::Relaxed);
+                    }
                     ApprovalOutcome::Cancel => {}
                 }
             }

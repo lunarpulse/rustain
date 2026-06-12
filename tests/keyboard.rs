@@ -801,9 +801,11 @@ fn test_slash_new_empty_session() {
 #[test]
 fn test_slash_new_clears_mentions() {
     use rustain::adapters::tui::state::ResolvedMention;
+    use rustain::domain::models::FileContextProvenance;
     let mut state = TuiState::new(80, 24);
     state.resolved_mentions.push(ResolvedMention {
         path: "test.rs".to_string(),
+        source: FileContextProvenance::UserProvided,
     });
 
     state.input_buffer = "/new".to_string();

@@ -2689,9 +2689,10 @@ fn apply_autocomplete_selection(
             state.cursor_position = trigger + 1 + path.chars().count();
             // Track resolved mention for file context attachment at send time (deduplicate)
             if !state.resolved_mentions.iter().any(|m| m.path == *path) {
-                state
-                    .resolved_mentions
-                    .push(ResolvedMention { path: path.clone() });
+                state.resolved_mentions.push(ResolvedMention {
+                    path: path.clone(),
+                    source: crate::domain::models::FileContextProvenance::UserProvided,
+                });
             }
             None
         }

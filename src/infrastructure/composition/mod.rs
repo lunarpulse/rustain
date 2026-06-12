@@ -1306,6 +1306,120 @@ pub fn build_daemon_core(
     ))
 }
 
+/// Composition for CLI one-shot commands (`rustain ask`, future `rustain run`).
+/// Human-present-but-headless posture: uses `SecurityAdapter` (NOT
+/// `HeadlessSecurityAdapter`) so `--yolo` can flip the mode to `Yolo`.
+/// Shares the `run_turn` engine with TUI and daemon — behavioral identity.
+///
+/// Durability tripwire: if this function ever sprouts an `if unattended` branch,
+/// the seam has drifted toward the daemon — keep CLI and daemon as two flat,
+/// opinionated compositions over the shared `run_turn`.
+pub struct CliCore {
+    pub provider: Arc<dyn StreamingProvider>,
+    pub security: Arc<dyn SecurityPort>,
+    pub tools: Arc<dyn ToolSetPort>,
+    pub tool_scheduler: Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
+    pub approval: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
+    pub storage: Arc<dyn StoragePort>,
+    pub event_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+    pub event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
+    pub ledger: Arc<dyn crate::domain::ports::UsageLedgerPort>,
+}
+
+pub fn build_cli_core(
+    app_config: &crate::domain::models::AppConfig,
+    workspace: &std::path::Path,
+    yolo: bool,
+) -> Result<CliCore, AdapterCompositionError> {
+    use crate::adapters::filesystem::FileSystemStorage;
+    use crate::adapters::noop::{NoOpApprovalPersistence, NoOpUsageLedger};
+    use crate::adapters::sandbox::NoOpSandbox;
+    use crate::adapters::security_adapter::SecurityAdapter;
+
+    let raw_capacity = app_config.runtime.event_bus.raw_capacity;
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let provider_layer = crate::infrastructure::startup::init_provider_layer(app_config);
+    let provider: Arc<dyn StreamingProvider> = provider_layer.router as Arc<dyn StreamingProvider>;
+
+    let security: Arc<dyn SecurityPort> = {
+        let adapter = SecurityAdapter::new(workspace.to_path_buf());
+        if yolo {
+            adapter.set_mode(crate::domain::models::PermissionMode::Yolo);
+        }
+        Arc::new(adapter)
+    };
+
+    let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
+    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        sessions_dir,
+        workspace.to_path_buf(),
+    ));
+
+    let ctx = ComposeContext {
+        workspace_path: workspace.to_path_buf(),
+        project_context: ProjectContext::empty(),
+        storage: storage.clone(),
+        skill_activator: Arc::new(SkillActivator::new()),
+        mcp_servers: Vec::new(),
+        include_builtin_tools: true,
+        domain_tx: Some(event_tx.clone()),
+        channel_turn_tx: None,
+        tool_exposure: "static-full".into(),
+        assembler: "passthrough".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
+            crate::infrastructure::skill_cache::SkillCacheConfig::default(),
+        )),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
+        )),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
+        memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+            crate::adapters::noop::NoOpMemory,
+        )
+            as Arc<dyn MemoryPort>)),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        #[cfg(feature = "meta-search")]
+        search_config: crate::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
+    };
+
+    let tools = build_tools("builtin-only", None, &ctx)?;
+
+    let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
+        raw_capacity,
+        Arc::new(NoOpApprovalPersistence),
+    );
+
+    let tool_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+        security.clone(),
+        tools.clone(),
+        approval.clone(),
+        raw_capacity,
+    );
+
+    let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> = Arc::new(NoOpUsageLedger);
+
+    Ok(CliCore {
+        provider,
+        security,
+        tools,
+        tool_scheduler,
+        approval,
+        storage,
+        event_tx,
+        event_rx,
+        ledger,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,7 +13,8 @@
 .rustain_data
 
 # python e2e tui tests
-__pycache__
+__pycache__/
+*.egg-info/
 .opencode
 graphify-out
 AGENTS.md

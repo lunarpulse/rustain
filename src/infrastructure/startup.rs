@@ -511,6 +511,33 @@ pub async fn run() -> Result<()> {
         });
     }
 
+    // Story 13.1a — Ask subcommand intercept. MUST run before provider
+    // construction + terminal setup: `ask` is headless (no TUI). Like the
+    // Daemon block, `run_ask` does its own composition via `build_cli_core`.
+    if let Some(Command::Ask {
+        query,
+        file,
+        yolo,
+        final_message_only,
+    }) = cli.command.clone()
+    {
+        return crate::adapters::cli::ask::run_ask(
+            query,
+            file,
+            yolo,
+            final_message_only,
+            app_config,
+            cli.session.clone(),
+            cli.new,
+            cli.model.clone(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Ask subcommand failed: {e}");
+            SubcommandExit.into()
+        });
+    }
+
     // 5. Apply model override from env (before provider + event loop, so status bar sees it)
     let mut app_config = app_config;
     // CONFORMANCE_EXCEPTION_ENV_LAYER_BYPASS: legacy env-var, see Story 8.1 Decision Gate item 1.2

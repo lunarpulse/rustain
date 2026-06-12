@@ -1,5 +1,5 @@
 use rustain::domain::models::{
-    ChatMessage, Conversation, MessageRole, ToolCallInfo, ToolResultInfo,
+    ChatMessage, Conversation, FileContextProvenance, MessageRole, ToolCallInfo, ToolResultInfo,
 };
 use rustain::domain::services::message_builder::{
     ResolvedCommandContext, ResolvedFileContext, build_api_messages, build_command_context_prefix,
@@ -171,6 +171,7 @@ fn test_build_file_context_prefix_single() {
     let files = vec![ResolvedFileContext {
         path: "src/main.rs".to_string(),
         content: "fn main() {}".to_string(),
+        provenance: FileContextProvenance::UserProvided,
     }];
     let prefix = build_file_context_prefix(&files);
     assert!(prefix.contains("<file path=\"src/main.rs\">"));
@@ -185,10 +186,12 @@ fn test_build_file_context_prefix_multiple() {
         ResolvedFileContext {
             path: "src/main.rs".to_string(),
             content: "fn main() {}".to_string(),
+            provenance: FileContextProvenance::UserProvided,
         },
         ResolvedFileContext {
             path: "src/lib.rs".to_string(),
             content: "pub mod app;".to_string(),
+            provenance: FileContextProvenance::UserProvided,
         },
     ];
     let prefix = build_file_context_prefix(&files);
@@ -225,6 +228,7 @@ fn test_build_file_context_prefix_escapes_xml_in_path() {
     let files = vec![ResolvedFileContext {
         path: "dir/file<script>.rs".to_string(),
         content: "fn main() {}".to_string(),
+        provenance: FileContextProvenance::UserProvided,
     }];
     let prefix = build_file_context_prefix(&files);
     // Path should be escaped — no raw < in attribute
@@ -249,6 +253,7 @@ fn test_build_file_context_cdata_escapes_end_sequence() {
     let files = vec![ResolvedFileContext {
         path: "test.rs".to_string(),
         content: "let x = \"]]>\"; // tricky".to_string(),
+        provenance: FileContextProvenance::UserProvided,
     }];
     let prefix = build_file_context_prefix(&files);
     // ]]> inside content must be split to avoid breaking CDATA
@@ -266,6 +271,7 @@ fn test_file_context_with_real_content() {
     let files = vec![ResolvedFileContext {
         path: "Cargo.toml".to_string(),
         content: cargo_content.clone(),
+        provenance: FileContextProvenance::UserProvided,
     }];
     let prefix = build_file_context_prefix(&files);
 
@@ -285,10 +291,12 @@ fn test_file_context_multiple_mentions_payload() {
         ResolvedFileContext {
             path: "src/main.rs".to_string(),
             content: "fn main() { println!(\"hello\"); }".to_string(),
+            provenance: FileContextProvenance::UserProvided,
         },
         ResolvedFileContext {
             path: "src/lib.rs".to_string(),
             content: "pub mod domain;".to_string(),
+            provenance: FileContextProvenance::UserProvided,
         },
     ];
     let prefix = build_file_context_prefix(&files);

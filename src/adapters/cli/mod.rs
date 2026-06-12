@@ -1,3 +1,4 @@
+pub mod ask;
 #[cfg(feature = "meta-search")]
 pub mod catalog;
 pub mod commands;

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use async_trait::async_trait;
 
 use crate::domain::errors::PermissionError;
-use crate::domain::models::{FileOperation, PathAccessType, PermissionMode};
+use crate::domain::models::{FileContextProvenance, FileOperation, PathAccessType, PermissionMode};
 use crate::domain::ports::SecurityPort;
 
 pub struct SecurityAdapter {
@@ -104,6 +104,7 @@ impl SecurityAdapter {
         &self,
         path: &Path,
         op: FileOperation,
+        provenance: FileContextProvenance,
     ) -> Result<PathAccessType, PermissionError> {
         if path
             .components()
@@ -123,9 +124,24 @@ impl SecurityAdapter {
         let workspace_canonical = std::fs::canonicalize(&self.workspace_path)
             .unwrap_or_else(|_| self.workspace_path.clone());
 
+        // Apply blocklist to the requested path even before canonicalization so
+        // user-provided paths cannot name blocked prefixes by a non-existent path.
+        let absolute_str = absolute.to_string_lossy();
+        for blocked in &self.blocked_paths {
+            if absolute_str.starts_with(blocked) {
+                return Err(PermissionError::WorkspaceViolation(format!(
+                    "Access to {} is not allowed",
+                    blocked
+                )));
+            }
+        }
+
         let resolved = match std::fs::canonicalize(&absolute) {
             Ok(p) => p,
             Err(_) => {
+                if provenance == FileContextProvenance::UserProvided {
+                    return Ok(PathAccessType::External);
+                }
                 if let Some(parent) = absolute.parent() {
                     match std::fs::canonicalize(parent) {
                         Ok(canon_parent) => {
@@ -191,6 +207,8 @@ impl SecurityAdapter {
 
         if resolved.starts_with(&workspace_canonical) {
             Ok(PathAccessType::Workspace)
+        } else if provenance == FileContextProvenance::UserProvided && op == FileOperation::Read {
+            Ok(PathAccessType::External)
         } else if op == FileOperation::Read {
             if let Ok(dirs) = self.active_skill_dirs.read() {
                 for skill_dir in dirs.iter() {
@@ -230,7 +248,16 @@ impl SecurityPort for SecurityAdapter {
         path: &Path,
         op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
-        self.validate_path(path, op)
+        self.validate_path(path, op, FileContextProvenance::ModelSuggested)
+    }
+
+    fn check_workspace_access_with_provenance(
+        &self,
+        path: &Path,
+        op: FileOperation,
+        provenance: FileContextProvenance,
+    ) -> Result<PathAccessType, PermissionError> {
+        self.validate_path(path, op, provenance)
     }
 
     fn add_active_skill_dir(&self, dir: PathBuf) {
@@ -288,6 +315,15 @@ impl SecurityPort for HeadlessSecurityAdapter {
         op: FileOperation,
     ) -> Result<PathAccessType, PermissionError> {
         self.0.check_workspace_access(path, op)
+    }
+    fn check_workspace_access_with_provenance(
+        &self,
+        path: &Path,
+        op: FileOperation,
+        provenance: FileContextProvenance,
+    ) -> Result<PathAccessType, PermissionError> {
+        self.0
+            .check_workspace_access_with_provenance(path, op, provenance)
     }
     fn add_active_skill_dir(&self, dir: PathBuf) {
         self.0.add_active_skill_dir(dir)
