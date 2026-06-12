@@ -1,5 +1,8 @@
 /target
-Cargo.lock
+# Cargo.lock IS committed: rustain is a binary/end-product, so the lockfile must be
+# version-controlled for reproducible CI. Without it, CI re-resolved deps on every run
+# (no --locked) and a newer ratatui patch broke compilation on a fresh resolve while
+# local builds stayed green on the cached/old versions (Epic 12 retro follow-up).
 *.swp
 *.swo
 .env
