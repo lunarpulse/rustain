@@ -59,6 +59,8 @@ def test_custom_command_appears_in_autocomplete(build_binary, tmp_path):
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "rev")
+        time.sleep(0.5)
         tui.assert_screen_contains("review", msg="Custom command /review should appear in autocomplete")
         tui.assert_screen_contains("Review code", msg="Description should appear in autocomplete")
         _close_autocomplete(tui)
@@ -76,6 +78,8 @@ def test_namespaced_command_appears_in_autocomplete(build_binary, tmp_path):
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "deploy")
+        time.sleep(0.5)
         tui.assert_screen_contains(
             "deploy:staging", msg="Namespaced command deploy:staging should appear in autocomplete"
         )
@@ -105,6 +109,8 @@ def test_custom_command_without_frontmatter_uses_first_line_description(build_bi
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "hello")
+        time.sleep(0.5)
         tui.assert_screen_contains("hello", msg="Command /hello should appear")
         tui.assert_screen_contains(
             "Greet the user warmly", msg="First body line should be used as description"
@@ -124,9 +130,25 @@ def test_multiple_custom_commands_sorted_alphabetically(build_binary, tmp_path):
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "alpha")
+        time.sleep(0.5)
         tui.assert_screen_contains("alpha", msg="alpha should appear")
+
+        # Clear filter back to '/' by backspacing the typed chars
+        for _ in range(5):
+            tui.send(BACKSPACE)
+            time.sleep(0.05)
+        type_slowly(tui, "middle")
+        time.sleep(0.5)
         tui.assert_screen_contains("middle", msg="middle should appear")
+
+        for _ in range(6):
+            tui.send(BACKSPACE)
+            time.sleep(0.05)
+        type_slowly(tui, "zebra")
+        time.sleep(0.5)
         tui.assert_screen_contains("zebra", msg="zebra should appear")
+
         _close_autocomplete(tui)
     finally:
         tui.stop()
@@ -149,6 +171,8 @@ def test_refresh_sees_newly_added_file(build_binary, tmp_path):
         )
 
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "added")
+        time.sleep(0.5)
         tui.assert_screen_contains(
             "added-later", msg="Newly added command should appear after re-scan"
         )
@@ -167,12 +191,16 @@ def test_refresh_removes_deleted_file(build_binary, tmp_path):
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "eph")
+        time.sleep(0.5)
         tui.assert_screen_contains("ephemeral", msg="Command should appear initially")
         _close_autocomplete(tui)
 
         cmd_file.unlink()
 
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "eph")
+        time.sleep(0.5)
         tui.assert_screen_not_contains(
             "ephemeral", msg="Deleted command should disappear after re-scan"
         )
@@ -213,6 +241,8 @@ def test_deeply_nested_namespace_appears(build_binary, tmp_path):
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "ci")
+        time.sleep(0.5)
         tui.assert_screen_contains(
             "ci:github:actions", msg="Deeply nested namespace should appear"
         )
@@ -229,6 +259,8 @@ def test_custom_command_with_empty_body_shows_no_description(build_binary, tmp_p
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
+        type_slowly(tui, "emp")
+        time.sleep(0.5)
         tui.assert_screen_contains("empty", msg="Empty-body command should still appear")
         _close_autocomplete(tui)
     finally:
@@ -245,9 +277,6 @@ def test_autocomplete_filter_narrows_custom_commands(build_binary, tmp_path):
     tui = _start_tui_with_workspace(tmp_path)
     try:
         _open_slash_autocomplete(tui)
-        tui.assert_screen_contains("deploy-prod", msg="deploy-prod should appear")
-        tui.assert_screen_contains("review", msg="review should appear")
-
         type_slowly(tui, "deploy")
         time.sleep(0.5)
         tui.assert_screen_contains("deploy-prod", msg="deploy-prod should match filter")

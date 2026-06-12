@@ -8,7 +8,7 @@ TUI contract tests for non-API-driven user interactions:
 
 Full activation + turn-kickoff tests (AC1/AC6/AC8/AC12 end-to-end) require a
 real LLM provider and are covered by the Rust integration suite
-(`tests/skill_activation.rs`). This file focuses on TUI mechanics that are
+(``tests/skill_activation.rs``).  This file focuses on TUI mechanics that are
 observable without an API key.
 
 Rewritten 2026-04-21 against the real ``tests_tui/harness.py`` API.
@@ -19,6 +19,7 @@ convention (see ``harness.py::send_message`` docstring).
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -29,6 +30,9 @@ from keys import ESC, TAB
 
 
 CHAR_DELAY = 0.015  # seconds per keystroke — matches harness.send_message default
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
@@ -83,6 +87,45 @@ def write_workspace_skill(
     return skill_dir / "SKILL.md"
 
 
+def _start_tui_with_monitor_density(workspace: Path) -> RustainTUI:
+    """Start a RustainTUI with Monitor density mode.
+
+    The default Focus density mode queues StatusFlash notifications instead of
+    displaying them, so tests that need to observe status-bar flash messages
+    (e.g. /deactivate feedback) must use Monitor mode.
+    """
+    allow_list = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    config_dir = workspace / ".rustain"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "config.toml"
+    if not config_file.exists():
+        config_file.write_text(
+            "[permissions]\n"
+            f"always_tools = {json.dumps(allow_list)}\n"
+            "\n"
+            "[layout]\n"
+            'density_mode = "monitor"\n'
+        )
+    return RustainTUI(build=False, workspace=workspace, allowed_tools=allow_list)
+
+
+def _wait_for_skills_loaded(tui: RustainTUI, count: int, timeout: float = 15.0) -> None:
+    """Wait for the background skill scan to complete.
+
+    Polls the screen for the ``Loaded N skill(s)`` SystemNotice flash, then
+    falls back to log inspection if the flash expired before a poll caught it.
+    """
+    screen_text = f"Loaded {count} skill"
+    if tui.wait_for_screen(screen_text, timeout=timeout):
+        return
+    # Fallback: check log for evidence the scan ran
+    log_pattern = rf"Background skill scan complete:\s+{count}\s+skills?"
+    tui.assert_log_contains(
+        log_pattern,
+        msg=f"Skill scan completed but '{screen_text}' not on screen",
+    )
+
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
@@ -102,7 +145,15 @@ def test_skill_appears_in_slash_autocomplete(tmp_path):
     ws.mkdir()
     write_workspace_skill(ws, "review-code", description="Review a Rust file")
     with RustainTUI(build=False, workspace=ws) as t:
-        type_slowly(t, "/")
+        _wait_for_skills_loaded(t, count=1)
+        t.send("/")
+        time.sleep(0.3)
+        # Narrow autocomplete filter — built-in commands fill the first 8
+        # visible slots, so the skill is off-screen without a filter prefix.
+        for ch in "review-code":
+            t.send(ch)
+            time.sleep(0.05)
+        time.sleep(0.5)
         assert t.wait_for_screen("review-code", timeout=5.0), (
             "workspace skill should appear in slash autocomplete"
         )
@@ -115,6 +166,7 @@ def test_workspace_skill_triggers_trust_prompt(tmp_path):
     ws.mkdir()
     write_workspace_skill(ws, "risky-skill")
     with RustainTUI(build=False, workspace=ws) as t:
+        _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/risky-skill")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
         t.assert_screen_contains("[y]")
@@ -128,11 +180,17 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "declined-skill")
-    with RustainTUI(build=False, workspace=ws) as t:
+    # Monitor density so the "not trusted" StatusFlash is visible on screen.
+    t = _start_tui_with_monitor_density(ws)
+    t.start()
+    try:
+        _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/declined-skill")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
         t.send("n")
         assert t.wait_for_screen("not trusted", timeout=3.0)
+    finally:
+        t.stop()
 
 
 @pytest.mark.story_5_2
@@ -141,11 +199,17 @@ def test_trust_prompt_decline_via_esc(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "esc-decline")
-    with RustainTUI(build=False, workspace=ws) as t:
+    # Monitor density so the "not trusted" StatusFlash is visible on screen.
+    t = _start_tui_with_monitor_density(ws)
+    t.start()
+    try:
+        _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/esc-decline")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
         t.send(ESC)
         assert t.wait_for_screen("not trusted", timeout=3.0)
+    finally:
+        t.stop()
 
 
 @pytest.mark.story_5_2
@@ -160,6 +224,7 @@ def test_trust_prompt_inspect_shows_file_content(tmp_path):
         body="# Unique Inspect Marker 7c4f\nContent body.\n",
     )
     with RustainTUI(build=False, workspace=ws) as t:
+        _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/inspectable")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
         t.send("i")
@@ -173,11 +238,17 @@ def test_deactivate_with_no_active_skills(tmp_path):
     """AC5: ``/deactivate`` on an empty active-set emits the canonical info notice."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    with RustainTUI(build=False, workspace=ws) as t:
+    # Monitor density so the StatusFlash ("No active skills to deactivate")
+    # is displayed on screen instead of being queued (Focus mode default).
+    t = _start_tui_with_monitor_density(ws)
+    t.start()
+    try:
         submit_slash(t, "/deactivate")
         assert t.wait_for_screen("No active skills to deactivate", timeout=5.0), (
             "AC5 canonical empty-set notice missing"
         )
+    finally:
+        t.stop()
 
 
 @pytest.mark.story_5_2
@@ -185,11 +256,16 @@ def test_deactivate_unknown_skill_name(tmp_path):
     """AC5: ``/deactivate <name>`` for an inactive skill emits the 'not active' notice."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    with RustainTUI(build=False, workspace=ws) as t:
-        # Typing the argument pushes the input past the palette-match window,
-        # so a trailing Enter dispatches directly without needing submit_slash.
+    # Monitor density so the StatusFlash ("Skill '…' is not active")
+    # is displayed on screen instead of being queued (Focus mode default).
+    t = _start_tui_with_monitor_density(ws)
+    t.start()
+    try:
         type_slowly(t, "/deactivate unknown-skill")
+        time.sleep(0.3)
         t.send("\r")
         assert t.wait_for_screen("is not active", timeout=5.0), (
             "AC5 unknown-skill notice missing"
         )
+    finally:
+        t.stop()

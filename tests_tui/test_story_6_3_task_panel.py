@@ -76,8 +76,9 @@ def _ensure_task_panel_open(tui: RustainTUI) -> None:
 
 
 @pytest.mark.story_6_3
-def test_chord_opens_panel(tui: RustainTUI):
+def test_chord_opens_panel(tui_monitor: RustainTUI):
     """Ctrl+X, T chord at 130-col terminal opens the Tasks sidebar panel."""
+    tui = tui_monitor
     _send_chord_ctrl_x_t(tui)
     tui.assert_screen_contains("Tasks", msg="Task panel header should be visible")
 
@@ -85,14 +86,14 @@ def test_chord_opens_panel(tui: RustainTUI):
 # ── Scenario 2: Ctrl+X, T at narrow terminal shows warning ────────────────
 
 
-@pytest.mark.story_6_3
-def test_chord_no_crash_at_default_size(tui: RustainTUI):
+def test_chord_no_crash_at_default_size(tui_monitor: RustainTUI):
     """Ctrl+X, T at the default 130x30 terminal opens the panel (no narrow guard).
 
     The 120-col guard is exercised by the Rust conformance tests
     (ac_resolve_panel_plan_rejects_narrow). Here we just verify the chord
     works at the standard test terminal size.
     """
+    tui = tui_monitor
     _send_chord_ctrl_x_t(tui)
     tui.assert_screen_contains("Tasks", msg="Panel should open at 130 cols")
 
@@ -241,8 +242,9 @@ def test_failed_task_action_row(tui: RustainTUI):
 
 
 @pytest.mark.story_6_3
-def test_toggle_closes_panel(tui: RustainTUI):
+def test_toggle_closes_panel(tui_monitor: RustainTUI):
     """Pressing Ctrl+X, T a second time closes the task panel."""
+    tui = tui_monitor
     _send_chord_ctrl_x_t(tui)
     tui.assert_screen_contains("Tasks", msg="Panel should be open")
 
@@ -257,8 +259,9 @@ def test_toggle_closes_panel(tui: RustainTUI):
 
 
 @pytest.mark.story_6_3
-def test_switch_from_history_to_tasks(tui: RustainTUI):
+def test_switch_from_history_to_tasks(tui_monitor: RustainTUI):
     """Ctrl+X, T while History panel is open switches to Tasks panel."""
+    tui = tui_monitor
     tui.toggle_sidebar()
     tui.wait(0.5)
     tui.assert_screen_contains("History", msg="History panel should be open")

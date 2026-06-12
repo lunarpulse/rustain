@@ -179,22 +179,36 @@ def test_help_overlay_shows_plan_mode_bindings(tui: RustainTUI):
     On the 30-row pyte terminal, only the first few categories fit.
     We scroll down to find the COMMANDS category.
     """
+    # Robust reset: close any leftover overlays, ensure chat focus
+    tui.send(ESC)
+    tui.wait(0.3)
+    tui.send(ESC)
+    tui.wait(0.3)
     tui.chat_mode()
     tui.open_help()
-    # Scroll down to find COMMANDS category (j scrolls down by 1 line)
-    for _ in range(60):
+    # Wait for help overlay to fully render
+    tui.wait_for_screen("Keybindings", timeout=3.0)
+    # Scroll down incrementally to find /plan in COMMANDS section
+    found_plan = False
+    for _ in range(120):
+        if "/plan on|off|toggle" in tui.get_screen_text():
+            found_plan = True
+            break
         tui.send("j")
-        tui.wait(0.1)
-    screen = tui.get_screen_text()
-    assert "/plan on|off|toggle" in screen, f"Help should document /plan command. Screen:\n{screen}"
-    # Scroll back to top and down a bit less to find Shift+Tab
+        tui.wait(0.08)
+    assert found_plan, f"Help should document /plan command. Screen:\n{tui.get_screen_text()}"
+    # Scroll back to top and down to find Shift+Tab (in INPUT section)
     tui.send("g")
     tui.wait(0.1)
-    for _ in range(30):
+    found_shift_tab = False
+    for _ in range(120):
+        if "Shift+Tab in input" in tui.get_screen_text():
+            found_shift_tab = True
+            break
         tui.send("j")
-        tui.wait(0.05)
+        tui.wait(0.08)
     screen = tui.get_screen_text()
-    assert "Shift+Tab in input" in screen, "Help should document Shift+Tab cycle"
+    assert found_shift_tab, f"Help should document Shift+Tab cycle. Screen:\n{screen}"
     assert "Cycle permission mode" in screen, "Help should describe Shift+Tab action"
     tui.close_overlay()
 
