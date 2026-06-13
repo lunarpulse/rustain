@@ -519,6 +519,7 @@ pub async fn run() -> Result<()> {
         file,
         yolo,
         final_message_only,
+        output_format,
     }) = cli.command.clone()
     {
         return crate::adapters::cli::ask::run_ask(
@@ -526,6 +527,7 @@ pub async fn run() -> Result<()> {
             file,
             yolo,
             final_message_only,
+            output_format,
             app_config,
             cli.session.clone(),
             cli.new,

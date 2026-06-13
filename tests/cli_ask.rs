@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream;
+use rustain::adapters::cli::ask::OutputFormat;
 use rustain::adapters::noop::{
     NoOpApprovalPersistence, NoOpSecurity, NoOpStorage, NoOpToolSet, NoOpUsageLedger,
 };
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::domain::models::{
     CompletionOptions, FileContextProvenance, Message, MessageRole, PermissionMode, StopReason,
-    StreamChunk,
+    StreamChunk, UsageInfo,
 };
 use rustain::domain::ports::SecurityPort;
 use rustain::domain::ports::StreamingProvider;
@@ -18,7 +19,7 @@ use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::message_builder::ResolvedFileContext;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::composition::CliCore;
-
+use sha2::{Digest, Sha256};
 fn default_config() -> rustain::domain::models::AppConfig {
     rustain::domain::models::AppConfig::default()
 }
@@ -231,13 +232,13 @@ impl StreamingProvider for ErrorProvider {
         Ok(())
     }
 }
-
 fn make_opts(query: &str) -> rustain::adapters::cli::ask::AskOpts {
     rustain::adapters::cli::ask::AskOpts {
         query: query.to_string(),
         files: vec![],
         yolo: false,
         final_message_only: false,
+        output_format: rustain::adapters::cli::ask::OutputFormat::Text,
         model_override: None,
         session_id: None,
     }
@@ -846,5 +847,852 @@ async fn p0_session_resume_hint() {
         "expected 21-char nanoid, got len={}: '{}'",
         id.len(),
         id
+    );
+}
+// ================== Story 13.1b: Structured Output & Schema Versioning ==================
+
+/// Generic provider that emits a configured sequence of chunks.
+struct ChunkProvider {
+    chunks: Vec<StreamChunk>,
+}
+
+impl ChunkProvider {
+    fn new(chunks: Vec<StreamChunk>) -> Self {
+        Self { chunks }
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for ChunkProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        let chunks = self.chunks.clone();
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "mock-chunk".into()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+}
+
+fn make_opts_with_format(query: &str, fmt: OutputFormat) -> rustain::adapters::cli::ask::AskOpts {
+    rustain::adapters::cli::ask::AskOpts {
+        query: query.to_string(),
+        files: vec![],
+        yolo: false,
+        final_message_only: false,
+        output_format: fmt,
+        model_override: None,
+        session_id: None,
+    }
+}
+
+async fn run_ask_core_test(
+    provider: Arc<dyn StreamingProvider>,
+    opts: rustain::adapters::cli::ask::AskOpts,
+) -> (ExitCode, String, String) {
+    let core = build_test_core(provider.clone());
+    let config = default_config();
+    let workspace = std::path::Path::new("/tmp/test-ask");
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider,
+        core,
+        opts,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    let out = String::from_utf8(stdout.into_inner()).unwrap();
+    let err = String::from_utf8(stderr.into_inner()).unwrap();
+    (exit, out, err)
+}
+
+/// P0-13.1b-text-identity — default mode and explicit `--output-format text` are identical.
+#[tokio::test]
+async fn p0_13_1b_text_identity() {
+    let provider = Arc::new(SimpleTextProvider {
+        text: "hello text identity".into(),
+    });
+    let default_opts = make_opts("test query");
+    let text_opts = make_opts_with_format("test query", OutputFormat::Text);
+
+    let (exit1, out1, _) = run_ask_core_test(provider.clone(), default_opts).await;
+    let (exit2, out2, _) = run_ask_core_test(provider, text_opts).await;
+
+    assert_eq!(exit1, ExitCode::SUCCESS);
+    assert_eq!(exit2, ExitCode::SUCCESS);
+    assert_eq!(
+        out1, out2,
+        "default text output must match explicit --output-format text"
+    );
+}
+
+/// P0-13.1b-json-shape — single JSON document with the v1.0 schema fields.
+#[tokio::test]
+async fn p0_13_1b_json_shape() {
+    let usage = UsageInfo {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_creation_input_tokens: Some(1),
+        cache_read_input_tokens: Some(2),
+        reasoning_tokens: Some(3),
+    };
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "JSON shape response".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::Usage {
+            usage,
+            session_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let mut opts = make_opts_with_format("test", OutputFormat::Json);
+    opts.yolo = true;
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("stdout must be valid JSON");
+    assert_eq!(doc["schema_version"], "1.0");
+    assert_eq!(doc["response"], "JSON shape response");
+    assert!(
+        !doc["model"].as_str().unwrap().is_empty(),
+        "model must be the resolved concrete model string"
+    );
+    assert_eq!(doc["stop_reason"], "end_turn");
+    assert_eq!(doc["usage"]["input_tokens"], 10);
+    assert_eq!(doc["usage"]["output_tokens"], 20);
+    assert_eq!(doc["usage"]["cache_creation_input_tokens"], 1);
+    assert_eq!(doc["usage"]["cache_read_input_tokens"], 2);
+    assert_eq!(doc["usage"]["reasoning_tokens"], 3);
+    assert!(doc["tool_calls"].is_array());
+    assert_eq!(doc["tool_calls"].as_array().unwrap().len(), 0);
+    assert!(
+        !doc["session_id"].as_str().unwrap().is_empty(),
+        "session_id must be a real conversation id"
+    );
+    assert_eq!(doc["deny_count"], 0);
+    assert!(
+        !doc.as_object().unwrap().contains_key("error"),
+        "success JSON must not contain an error object"
+    );
+    assert!(
+        err.contains("Session saved"),
+        "resume hint must stay on stderr, got: {}",
+        err
+    );
+}
+
+/// P0-13.1b-G1-usage-matrix — capture Usage regardless of chunk ordering.
+#[tokio::test]
+async fn p0_13_1b_g1_usage_matrix() {
+    let usage = UsageInfo {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        reasoning_tokens: None,
+    };
+    let cases: Vec<(&str, Vec<StreamChunk>)> = vec![
+        (
+            "after",
+            vec![
+                StreamChunk::Text {
+                    content: "a".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+                StreamChunk::Usage {
+                    usage: usage.clone(),
+                    session_id: None,
+                },
+            ],
+        ),
+        (
+            "before",
+            vec![
+                StreamChunk::Text {
+                    content: "a".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::Usage {
+                    usage: usage.clone(),
+                    session_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ),
+        (
+            "interleaved",
+            vec![
+                StreamChunk::Text {
+                    content: "a".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::Usage {
+                    usage: usage.clone(),
+                    session_id: None,
+                },
+                StreamChunk::Text {
+                    content: "b".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ),
+        (
+            "none",
+            vec![
+                StreamChunk::Text {
+                    content: "a".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ),
+        (
+            "twice",
+            vec![
+                StreamChunk::Text {
+                    content: "a".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::Usage {
+                    usage: UsageInfo {
+                        input_tokens: 1,
+                        output_tokens: 2,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                    session_id: None,
+                },
+                StreamChunk::Usage {
+                    usage: UsageInfo {
+                        input_tokens: 3,
+                        output_tokens: 4,
+                        cache_creation_input_tokens: None,
+                        cache_read_input_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                    session_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ),
+    ];
+
+    for (name, chunks) in cases {
+        let provider = Arc::new(ChunkProvider::new(chunks));
+        let opts = make_opts_with_format("test", OutputFormat::Json);
+        let (exit, out, _) = run_ask_core_test(provider, opts).await;
+        assert_eq!(exit, ExitCode::SUCCESS, "case {} failed", name);
+
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        if name == "none" {
+            assert!(
+                doc["usage"].is_null(),
+                "case {}: usage must be explicit null, got {:?}",
+                name,
+                doc["usage"]
+            );
+        } else if name == "twice" {
+            assert_eq!(
+                doc["usage"]["input_tokens"], 3,
+                "case {}: last usage wins",
+                name
+            );
+            assert_eq!(
+                doc["usage"]["output_tokens"], 4,
+                "case {}: last usage wins",
+                name
+            );
+        } else {
+            assert_eq!(doc["usage"]["input_tokens"], 1, "case {}", name);
+            assert_eq!(doc["usage"]["output_tokens"], 2, "case {}", name);
+        }
+        assert!(out.contains('a'), "case {}: response text intact", name);
+    }
+}
+
+/// P0-13.1b-G3-stream-ndjson + mid-stream error.
+#[tokio::test]
+async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
+    // Happy path: every line is a parseable object, no embedded newlines,
+    // terminal line is turn_complete.
+    let usage = UsageInfo {
+        input_tokens: 5,
+        output_tokens: 6,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        reasoning_tokens: None,
+    };
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "hello".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::ToolUse {
+            id: "t1".into(),
+            name: "tool".into(),
+            input: serde_json::json!({"x": 1}),
+        },
+        StreamChunk::ToolResult {
+            id: "t1".into(),
+            content: "r1".into(),
+            is_error: false,
+        },
+        StreamChunk::Usage {
+            usage,
+            session_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let mut opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    opts.yolo = true;
+
+    let (exit, out, _err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let lines: Vec<&str> = out.trim_end().split('\n').collect();
+    assert!(
+        lines.len() >= 2,
+        "expected >=2 NDJSON lines, got {}",
+        lines.len()
+    );
+    for line in &lines {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "line not parseable: {}",
+            line
+        );
+        assert!(
+            !line.contains('\n'),
+            "compact JSON must not contain embedded newline: {}",
+            line
+        );
+        let ev: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(ev["schema_version"], "1.0");
+    }
+    let types: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert!(types.contains(&"text".to_string()));
+    assert!(types.contains(&"tool_use".to_string()));
+    assert!(types.contains(&"tool_result".to_string()));
+    assert!(types.contains(&"usage".to_string()));
+    assert_eq!(types.last().unwrap(), "turn_complete");
+
+    // Mid-stream error: prior NDJSON lines still parse, terminal line is error.
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "part1".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::Text {
+            content: "part2".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::Error {
+            content: "boom".into(),
+        },
+    ]));
+    let opts = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit, out, _err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::FAILURE);
+
+    let lines: Vec<&str> = out.trim_end().split('\n').collect();
+    assert!(
+        lines.len() >= 2,
+        "expected prior NDJSON lines plus error, got {:?}",
+        lines
+    );
+    for line in &lines {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "line not parseable: {}",
+            line
+        );
+    }
+    let last: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    assert_eq!(last["type"], "error");
+    assert!(last["error"]["message"].as_str().unwrap().contains("boom"));
+}
+
+/// P0-13.1b-G2-deny-fields + exit-zero — auto-denied tool surfaces deny_count on stdout.
+#[tokio::test]
+async fn p0_13_1b_g2_deny_fields() {
+    let provider = Arc::new(ToolUseProvider::new());
+    let mut opts = make_opts_with_format("use a tool", OutputFormat::Json);
+    opts.yolo = false;
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(
+        exit,
+        ExitCode::SUCCESS,
+        "deny must keep exit 0, stderr: {}",
+        err
+    );
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        doc["deny_count"].as_u64().unwrap() >= 1,
+        "deny_count must surface on stdout, got {}",
+        doc["deny_count"]
+    );
+}
+
+/// P0-13.1b-G2-stream-json-deny — stream-json turn_complete carries deny_count.
+#[tokio::test]
+async fn p0_13_1b_g2_stream_json_deny_fields() {
+    let provider = Arc::new(ToolUseProvider::new());
+    let mut opts = make_opts_with_format("use a tool", OutputFormat::StreamJson);
+    opts.yolo = false;
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(
+        exit,
+        ExitCode::SUCCESS,
+        "deny must keep exit 0 in stream-json, stderr: {}",
+        err
+    );
+
+    // Find the turn_complete line and assert deny_count >= 1
+    let lines: Vec<&str> = out.trim().lines().collect();
+    let tc_line = lines.iter().find(|l| {
+        serde_json::from_str::<serde_json::Value>(l)
+            .map(|v| v["type"] == "turn_complete")
+            .unwrap_or(false)
+    }).expect("stream-json must contain a turn_complete event");
+    let tc: serde_json::Value = serde_json::from_str(tc_line).unwrap();
+    assert!(
+        tc["deny_count"].as_u64().unwrap() >= 1,
+        "stream-json turn_complete must carry deny_count >= 1, got: {}",
+        tc["deny_count"]
+    );
+}
+
+/// P0-13.1b-stdout-purity-under-denials — json stdout contains only the JSON doc.
+#[tokio::test]
+async fn p0_13_1b_stdout_purity_under_denials() {
+    let provider = Arc::new(ToolUseProvider::new());
+    let mut opts = make_opts_with_format("use a tool", OutputFormat::Json);
+    opts.yolo = false;
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+        "stdout must be a single JSON document, got: {}",
+        out
+    );
+    assert!(
+        !out.contains("requires approval"),
+        "deny narration must not leak to stdout"
+    );
+    assert!(
+        !out.contains("auto-denied"),
+        "deny summary must not leak to stdout"
+    );
+    assert!(
+        !out.contains("Session saved"),
+        "resume hint must not leak to stdout"
+    );
+    assert!(
+        err.contains("requires approval") || err.contains("auto-denied"),
+        "stderr must still carry human-readable denial info, got: {}",
+        err
+    );
+}
+
+/// P0-13.1b-json-error — turn failure emits a structured error document in json mode.
+#[tokio::test]
+async fn p0_13_1b_json_error() {
+    let provider = Arc::new(ErrorProvider);
+    let opts = make_opts_with_format("test", OutputFormat::Json);
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::FAILURE);
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&out).expect("json error must be parseable stdout");
+    assert_eq!(doc["schema_version"], "1.0");
+    assert!(doc["response"].is_null(), "error envelope: response must be null");
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("simulated provider failure")
+    );
+    // F-7: verify full envelope parity — same fields as success (AC6)
+    assert!(doc.get("model").is_some(), "error envelope must carry model");
+    assert!(doc.get("stop_reason").is_some(), "error envelope must carry stop_reason");
+    assert!(doc.get("usage").is_some(), "error envelope must carry usage");
+    assert!(doc.get("tool_calls").is_some(), "error envelope must carry tool_calls");
+    assert!(doc.get("session_id").is_some(), "error envelope must carry session_id");
+    assert!(doc.get("deny_count").is_some(), "error envelope must carry deny_count");
+    assert!(err.contains("Error"));
+}
+
+/// Collect every field path from a serialized JSON value.
+/// Arrays are represented with `[]` so nested object keys under arrays are captured.
+fn collect_field_paths(
+    value: &serde_json::Value,
+    prefix: &str,
+    paths: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let p = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{}.{}", prefix, k)
+                };
+                paths.insert(p.clone());
+                collect_field_paths(v, &p, paths);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if !prefix.is_empty() {
+                paths.insert(format!("{}[]", prefix));
+            }
+            for item in arr {
+                collect_field_paths(item, &format!("{}[]", prefix), paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// P0-13.1b-G4-schema-fingerprint — the v1.0 field set is pinned.
+const SCHEMA_FINGERPRINT: &str = "0d0afb73ef46f84fff90596091a8842bb4d993b169b54a98a6843448badba8d5";
+#[tokio::test]
+async fn p0_13_1b_g4_schema_fingerprint() {
+    let usage = UsageInfo {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: Some(3),
+        cache_read_input_tokens: Some(4),
+        reasoning_tokens: Some(5),
+    };
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "fp".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::ToolUse {
+            id: "tc1".into(),
+            name: "tc_name".into(),
+            input: serde_json::json!({}),
+        },
+        StreamChunk::ToolResult {
+            id: "tc1".into(),
+            content: "res".into(),
+            is_error: false,
+        },
+        StreamChunk::Usage {
+            usage,
+            session_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let mut opts = make_opts_with_format("test", OutputFormat::Json);
+    opts.yolo = true;
+
+    let (exit, out, _) = run_ask_core_test(provider.clone(), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let mut paths = std::collections::BTreeSet::new();
+    collect_field_paths(&doc, "", &mut paths);
+    // Include the full stream-json field-path set (F-8: was type-only, now field paths).
+    let opts_stream = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (_exit_s, out_s, _) = run_ask_core_test(provider, opts_stream).await;
+    for line in out_s.trim().lines() {
+        if let Ok(ev) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(t) = ev["type"].as_str() {
+                collect_field_paths(&ev, &format!("stream:{}", t), &mut paths);
+            }
+        }
+    }
+
+    let joined = paths.iter().cloned().collect::<Vec<_>>().join("\n");
+    let hash = hex::encode(Sha256::digest(&joined));
+    assert_eq!(
+        hash, SCHEMA_FINGERPRINT,
+        "field set changed — if additive bump minor, if breaking bump major, then update the fingerprint.\nfields:\n{}",
+        joined
+    );
+}
+
+/// Assert that every object key in a JSON value matches snake_case.
+fn assert_all_keys_snake_case(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                assert!(
+                    k.chars()
+                        .next()
+                        .map(|c| c.is_ascii_lowercase())
+                        .unwrap_or(false)
+                        && k.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                    "key '{}' is not snake_case",
+                    k
+                );
+                assert_all_keys_snake_case(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                assert_all_keys_snake_case(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// P0-13.1b-G5-snake-case-lint — every key in json and stream-json is snake_case.
+#[tokio::test]
+async fn p0_13_1b_g5_snake_case_lint() {
+    let usage = UsageInfo {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: Some(3),
+        cache_read_input_tokens: Some(4),
+        reasoning_tokens: Some(5),
+    };
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "hi".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::ToolUse {
+            id: "t".into(),
+            name: "n".into(),
+            input: serde_json::json!({}),
+        },
+        StreamChunk::ToolResult {
+            id: "t".into(),
+            content: "r".into(),
+            is_error: false,
+        },
+        StreamChunk::Usage {
+            usage,
+            session_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+
+    let mut opts_json = make_opts_with_format("test", OutputFormat::Json);
+    opts_json.yolo = true;
+    let (exit, out, _) = run_ask_core_test(provider.clone(), opts_json).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let doc = serde_json::from_str::<serde_json::Value>(&out).unwrap();
+    assert_all_keys_snake_case(&doc);
+
+    let mut opts_stream = make_opts_with_format("test", OutputFormat::StreamJson);
+    opts_stream.yolo = true;
+    let (exit2, out2, _) = run_ask_core_test(provider, opts_stream).await;
+    assert_eq!(exit2, ExitCode::SUCCESS);
+    for line in out2.trim_end().split('\n') {
+        let ev = serde_json::from_str::<serde_json::Value>(line).unwrap();
+        assert_all_keys_snake_case(&ev);
+    }
+}
+
+/// P0-13.1b-final-message-json — `--final-message-only` narrows response to final block.
+#[tokio::test]
+async fn p0_13_1b_final_message_json() {
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "first block".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::ToolUse {
+            id: "t".into(),
+            name: "n".into(),
+            input: serde_json::json!({}),
+        },
+        StreamChunk::ToolResult {
+            id: "t".into(),
+            content: "r".into(),
+            is_error: false,
+        },
+        StreamChunk::Text {
+            content: "final block".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let mut opts = make_opts_with_format("test", OutputFormat::Json);
+    opts.yolo = true;
+    opts.final_message_only = true;
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["response"], "final block");
+    assert!(!err.contains("Session saved"), "stderr must be quieted");
+}
+
+/// P0-13.1b-no-format-flag — `--format` is intentionally absent.
+#[test]
+fn p0_13_1b_no_format_flag() {
+    let mut cmd = assert_cmd::Command::cargo_bin("rustain").unwrap();
+    cmd.args(["ask", "q", "--format", "json"]);
+    cmd.assert().failure();
+}
+
+/// P1-13.1b-G7-empty-response — pure tool turn produces response: "" (not missing).
+#[tokio::test]
+async fn p1_13_1b_g7_empty_response() {
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::ToolUse {
+            id: "t".into(),
+            name: "n".into(),
+            input: serde_json::json!({}),
+        },
+        StreamChunk::ToolResult {
+            id: "t".into(),
+            content: "r".into(),
+            is_error: false,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let mut opts = make_opts_with_format("test", OutputFormat::Json);
+    opts.yolo = true;
+
+    let (exit, out, _) = run_ask_core_test(provider.clone(), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let doc = serde_json::from_str::<serde_json::Value>(&out).unwrap();
+    assert_eq!(doc["response"], "");
+
+    let opts_stream = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit2, out2, _) = run_ask_core_test(provider, opts_stream).await;
+    assert_eq!(exit2, ExitCode::SUCCESS);
+    assert!(out2.contains(r#""type":"turn_complete""#));
+}
+
+/// P1-13.1b-G8-escaping — JSON/UTF-8 escaping round-trips correctly.
+#[tokio::test]
+async fn p1_13_1b_g8_escaping() {
+    let text = "line1\nline2\t\"quoted\" 🎉";
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: text.into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let opts = make_opts_with_format("test", OutputFormat::Json);
+
+    let (exit, out, _) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let doc = serde_json::from_str::<serde_json::Value>(&out).unwrap();
+    assert_eq!(doc["response"].as_str().unwrap(), text);
+}
+
+/// P1-13.1b-G12-framing — trailing newline discipline.
+#[tokio::test]
+async fn p1_13_1b_g12_framing() {
+    let provider = Arc::new(SimpleTextProvider { text: "hi".into() });
+
+    let opts_json = make_opts_with_format("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_core_test(provider.clone(), opts_json).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    assert!(out.ends_with('\n'), "single JSON doc must end with newline");
+
+    let opts_stream = make_opts_with_format("test", OutputFormat::StreamJson);
+    let (exit2, out2, _) = run_ask_core_test(provider, opts_stream).await;
+    assert_eq!(exit2, ExitCode::SUCCESS);
+    assert!(
+        out2.ends_with('\n'),
+        "NDJSON stream must end with final newline"
+    );
+}
+
+/// P0-13.1b-json-error-unreadable-file — pre-turn file failure emits structured error.
+#[test]
+fn p0_13_1b_json_error_unreadable_file() {
+    let mut cmd = assert_cmd::Command::cargo_bin("rustain").unwrap();
+    cmd.args([
+        "ask",
+        "q",
+        "--output-format",
+        "json",
+        "--file",
+        "/nonexistent/path/that/does/not/exist.txt",
+    ]);
+    let output = cmd.output().unwrap();
+    assert!(!output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let doc = serde_json::from_str::<serde_json::Value>(&stdout)
+        .expect("stdout must contain structured error document");
+    assert_eq!(doc["schema_version"], "1.0");
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read file")
     );
 }

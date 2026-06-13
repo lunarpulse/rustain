@@ -150,6 +150,9 @@ pub enum Command {
         /// Print only the final assistant text block; quiet stderr
         #[arg(long)]
         final_message_only: bool,
+        /// Output format for the rendered response (Story 13.1b)
+        #[arg(long, value_parser = ["text", "json", "stream-json"], default_value = "text")]
+        output_format: String,
     },
 }
 
