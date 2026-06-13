@@ -153,6 +153,10 @@ pub enum Command {
         /// Output format for the rendered response (Story 13.1b)
         #[arg(long, value_parser = ["text", "json", "stream-json"], default_value = "text")]
         output_format: String,
+        /// Dry-run plan mode: generate a plan without executing state-mutating tools (Story 13.1c, FR101).
+        /// No session state is written. Conflicts with --yolo (opposite permission posture).
+        #[arg(long, conflicts_with = "yolo")]
+        dry_run: bool,
     },
 }
 

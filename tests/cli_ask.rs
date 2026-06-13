@@ -241,6 +241,7 @@ fn make_opts(query: &str) -> rustain::adapters::cli::ask::AskOpts {
         output_format: rustain::adapters::cli::ask::OutputFormat::Text,
         model_override: None,
         session_id: None,
+        dry_run: false,
     }
 }
 
@@ -902,6 +903,7 @@ fn make_opts_with_format(query: &str, fmt: OutputFormat) -> rustain::adapters::c
         output_format: fmt,
         model_override: None,
         session_id: None,
+        dry_run: false,
     }
 }
 
@@ -980,7 +982,7 @@ async fn p0_13_1b_json_shape() {
     assert_eq!(exit, ExitCode::SUCCESS);
 
     let doc: serde_json::Value = serde_json::from_str(&out).expect("stdout must be valid JSON");
-    assert_eq!(doc["schema_version"], "1.0");
+    assert_eq!(doc["schema_version"], "1.1");
     assert_eq!(doc["response"], "JSON shape response");
     assert!(
         !doc["model"].as_str().unwrap().is_empty(),
@@ -1211,7 +1213,7 @@ async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
             line
         );
         let ev: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(ev["schema_version"], "1.0");
+        assert_eq!(ev["schema_version"], "1.1");
     }
     let types: Vec<String> = lines
         .iter()
@@ -1304,11 +1306,14 @@ async fn p0_13_1b_g2_stream_json_deny_fields() {
 
     // Find the turn_complete line and assert deny_count >= 1
     let lines: Vec<&str> = out.trim().lines().collect();
-    let tc_line = lines.iter().find(|l| {
-        serde_json::from_str::<serde_json::Value>(l)
-            .map(|v| v["type"] == "turn_complete")
-            .unwrap_or(false)
-    }).expect("stream-json must contain a turn_complete event");
+    let tc_line = lines
+        .iter()
+        .find(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .map(|v| v["type"] == "turn_complete")
+                .unwrap_or(false)
+        })
+        .expect("stream-json must contain a turn_complete event");
     let tc: serde_json::Value = serde_json::from_str(tc_line).unwrap();
     assert!(
         tc["deny_count"].as_u64().unwrap() >= 1,
@@ -1362,8 +1367,11 @@ async fn p0_13_1b_json_error() {
 
     let doc: serde_json::Value =
         serde_json::from_str(&out).expect("json error must be parseable stdout");
-    assert_eq!(doc["schema_version"], "1.0");
-    assert!(doc["response"].is_null(), "error envelope: response must be null");
+    assert_eq!(doc["schema_version"], "1.1");
+    assert!(
+        doc["response"].is_null(),
+        "error envelope: response must be null"
+    );
     assert!(
         doc["error"]["message"]
             .as_str()
@@ -1371,12 +1379,30 @@ async fn p0_13_1b_json_error() {
             .contains("simulated provider failure")
     );
     // F-7: verify full envelope parity — same fields as success (AC6)
-    assert!(doc.get("model").is_some(), "error envelope must carry model");
-    assert!(doc.get("stop_reason").is_some(), "error envelope must carry stop_reason");
-    assert!(doc.get("usage").is_some(), "error envelope must carry usage");
-    assert!(doc.get("tool_calls").is_some(), "error envelope must carry tool_calls");
-    assert!(doc.get("session_id").is_some(), "error envelope must carry session_id");
-    assert!(doc.get("deny_count").is_some(), "error envelope must carry deny_count");
+    assert!(
+        doc.get("model").is_some(),
+        "error envelope must carry model"
+    );
+    assert!(
+        doc.get("stop_reason").is_some(),
+        "error envelope must carry stop_reason"
+    );
+    assert!(
+        doc.get("usage").is_some(),
+        "error envelope must carry usage"
+    );
+    assert!(
+        doc.get("tool_calls").is_some(),
+        "error envelope must carry tool_calls"
+    );
+    assert!(
+        doc.get("session_id").is_some(),
+        "error envelope must carry session_id"
+    );
+    assert!(
+        doc.get("deny_count").is_some(),
+        "error envelope must carry deny_count"
+    );
     assert!(err.contains("Error"));
 }
 
@@ -1411,8 +1437,10 @@ fn collect_field_paths(
     }
 }
 
-/// P0-13.1b-G4-schema-fingerprint — the v1.0 field set is pinned.
-const SCHEMA_FINGERPRINT: &str = "0d0afb73ef46f84fff90596091a8842bb4d993b169b54a98a6843448badba8d5";
+/// P0-13.1b/c-G4-schema-fingerprint — the v1.1 field set is pinned.
+/// Story 13.1c additive bump 1.0→1.1: dry_run, plan, tools_would_use (always-present, O3).
+/// turn_complete now carries dry_run + tools_would_use.
+const SCHEMA_FINGERPRINT: &str = "9287240bc07389a3dddf14ecbe68d36fdd12d37c7ec8a80b34c880b6fe847f9f";
 #[tokio::test]
 async fn p0_13_1b_g4_schema_fingerprint() {
     let usage = UsageInfo {
@@ -1688,11 +1716,992 @@ fn p0_13_1b_json_error_unreadable_file() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let doc = serde_json::from_str::<serde_json::Value>(&stdout)
         .expect("stdout must contain structured error document");
-    assert_eq!(doc["schema_version"], "1.0");
+    assert_eq!(doc["schema_version"], "1.1");
     assert!(
         doc["error"]["message"]
             .as_str()
             .unwrap()
             .contains("cannot read file")
     );
+}
+// ================== Story 13.1c: Dry-Run Plan Mode ==================
+
+/// ToolSet that handles `propose_plan` by parsing the plan and emitting PlanProposed
+/// on the captured event_tx. All other tools return NotFound.
+struct PlanToolSet {
+    event_tx: tokio::sync::mpsc::UnboundedSender<rustain::domain::events::AppEvent>,
+}
+
+impl PlanToolSet {
+    fn new(
+        event_tx: tokio::sync::mpsc::UnboundedSender<rustain::domain::events::AppEvent>,
+    ) -> Self {
+        Self { event_tx }
+    }
+}
+
+#[async_trait]
+impl rustain::domain::ports::ToolSetPort for PlanToolSet {
+    fn available_tools(&self) -> Vec<rustain::domain::models::ToolDefinition> {
+        vec![rustain::domain::models::ToolDefinition {
+            name: "propose_plan".to_string(),
+            description: "Propose a structured plan.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"}
+                            }
+                        }
+                    },
+                    "estimated_tool_calls": {"type": "number"},
+                    "estimated_seconds": {"type": "number"}
+                },
+                "required": ["title", "tasks"]
+            }),
+            parallel_safe: false,
+        }]
+    }
+    async fn execute(
+        &self,
+        tool_name: &str,
+        input: serde_json::Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<rustain::domain::models::ToolResult, rustain::domain::errors::ToolError> {
+        if tool_name == "propose_plan" {
+            use rustain::domain::services::plan_parser::parse_plan_input;
+            let plan = parse_plan_input(&input, "test-plan-id")
+                .map_err(|e| rustain::domain::errors::ToolError::InvalidInput(e.to_string()))?;
+            let _ = self
+                .event_tx
+                .send(rustain::domain::events::AppEvent::PlanProposed {
+                    conversation_id: String::new(),
+                    plan,
+                });
+            Ok(rustain::domain::models::ToolResult {
+                tool_use_id: String::new(),
+                content: "Plan proposed for user approval.".to_string(),
+                is_error: false,
+            })
+        } else {
+            Err(rustain::domain::errors::ToolError::NotFound(
+                tool_name.into(),
+            ))
+        }
+    }
+}
+
+/// Build a CliCore that handles `propose_plan` via PlanToolSet.
+fn build_plan_test_core(provider: Arc<dyn StreamingProvider>) -> CliCore {
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let security: Arc<dyn rustain::domain::ports::SecurityPort> =
+        Arc::new(SecurityAdapter::new(std::env::current_dir().unwrap()));
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> =
+        Arc::new(PlanToolSet::new(event_tx.clone()));
+    let storage: Arc<dyn rustain::domain::ports::StoragePort> = Arc::new(NoOpStorage);
+    let approval = ApprovalRuntime::new(16, Arc::new(NoOpApprovalPersistence));
+    let tool_scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 16);
+    let ledger: Arc<dyn rustain::domain::ports::UsageLedgerPort> = Arc::new(NoOpUsageLedger);
+
+    CliCore {
+        provider,
+        security,
+        tools,
+        tool_scheduler,
+        approval,
+        storage,
+        event_tx,
+        event_rx,
+        ledger,
+    }
+}
+
+fn make_dry_run_opts(query: &str, fmt: OutputFormat) -> rustain::adapters::cli::ask::AskOpts {
+    rustain::adapters::cli::ask::AskOpts {
+        query: query.to_string(),
+        files: vec![],
+        yolo: false,
+        final_message_only: false,
+        output_format: fmt,
+        model_override: None,
+        session_id: None,
+        dry_run: true,
+    }
+}
+
+async fn run_ask_plan_test(
+    provider: Arc<dyn StreamingProvider>,
+    opts: rustain::adapters::cli::ask::AskOpts,
+) -> (ExitCode, String, String) {
+    let core = build_plan_test_core(provider.clone());
+    let config = default_config();
+    let workspace = std::path::Path::new("/tmp/test-ask-dryrun");
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+
+    let exit = rustain::adapters::cli::ask::run_ask_core(
+        provider,
+        core,
+        opts,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    let out = String::from_utf8(stdout.into_inner()).unwrap();
+    let err = String::from_utf8(stderr.into_inner()).unwrap();
+    (exit, out, err)
+}
+
+/// Provider that emits a propose_plan ToolUse (iteration 0), then text + EndTurn (iteration 1).
+struct ProposePlanProvider {
+    call_count: std::sync::atomic::AtomicUsize,
+    plan_input: serde_json::Value,
+    extra_tool_uses: Vec<(String, String, serde_json::Value)>, // (id, name, input)
+}
+
+impl ProposePlanProvider {
+    fn with_plan(plan_input: serde_json::Value) -> Self {
+        Self {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            plan_input,
+            extra_tool_uses: vec![],
+        }
+    }
+
+    fn with_plan_and_tools(
+        plan_input: serde_json::Value,
+        extra: Vec<(String, String, serde_json::Value)>,
+    ) -> Self {
+        Self {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            plan_input,
+            extra_tool_uses: extra,
+        }
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for ProposePlanProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        let n = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let chunks = if n == 0 {
+            let mut v = Vec::new();
+            // Extra tool uses first (e.g. Write, Bash — will be denied in plan mode)
+            for (id, name, input) in &self.extra_tool_uses {
+                v.push(StreamChunk::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                });
+            }
+            v.push(StreamChunk::ToolUse {
+                id: "plan_call_1".into(),
+                name: "propose_plan".into(),
+                input: self.plan_input.clone(),
+            });
+            v.push(StreamChunk::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+            });
+            v
+        } else {
+            vec![
+                StreamChunk::Text {
+                    content: "Plan proposed.".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "mock-propose-plan".into()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+}
+
+fn sample_plan_input() -> serde_json::Value {
+    serde_json::json!({
+        "title": "Refactor auth module",
+        "tasks": [
+            {"title": "Extract interfaces", "description": "Move auth contracts to ports"},
+            {"title": "Implement adapters", "description": "Create concrete implementations"}
+        ],
+        "estimated_tool_calls": 5,
+        "estimated_seconds": 40
+    })
+}
+
+/// P0-13.1c-yolo-conflict — `--dry-run --yolo` → clap rejects.
+#[test]
+fn p0_13_1c_yolo_conflict() {
+    use clap::Parser;
+    use rustain::adapters::cli::commands::Cli;
+    let result = Cli::try_parse_from(["rustain", "ask", "test query", "--dry-run", "--yolo"]);
+    assert!(result.is_err(), "--dry-run --yolo must be rejected by clap");
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot be used with") || msg.contains("conflict"),
+        "error must mention conflict: {}",
+        msg
+    );
+}
+
+/// P0-13.1c-always-present (O3 shape) — normal ask has dry_run: false, plan: null, tools_would_use: [].
+#[tokio::test]
+async fn p0_13_1c_always_present() {
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "hello".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let opts = make_opts_with_format("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // All three keys MUST be present (not absent)
+    assert!(doc.get("dry_run").is_some(), "dry_run key must be present");
+    assert!(doc.get("plan").is_some(), "plan key must be present");
+    assert!(
+        doc.get("tools_would_use").is_some(),
+        "tools_would_use key must be present"
+    );
+    // Values on normal ask
+    assert_eq!(doc["dry_run"], false);
+    assert!(doc["plan"].is_null(), "plan must be null on normal ask");
+    assert_eq!(doc["tools_would_use"], serde_json::json!([]));
+}
+
+/// P0-13.1c-no-plan-fallback — no propose_plan → text shows prose + tools line; json plan == null.
+#[tokio::test]
+async fn p0_13_1c_no_plan_fallback() {
+    // Provider emits text only, no propose_plan
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "I would refactor the auth module by...".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+
+    // Text mode
+    let opts = make_dry_run_opts("plan something", OutputFormat::Text);
+    let (exit, out, _) = run_ask_core_test(provider.clone(), opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    assert!(
+        out.contains("I would refactor"),
+        "should contain prose fallback"
+    );
+    assert!(
+        out.contains("Tools attempted: (none)"),
+        "should have attempted-tools line"
+    );
+
+    // Json mode
+    let opts = make_dry_run_opts("plan something", OutputFormat::Json);
+    let (exit, out, _) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["dry_run"], true);
+    assert!(
+        doc["plan"].is_null(),
+        "plan must be null when no propose_plan"
+    );
+    assert!(
+        doc["response"]
+            .as_str()
+            .unwrap()
+            .contains("I would refactor")
+    );
+}
+
+/// P0-13.1c-json-plan + schema 1.1 — dry-run json with plan: parse doc, check fields, G5 lint.
+#[tokio::test]
+async fn p0_13_1c_json_plan_and_schema_1_1() {
+    let provider = Arc::new(ProposePlanProvider::with_plan_and_tools(
+        sample_plan_input(),
+        vec![
+            (
+                "w1".into(),
+                "Write".into(),
+                serde_json::json!({"path": "/tmp/x"}),
+            ),
+            (
+                "b1".into(),
+                "Bash".into(),
+                serde_json::json!({"command": "echo"}),
+            ),
+        ],
+    ));
+    let opts = make_dry_run_opts("refactor auth", OutputFormat::Json);
+    let (exit, out, _) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["schema_version"], "1.1");
+    assert_eq!(doc["dry_run"], true);
+    assert!(!doc["plan"].is_null(), "plan must be non-null");
+    assert_eq!(doc["plan"]["title"], "Refactor auth module");
+
+    // Snake keys
+    assert!(
+        doc["plan"].get("estimated_effort").is_some(),
+        "must have estimated_effort (snake)"
+    );
+    assert!(
+        doc["plan"]["tasks"][0].get("depends_on").is_some(),
+        "must have depends_on (snake)"
+    );
+    assert!(
+        doc["plan"]["tasks"][0].get("sub_tasks").is_some(),
+        "must have sub_tasks (snake)"
+    );
+
+    // tools_would_use sorted, excluding plan-control
+    let tools: Vec<String> = doc["tools_would_use"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        tools,
+        vec!["Bash", "Write"],
+        "tools_would_use should be sorted, plan-control excluded"
+    );
+
+    // G5 snake-lint over the entire doc
+    assert_all_keys_snake_case(&doc);
+}
+
+/// P0-13.1c-text-plan — dry-run text renders title, numbered tasks, effort, tools line.
+#[tokio::test]
+async fn p0_13_1c_text_plan() {
+    let provider = Arc::new(ProposePlanProvider::with_plan_and_tools(
+        sample_plan_input(),
+        vec![("w1".into(), "Write".into(), serde_json::json!({}))],
+    ));
+    let opts = make_dry_run_opts("refactor auth", OutputFormat::Text);
+    let (exit, out, err) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    // Title
+    assert!(
+        out.contains("Refactor auth module"),
+        "stdout should have plan title"
+    );
+    // Numbered tasks
+    assert!(out.contains("1. Extract interfaces"), "should have task 1");
+    assert!(out.contains("2. Implement adapters"), "should have task 2");
+    // Effort estimate
+    assert!(
+        out.contains("Estimated:"),
+        "should have estimated effort line"
+    );
+    assert!(
+        out.contains("~5 tool calls"),
+        "should have tool call estimate"
+    );
+    // Attempted-tools line
+    assert!(
+        out.contains("Tools attempted: Write"),
+        "should have attempted-tools line"
+    );
+    // Purity: narration on stderr, not stdout
+    assert!(!out.contains("Session saved"), "no resume hint in stdout");
+    // No resume hint anywhere (read-only)
+    assert!(
+        !err.contains("Session saved"),
+        "no resume hint in stderr (read-only)"
+    );
+    assert!(!err.contains("Resume with"), "no resume hint");
+}
+
+/// P0-13.1c-read-only (AC7) — dry-run writes NO session state.
+#[tokio::test]
+async fn p0_13_1c_read_only() {
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "dry run output".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let opts = make_dry_run_opts("test read only", OutputFormat::Text);
+    let (exit, _out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    // No session-save warning
+    assert!(
+        !err.contains("Session saved"),
+        "dry-run must not save session"
+    );
+    assert!(
+        !err.contains("Resume with"),
+        "dry-run must not emit resume hint"
+    );
+}
+
+/// P0-13.1c-deny-count-vs-tools-would-use — deny_count == 0 AND tools_would_use has attempted tools.
+#[tokio::test]
+async fn p0_13_1c_deny_count_vs_tools_would_use() {
+    let provider = Arc::new(ProposePlanProvider::with_plan_and_tools(
+        sample_plan_input(),
+        vec![
+            (
+                "w1".into(),
+                "Write".into(),
+                serde_json::json!({"path": "/tmp/x"}),
+            ),
+            (
+                "b1".into(),
+                "Bash".into(),
+                serde_json::json!({"command": "echo hi"}),
+            ),
+        ],
+    ));
+    let opts = make_dry_run_opts("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // deny_count is structurally 0 in dry-run (plan-mode denials short-circuit before ApprovalRuntime)
+    assert_eq!(doc["deny_count"], 0, "deny_count must be 0 in pure dry-run");
+    // tools_would_use captures the attempted tools
+    let tools: Vec<String> = doc["tools_would_use"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        tools,
+        vec!["Bash", "Write"],
+        "tools_would_use must contain attempted tools"
+    );
+}
+
+/// P0-13.1c-denied-tool-in-set — a single tool: side-effect absent AND name in tools_would_use.
+#[tokio::test]
+async fn p0_13_1c_denied_tool_in_set() {
+    // Provider emits Write ToolUse targeting a path inside a temp directory.
+    let tmp = tempfile::tempdir().unwrap();
+    let target_path = tmp.path().join("denied-test-file");
+    let provider = Arc::new(ProposePlanProvider::with_plan_and_tools(
+        sample_plan_input(),
+        vec![(
+            "w1".into(),
+            "Write".into(),
+            serde_json::json!({"path": target_path.to_string_lossy()}),
+        )],
+    ));
+    let opts = make_dry_run_opts("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let tools: Vec<String> = doc["tools_would_use"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        tools.contains(&"Write".to_string()),
+        "Write must be in tools_would_use"
+    );
+    // The file must NOT exist (side-effect absent)
+    assert!(
+        !target_path.exists(),
+        "denied tool must not have written the file"
+    );
+}
+
+/// P0-13.1c-stream-plan — stream-json: plan_proposed line + turn_complete with dry_run/tools_would_use.
+#[tokio::test]
+async fn p0_13_1c_stream_plan() {
+    let provider = Arc::new(ProposePlanProvider::with_plan_and_tools(
+        sample_plan_input(),
+        vec![("w1".into(), "Write".into(), serde_json::json!({}))],
+    ));
+    let opts = make_dry_run_opts("test", OutputFormat::StreamJson);
+    let (exit, out, _) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let lines: Vec<serde_json::Value> = out
+        .trim()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    // Every line has schema_version 1.1
+    for line in &lines {
+        assert_eq!(
+            line["schema_version"], "1.1",
+            "every line must have schema 1.1"
+        );
+    }
+
+    // Find plan_proposed event
+    let plan_proposed = lines.iter().find(|l| l["type"] == "plan_proposed");
+    assert!(
+        plan_proposed.is_some(),
+        "must have a plan_proposed event line"
+    );
+    let pp = plan_proposed.unwrap();
+    assert_eq!(pp["dry_run"], true);
+    assert!(!pp["plan"].is_null(), "plan_proposed must carry a plan");
+    assert_eq!(pp["plan"]["title"], "Refactor auth module");
+    // Snake case in plan
+    assert_all_keys_snake_case(pp);
+
+    // Find turn_complete
+    let turn_complete = lines.iter().find(|l| l["type"] == "turn_complete");
+    assert!(turn_complete.is_some(), "must have turn_complete");
+    let tc = turn_complete.unwrap();
+    assert_eq!(tc["dry_run"], true);
+    assert!(
+        tc["tools_would_use"].is_array(),
+        "turn_complete must carry tools_would_use"
+    );
+}
+
+/// P0-13.1c-last-plan-wins — two propose_plan calls → the second is rendered.
+#[tokio::test]
+async fn p0_13_1c_last_plan_wins() {
+    // Provider that emits two propose_plan calls in iteration 0, then ends in iteration 1.
+    struct TwoPlanProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait]
+    impl StreamingProvider for TwoPlanProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<
+            futures::stream::BoxStream<'static, StreamChunk>,
+            rustain::domain::errors::ProviderError,
+        > {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let chunks = if n == 0 {
+                vec![
+                    StreamChunk::ToolUse {
+                        id: "p1".into(),
+                        name: "propose_plan".into(),
+                        input: serde_json::json!({"title": "First plan", "tasks": [{"title": "A"}]}),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ]
+            } else if n == 1 {
+                vec![
+                    StreamChunk::ToolUse {
+                        id: "p2".into(),
+                        name: "propose_plan".into(),
+                        input: serde_json::json!({"title": "Second plan", "tasks": [{"title": "B"}]}),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    StreamChunk::Text {
+                        content: "done".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+        async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "mock-two-plan".into()
+        }
+        fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+    }
+
+    let provider = Arc::new(TwoPlanProvider {
+        call_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let opts = make_dry_run_opts("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["plan"]["title"], "Second plan", "last plan must win");
+}
+
+/// P0-13.1c-bounded-timeout (O4 hang guard) — the dry-run turn reaches EndTurn within a bounded timeout.
+#[tokio::test]
+async fn p0_13_1c_bounded_timeout() {
+    let provider = Arc::new(ProposePlanProvider::with_plan(sample_plan_input()));
+    let opts = make_dry_run_opts("test timeout", OutputFormat::Text);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        run_ask_plan_test(provider, opts).await
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "dry-run must complete within bounded timeout"
+    );
+    let (exit, _, _) = result.unwrap();
+    assert_eq!(exit, ExitCode::SUCCESS);
+}
+
+/// P0-13.1c-addendum-present (O7) — dry_run_reminder() string present in system prompt when dry-run.
+#[tokio::test]
+async fn p0_13_1c_addendum_present() {
+    use std::sync::Mutex;
+
+    /// Provider that captures the system prompt from options.
+    struct SystemPromptCapture {
+        captured: Mutex<Option<String>>,
+    }
+    #[async_trait]
+    impl StreamingProvider for SystemPromptCapture {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<
+            futures::stream::BoxStream<'static, StreamChunk>,
+            rustain::domain::errors::ProviderError,
+        > {
+            *self.captured.lock().unwrap() = Some(options.system_prompt.clone());
+            let chunks = vec![
+                StreamChunk::Text {
+                    content: "ok".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ];
+            Ok(Box::pin(stream::iter(chunks)))
+        }
+        async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "mock-capture".into()
+        }
+        fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+            Ok(())
+        }
+    }
+
+    let addendum = rustain::domain::services::plan_mode_injector::dry_run_reminder();
+
+    // With dry-run: addendum present
+    let provider_dr = Arc::new(SystemPromptCapture {
+        captured: Mutex::new(None),
+    });
+    let opts = make_dry_run_opts("test", OutputFormat::Text);
+    let core = build_test_core(provider_dr.clone());
+    let config = default_config();
+    let workspace = std::path::Path::new("/tmp/test-addendum");
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let _ = rustain::adapters::cli::ask::run_ask_core(
+        provider_dr.clone(),
+        core,
+        opts,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    let prompt_dr = provider_dr.captured.lock().unwrap().clone().unwrap();
+    assert!(
+        prompt_dr.contains(addendum),
+        "dry-run system prompt must contain the addendum"
+    );
+
+    // Without dry-run: addendum absent
+    let provider_no = Arc::new(SystemPromptCapture {
+        captured: Mutex::new(None),
+    });
+    let opts = make_opts("test");
+    let core = build_test_core(provider_no.clone());
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let _ = rustain::adapters::cli::ask::run_ask_core(
+        provider_no.clone(),
+        core,
+        opts,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    let prompt_no = provider_no.captured.lock().unwrap().clone().unwrap();
+    assert!(
+        !prompt_no.contains(addendum),
+        "normal system prompt must NOT contain the addendum"
+    );
+}
+
+/// P0-13.1c-tools-line-divergence — plan content line and tools_would_use are independent.
+#[tokio::test]
+async fn p0_13_1c_tools_line_divergence() {
+    // Plan with a "Tools:" field in its description that differs from attempted ToolUse.
+    let plan = serde_json::json!({
+        "title": "Divergence test",
+        "tasks": [{"title": "Use grep and sed", "description": "Tools: grep, sed"}]
+    });
+    let provider = Arc::new(ProposePlanProvider::with_plan_and_tools(
+        plan,
+        vec![("w1".into(), "Write".into(), serde_json::json!({}))],
+    ));
+    let opts = make_dry_run_opts("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_plan_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let tools: Vec<String> = doc["tools_would_use"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    // tools_would_use is from ToolUse chunks, not from plan description content
+    assert_eq!(
+        tools,
+        vec!["Write"],
+        "tools_would_use independent from plan text"
+    );
+    assert!(
+        doc["plan"]["tasks"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("grep"),
+        "plan content has its own tools reference"
+    );
+}
+
+/// P0-13.1c-no-mutate-differential — same mock: without dry-run tool executes (if available),
+/// with dry-run it doesn't. Since NoOpToolSet doesn't actually execute tools, we verify
+/// through deny_count and permission behavior.
+#[tokio::test]
+async fn p0_13_1c_no_mutate_differential() {
+    // Provider emits dummy_tool ToolUse.
+    let provider_normal = Arc::new(ToolUseProvider::new());
+    let provider_dryrun = Arc::new(ToolUseProvider::new());
+
+    // Normal+yolo mode: SecurityAdapter in Yolo so tool executes (even if NotFound).
+    let security_yolo = Arc::new(SecurityAdapter::new(std::env::current_dir().unwrap()));
+    security_yolo.set_mode(PermissionMode::Yolo);
+    let core = build_test_core_with_security(provider_normal.clone(), security_yolo);
+    let mut opts_normal = make_opts_with_format("test", OutputFormat::Json);
+    opts_normal.yolo = true;
+    let config = default_config();
+    let workspace = std::path::Path::new("/tmp/test-differential");
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let exit_n = rustain::adapters::cli::ask::run_ask_core(
+        provider_normal,
+        core,
+        opts_normal,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    assert_eq!(exit_n, ExitCode::SUCCESS);
+    let out_n = String::from_utf8(stdout.into_inner()).unwrap();
+    let doc_n: serde_json::Value = serde_json::from_str(&out_n).unwrap();
+    // In normal+yolo, tool_calls should have result (even if error from NotFound)
+    assert!(
+        !doc_n["tool_calls"].as_array().unwrap().is_empty(),
+        "normal mode should have tool_calls"
+    );
+    // Normal runs must report tools_would_use: [] (O3 always-present).
+    assert_eq!(
+        doc_n["tools_would_use"],
+        serde_json::json!([]),
+        "normal mode tools_would_use must be empty"
+    );
+
+    // Dry-run mode: tool should be denied by Plan mode gate
+    let security = Arc::new(SecurityAdapter::new(std::env::current_dir().unwrap()));
+    let core = build_test_core_with_security(provider_dryrun.clone(), security);
+    let opts_dr = make_dry_run_opts("test", OutputFormat::Json);
+    let config = default_config();
+    let workspace = std::path::Path::new("/tmp/test-differential");
+    let mut stdout = Cursor::new(Vec::new());
+    let mut stderr = Cursor::new(Vec::new());
+    let exit_d = rustain::adapters::cli::ask::run_ask_core(
+        provider_dryrun,
+        core,
+        opts_dr,
+        &config,
+        workspace,
+        &mut stdout,
+        &mut stderr,
+    )
+    .await;
+    assert_eq!(exit_d, ExitCode::SUCCESS);
+    let out_d = String::from_utf8(stdout.into_inner()).unwrap();
+    let doc_d: serde_json::Value = serde_json::from_str(&out_d).unwrap();
+
+    assert_eq!(doc_d["dry_run"], true, "must be dry_run");
+    // In dry-run the tool was attempted but the plan gate blocked it.
+    // The tool name appears in tools_would_use
+    let tools: Vec<String> = doc_d["tools_would_use"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        tools.contains(&"dummy_tool".to_string()),
+        "dry-run tools_would_use must contain the attempted tool"
+    );
+}
+
+/// P0-13.1c-final-message-only-dry-run — `--dry-run --final-message-only` narrows text output
+/// to the final assistant block plus tools line, and suppresses resume hint.
+#[tokio::test]
+async fn p0_13_1c_final_message_only_dry_run() {
+    // Provider emits a tool use (resets last_block_start) then final text.
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "Reasoning about the refactor...".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::ToolUse {
+            id: "t1".into(),
+            name: "propose_plan".into(),
+            input: sample_plan_input(),
+        },
+        StreamChunk::ToolResult {
+            id: "t1".into(),
+            content: "Plan proposed.".into(),
+            is_error: false,
+        },
+        StreamChunk::Text {
+            content: "Final plan paragraph.".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let mut opts = make_dry_run_opts("plan refactor", OutputFormat::Text);
+    opts.final_message_only = true;
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    // Text is narrowed to final message after the tool block.
+    assert!(
+        out.contains("Final plan paragraph"),
+        "stdout must contain final message"
+    );
+    assert!(
+        !out.contains("Reasoning about the refactor"),
+        "stdout must NOT contain earlier reasoning block"
+    );
+    // Attempted-tools line present.
+    assert!(
+        out.contains("Tools attempted: (none)"),
+        "must render tools line"
+    );
+    // Read-only: no resume hint anywhere.
+    assert!(!err.contains("Session saved"), "no resume hint in stderr");
+    assert!(!err.contains("Resume with"), "no resume hint");
+}
+
+/// P0-13.1c-13.1b-regression — existing 13.1b tests pass; only sanctioned diffs are schema_version + fingerprint.
+#[tokio::test]
+async fn p0_13_1c_13_1b_regression() {
+    // Re-run a representative 13.1b test to confirm the only change is schema_version
+    let provider = Arc::new(ChunkProvider::new(vec![
+        StreamChunk::Text {
+            content: "regression check".into(),
+            parent_tool_use_id: None,
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+        },
+    ]));
+    let opts = make_opts_with_format("test", OutputFormat::Json);
+    let (exit, out, _) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // Schema version bumped
+    assert_eq!(doc["schema_version"], "1.1");
+    // All existing fields still present
+    assert!(doc.get("response").is_some());
+    assert!(doc.get("model").is_some());
+    assert!(doc.get("stop_reason").is_some());
+    assert!(doc.get("tool_calls").is_some());
+    assert!(doc.get("session_id").is_some());
+    assert!(doc.get("deny_count").is_some());
+    // New fields present with correct defaults for non-dry-run
+    assert_eq!(doc["dry_run"], false);
+    assert!(doc["plan"].is_null());
+    assert_eq!(doc["tools_would_use"], serde_json::json!([]));
 }

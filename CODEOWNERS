@@ -1,0 +1,5 @@
+# Schema/fingerprint human review gate.
+# Changing these files requires a deliberate schema_version decision.
+# Introduced in Story 13.1c (Dry-Run Plan Mode); Story 13.1b pinned the v1.0 contract.
+docs/output-schema.md       @lunarpulse
+tests/cli_ask.rs            @lunarpulse

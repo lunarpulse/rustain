@@ -15,6 +15,15 @@ pub trait PlanModeInjector: Send + Sync {
     fn reset_reentry(&self);
 }
 
+/// Shared, path-free plan-mode nudge for headless `--dry-run` (Story 13.1c, O7).
+/// Single source of truth: shares the core posture instruction with the TUI
+/// `DefaultPlanInjector::full_reminder` but without path coupling.
+pub fn dry_run_reminder() -> &'static str {
+    "You are in plan mode (dry-run). Propose a structured plan via the `propose_plan` tool. \
+     Do not attempt to modify state — all state-mutating tools will be denied. \
+     Use `propose_plan` to describe what you would do, then call `exit_plan_mode` when complete."
+}
+
 /// Default implementation of `PlanModeInjector`.
 ///
 /// Reminder cadence (validated against Kimi CLI behavior):

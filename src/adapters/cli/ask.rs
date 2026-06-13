@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json;
 
 use crate::domain::models::{
-    AppConfig, CompletionOptions, FileContextProvenance, MessageRole, SkillActivationSet,
+    AppConfig, CompletionOptions, FileContextProvenance, MessageRole, Plan, SkillActivationSet,
     StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, UsageInfo,
 };
 use crate::domain::ports::StreamingProvider;
@@ -49,8 +49,8 @@ impl OutputFormat {
     }
 }
 
-/// v1.0 schema version string (Story 13.1b, NFR31 major.minor).
-const SCHEMA_VERSION: &str = "1.0";
+/// Schema version string. Bumped 1.0 → 1.1 in Story 13.1c (additive: dry_run, plan, tools_would_use).
+const SCHEMA_VERSION: &str = "1.1";
 
 /// Output-only snake_case DTO for token usage (boundary coercion, AC1/O6).
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +125,95 @@ impl From<&ToolCallInfo> for ToolCallOut {
     }
 }
 
+/// Output-only snake_case DTO for `PlanSubTask` (boundary coercion, Story 13.1c AC5).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct PlanSubTaskOut {
+    number: u32,
+    title: String,
+    description: String,
+}
+
+/// Output-only snake_case DTO for effort estimates (boundary coercion, Story 13.1c AC5).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct EffortOut {
+    tool_calls: Option<u32>,
+    seconds: Option<u32>,
+}
+
+/// Output-only snake_case DTO for a plan task (boundary coercion, Story 13.1c AC5).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct PlanTaskOut {
+    number: u32,
+    title: String,
+    description: String,
+    depends_on: Vec<u32>,
+    sub_tasks: Vec<PlanSubTaskOut>,
+}
+
+/// Output-only snake_case DTO for a proposed plan (boundary coercion, Story 13.1c AC5).
+/// Renders only proposal-relevant fields from the domain `Plan` (omits execution-tracking
+/// fields like `started_at_ms`/`result` which are always empty in dry-run).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+struct PlanOut {
+    id: String,
+    title: String,
+    tasks: Vec<PlanTaskOut>,
+    estimated_effort: Option<EffortOut>,
+    status: String,
+    created_at: i64,
+}
+
+/// Map `PlanStatus` to its stable snake_case output string (Story 13.1c AC5).
+/// Avoids relying on `Debug` formatting, which is not a stable contract.
+fn plan_status_to_string(status: crate::domain::models::PlanStatus) -> String {
+    match status {
+        crate::domain::models::PlanStatus::Pending => "pending".to_string(),
+        crate::domain::models::PlanStatus::Executing => "executing".to_string(),
+        crate::domain::models::PlanStatus::Completed => "completed".to_string(),
+        crate::domain::models::PlanStatus::Rejected => "rejected".to_string(),
+        crate::domain::models::PlanStatus::Editing => "editing".to_string(),
+        crate::domain::models::PlanStatus::Cancelled => "cancelled".to_string(),
+    }
+}
+
+impl From<&Plan> for PlanOut {
+    fn from(p: &Plan) -> Self {
+        Self {
+            id: p.id.clone(),
+            title: p.title.clone(),
+            tasks: p
+                .tasks
+                .iter()
+                .map(|t| PlanTaskOut {
+                    number: t.number,
+                    title: t.title.clone(),
+                    description: t.description.clone(),
+                    depends_on: t.depends_on.clone(),
+                    sub_tasks: t
+                        .sub_tasks
+                        .iter()
+                        .map(|st| PlanSubTaskOut {
+                            number: st.number,
+                            title: st.title.clone(),
+                            description: st.description.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            estimated_effort: p.estimated_effort.as_ref().map(|e| EffortOut {
+                tool_calls: e.tool_calls,
+                seconds: e.seconds,
+            }),
+            status: plan_status_to_string(p.status),
+            created_at: p.created_at,
+        }
+    }
+}
+
 /// Structured JSON response envelope for `--output-format json` (AC1).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +226,12 @@ struct AskResponse {
     tool_calls: Vec<ToolCallOut>,
     session_id: String,
     deny_count: u32,
+    /// Story 13.1c: ALWAYS-PRESENT (no skip_serializing_if) — flag-invariant field-path set (O3).
+    dry_run: bool,
+    /// Story 13.1c: ALWAYS-PRESENT — serializes `null` when no plan, NOT omitted (O3).
+    plan: Option<PlanOut>,
+    /// Story 13.1c: ALWAYS-PRESENT — serializes `[]` when empty, NOT omitted (O3).
+    tools_would_use: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorOut>,
 }
@@ -171,6 +266,15 @@ struct StreamEvent {
     stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deny_count: Option<u32>,
+    /// Story 13.1c: present on `plan_proposed` and `turn_complete` events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dry_run: Option<bool>,
+    /// Story 13.1c: present on `plan_proposed` event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<PlanOut>,
+    /// Story 13.1c: present on `turn_complete` event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools_would_use: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorOut>,
 }
@@ -194,6 +298,12 @@ struct AskOutcome {
     model: String,
     session_id: String,
     deny_count: u32,
+    /// Story 13.1c: whether this was a dry-run turn.
+    dry_run: bool,
+    /// Story 13.1c: plan proposed via `propose_plan` (last-wins).
+    proposed_plan: Option<Plan>,
+    /// Story 13.1c: deduplicated sorted tool names the model attempted, minus plan-control builtins.
+    tools_would_use: Vec<String>,
 }
 
 /// Concrete enum-dispatched renderer that owns the `out` writer (AC5).
@@ -225,6 +335,9 @@ impl<'a> AskRenderer<'a> {
                 usage: None,
                 stop_reason: None,
                 deny_count: None,
+                dry_run: None,
+                plan: None,
+                tools_would_use: None,
                 error: None,
             },
             StreamChunk::ToolUse { id, name, input } => StreamEvent {
@@ -238,6 +351,9 @@ impl<'a> AskRenderer<'a> {
                 usage: None,
                 stop_reason: None,
                 deny_count: None,
+                dry_run: None,
+                plan: None,
+                tools_would_use: None,
                 error: None,
             },
             StreamChunk::ToolResult {
@@ -258,6 +374,9 @@ impl<'a> AskRenderer<'a> {
                 usage: None,
                 stop_reason: None,
                 deny_count: None,
+                dry_run: None,
+                plan: None,
+                tools_would_use: None,
                 error: None,
             },
             _ => return Ok(()),
@@ -268,9 +387,12 @@ impl<'a> AskRenderer<'a> {
 
     /// Render final output for `text`/`json`; emit terminal stream-json lines.
     fn finish(self, outcome: &AskOutcome, final_message_only: bool) -> Result<(), std::io::Error> {
-        debug_assert!(outcome.last_block_start <= outcome.assistant_text.len(),
+        debug_assert!(
+            outcome.last_block_start <= outcome.assistant_text.len(),
             "last_block_start ({}) exceeds assistant_text len ({})",
-            outcome.last_block_start, outcome.assistant_text.len());
+            outcome.last_block_start,
+            outcome.assistant_text.len()
+        );
         let response_text = if final_message_only {
             let start = outcome.last_block_start.min(outcome.assistant_text.len());
             &outcome.assistant_text[start..]
@@ -280,13 +402,75 @@ impl<'a> AskRenderer<'a> {
 
         match self.fmt {
             OutputFormat::Text => {
-                if !response_text.is_empty() {
-                    self.out.write_all(response_text.as_bytes())?;
-                    if !response_text.ends_with('\n') {
-                        self.out.write_all(b"\n")?;
+                // Story 13.1c: dry-run text rendering.
+                if outcome.dry_run {
+                    if let Some(ref plan) = outcome.proposed_plan {
+                        // Title
+                        writeln!(self.out, "{}", plan.title)?;
+                        writeln!(self.out)?;
+                        // Numbered tasks
+                        for task in &plan.tasks {
+                            writeln!(self.out, "{}. {}", task.number, task.title)?;
+                            if !task.description.is_empty() {
+                                for line in task.description.lines() {
+                                    writeln!(self.out, "   {}", line)?;
+                                }
+                            }
+                            for st in &task.sub_tasks {
+                                writeln!(
+                                    self.out,
+                                    "   {}.{}. {}",
+                                    task.number, st.number, st.title
+                                )?;
+                                if !st.description.is_empty() {
+                                    for line in st.description.lines() {
+                                        writeln!(self.out, "      {}", line)?;
+                                    }
+                                }
+                            }
+                        }
+                        // Estimated effort
+                        if let Some(ref effort) = plan.estimated_effort {
+                            let mut parts = Vec::new();
+                            if let Some(tc) = effort.tool_calls {
+                                parts.push(format!("~{} tool calls", tc));
+                            }
+                            if let Some(s) = effort.seconds {
+                                parts.push(format!("~{}s", s));
+                            }
+                            if !parts.is_empty() {
+                                writeln!(self.out, "\nEstimated: {}", parts.join(", "))?;
+                            }
+                        }
+                    } else {
+                        // No propose_plan call — fall back to assistant prose.
+                        if !response_text.is_empty() {
+                            self.out.write_all(response_text.as_bytes())?;
+                            if !response_text.ends_with('\n') {
+                                self.out.write_all(b"\n")?;
+                            }
+                        }
                     }
+                    // Attempted-tools line (always, even when empty).
+                    if outcome.tools_would_use.is_empty() {
+                        writeln!(self.out, "Tools attempted: (none)")?;
+                    } else {
+                        writeln!(
+                            self.out,
+                            "Tools attempted: {}",
+                            outcome.tools_would_use.join(", ")
+                        )?;
+                    }
+                    self.out.flush()
+                } else {
+                    if !response_text.is_empty() {
+                        self.out.write_all(response_text.as_bytes())?;
+                        if !response_text.ends_with('\n') {
+                            self.out.write_all(b"\n")?;
+                        }
+                    }
+                    self.out.flush()
                 }
-                self.out.flush()
             }
             OutputFormat::Json => {
                 let doc = AskResponse {
@@ -298,6 +482,9 @@ impl<'a> AskRenderer<'a> {
                     tool_calls: outcome.tool_calls.iter().map(|tc| tc.into()).collect(),
                     session_id: outcome.session_id.clone(),
                     deny_count: outcome.deny_count,
+                    dry_run: outcome.dry_run,
+                    plan: outcome.proposed_plan.as_ref().map(|p| p.into()),
+                    tools_would_use: outcome.tools_would_use.clone(),
                     error: None,
                 };
                 let json = serde_json::to_string_pretty(&doc)?;
@@ -317,6 +504,30 @@ impl<'a> AskRenderer<'a> {
                         usage: Some(usage.into()),
                         stop_reason: None,
                         deny_count: None,
+                        dry_run: None,
+                        plan: None,
+                        tools_would_use: None,
+                        error: None,
+                    };
+                    let line = serde_json::to_string(&event)?;
+                    writeln!(self.out, "{}", line)?;
+                }
+                // Story 13.1c: emit plan_proposed line when a plan exists (before turn_complete).
+                if let Some(ref plan) = outcome.proposed_plan {
+                    let event = StreamEvent {
+                        schema_version: SCHEMA_VERSION,
+                        event_type: "plan_proposed",
+                        content: None,
+                        id: None,
+                        name: None,
+                        input: None,
+                        result: None,
+                        usage: None,
+                        stop_reason: None,
+                        deny_count: None,
+                        dry_run: Some(outcome.dry_run),
+                        plan: Some(plan.into()),
+                        tools_would_use: None,
                         error: None,
                     };
                     let line = serde_json::to_string(&event)?;
@@ -333,6 +544,9 @@ impl<'a> AskRenderer<'a> {
                     usage: None,
                     stop_reason: Some(stop_reason_str(&outcome.turn_stop_reason).to_string()),
                     deny_count: Some(outcome.deny_count),
+                    dry_run: Some(outcome.dry_run),
+                    plan: None,
+                    tools_would_use: Some(outcome.tools_would_use.clone()),
                     error: None,
                 };
                 let line = serde_json::to_string(&complete)?;
@@ -342,9 +556,7 @@ impl<'a> AskRenderer<'a> {
         }
     }
 
-    /// Emit a format-correct error document. Does NOT consume the renderer so it
-    /// can be called from mid-turn failure paths before `finish`.
-    fn emit_error(&mut self, message: &str) -> Result<(), std::io::Error> {
+    fn emit_error(&mut self, message: &str, dry_run: bool) -> Result<(), std::io::Error> {
         match self.fmt {
             OutputFormat::Text => Ok(()),
             OutputFormat::Json => {
@@ -357,6 +569,9 @@ impl<'a> AskRenderer<'a> {
                     tool_calls: vec![],
                     session_id: String::new(),
                     deny_count: 0,
+                    dry_run,
+                    plan: None,
+                    tools_would_use: vec![],
                     error: Some(ErrorOut {
                         message: message.to_string(),
                     }),
@@ -376,6 +591,9 @@ impl<'a> AskRenderer<'a> {
                     usage: None,
                     stop_reason: None,
                     deny_count: None,
+                    dry_run: Some(dry_run),
+                    plan: None,
+                    tools_would_use: Some(vec![]),
                     error: Some(ErrorOut {
                         message: message.to_string(),
                     }),
@@ -394,22 +612,21 @@ fn emit_cli_error(
     out: &mut dyn Write,
     err: &mut dyn Write,
     message: &str,
+    dry_run: bool,
 ) -> ExitCode {
     let _ = writeln!(err, "Error: {}", message);
     if fmt != OutputFormat::Text {
         let mut renderer = AskRenderer::new(fmt, out);
-        let _ = renderer.emit_error(message);
+        let _ = renderer.emit_error(message, dry_run);
     }
     ExitCode::FAILURE
 }
-
-/// Emit a format-correct CLI error and terminate the process.
 /// Used by `run_ask` for pre-turn failures (e.g. unreadable --file) where
 /// returning a `Result` would route through the generic text-only error printer.
-fn exit_with_cli_error(fmt: OutputFormat, message: &str) -> ! {
+fn exit_with_cli_error(fmt: OutputFormat, message: &str, dry_run: bool) -> ! {
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    let _ = emit_cli_error(fmt, &mut stdout, &mut stderr, message);
+    let _ = emit_cli_error(fmt, &mut stdout, &mut stderr, message, dry_run);
     let _ = stdout.flush();
     let _ = stderr.flush();
     std::process::exit(1);
@@ -423,6 +640,8 @@ pub struct AskOpts {
     pub output_format: OutputFormat,
     pub model_override: Option<String>,
     pub session_id: Option<String>,
+    /// Story 13.1c: dry-run plan mode — no state-mutating tools, no session write.
+    pub dry_run: bool,
 }
 pub async fn run_ask_core(
     provider: Arc<dyn StreamingProvider>,
@@ -446,11 +665,23 @@ pub async fn run_ask_core(
         ledger,
     } = core;
 
+    // Story 13.1c: enter Plan mode when dry_run so the permission_chain gate
+    // denies all state-mutating (Standard/Elevated-risk) tools.
+    if opts.dry_run {
+        security.set_mode(crate::domain::models::PermissionMode::Plan);
+    }
+
     // Format is parsed first so every failure path can emit a format-correct error document.
     let output_format = opts.output_format;
 
     if opts.query.trim().is_empty() {
-        return emit_cli_error(output_format, out, err, "query cannot be empty");
+        return emit_cli_error(
+            output_format,
+            out,
+            err,
+            "query cannot be empty",
+            opts.dry_run,
+        );
     }
 
     let mut conversation = if let Some(ref sid) = opts.session_id {
@@ -462,10 +693,17 @@ pub async fn run_ask_core(
                     out,
                     err,
                     &format!("session '{}' not found", sid),
+                    opts.dry_run,
                 );
             }
             Err(e) => {
-                return emit_cli_error(output_format, out, err, &format!("loading session: {}", e));
+                return emit_cli_error(
+                    output_format,
+                    out,
+                    err,
+                    &format!("loading session: {}", e),
+                    opts.dry_run,
+                );
             }
         }
     } else {
@@ -513,11 +751,19 @@ pub async fn run_ask_core(
     let persona = crate::adapters::persona_adapter::PersonaAdapter::new(project_context);
     let persona_prompt = crate::domain::ports::PersonaPort::system_prompt(&persona, workspace);
     let empty_set = SkillActivationSet::new();
-    let system_prompt = crate::domain::services::skill_context::assemble_system_prompt(
+    let mut system_prompt = crate::domain::services::skill_context::assemble_system_prompt(
         &persona_prompt,
         &empty_set,
         workspace,
     );
+
+    // Story 13.1c (AC2, O7): append plan-mode addendum when dry_run.
+    // Byte-unchanged when dry_run is false.
+    if opts.dry_run {
+        system_prompt.push_str("\n\n<plan-mode>\n");
+        system_prompt.push_str(crate::domain::services::plan_mode_injector::dry_run_reminder());
+        system_prompt.push_str("\n</plan-mode>");
+    }
 
     let tool_defs = tools.available_tools();
 
@@ -602,6 +848,12 @@ pub async fn run_ask_core(
         None,
         session_id,
     ));
+    // Drop local Arc clones of tools/tool_scheduler so any event senders
+    // held inside ToolSetPort adaptors are released. The spawned run_turn
+    // task now holds the only remaining clones; when it finishes, the channel
+    // closes and the event loop below can exit.
+    drop(tools);
+    drop(tool_scheduler);
 
     let mut assistant_text = String::new();
     let mut last_block_start = 0usize;
@@ -610,6 +862,8 @@ pub async fn run_ask_core(
     let mut turn_stop_reason = StopReason::EndTurn;
     let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
     let mut turn_usage: Option<UsageInfo> = None;
+    // Story 13.1c: accumulate the last proposed plan (last-wins, AC6).
+    let mut proposed_plan: Option<Plan> = None;
     let mut renderer = AskRenderer::new(output_format, out);
     loop {
         let event = tokio::select! {
@@ -710,6 +964,12 @@ pub async fn run_ask_core(
                     break;
                 }
             }
+            // Story 13.1c (AC6): capture the last proposed plan (last-wins).
+            AppEvent::PlanProposed { plan, .. } => {
+                proposed_plan = Some(plan.clone());
+            }
+            // Story 13.1c (AC6): benign no-op — no approval card in headless.
+            AppEvent::PlanApprovalRequested { .. } => {}
             _ => {}
         }
     }
@@ -723,16 +983,31 @@ pub async fn run_ask_core(
 
     if let Some(error) = turn_error {
         let _ = writeln!(err, "Error: turn failed: {}", error);
-        let _ = renderer.emit_error(&format!("turn failed: {}", error));
+        let _ = renderer.emit_error(&format!("turn failed: {}", error), opts.dry_run);
         return ExitCode::FAILURE;
     }
 
     if !turn_complete {
         let _ = writeln!(err, "Error: turn did not complete");
-        let _ = renderer.emit_error("turn did not complete");
+        let _ = renderer.emit_error("turn did not complete", opts.dry_run);
         return ExitCode::FAILURE;
     }
 
+    // Story 13.1c (AC4): derive tools_would_use — deduplicated, sorted tool names
+    // the model attempted via ToolUse, excluding plan-control builtins.
+    // Only meaningful in dry-run; normal runs report an empty array (O3).
+    let tools_would_use = if opts.dry_run {
+        let mut names: Vec<String> = tool_calls
+            .iter()
+            .map(|tc| tc.name.clone())
+            .filter(|n| n != "propose_plan" && n != "exit_plan_mode")
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    } else {
+        vec![]
+    };
     let outcome = AskOutcome {
         assistant_text,
         last_block_start,
@@ -745,31 +1020,38 @@ pub async fn run_ask_core(
             .clone()
             .unwrap_or_else(|| conversation.id.clone()),
         deny_count: approval.rejected_count() as u32,
+        dry_run: opts.dry_run,
+        proposed_plan,
+        tools_would_use,
     };
     if let Err(e) = renderer.finish(&outcome, opts.final_message_only) {
         let _ = writeln!(err, "Error: failed to write output: {}", e);
         return ExitCode::FAILURE;
     }
 
-    conversation.messages.push(ChatMessage {
-        id: generate_message_id(),
-        role: MessageRole::Assistant,
-        content: outcome.assistant_text,
-        content_blocks: vec![],
-        tool_calls: outcome.tool_calls,
-        created_at: now_unix(),
-        token_count: None,
-        stop_reason: Some(outcome.turn_stop_reason.clone()),
-        images: vec![],
-        synthetic: false,
-        origin: crate::domain::models::ChannelKind::Terminal,
-    });
-    conversation.updated_at = now_unix();
-    conversation.last_response_at = Some(now_unix());
+    // Story 13.1c (AC7): dry-run is fully read-only — skip all session writes
+    // and the resume hint. A dry-run leaves zero trace on disk.
+    if !opts.dry_run {
+        conversation.messages.push(ChatMessage {
+            id: generate_message_id(),
+            role: MessageRole::Assistant,
+            content: outcome.assistant_text,
+            content_blocks: vec![],
+            tool_calls: outcome.tool_calls,
+            created_at: now_unix(),
+            token_count: None,
+            stop_reason: Some(outcome.turn_stop_reason.clone()),
+            images: vec![],
+            synthetic: false,
+            origin: crate::domain::models::ChannelKind::Terminal,
+        });
+        conversation.updated_at = now_unix();
+        conversation.last_response_at = Some(now_unix());
 
-    if let Err(e) = storage.save_conversation(&conversation).await {
-        if !opts.final_message_only {
-            let _ = writeln!(err, "Warning: failed to save session: {}", e);
+        if let Err(e) = storage.save_conversation(&conversation).await {
+            if !opts.final_message_only {
+                let _ = writeln!(err, "Warning: failed to save session: {}", e);
+            }
         }
     }
 
@@ -778,7 +1060,8 @@ pub async fn run_ask_core(
         let _ = writeln!(err, "{} tool call(s) auto-denied", dc);
     }
 
-    if !opts.final_message_only {
+    // Story 13.1c (AC7): no resume hint in dry-run (nothing was saved).
+    if !opts.dry_run && !opts.final_message_only {
         let _ = writeln!(
             err,
             "Session saved. Resume with: rustain --session {}",
@@ -795,6 +1078,7 @@ pub async fn run_ask(
     yolo: bool,
     final_message_only: bool,
     output_format: String,
+    dry_run: bool,
     app_config: AppConfig,
     session_id: Option<String>,
     force_new: bool,
@@ -811,7 +1095,7 @@ pub async fn run_ask(
             Err(e) => {
                 let msg = format!("cannot read file '{}': {}", path.display(), e);
                 if resolved_output_format != OutputFormat::Text {
-                    exit_with_cli_error(resolved_output_format, &msg);
+                    exit_with_cli_error(resolved_output_format, &msg, dry_run);
                 }
                 return Err(anyhow::anyhow!(msg));
             }
@@ -835,7 +1119,7 @@ pub async fn run_ask(
             Err(e) => {
                 let msg = format!("failed to read stdin: {}", e);
                 if resolved_output_format != OutputFormat::Text {
-                    exit_with_cli_error(resolved_output_format, &msg);
+                    exit_with_cli_error(resolved_output_format, &msg, dry_run);
                 }
                 return Err(e);
             }
@@ -864,8 +1148,8 @@ pub async fn run_ask(
         output_format: resolved_output_format,
         model_override,
         session_id: effective_session,
+        dry_run,
     };
-
     let exit_code = run_ask_core(
         provider,
         core,
