@@ -52,12 +52,12 @@ pub async fn run_profile_edit(
         }
     }
 
-    // Resolve editor: $VISUAL > $EDITOR > platform default
-    let editor = resolve_editor()?;
+    // Resolve editor: $VISUAL > $EDITOR > platform default (shared, Story 13.2a AC3)
+    let editor = crate::infrastructure::utils::editor::resolve_editor()?;
 
     // Editor loop
     loop {
-        let status = run_editor(&editor, &dest)?;
+        let status = crate::infrastructure::utils::editor::run_editor(&editor, &dest)?;
 
         if !status.success() {
             let code = status.code().unwrap_or(1);
@@ -95,53 +95,9 @@ pub async fn run_profile_edit(
     }
 }
 
-/// Resolve the editor command per Decision Gate 1.3.
-/// Precedence: $VISUAL → $EDITOR → platform default (vi on unix, notepad on windows).
-fn resolve_editor() -> Result<String> {
-    let visual = crate::infrastructure::utils::env_var_trimmed("VISUAL");
-    if let Some(editor) = visual {
-        return Ok(editor);
-    }
-
-    let editor_env = crate::infrastructure::utils::env_var_trimmed("EDITOR");
-    if let Some(editor) = editor_env {
-        return Ok(editor);
-    }
-
-    // Platform default
-    #[cfg(target_family = "unix")]
-    {
-        Ok("vi".to_string())
-    }
-    #[cfg(target_family = "windows")]
-    {
-        Ok("notepad.exe".to_string())
-    }
-    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
-    {
-        anyhow::bail!("No editor configured. Set $EDITOR or $VISUAL (e.g., export EDITOR=nano)");
-    }
-}
-
-fn run_editor(editor: &str, path: &std::path::Path) -> Result<std::process::ExitStatus> {
-    let parts: Vec<&str> = editor.split_whitespace().collect();
-    let (cmd, args) = match parts.split_first() {
-        Some((c, a)) => (*c, a),
-        None => anyhow::bail!("Editor command is empty"),
-    };
-    let mut command = std::process::Command::new(cmd);
-    for arg in args {
-        command.arg(arg);
-    }
-    command.arg(path);
-    command
-        .status()
-        .map_err(|e| anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::infrastructure::utils::editor::resolve_editor;
 
     /// Test editor resolution precedence. Must run with --test-threads=1
     /// due to env-var manipulation (standard for env-dependent tests in this repo).

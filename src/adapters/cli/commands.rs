@@ -223,6 +223,30 @@ pub enum DaemonAction {
 pub enum ConfigAction {
     /// Reload configuration in the running TUI (cross-process reload stub — see AC-9)
     Reload,
+    /// Display the fully-resolved configuration (Story 13.2a AC2, FR124)
+    Show {
+        /// Machine-readable JSON output instead of TOML
+        #[arg(long)]
+        json: bool,
+    },
+    /// Open the active config file in $EDITOR (Story 13.2a AC3, FR124)
+    Edit {
+        /// Edit the user-global config (~/.config/rustain/config.toml) instead of workspace
+        #[arg(long)]
+        global: bool,
+    },
+    /// Show config file locations and their precedence order (Story 13.2a AC4, FR124)
+    Path {
+        /// Machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate configuration without launching the TUI (Story 13.2a AC5, FR124)
+    Validate {
+        /// Machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

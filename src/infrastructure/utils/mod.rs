@@ -4,6 +4,18 @@
 //! patterns that were independently implemented (and repeatedly flagged in review)
 //! across Stories 2-0 through 2-4.
 
+pub mod editor;
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Runtime call counter for `env_var_trimmed` — Story 13.2a P0-2 sentinel.
+///
+/// Incremented on every `env_var_trimmed` call. Integration tests assert this
+/// stays 0 across `config show` (the show path must never resolve env vars)
+/// and >0 across `config edit` (positive control proving the counter is live).
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub static ENV_VAR_TRIMMED_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// Read an environment variable, returning `None` if unset, empty, or whitespace-only.
 ///
 /// This replaces the recurring pattern:
@@ -12,8 +24,9 @@
 /// ```
 ///
 /// Returns `Some(trimmed_value)` only when the variable is set and contains
-/// non-whitespace content.
 pub fn env_var_trimmed(name: &str) -> Option<String> {
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    ENV_VAR_TRIMMED_CALLS.fetch_add(1, Ordering::Relaxed);
     std::env::var(name)
         .ok()
         .filter(|s| !s.is_empty())
@@ -107,6 +120,28 @@ impl std::fmt::Display for SanitizeError {
 }
 
 impl std::error::Error for SanitizeError {}
+/// Strip userinfo (username:password) from a URL string.
+///
+/// Uses `url::Url` for correct handling of percent-encoded credentials.
+/// Returns the original string unchanged if it cannot be parsed as a URL.
+///
+/// Story 13.2a AC2 — single redaction chokepoint for config show.
+pub fn strip_url_userinfo(raw: &str) -> std::borrow::Cow<'_, str> {
+    match url::Url::parse(raw) {
+        Ok(parsed) => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                // No userinfo to strip — return the original slice (zero allocation).
+                return std::borrow::Cow::Borrowed(raw);
+            }
+            // Userinfo present: allocate the sanitized URL.
+            let mut parsed = parsed;
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            std::borrow::Cow::Owned(parsed.to_string())
+        }
+        Err(_) => std::borrow::Cow::Borrowed(raw),
+    }
+}
 
 #[cfg(test)]
 mod tests {

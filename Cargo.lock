@@ -4093,6 +4093,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "unicode-width",
+ "url",
  "wiremock",
 ]
 

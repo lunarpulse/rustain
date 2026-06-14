@@ -94,6 +94,7 @@ blake3 = "1"
 bm25 = { version = "=2.3.2", optional = true }
 hex = "0.4"
 gray_matter = "0.2"
+url = "2"
 
 # ── Local vector search (Story 11.3a, feature-gated `vector-search`) ──
 # Local ONNX embeddings (downloads + caches the model on first use → AC5) and
@@ -167,6 +168,9 @@ mcp = ["dep:rmcp"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]
+# Test-only instrumentation for P0-2/P0-3 sentinels (Story 13.2a review patch).
+# Off by default; enabled for integration tests via `--features test-instrumentation`.
+test-instrumentation = []
 telegram = ["dep:teloxide"]
 cron = ["dep:croner"]
 # Story 11.3a — local semantic memory search. OUT of `default` (NFR9): the

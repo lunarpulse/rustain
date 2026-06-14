@@ -140,41 +140,51 @@ pub fn try_load(
 }
 
 /// Build the full 7-layer figment chain.
+///
+/// File-layer paths are derived from `config_layer_paths()` (the shared
+/// source of truth introduced in Story 13.2a AC4) so `build_figment`,
+/// `config path`, and `config edit` all agree.
 fn build_figment(cli: &Cli, profile_resolver: &dyn ProfileResolver) -> Figment {
-    // Layer 7: Built-in defaults (BOTTOM — lowest priority)
-    let mut figment = Figment::from(Serialized::defaults(AppConfig::default()));
+    let layers = match crate::adapters::cli::config_cmd::config_layer_paths(cli) {
+        Ok(layers) => layers,
+        Err(e) => {
+            tracing::error!("Failed to resolve config layer paths: {e}");
+            // Fall back to an empty layer list so the merge still produces a valid
+            // (if default-only) configuration rather than panicking.
+            Vec::new()
+        }
+    };
 
-    // Layer 6: Active profile defaults (no-op until Story 8.2)
-    if let Some(profile_value) = profile_resolver.resolve_active_profile_defaults() {
-        figment = figment.merge(Serialized::defaults(profile_value));
+    // Start with the lowest-priority layer and merge higher-priority layers on top.
+    let mut figment = Figment::new();
+    for layer in layers.iter().rev() {
+        match layer.priority {
+            7 => figment = figment.merge(Serialized::defaults(AppConfig::default())),
+            6 => {
+                if let Some(profile_value) = profile_resolver.resolve_active_profile_defaults() {
+                    figment = figment.merge(Serialized::defaults(profile_value));
+                }
+            }
+            5 => {
+                if let Some(path) = &layer.path {
+                    figment = merge_toml_if_valid(figment, path, "user-global");
+                }
+            }
+            4 => {
+                if let Some(path) = &layer.path {
+                    figment = merge_toml_if_valid(figment, path, "workspace");
+                }
+            }
+            3 => {
+                if let Some(path) = &layer.path {
+                    figment = merge_json_if_valid(figment, path, "local-override");
+                }
+            }
+            2 => figment = figment.merge(Env::prefixed("RUSTAIN_").split("__")),
+            1 => figment = figment.merge(Serialized::globals(CliOverrides::from(cli))),
+            _ => {}
+        }
     }
-
-    // Layer 5: User-global config (~/.config/rustain/config.toml)
-    if let Some(home) = dirs::home_dir() {
-        let home_config = home.join(".config").join("rustain").join("config.toml");
-        figment = merge_toml_if_valid(figment, &home_config, "user-global");
-    }
-
-    // Layer 4: Workspace config (<cwd>/.rustain/config.toml, overridden by --config-file)
-    if let Ok(cwd) = std::env::current_dir() {
-        let ws_path = cli
-            .config_file
-            .clone()
-            .unwrap_or_else(|| cwd.join(".rustain").join("config.toml"));
-        figment = merge_toml_if_valid(figment, &ws_path, "workspace");
-    }
-
-    // Layer 3: Local override JSON ({workspace}/.claude/rustain-settings.json)
-    if let Ok(cwd) = std::env::current_dir() {
-        let json_path = cwd.join(".claude").join("rustain-settings.json");
-        figment = merge_json_if_valid(figment, &json_path, "local-override");
-    }
-
-    // Layer 2: Environment variables (RUSTAIN_* prefix, __ nest separator)
-    figment = figment.merge(Env::prefixed("RUSTAIN_").split("__"));
-
-    // Layer 1: CLI flags (TOP — highest priority)
-    figment = figment.merge(Serialized::globals(CliOverrides::from(cli)));
 
     figment
 }

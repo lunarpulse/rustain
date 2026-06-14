@@ -224,18 +224,18 @@ fn test_no_cross_adapter_imports() {
 // Covers: Architecture invariant (shared utility adoption), AC6
 /// Raw `env::var()` must not appear outside the shared utility and known exceptions.
 ///
-/// The shared utility `infrastructure/utils.rs` provides `env_var_trimmed()` — all other
+/// The shared utility `infrastructure/utils/mod.rs` provides `env_var_trimmed()` — all other
 /// code should use that wrapper. Exceptions:
-/// - `src/infrastructure/utils.rs` — the shared utility itself
+/// - `src/infrastructure/utils/mod.rs` — the shared utility itself
 /// - `src/adapters/cli/init.rs` lines 276-277 — test backup/restore (Story 2-5 decision)
+
 #[test]
 fn test_no_raw_env_var_outside_utils() {
     let src_dir = Path::new("src");
     let files = collect_rs_files(src_dir);
     assert!(!files.is_empty(), "No .rs files found in src/");
 
-    let allowed_files: &[&str] = &["src/infrastructure/utils.rs"];
-
+    let allowed_files: &[&str] = &["src/infrastructure/utils/mod.rs"];
     let mut violations = Vec::new();
 
     for file in &files {

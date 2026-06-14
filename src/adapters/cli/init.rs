@@ -232,6 +232,7 @@ fn prompt_yes_no(question: &str) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_write_config_toml_creates_valid_file() {
@@ -290,6 +291,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_find_api_key_var_prefers_auth_token() {
         // Save originals
         let orig_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok(); // CONFORMANCE_EXCEPTION: test backup/restore

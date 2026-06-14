@@ -7,7 +7,16 @@ use std::sync::{Arc, Mutex}; // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: Mutex guard
 use crate::domain::errors::ProviderError;
 use crate::domain::models::ProviderConfig;
 use crate::domain::ports::StreamingProvider;
+#[cfg(any(test, feature = "test-instrumentation"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Runtime call counter for provider construction — Story 13.2a P0-3 sentinel.
+///
+/// Incremented in `build_provider_for_config`. Integration tests assert this
+/// is 0 after `config validate` (no provider constructed) and >0 after a path
+/// that builds a provider (positive control proving the sentinel is armed).
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub static PROVIDER_CTOR_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Shared cache of built OpenAI-compatible adapters keyed by config key (provider_id).
 /// Used so that `build_openai_for_discovery` can return the same `Arc`
 /// that was already created during provider layer init, ensuring discovery
@@ -37,6 +46,8 @@ pub fn build_provider_for_config(
     provider_id: &str,
     cfg: &ProviderConfig,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    PROVIDER_CTOR_COUNT.fetch_add(1, Ordering::Relaxed);
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     match kind {
         "anthropic" => build_anthropic_from_config(cfg),

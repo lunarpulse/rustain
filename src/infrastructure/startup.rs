@@ -277,17 +277,58 @@ pub async fn run() -> Result<()> {
             "update-catalog requires the 'openai' feature — rebuild with --features openai"
         );
     }
-    // Story 8.1 AC-9 — Config subcommand intercept
-    if let Some(Command::Config {
-        action: ConfigAction::Reload,
-    }) = cli.command
-    {
-        return crate::adapters::cli::config_cmd::run_config_reload()
-            .await
-            .map_err(|e| {
-                tracing::error!("Config reload subcommand failed: {e}");
-                SubcommandExit.into()
-            });
+    // Story 8.1 AC-9 + Story 13.2a — Config subcommand intercept
+    if let Some(Command::Config { action }) = &cli.command {
+        match action {
+            ConfigAction::Reload => {
+                return crate::adapters::cli::config_cmd::run_config_reload()
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Config reload subcommand failed: {e}");
+                        SubcommandExit.into()
+                    });
+            }
+            ConfigAction::Show { json } => {
+                return crate::adapters::cli::config_cmd::run_config_show(
+                    *json,
+                    &profile_resolver_arc,
+                    &cli,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Config show subcommand failed: {e}");
+                    SubcommandExit.into()
+                });
+            }
+            ConfigAction::Edit { global } => {
+                return crate::adapters::cli::config_cmd::run_config_edit(*global, &cli)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Config edit subcommand failed: {e}");
+                        SubcommandExit.into()
+                    });
+            }
+            ConfigAction::Path { json } => {
+                return crate::adapters::cli::config_cmd::run_config_path(*json, &cli)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Config path subcommand failed: {e}");
+                        SubcommandExit.into()
+                    });
+            }
+            ConfigAction::Validate { json } => {
+                return crate::adapters::cli::config_cmd::run_config_validate(
+                    *json,
+                    &profile_resolver_arc,
+                    &cli,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Config validate subcommand failed: {e}");
+                    SubcommandExit.into()
+                });
+            }
+        }
     }
 
     // Story 8.4 AC-7 — Profile switch subcommand intercept
