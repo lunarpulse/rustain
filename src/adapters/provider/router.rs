@@ -160,6 +160,22 @@ impl StreamingProvider for ProviderRouter {
         drop(active_id);
         provider.health_check().await
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        let routes = self.routes.load();
+        let active_id = self.active.load();
+        let provider = routes.get(active_id.as_str()).cloned().ok_or_else(|| {
+            ProviderError::Other(format!(
+                "router: no active provider '{}'",
+                active_id.as_str()
+            ))
+        })?;
+        drop(routes);
+        drop(active_id);
+        provider.connectivity_probe().await
+    }
 }
 
 #[cfg(test)]

@@ -130,6 +130,19 @@ impl ProviderRegistry {
         models
     }
 
+    /// Return all registered providers as `(id, Arc)` pairs for consumers that need
+    /// to call provider methods directly (e.g. `rustain doctor` connectivity probes).
+    pub fn iter_provider_arcs(&self) -> Vec<(String, Arc<dyn StreamingProvider>)> {
+        let providers = self
+            .providers
+            .read()
+            .expect("ProviderRegistry lock poisoned");
+        providers
+            .iter()
+            .map(|(id, provider)| (id.clone(), Arc::clone(provider)))
+            .collect()
+    }
+
     /// Return provider-level descriptors for UI display.
     /// Uses stored health status from `update_health()`.
     pub fn list_providers(&self) -> Vec<ProviderDescriptor> {

@@ -56,6 +56,13 @@ impl StreamingProvider for MockTitleProvider {
     async fn health_check(&self) -> Result<(), ProviderError> {
         Ok(())
     }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 /// Mock provider that always fails.
@@ -85,6 +92,13 @@ impl StreamingProvider for FailingProvider {
 
     async fn health_check(&self) -> Result<(), ProviderError> {
         Ok(())
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 

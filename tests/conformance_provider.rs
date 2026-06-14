@@ -358,6 +358,14 @@ impl StreamingProvider for MockStreamingProvider {
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 #[test]
@@ -720,6 +728,14 @@ impl StreamingProvider for CatalogedMockProvider {
     }
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 

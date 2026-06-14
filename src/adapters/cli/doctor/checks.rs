@@ -1,212 +1,32 @@
-use anyhow::Result;
+//! Health check implementations for `rustain doctor`.
+//!
+//! Each struct implements `HealthCheck` and is appended to `build_check_list` in `mod.rs`.
+//! New checks are added by creating a struct here and appending it to the list — no
+//! modification to existing check code required.
+
 use async_trait::async_trait;
 
 use crate::infrastructure::{paths, permission_rules, terminal_info, utils};
 
-// ──────────────────────────────────────────────────────────────────
-// Health check framework (Task 2)
-// ──────────────────────────────────────────────────────────────────
-
-/// Result status of a single health check.
-#[derive(Debug, PartialEq, Eq)]
-pub enum CheckStatus {
-    Pass,
-    Warning,
-    Fail,
-}
-
-/// Result of a single health check.
-#[derive(Debug)]
-pub struct CheckResult {
-    pub name: String,
-    pub status: CheckStatus,
-    pub message: String,
-    /// Actionable fix suggestion (required for Fail, optional for Warning).
-    pub fix: Option<String>,
-}
-
-/// Trait for extensible health checks. Async because some checks (API validation)
-/// require network I/O. Sync checks simply return without `.await`.
-#[async_trait]
-pub trait HealthCheck: Send + Sync {
-    fn name(&self) -> &str;
-    async fn run(&self) -> CheckResult;
-}
-
-/// Build the ordered list of health checks to run.
-/// New checks are added by appending to this list — no modification to existing
-/// check code required (AC7 extensibility).
-fn build_check_list(terminal_detail: bool) -> Vec<Box<dyn HealthCheck>> {
-    let mut checks: Vec<Box<dyn HealthCheck>> = vec![
-        Box::new(ApiKeyCheck {
-            key_var_override: None,
-            key_value_override: None,
-            base_url_override: None,
-        }),
-        Box::new(ApiEndpointCheck {
-            base_url_override: None,
-        }),
-        Box::new(GlobalConfigCheck { config_dir: None }),
-        Box::new(WorkspaceDirCheck { workspace: None }),
-        Box::new(WorkspaceConfigCheck { workspace: None }),
-        Box::new(TerminalCheck),
-        Box::new(SessionStorageCheck {
-            workspace: None,
-            config_dir: None,
-        }),
-    ];
-    checks.push(Box::new(PermissionRulesCheck { workspace: None }));
-    checks.push(Box::new(PlanDirCheck { workspace: None }));
-    checks.push(Box::new(MemoryDirSizeCheck { workspace: None }));
-    if terminal_detail {
-        checks.push(Box::new(TerminalDetailCheck));
-    }
-    checks
-}
-
-/// Entry point for `rustain doctor`. Runs all checks and displays results.
-pub async fn run_doctor(terminal_detail: bool, adapters: bool) -> Result<()> {
-    if adapters {
-        println!("Adapter conformance smoke-check (profile: coding):\n");
-        let ports = [
-            ("persona", "coding (project-aware)"),
-            ("memory", "noop"),
-            ("session", "noop"),
-            ("tools", "builtin-full"),
-            ("channels", "noop"),
-            ("scheduler", "noop"),
-            ("context", "default (no injection)"),
-        ];
-        let start = std::time::Instant::now();
-        let mut pass_count = 0usize;
-        let mut skip_count = 0usize;
-        let fail_count = 0usize;
-        for (name, desc) in &ports {
-            let is_noop = *desc == "noop";
-            let (status_char, detail) = if is_noop {
-                skip_count += 1;
-                ("SKIP", "noop adapter — no behavior to test")
-            } else {
-                pass_count += 1;
-                ("PASS", *desc)
-            };
-            println!("  ✓ {:10}: {:4}  ({})    [0ms]", name, status_char, detail);
-        }
-        let elapsed = start.elapsed();
-        println!(
-            "\nTotal: {}ms — {} PASS, {} SKIP, {} FAIL",
-            elapsed.as_millis(),
-            pass_count,
-            skip_count,
-            fail_count
-        );
-        tracing::info!(
-            profile = "coding",
-            port_count = 7,
-            pass_count,
-            fail_count,
-            elapsed_ms = elapsed.as_millis() as u64,
-            "rustain doctor --adapters complete"
-        );
-        if fail_count > 0 {
-            anyhow::bail!("rustain doctor --adapters: {} failure(s) found", fail_count);
-        }
-        return Ok(());
-    }
-
-    println!("rustain doctor\n");
-
-    let checks = build_check_list(terminal_detail);
-    let mut results = Vec::with_capacity(checks.len());
-    for check in &checks {
-        results.push(check.run().await);
-    }
-    display_results(&results);
-
-    let failures = results
-        .iter()
-        .filter(|r| matches!(r.status, CheckStatus::Fail))
-        .count();
-    if failures > 0 {
-        anyhow::bail!("rustain doctor: {} failure(s) found", failures);
-    }
-    Ok(())
-}
-
-/// Format and print all check results with Unicode indicators, then summary.
-pub fn display_results(results: &[CheckResult]) {
-    for r in results {
-        let icon = match r.status {
-            CheckStatus::Pass => "\u{2713}", // ✓
-            CheckStatus::Warning => "!",
-            CheckStatus::Fail => "\u{2717}", // ✗
-        };
-        println!("{} {}: {}", icon, r.name, r.message);
-        if let Some(ref fix) = r.fix {
-            let label = match r.status {
-                CheckStatus::Fail => "Fix",
-                _ => "Note",
-            };
-            println!("  {}: {}", label, fix);
-        }
-    }
-
-    let pass_count = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Pass)
-        .count();
-    let warn_count = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Warning)
-        .count();
-    let fail_count = results
-        .iter()
-        .filter(|r| r.status == CheckStatus::Fail)
-        .count();
-    println!(
-        "\n{} passed, {} warnings, {} failures",
-        pass_count, warn_count, fail_count
-    );
-}
+use super::{CheckResult, CheckStatus, CheckTier, HealthCheck};
 
 // ──────────────────────────────────────────────────────────────────
-// Task 3: API key health check
+// API key presence check (de-billed in Story 13.2 AC8b — key presence only, no network).
+// Reachability/auth validation moved to ProviderConnectivityCheck (AC8).
 // ──────────────────────────────────────────────────────────────────
 
-/// Check that an API key env var is set and optionally validate it against the API.
+/// Check that an API key env var is set (key-presence only, NO network).
+/// Reachability + auth validation delegated to `ProviderConnectivityCheck` (AC8).
 pub struct ApiKeyCheck {
     /// Override for testing: Some(Some("VAR_NAME")) = key found, Some(None) = no key, None = read env.
     pub key_var_override: Option<Option<&'static str>>,
-    /// Override key value for testing (avoids reading env var value).
-    pub key_value_override: Option<String>,
-    /// Override base URL for testing: Some(Some(url)) = custom, Some(None) = default, None = read env.
-    pub base_url_override: Option<Option<String>>,
 }
 
 impl ApiKeyCheck {
     fn resolve_key_var(&self) -> Option<&'static str> {
         match &self.key_var_override {
             Some(val) => *val,
-            None => super::init::find_api_key_var(),
-        }
-    }
-
-    fn resolve_base_url(&self) -> (String, bool) {
-        let custom = match &self.base_url_override {
-            Some(val) => val.clone(),
-            None => utils::env_var_trimmed("ANTHROPIC_BASE_URL"),
-        };
-        let is_custom = custom.is_some();
-        let url = utils::normalize_base_url(
-            &custom.unwrap_or_else(|| "https://api.anthropic.com".to_string()),
-        );
-        (url, is_custom)
-    }
-
-    fn resolve_key_value(&self, var_name: &str) -> String {
-        match &self.key_value_override {
-            Some(val) => val.clone(),
-            None => utils::env_var_trimmed(var_name).unwrap_or_default(),
+            None => crate::adapters::cli::init::find_api_key_var(),
         }
     }
 }
@@ -223,99 +43,28 @@ impl HealthCheck for ApiKeyCheck {
         let Some(var_name) = key_var else {
             return CheckResult {
                 name: self.name().to_string(),
+                category: "api".to_string(),
                 status: CheckStatus::Fail,
                 message: "not set".to_string(),
                 fix: Some(
                     "Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in your shell profile"
                         .to_string(),
                 ),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             };
         };
 
-        // Attempt lightweight credit-free API validation
-        let (base_url, is_custom) = self.resolve_base_url();
-        let url = format!("{}/v1/messages", base_url);
-
-        // Build auth header based on which env var is set (same logic as AnthropicAdapter)
-        // NEVER read the key value into output — only use it for the HTTP header.
-        let key_value = self.resolve_key_value(var_name);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build();
-
-        let client = match client {
-            Ok(c) => c,
-            Err(_) => {
-                return CheckResult {
-                    name: self.name().to_string(),
-                    status: CheckStatus::Warning,
-                    message: "key set but validation failed (HTTP client error)".to_string(),
-                    fix: Some(format!("Key found in {}.", var_name)),
-                };
-            }
-        };
-
-        let mut req = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .body(r#"{"model":"x","max_tokens":1,"messages":[]}"#);
-
-        // Use correct auth header per AuthMode
-        if var_name == "ANTHROPIC_AUTH_TOKEN" {
-            req = req.header("authorization", format!("Bearer {}", key_value));
-        } else {
-            req = req.header("x-api-key", &key_value);
-        }
-
-        match req.send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if status == 401 || status == 403 {
-                    let fix_msg = if is_custom {
-                        format!("Check your API key with your provider ({})", base_url)
-                    } else {
-                        "Check your API key at https://console.anthropic.com/".to_string()
-                    };
-                    CheckResult {
-                        name: self.name().to_string(),
-                        status: CheckStatus::Fail,
-                        message: "invalid key".to_string(),
-                        fix: Some(fix_msg),
-                    }
-                } else if status >= 500 {
-                    // 5xx — server error, key validity unknown
-                    CheckResult {
-                        name: self.name().to_string(),
-                        status: CheckStatus::Warning,
-                        message: format!(
-                            "API server error (HTTP {}). Key found in {}.",
-                            status, var_name
-                        ),
-                        fix: Some(
-                            "API server may be temporarily unavailable. Try again later."
-                                .to_string(),
-                        ),
-                    }
-                } else {
-                    // 200, 400, 422, 429, etc. — auth accepted, request rejected = key valid
-                    CheckResult {
-                        name: self.name().to_string(),
-                        status: CheckStatus::Pass,
-                        message: format!("valid (via {})", var_name),
-                        fix: None,
-                    }
-                }
-            }
-            Err(_) => CheckResult {
-                name: self.name().to_string(),
-                status: CheckStatus::Warning,
-                message: "key set but validation failed (network error)".to_string(),
-                fix: Some(format!(
-                    "Check your internet connection. Key found in {}.",
-                    var_name
-                )),
-            },
+        // Key-presence only (AC8b de-bill): no network call.
+        // Auth validation is now handled by ProviderConnectivityCheck (AC8).
+        CheckResult {
+            name: self.name().to_string(),
+            category: "api".to_string(),
+            status: CheckStatus::Pass,
+            message: format!("set (via {})", var_name),
+            fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         }
     }
 }
@@ -347,15 +96,21 @@ impl HealthCheck for ApiEndpointCheck {
         match self.resolve_base_url() {
             Some(url) => CheckResult {
                 name: self.name().to_string(),
+                category: "api".to_string(),
                 status: CheckStatus::Pass,
                 message: format!("{} (custom)", url),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
             None => CheckResult {
                 name: self.name().to_string(),
+                category: "api".to_string(),
                 status: CheckStatus::Pass,
                 message: "https://api.anthropic.com (default)".to_string(),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
         }
     }
@@ -384,9 +139,12 @@ impl HealthCheck for GlobalConfigCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "config".to_string(),
                         status: CheckStatus::Fail,
                         message: "cannot determine config directory".to_string(),
                         fix: Some("Ensure $HOME is set".to_string()),
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -395,9 +153,12 @@ impl HealthCheck for GlobalConfigCheck {
         if !config_path.exists() {
             return CheckResult {
                 name: self.name().to_string(),
+                category: "config".to_string(),
                 status: CheckStatus::Fail,
                 message: format!("missing ({})", config_path.display()),
                 fix: Some("Run 'rustain init' to create initial configuration".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             };
         }
 
@@ -410,34 +171,46 @@ impl HealthCheck for GlobalConfigCheck {
                         match toml::from_str::<crate::domain::models::AppConfig>(&content) {
                             Ok(_) => CheckResult {
                                 name: self.name().to_string(),
+                                category: "config".to_string(),
                                 status: CheckStatus::Pass,
                                 message: format!("{}", config_path.display()),
                                 fix: None,
+                                latency: None,
+                                tier: CheckTier::ExitAffecting,
                             },
                             Err(_) => CheckResult {
                                 name: self.name().to_string(),
+                                category: "config".to_string(),
                                 status: CheckStatus::Fail,
                                 message: format!(
                                     "invalid config format ({})",
                                     config_path.display()
                                 ),
                                 fix: Some("Run 'rustain init' to regenerate config".to_string()),
+                                latency: None,
+                                tier: CheckTier::ExitAffecting,
                             },
                         }
                     }
                     Err(_) => CheckResult {
                         name: self.name().to_string(),
+                        category: "config".to_string(),
                         status: CheckStatus::Fail,
                         message: format!("invalid TOML syntax ({})", config_path.display()),
                         fix: Some("Run 'rustain init' to regenerate config".to_string()),
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     },
                 }
             }
             Err(_) => CheckResult {
                 name: self.name().to_string(),
+                category: "config".to_string(),
                 status: CheckStatus::Fail,
                 message: format!("cannot read ({})", config_path.display()),
                 fix: Some("Check file permissions".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
         }
     }
@@ -462,9 +235,12 @@ impl HealthCheck for WorkspaceConfigCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "config".to_string(),
                         status: CheckStatus::Warning,
                         message: "cannot determine workspace directory".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -475,9 +251,12 @@ impl HealthCheck for WorkspaceConfigCheck {
         if !settings_path.exists() {
             return CheckResult {
                 name: self.name().to_string(),
+                category: "config".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("missing ({})", settings_path.display()),
                 fix: Some("Run 'rustain init' in this workspace".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             };
         }
 
@@ -487,13 +266,17 @@ impl HealthCheck for WorkspaceConfigCheck {
                     if val.get("permissions").is_some_and(|v| !v.is_null()) {
                         CheckResult {
                             name: self.name().to_string(),
+                            category: "config".to_string(),
                             status: CheckStatus::Pass,
                             message: format!("{}", settings_path.display()),
                             fix: None,
+                            latency: None,
+                            tier: CheckTier::ExitAffecting,
                         }
                     } else {
                         CheckResult {
                             name: self.name().to_string(),
+                            category: "config".to_string(),
                             status: CheckStatus::Warning,
                             message: format!(
                                 "missing 'permissions' key ({})",
@@ -502,21 +285,29 @@ impl HealthCheck for WorkspaceConfigCheck {
                             fix: Some(
                                 "Run 'rustain init' to regenerate workspace config".to_string(),
                             ),
+                            latency: None,
+                            tier: CheckTier::ExitAffecting,
                         }
                     }
                 }
                 Err(_) => CheckResult {
                     name: self.name().to_string(),
+                    category: "config".to_string(),
                     status: CheckStatus::Fail,
                     message: format!("invalid JSON ({})", settings_path.display()),
                     fix: Some("Delete and run 'rustain init' to regenerate".to_string()),
+                    latency: None,
+                    tier: CheckTier::ExitAffecting,
                 },
             },
             Err(_) => CheckResult {
                 name: self.name().to_string(),
+                category: "config".to_string(),
                 status: CheckStatus::Fail,
                 message: format!("cannot read ({})", settings_path.display()),
                 fix: Some("Check file permissions".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
         }
     }
@@ -541,9 +332,12 @@ impl HealthCheck for WorkspaceDirCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "config".to_string(),
                         status: CheckStatus::Warning,
                         message: "cannot determine workspace directory".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -553,16 +347,22 @@ impl HealthCheck for WorkspaceDirCheck {
         if claude_dir.is_dir() {
             CheckResult {
                 name: self.name().to_string(),
+                category: "config".to_string(),
                 status: CheckStatus::Pass,
                 message: format!("{}", claude_dir.display()),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             }
         } else {
             CheckResult {
                 name: self.name().to_string(),
+                category: "config".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("missing ({})", claude_dir.display()),
                 fix: Some("Run 'rustain init' to create workspace structure".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             }
         }
     }
@@ -573,7 +373,7 @@ impl HealthCheck for WorkspaceDirCheck {
 // ──────────────────────────────────────────────────────────────────
 
 /// Basic terminal info (always runs).
-struct TerminalCheck;
+pub(super) struct TerminalCheck;
 
 #[async_trait]
 impl HealthCheck for TerminalCheck {
@@ -614,15 +414,18 @@ impl HealthCheck for TerminalCheck {
 
         CheckResult {
             name: self.name().to_string(),
+            category: "terminal".to_string(),
             status: CheckStatus::Pass,
             message,
             fix,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         }
     }
 }
 
 /// Detailed terminal diagnostics (only with --terminal flag).
-struct TerminalDetailCheck;
+pub(super) struct TerminalDetailCheck;
 
 #[async_trait]
 impl HealthCheck for TerminalDetailCheck {
@@ -687,9 +490,12 @@ impl HealthCheck for TerminalDetailCheck {
 
         CheckResult {
             name: self.name().to_string(),
+            category: "terminal".to_string(),
             status: CheckStatus::Pass,
             message: details.join("; "),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         }
     }
 }
@@ -719,9 +525,12 @@ impl HealthCheck for SessionStorageCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "session".to_string(),
                         status: CheckStatus::Warning,
                         message: "cannot determine workspace directory".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -741,16 +550,22 @@ impl HealthCheck for SessionStorageCheck {
             return if init_run {
                 CheckResult {
                     name: self.name().to_string(),
+                    category: "session".to_string(),
                     status: CheckStatus::Fail,
                     message: "session directory missing".to_string(),
                     fix: Some("Run 'rustain init' to create session storage".to_string()),
+                    latency: None,
+                    tier: CheckTier::ExitAffecting,
                 }
             } else {
                 CheckResult {
                     name: self.name().to_string(),
+                    category: "session".to_string(),
                     status: CheckStatus::Pass,
                     message: "not initialized".to_string(),
                     fix: None,
+                    latency: None,
+                    tier: CheckTier::ExitAffecting,
                 }
             };
         }
@@ -786,9 +601,12 @@ impl HealthCheck for SessionStorageCheck {
             Err(_) => {
                 return CheckResult {
                     name: self.name().to_string(),
+                    category: "session".to_string(),
                     status: CheckStatus::Fail,
                     message: "cannot read session directory".to_string(),
                     fix: Some("Check directory permissions".to_string()),
+                    latency: None,
+                    tier: CheckTier::ExitAffecting,
                 };
             }
         }
@@ -804,28 +622,37 @@ impl HealthCheck for SessionStorageCheck {
         if session_count == 0 {
             return CheckResult {
                 name: self.name().to_string(),
+                category: "session".to_string(),
                 status: CheckStatus::Pass,
                 message: "empty (no sessions yet)".to_string(),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             };
         }
 
         if corrupted > 0 {
             CheckResult {
                 name: self.name().to_string(),
+                category: "session".to_string(),
                 status: CheckStatus::Warning,
                 message: format!(
                     "{} saved, {} corrupted ({})",
                     session_count, corrupted, size_display
                 ),
                 fix: Some("Remove corrupted session files from .claude/sessions/".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             }
         } else {
             CheckResult {
                 name: self.name().to_string(),
+                category: "session".to_string(),
                 status: CheckStatus::Pass,
                 message: format!("{} saved ({})", session_count, size_display),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             }
         }
     }
@@ -854,9 +681,12 @@ impl HealthCheck for PermissionRulesCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "permissions".to_string(),
                         status: CheckStatus::Warning,
                         message: "cannot determine workspace directory".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -867,9 +697,12 @@ impl HealthCheck for PermissionRulesCheck {
             Err(_) => {
                 return CheckResult {
                     name: self.name().to_string(),
+                    category: "permissions".to_string(),
                     status: CheckStatus::Warning,
                     message: "cannot determine config directory".to_string(),
                     fix: None,
+                    latency: None,
+                    tier: CheckTier::ExitAffecting,
                 };
             }
         };
@@ -880,30 +713,39 @@ impl HealthCheck for PermissionRulesCheck {
                 if ruleset.has_catchall() {
                     CheckResult {
                         name: self.name().to_string(),
+                        category: "permissions".to_string(),
                         status: CheckStatus::Pass,
                         message: "catch-all rule present".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     }
                 } else {
                     CheckResult {
                         name: self.name().to_string(),
+                        category: "permissions".to_string(),
                         status: CheckStatus::Warning,
                         message: "no catch-all rule in permissions.toml".to_string(),
                         fix: Some(format!(
                             r#"Add a catch-all [[rules]] pattern = "*" action = "ask" scope = "tool" to {}"#,
                             workspace_rules.display()
                         )),
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     }
                 }
             }
             Err(_) => CheckResult {
                 name: self.name().to_string(),
+                category: "permissions".to_string(),
                 status: CheckStatus::Warning,
                 message: "failed to load permission rules".to_string(),
                 fix: Some(
                     "Check ~/.rustain/config.toml and workspace/.rustain/permissions.toml"
                         .to_string(),
                 ),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
         }
     }
@@ -927,9 +769,12 @@ impl HealthCheck for PlanDirCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "plans".to_string(),
                         status: CheckStatus::Warning,
                         message: "cannot determine workspace directory".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -939,15 +784,21 @@ impl HealthCheck for PlanDirCheck {
         match std::fs::create_dir_all(&plans_dir) {
             Ok(()) => CheckResult {
                 name: self.name().to_string(),
+                category: "plans".to_string(),
                 status: CheckStatus::Pass,
                 message: format!("Plan directory writable: {}", plans_dir.display()),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
             Err(e) => CheckResult {
                 name: self.name().to_string(),
+                category: "plans".to_string(),
                 status: CheckStatus::Warning,
                 message: format!("Cannot create plan directory: {}", e),
                 fix: Some(format!("Ensure {} is writable", plans_dir.display())),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
         }
     }
@@ -980,9 +831,12 @@ impl HealthCheck for MemoryDirSizeCheck {
                 Err(_) => {
                     return CheckResult {
                         name: self.name().to_string(),
+                        category: "memory".to_string(),
                         status: CheckStatus::Warning,
                         message: "cannot determine workspace directory".to_string(),
                         fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
                     };
                 }
             },
@@ -1035,9 +889,12 @@ impl HealthCheck for MemoryDirSizeCheck {
         if file_count == 0 && memory_md_size == 0 && index_bin_size == 0 {
             return CheckResult {
                 name: self.name().to_string(),
+                category: "memory".to_string(),
                 status: CheckStatus::Pass,
                 message: "no memory yet".to_string(),
                 fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             };
         }
 
@@ -1075,509 +932,351 @@ impl HealthCheck for MemoryDirSizeCheck {
 
         CheckResult {
             name: self.name().to_string(),
+            category: "memory".to_string(),
             status: CheckStatus::Pass,
             message: format!("{file_count} day file(s), {size_display}{md_note}{index_note}"),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         }
     }
 }
 
-// Tests
+// ──────────────────────────────────────────────────────────────────
+// Story 13.2 AC8: Non-billable provider connectivity probe
 // ──────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Non-billable provider connectivity check (Story 13.2 AC8).
+///
+/// Uses `connectivity_probe()` (free `GET /v1/models` or `/api/tags`) to validate
+/// reachability + auth for each configured provider. Reports latency on success.
+/// - 200 → Pass (latency)
+/// - 401/403 → Fail (auth)
+/// - transport error → Skipped (offline)
+/// - 404/405 → Skipped (endpoint unsupported)
+///
+/// Honestly states it proves auth+reachability only, NOT that streaming/messages works.
+pub struct ProviderConnectivityCheck {
+    /// Display name (e.g. "Provider connectivity (anthropic)").
+    pub name: String,
+    /// Provider name for display.
+    pub provider_name: String,
+    /// The provider to probe. `None` means the provider is not configured.
+    pub provider: Option<std::sync::Arc<dyn crate::domain::ports::StreamingProvider>>,
+}
 
-    // ── CheckResult formatting tests (Task 8.2, 8.3) ──
-
-    #[test]
-    fn test_display_results_pass() {
-        let results = vec![CheckResult {
-            name: "Test".to_string(),
-            status: CheckStatus::Pass,
-            message: "ok".to_string(),
-            fix: None,
-        }];
-        // Should not panic
-        display_results(&results);
+#[async_trait]
+impl HealthCheck for ProviderConnectivityCheck {
+    fn name(&self) -> &str {
+        &self.name
     }
 
-    #[test]
-    fn test_display_results_fail_with_fix() {
-        let results = vec![CheckResult {
-            name: "Test".to_string(),
-            status: CheckStatus::Fail,
-            message: "bad".to_string(),
-            fix: Some("fix it".to_string()),
-        }];
-        display_results(&results);
-    }
+    async fn run(&self) -> CheckResult {
+        let Some(ref provider) = self.provider else {
+            return CheckResult {
+                name: self.name.clone(),
+                category: "api".to_string(),
+                status: CheckStatus::Skipped("not configured".to_string()),
+                message: "provider not configured".to_string(),
+                fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            };
+        };
 
-    #[test]
-    fn test_display_results_warning_with_note() {
-        let results = vec![CheckResult {
-            name: "Test".to_string(),
-            status: CheckStatus::Warning,
-            message: "hmm".to_string(),
-            fix: Some("note this".to_string()),
-        }];
-        display_results(&results);
-    }
-
-    #[test]
-    fn test_summary_counting() {
-        let results = [
-            CheckResult {
-                name: "A".to_string(),
+        let start = std::time::Instant::now();
+        match provider.connectivity_probe().await {
+            Ok(outcome) => CheckResult {
+                name: self.name.clone(),
+                category: "api".to_string(),
                 status: CheckStatus::Pass,
-                message: String::new(),
+                message: format!(
+                    "reachable ({}ms) — proves auth+reachability, not chat health",
+                    outcome.latency.as_millis()
+                ),
                 fix: None,
+                latency: Some(start.elapsed()),
+                tier: CheckTier::ExitAffecting,
             },
-            CheckResult {
-                name: "B".to_string(),
-                status: CheckStatus::Pass,
-                message: String::new(),
-                fix: None,
-            },
-            CheckResult {
-                name: "C".to_string(),
-                status: CheckStatus::Warning,
-                message: String::new(),
-                fix: None,
-            },
-            CheckResult {
-                name: "D".to_string(),
+            Err(crate::domain::errors::ProviderError::AuthenticationFailed) => CheckResult {
+                name: self.name.clone(),
+                category: "api".to_string(),
                 status: CheckStatus::Fail,
-                message: String::new(),
-                fix: None,
+                message: "authentication failed".to_string(),
+                fix: Some("Check your API key or token.".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
             },
-        ];
-        let pass = results
-            .iter()
-            .filter(|r| r.status == CheckStatus::Pass)
-            .count();
-        let warn = results
-            .iter()
-            .filter(|r| r.status == CheckStatus::Warning)
-            .count();
-        let fail = results
-            .iter()
-            .filter(|r| r.status == CheckStatus::Fail)
-            .count();
-        assert_eq!(pass, 2);
-        assert_eq!(warn, 1);
-        assert_eq!(fail, 1);
+            Err(crate::domain::errors::ProviderError::Offline(msg)) => CheckResult {
+                name: self.name.clone(),
+                category: "api".to_string(),
+                status: CheckStatus::Skipped("offline".to_string()),
+                message: format!("skipped — offline, network probes unavailable ({})", msg),
+                fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            },
+            Err(crate::domain::errors::ProviderError::EndpointUnsupported(status)) => CheckResult {
+                name: self.name.clone(),
+                category: "api".to_string(),
+                status: CheckStatus::Skipped("endpoint unsupported".to_string()),
+                message: format!("skipped — endpoint unsupported (HTTP {})", status),
+                fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            },
+            Err(e) => CheckResult {
+                name: self.name.clone(),
+                category: "api".to_string(),
+                status: CheckStatus::Fail,
+                message: e.to_string(),
+                fix: Some("Check your provider configuration.".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            },
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Story 13.2 Task 5: Category-tier diagnostic checks
+// ──────────────────────────────────────────────────────────────────
+
+/// Info-tier: reports OS, arch, rustain version, terminal. Always Pass.
+pub struct SystemInfoCheck;
+
+#[async_trait]
+impl HealthCheck for SystemInfoCheck {
+    fn name(&self) -> &str {
+        "System info"
     }
 
-    // ── GlobalConfigCheck tests (Task 8.4) ──
+    async fn run(&self) -> CheckResult {
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        let version = env!("CARGO_PKG_VERSION");
+        let terminal = utils::env_var_trimmed("TERM_PROGRAM")
+            .or_else(|| utils::env_var_trimmed("TERM"))
+            .unwrap_or_else(|| "unknown".to_string());
 
-    #[tokio::test]
-    async fn test_global_config_valid() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().to_path_buf();
-        let config = crate::domain::models::AppConfig::default();
-        let toml_content = toml::to_string_pretty(&config).unwrap();
-        std::fs::write(config_dir.join("config.toml"), &toml_content).unwrap();
+        CheckResult {
+            name: self.name().to_string(),
+            category: "system_info".to_string(),
+            status: CheckStatus::Pass,
+            message: format!(
+                "{}/{}, rustain v{}, terminal: {}",
+                os, arch, version, terminal
+            ),
+            fix: None,
+            latency: None,
+            tier: CheckTier::Info,
+        }
+    }
+}
 
-        let check = GlobalConfigCheck {
-            config_dir: Some(config_dir),
+/// Check profiles directory for .toml profile files.
+pub struct ProfilesCheck;
+
+#[async_trait]
+impl HealthCheck for ProfilesCheck {
+    fn name(&self) -> &str {
+        "Profiles"
+    }
+
+    async fn run(&self) -> CheckResult {
+        let config_dir = match paths::config_dir() {
+            Ok(d) => d,
+            Err(_) => {
+                return CheckResult {
+                    name: self.name().to_string(),
+                    category: "profiles".to_string(),
+                    status: CheckStatus::Warning,
+                    message: "cannot determine config directory".to_string(),
+                    fix: None,
+                    latency: None,
+                    tier: CheckTier::ExitAffecting,
+                };
+            }
         };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-    }
 
-    #[tokio::test]
-    async fn test_global_config_invalid_toml_syntax() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().to_path_buf();
-        std::fs::write(config_dir.join("config.toml"), "not [valid toml {{").unwrap();
+        let profiles_dir = config_dir.join("profiles");
+        let active =
+            utils::env_var_trimmed("RUSTAIN_PROFILE").unwrap_or_else(|| "coding".to_string());
 
-        let check = GlobalConfigCheck {
-            config_dir: Some(config_dir),
+        if !profiles_dir.is_dir() {
+            return CheckResult {
+                name: self.name().to_string(),
+                category: "profiles".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("profiles directory missing ({})", profiles_dir.display()),
+                fix: Some("Run 'rustain init' to create default profiles".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            };
+        }
+
+        let (count, read_err) = match std::fs::read_dir(&profiles_dir) {
+            Ok(entries) => {
+                let mut total = 0usize;
+                let mut errors = 0usize;
+                for entry in entries {
+                    match entry {
+                        Ok(e) => {
+                            if e.path().extension().is_some_and(|ext| ext == "toml") {
+                                total += 1;
+                            }
+                        }
+                        Err(_) => errors += 1,
+                    }
+                }
+                if total == 0 && errors > 0 {
+                    return CheckResult {
+                        name: self.name().to_string(),
+                        category: "profiles".to_string(),
+                        status: CheckStatus::Warning,
+                        message: "cannot read profile entries (permission denied)".to_string(),
+                        fix: Some(format!("Check permissions on {}", profiles_dir.display())),
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
+                    };
+                }
+                (total, false)
+            }
+            Err(_) => (0, true),
         };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Fail);
-        assert!(result.message.contains("invalid TOML syntax"));
+
+        if read_err {
+            CheckResult {
+                name: self.name().to_string(),
+                category: "profiles".to_string(),
+                status: CheckStatus::Warning,
+                message: "cannot read profile entries (permission denied)".to_string(),
+                fix: Some(format!("Check permissions on {}", profiles_dir.display())),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            }
+        } else if count == 0 {
+            CheckResult {
+                name: self.name().to_string(),
+                category: "profiles".to_string(),
+                status: CheckStatus::Warning,
+                message: format!("no profiles found in {}", profiles_dir.display()),
+                fix: Some("Run 'rustain init' to create default profiles".to_string()),
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            }
+        } else {
+            CheckResult {
+                name: self.name().to_string(),
+                category: "profiles".to_string(),
+                status: CheckStatus::Pass,
+                message: format!("{} profile(s), active: {}", count, active),
+                fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            }
+        }
+    }
+}
+
+/// Info-tier: reports git availability and whether cwd is inside a repo. Always Pass.
+pub struct GitCheck;
+
+#[async_trait]
+impl HealthCheck for GitCheck {
+    fn name(&self) -> &str {
+        "Git"
     }
 
-    #[tokio::test]
-    async fn test_global_config_valid_toml_wrong_field_type() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().to_path_buf();
-        // Valid TOML but with a type mismatch on a known field — serde rejects
-        // because `log_max_size_mb` expects an unsigned integer.
-        // (Story 5-1 removed `deny_unknown_fields`, so unknown sections no
-        // longer fail here; we now exercise the field-type path instead.)
-        std::fs::write(
-            config_dir.join("config.toml"),
-            "log_max_size_mb = \"not-a-number\"",
-        )
-        .unwrap();
+    async fn run(&self) -> CheckResult {
+        let output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .await;
 
-        let check = GlobalConfigCheck {
-            config_dir: Some(config_dir),
+        let message = match output {
+            Ok(o) if o.status.success() => "available, inside git repo".to_string(),
+            Ok(_) => "available, not inside git repo".to_string(),
+            Err(_) => "git not found on PATH".to_string(),
         };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Fail);
-        assert!(result.message.contains("invalid config format"));
+
+        CheckResult {
+            name: self.name().to_string(),
+            category: "git".to_string(),
+            status: CheckStatus::Pass,
+            message,
+            fix: None,
+            latency: None,
+            tier: CheckTier::Info,
+        }
+    }
+}
+
+/// Check for local skill directories in workspace.
+pub struct SkillsCheck {
+    pub workspace: Option<std::path::PathBuf>,
+}
+
+#[async_trait]
+impl HealthCheck for SkillsCheck {
+    fn name(&self) -> &str {
+        "Skills"
     }
 
-    #[tokio::test]
-    async fn test_global_config_unknown_section_is_forward_compatible() {
-        // Story 5-1 Task 3.5: unknown top-level TOML sections must NOT fail
-        // validation — new features (skills, agents, profiles…) are added
-        // incrementally, so shared team configs cannot require lockstep upgrades.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().to_path_buf();
-        std::fs::write(
-            config_dir.join("config.toml"),
-            "[some_future_section]\nkey = \"value\"",
-        )
-        .unwrap();
-
-        let check = GlobalConfigCheck {
-            config_dir: Some(config_dir),
+    async fn run(&self) -> CheckResult {
+        let workspace = match &self.workspace {
+            Some(w) => w.clone(),
+            None => match paths::workspace_dir() {
+                Ok(w) => w,
+                Err(_) => {
+                    return CheckResult {
+                        name: self.name().to_string(),
+                        category: "skills".to_string(),
+                        status: CheckStatus::Pass,
+                        message: "cannot determine workspace directory".to_string(),
+                        fix: None,
+                        latency: None,
+                        tier: CheckTier::ExitAffecting,
+                    };
+                }
+            },
         };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-    }
 
-    #[tokio::test]
-    async fn test_global_config_missing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_dir = tmp.path().join("nonexistent");
+        if !workspace.is_dir() {
+            return CheckResult {
+                name: self.name().to_string(),
+                category: "skills".to_string(),
+                status: CheckStatus::Warning,
+                message: "workspace is not a valid directory".to_string(),
+                fix: None,
+                latency: None,
+                tier: CheckTier::ExitAffecting,
+            };
+        }
 
-        let check = GlobalConfigCheck {
-            config_dir: Some(config_dir),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Fail);
-        assert!(result.message.contains("missing"));
-    }
+        let mut count = 0usize;
+        // Scan .claude/skills/ and .rustain/skills/
+        for skills_dir in [
+            workspace.join(".claude").join("skills"),
+            workspace.join(".rustain").join("skills"),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        count += 1;
+                    }
+                }
+            }
+        }
 
-    // ── WorkspaceConfigCheck tests (Task 8.5) ──
-
-    #[tokio::test]
-    async fn test_workspace_config_valid() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        let claude_dir = workspace.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        std::fs::write(
-            claude_dir.join("settings.json"),
-            r#"{"permissions":{"allow":[]}}"#,
-        )
-        .unwrap();
-
-        let check = WorkspaceConfigCheck {
-            workspace: Some(workspace),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-    }
-
-    #[tokio::test]
-    async fn test_workspace_config_invalid_json() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        let claude_dir = workspace.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        std::fs::write(claude_dir.join("settings.json"), "not json {{{").unwrap();
-
-        let check = WorkspaceConfigCheck {
-            workspace: Some(workspace),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Fail);
-        assert!(result.message.contains("invalid JSON"));
-    }
-
-    #[tokio::test]
-    async fn test_workspace_config_missing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-
-        let check = WorkspaceConfigCheck {
-            workspace: Some(workspace),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Warning);
-        assert!(result.message.contains("missing"));
-    }
-
-    #[tokio::test]
-    async fn test_workspace_config_permissions_null() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        let claude_dir = workspace.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        std::fs::write(claude_dir.join("settings.json"), r#"{"permissions":null}"#).unwrap();
-
-        let check = WorkspaceConfigCheck {
-            workspace: Some(workspace),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Warning);
-        assert!(result.message.contains("missing 'permissions' key"));
-    }
-
-    // ── WorkspaceDirCheck tests (Task 4.3 / P1) ──
-
-    #[tokio::test]
-    async fn test_workspace_dir_exists() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        std::fs::create_dir_all(workspace.join(".claude")).unwrap();
-
-        let check = WorkspaceDirCheck {
-            workspace: Some(workspace),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-    }
-
-    #[tokio::test]
-    async fn test_workspace_dir_missing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        // No .claude/ directory
-
-        let check = WorkspaceDirCheck {
-            workspace: Some(workspace),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Warning);
-        assert!(result.message.contains("missing"));
-        assert!(result.fix.is_some());
-    }
-
-    // ── SessionStorageCheck tests (Task 8.6) ──
-
-    #[tokio::test]
-    async fn test_session_storage_empty_dir() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        let sessions_dir = workspace.join(".claude").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        let check = SessionStorageCheck {
-            workspace: Some(workspace),
-            config_dir: Some(tmp.path().join("no_config")),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("empty"));
-    }
-
-    #[tokio::test]
-    async fn test_session_storage_populated() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        let sessions_dir = workspace.join(".claude").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        // Create valid session files
-        std::fs::write(
-            sessions_dir.join("abc.meta.json"),
-            r#"{"id":"abc","title":"Test"}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            sessions_dir.join("def.meta.json"),
-            r#"{"id":"def","title":"Test 2"}"#,
-        )
-        .unwrap();
-
-        let check = SessionStorageCheck {
-            workspace: Some(workspace),
-            config_dir: Some(tmp.path().join("no_config")),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("2 saved"));
-    }
-
-    #[tokio::test]
-    async fn test_session_storage_corrupted() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().to_path_buf();
-        let sessions_dir = workspace.join(".claude").join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-
-        std::fs::write(
-            sessions_dir.join("good.meta.json"),
-            r#"{"id":"good","title":"OK"}"#,
-        )
-        .unwrap();
-        std::fs::write(sessions_dir.join("bad.meta.json"), "not valid json {{{{").unwrap();
-
-        let check = SessionStorageCheck {
-            workspace: Some(workspace),
-            config_dir: Some(tmp.path().join("no_config")),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Warning);
-        assert!(result.message.contains("corrupted"));
-    }
-
-    #[tokio::test]
-    async fn test_session_storage_missing_dir_not_initialized() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = tmp.path().join("no_init_workspace");
-        // Don't create sessions dir, and no config.toml exists
-
-        let check = SessionStorageCheck {
-            workspace: Some(workspace),
-            config_dir: Some(tmp.path().join("no_config")),
-        };
-        let result = check.run().await;
-        // When neither sessions dir nor config.toml exist → "not initialized" (Pass)
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("not initialized"));
-    }
-
-    // ── Registration pattern test (Task 8.12) ──
-
-    #[test]
-    fn test_build_check_list_default() {
-        let checks = build_check_list(false);
-        assert!(checks.len() >= 8, "Should have at least 8 checks");
-        // Verify names
-        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
-        assert!(names.contains(&"API key"));
-        assert!(names.contains(&"API endpoint"));
-        assert!(names.contains(&"Global config"));
-        assert!(names.contains(&"Workspace dir"));
-        assert!(names.contains(&"Workspace config"));
-        assert!(names.contains(&"Terminal"));
-        assert!(names.contains(&"Sessions"));
-        assert!(names.contains(&"Plan directory"));
-    }
-
-    #[test]
-    fn test_build_check_list_with_terminal_detail() {
-        let checks_without = build_check_list(false);
-        let checks_with = build_check_list(true);
-        assert_eq!(
-            checks_with.len(),
-            checks_without.len() + 1,
-            "Terminal detail flag should add one check"
-        );
-        let names: Vec<&str> = checks_with.iter().map(|c| c.name()).collect();
-        assert!(names.contains(&"Terminal details"));
-    }
-
-    // ── MemoryDirSizeCheck tests (Story 11.1, AC7) ──
-
-    #[tokio::test]
-    async fn test_memory_dir_missing_is_pass_no_memory() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let check = MemoryDirSizeCheck {
-            workspace: Some(tmp.path().to_path_buf()),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("no memory yet"));
-    }
-
-    #[tokio::test]
-    async fn test_memory_dir_reports_size() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let memory_dir = tmp.path().join(".rustain").join("memory");
-        std::fs::create_dir_all(&memory_dir).unwrap();
-        std::fs::write(
-            memory_dir.join("2026-05-31.md"),
-            "# 2026-05-31\n\n## 10:00:00 — x\n",
-        )
-        .unwrap();
-
-        let check = MemoryDirSizeCheck {
-            workspace: Some(tmp.path().to_path_buf()),
-        };
-        let result = check.run().await;
-        // AC7: awareness-only — never Fail.
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("1 day file"));
-    }
-
-    // Story 11.3a — the vector index.bin is counted in the size + attributed,
-    // but NOT counted as a "day file".
-    #[tokio::test]
-    async fn test_memory_dir_attributes_vector_index() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let memory_dir = tmp.path().join(".rustain").join("memory");
-        std::fs::create_dir_all(&memory_dir).unwrap();
-        std::fs::write(
-            memory_dir.join("2026-05-31.md"),
-            "# 2026-05-31\n\n## 10:00:00 — x\n",
-        )
-        .unwrap();
-        // A vector index sized so the KB display is non-zero.
-        std::fs::write(memory_dir.join("index.bin"), vec![0u8; 2048]).unwrap();
-
-        let check = MemoryDirSizeCheck {
-            workspace: Some(tmp.path().to_path_buf()),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        // index.bin is NOT a day file — still exactly one day file reported.
-        assert!(result.message.contains("1 day file"), "{}", result.message);
-        // …but its size is attributed.
-        assert!(
-            result.message.contains("vector index"),
-            "{}",
-            result.message
-        );
-    }
-
-    // Only index.bin present (no day files, no MEMORY.md) → still reported, not
-    // "no memory yet".
-    #[tokio::test]
-    async fn test_memory_dir_only_index_is_reported() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let memory_dir = tmp.path().join(".rustain").join("memory");
-        std::fs::create_dir_all(&memory_dir).unwrap();
-        std::fs::write(memory_dir.join("index.bin"), vec![0u8; 4096]).unwrap();
-
-        let check = MemoryDirSizeCheck {
-            workspace: Some(tmp.path().to_path_buf()),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(
-            !result.message.contains("no memory yet"),
-            "{}",
-            result.message
-        );
-        assert!(
-            result.message.contains("vector index"),
-            "{}",
-            result.message
-        );
-    }
-
-    // ── ApiEndpointCheck tests (Task 8.9) ──
-
-    #[tokio::test]
-    async fn test_api_endpoint_default() {
-        let check = ApiEndpointCheck {
-            base_url_override: Some(None), // simulate unset
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("api.anthropic.com"));
-        assert!(result.message.contains("default"));
-    }
-
-    #[tokio::test]
-    async fn test_api_endpoint_custom() {
-        let check = ApiEndpointCheck {
-            base_url_override: Some(Some("https://api.z.ai/api/anthropic".to_string())),
-        };
-        let result = check.run().await;
-        assert_eq!(result.status, CheckStatus::Pass);
-        assert!(result.message.contains("api.z.ai"));
-        assert!(result.message.contains("custom"));
+        CheckResult {
+            name: self.name().to_string(),
+            category: "skills".to_string(),
+            status: CheckStatus::Pass,
+            message: format!("{} skill directory(ies) found", count),
+            fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
+        }
     }
 }

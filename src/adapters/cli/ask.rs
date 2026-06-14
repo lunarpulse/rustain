@@ -24,6 +24,30 @@ use crate::domain::services::message_builder::{self, ResolvedFileContext};
 use crate::domain::services::model_router::{ModelResolutionRequest, resolve_effective_model};
 use crate::infrastructure::composition::CliCore;
 use crate::infrastructure::runtime::turn;
+
+use crate::domain::errors::ProviderError;
+
+/// Parse a `ProviderError` from its `Display` string representation.
+/// Used at the two string boundaries (StreamChunk::Error and SystemNotice)
+/// where the structured error has been flattened to a string.
+fn parse_provider_error_display(s: &str) -> ProviderError {
+    if let Some(rest) = s.strip_prefix("Offline: ") {
+        ProviderError::Offline(rest.to_string())
+    } else if let Some(rest) = s.strip_prefix("Connection failed: ") {
+        ProviderError::ConnectionFailed(rest.to_string())
+    } else if s == "Authentication failed" {
+        ProviderError::AuthenticationFailed
+    } else if s == "Request cancelled" {
+        ProviderError::Cancelled
+    } else if let Some(rest) = s.strip_prefix("Stream error: ") {
+        ProviderError::StreamError(rest.to_string())
+    } else if let Some(rest) = s.strip_prefix("endpoint unsupported (HTTP ") {
+        let code = rest.trim_end_matches(')').parse::<u16>().unwrap_or(0);
+        ProviderError::EndpointUnsupported(code)
+    } else {
+        ProviderError::Other(s.to_string())
+    }
+}
 const FILE_SIZE_CAP: usize = 100 * 1024;
 
 /// Output format selector for `rustain ask` (Story 13.1b).
@@ -858,7 +882,7 @@ pub async fn run_ask_core(
     let mut assistant_text = String::new();
     let mut last_block_start = 0usize;
     let mut turn_complete = false;
-    let mut turn_error: Option<String> = None;
+    let mut turn_error: Option<ProviderError> = None;
     let mut turn_stop_reason = StopReason::EndTurn;
     let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
     let mut turn_usage: Option<UsageInfo> = None;
@@ -951,16 +975,23 @@ pub async fn run_ask_core(
                     turn_usage = Some(usage.clone());
                 }
                 StreamChunk::Error { content } => {
-                    let _ = writeln!(err, "Error: {}", content);
-                    turn_error = Some(content.clone());
+                    let parsed = parse_provider_error_display(content);
+                    if !parsed.is_offline() {
+                        let _ = writeln!(err, "Error: {}", content);
+                    }
+                    turn_error = Some(parsed);
                     break;
                 }
                 _ => {}
             },
             AppEvent::SystemNotice { level, message, .. } => {
                 if *level == crate::domain::models::NoticeLevel::Error {
-                    let _ = writeln!(err, "Error: {}", message);
-                    turn_error = Some(message.clone());
+                    let parsed = parse_provider_error_display(message);
+                    // Defer stderr output for offline errors — handled post-loop (AC3).
+                    if !parsed.is_offline() {
+                        let _ = writeln!(err, "Error: {}", message);
+                    }
+                    turn_error = Some(parsed);
                     break;
                 }
             }
@@ -981,7 +1012,13 @@ pub async fn run_ask_core(
         let _ = writeln!(err, "{}", msg);
     }
 
-    if let Some(error) = turn_error {
+    if let Some(ref error) = turn_error {
+        // Story 13.2 (AC3): surface a specific offline message when a transport-level
+        // failure occurs — matched on the domain variant, not a string prefix.
+        if error.is_offline() {
+            let msg = "✗ No provider available (offline). Use --dry-run for plan-only, or configure a local LLM.";
+            return emit_cli_error(output_format, out, err, msg, opts.dry_run);
+        }
         let _ = writeln!(err, "Error: turn failed: {}", error);
         let _ = renderer.emit_error(&format!("turn failed: {}", error), opts.dry_run);
         return ExitCode::FAILURE;

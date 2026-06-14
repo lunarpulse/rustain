@@ -143,7 +143,7 @@ impl StreamingProvider for AnthropicAdapter {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ProviderError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| crate::adapters::provider::classify_reqwest_error(&e))?;
 
         tracing::debug!(
             status = %response.status(),
@@ -289,7 +289,49 @@ impl StreamingProvider for AnthropicAdapter {
                 "Health check failed: HTTP {}",
                 resp.status()
             ))),
-            Err(e) => Err(ProviderError::ConnectionFailed(e.to_string())),
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+        }
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        use std::time::Instant;
+        let start = Instant::now();
+        // Non-billable: GET /v1/models (free, idempotent, validates auth).
+        // base_url may already end with "/v1" (e.g. proxy); avoid doubling it.
+        let url = if self.base_url.ends_with("/v1") {
+            format!("{}/models", self.base_url)
+        } else {
+            format!("{}/v1/models", self.base_url)
+        };
+        let mut req = self
+            .client
+            .get(&url)
+            .header("anthropic-version", "2023-06-01")
+            .timeout(std::time::Duration::from_secs(5));
+        req = match &self.auth_mode {
+            AuthMode::ApiKey(key) => req.header("x-api-key", key.as_str()),
+            AuthMode::BearerToken(token) => {
+                req.header("authorization", format!("Bearer {}", token))
+            }
+        };
+        let response = req.send().await;
+        let latency = start.elapsed();
+        match response {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                match status {
+                    200..=299 => Ok(crate::domain::ports::ProbeOutcome { latency }),
+                    401 | 403 => Err(ProviderError::AuthenticationFailed),
+                    404 | 405 => Err(ProviderError::EndpointUnsupported(status)),
+                    _ => Err(ProviderError::Other(format!(
+                        "Probe failed: HTTP {}",
+                        status
+                    ))),
+                }
+            }
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
         }
     }
 }

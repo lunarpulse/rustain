@@ -225,8 +225,22 @@ pub async fn run() -> Result<()> {
     if let Some(Command::Init) = cli.command {
         return crate::adapters::cli::init::run_init().await;
     }
-    if let Some(Command::Doctor { terminal, adapters }) = cli.command {
-        return crate::adapters::cli::doctor::run_doctor(terminal, adapters)
+    if let Some(Command::Doctor {
+        terminal,
+        adapters,
+        json,
+    }) = cli.command
+    {
+        // Build a minimal provider layer so `rustain doctor` can run non-billable
+        // connectivity probes against configured providers (Story 13.2 AC8).
+        let provider_layer = init_provider_layer(&app_config);
+        let provider_pairs: Vec<(String, Option<Arc<dyn StreamingProvider>>)> = provider_layer
+            .registry
+            .iter_provider_arcs()
+            .into_iter()
+            .map(|(id, provider)| (id, Some(provider)))
+            .collect();
+        return crate::adapters::cli::doctor::run_doctor(terminal, adapters, json, provider_pairs)
             .await
             .map_err(|e| {
                 tracing::error!("Doctor subcommand failed: {e}");

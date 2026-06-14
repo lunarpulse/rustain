@@ -136,6 +136,14 @@ mod tests {
         async fn health_check(&self) -> Result<(), ProviderError> {
             Ok(())
         }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
     }
 
     struct FailingProvider;
@@ -160,6 +168,14 @@ mod tests {
         }
         async fn health_check(&self) -> Result<(), ProviderError> {
             Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
         }
     }
 

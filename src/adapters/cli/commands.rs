@@ -85,6 +85,9 @@ pub enum Command {
         /// Run adapter conformance smoke-checks (NFR44)
         #[arg(long)]
         adapters: bool,
+        /// Machine-readable JSON output (Story 13.2 AC9)
+        #[arg(long)]
+        json: bool,
     },
     /// Import conversation history from another tool
     Migrate {

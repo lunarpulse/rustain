@@ -119,7 +119,7 @@ impl OpenAiAdapter {
                 "Models fetch failed: HTTP {}",
                 resp.status()
             ))),
-            Err(e) => Err(ProviderError::ConnectionFailed(e.to_string())),
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
         }
     }
 
@@ -186,7 +186,7 @@ impl StreamingProvider for OpenAiAdapter {
         let response = req
             .send()
             .await
-            .map_err(|e| ProviderError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| crate::adapters::provider::classify_reqwest_error(&e))?;
 
         tracing::debug!(
             status = %response.status(),
@@ -315,7 +315,41 @@ impl StreamingProvider for OpenAiAdapter {
                 "Health check failed: HTTP {}",
                 resp.status()
             ))),
-            Err(e) => Err(ProviderError::ConnectionFailed(e.to_string())),
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+        }
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        use std::time::Instant;
+        let start = Instant::now();
+        // Non-billable: GET /v1/models (free, idempotent, validates auth).
+        // base_url is expected to end with "/v1" (e.g. https://api.openai.com/v1).
+        let url = format!("{}/models", self.base_url);
+        let mut req = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5));
+        if !self.api_key.is_empty() {
+            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = req.send().await;
+        let latency = start.elapsed();
+        match response {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                match status {
+                    200..=299 => Ok(crate::domain::ports::ProbeOutcome { latency }),
+                    401 | 403 => Err(ProviderError::AuthenticationFailed),
+                    404 | 405 => Err(ProviderError::EndpointUnsupported(status)),
+                    _ => Err(ProviderError::Other(format!(
+                        "Probe failed: HTTP {}",
+                        status
+                    ))),
+                }
+            }
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
         }
     }
 }

@@ -76,6 +76,13 @@ impl StreamingProvider for RecordingProvider {
     async fn health_check(&self) -> Result<(), ProviderError> {
         Ok(())
     }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 #[tokio::test]
@@ -196,6 +203,13 @@ impl StreamingProvider for OrderedProvider {
 
     async fn health_check(&self) -> Result<(), ProviderError> {
         Ok(())
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 

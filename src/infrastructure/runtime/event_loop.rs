@@ -716,6 +716,34 @@ pub async fn run(
         });
     }
 
+    // Story 13-2 AC5: fire a background connectivity probe at startup.
+    // If the provider is offline, emit a status notice so the user knows
+    // immediately rather than discovering it on first send.
+    {
+        let probe_provider = provider.clone();
+        let event_bus = app_state.event_bus.clone();
+        tokio::spawn(async move {
+            match probe_provider.connectivity_probe().await {
+                Ok(_) => { /* provider reachable — nothing to surface */ }
+                Err(e) if e.is_offline() => {
+                    let provider_name = probe_provider.provider_id();
+                    event_bus.emit_domain(AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: NoticeLevel::Warning,
+                        message: format!(
+                            "⚠ {}: offline. Local LLM: not configured.",
+                            provider_name
+                        ),
+                    });
+                }
+                Err(_) => {
+                    // Non-offline probe failure (e.g. endpoint unsupported) —
+                    // not actionable for AC5; silently ignore.
+                }
+            }
+        });
+    }
+
     // Story 5.4 AC8: Spawn agent discovery as background task after first frame.
     tracing::debug!("Dispatching background agent scan");
     {
@@ -5720,6 +5748,16 @@ pub async fn run(
                                 }
                             }
 
+                            // Story 13-2 AC5: rewrite offline provider errors with
+                            // user-friendly copy instead of raw error strings.
+                            let msg = if matches!(level, crate::domain::models::NoticeLevel::Error)
+                                && msg.starts_with("Offline:")
+                            {
+                                "✗ No provider available. Configure a local LLM for offline use, or check your connection.".to_string()
+                            } else {
+                                msg
+                            };
+
                             // Create FeedbackBlock for errors and warnings; flash for info
                             match level {
                                 crate::domain::models::NoticeLevel::Error => {
@@ -10387,6 +10425,14 @@ mod tests {
         }
         async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
             Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
         }
     }
 

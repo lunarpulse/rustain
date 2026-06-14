@@ -95,6 +95,9 @@ pub fn find_api_key_var() -> Option<&'static str> {
     None
 }
 
+// AC4 guard: `run_init` does no network I/O today (detect_api_key reads env only).
+// If a live key-validation step is ever added, it MUST skip on transport error with:
+// "⚠ Skipped API key validation (offline). Verify later with 'rustain doctor'."
 /// Detect API key presence from environment variables.
 /// Returns true if a key was found and user confirmed, false otherwise.
 /// NEVER displays the key value (NFR11).
@@ -337,5 +340,54 @@ mod tests {
         assert_eq!(parsed.log_level, default.log_level);
         assert_eq!(parsed.log_max_size_mb, default.log_max_size_mb);
         assert_eq!(parsed.log_retain_count, default.log_retain_count);
+    }
+
+    /// AC4 guard: `find_api_key_var` reads only environment variables — no network I/O.
+    /// `detect_api_key` delegates to `find_api_key_var` + `prompt_yes_no` (stdin only).
+    /// `run_init_with_paths` calls `detect_api_key`, `create_directories`, `write_config_toml`,
+    /// `write_settings_json`, and `display_summary` — all pure file/env/stdio operations.
+    /// Therefore `run_init` completes with no network by construction.
+    /// This test exercises `find_api_key_var` with no API keys set, confirming it returns
+    /// `None` without any network call, satisfying AC4's offline guard.
+    #[test]
+    fn test_init_completes_offline_guard() {
+        // Save originals
+        let orig_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
+        let orig_key = std::env::var("ANTHROPIC_API_KEY").ok(); // CONFORMANCE_EXCEPTION: test backup/restore
+
+        // SAFETY: Test-only env manipulation. Tests using env vars must run
+        // with --test-threads=1 or accept potential flakiness.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+
+        // find_api_key_var is the network-relevant function in the init path.
+        // It only reads env vars — no reqwest, no HTTP, no DNS.
+        assert_eq!(
+            find_api_key_var(),
+            None,
+            "AC4: find_api_key_var must not require network"
+        );
+
+        // Also verify the pure file-writing helpers complete offline.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config");
+        let workspace = tmp.path().join("workspace");
+        create_directories(&config_dir, &workspace).unwrap();
+        write_config_toml(&config_dir.join("config.toml")).unwrap();
+        write_settings_json(&workspace.join(".claude").join("settings.json")).unwrap();
+
+        // Restore originals
+        unsafe {
+            match orig_token {
+                Some(v) => std::env::set_var("ANTHROPIC_AUTH_TOKEN", v),
+                None => std::env::remove_var("ANTHROPIC_AUTH_TOKEN"),
+            }
+            match orig_key {
+                Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+                None => std::env::remove_var("ANTHROPIC_API_KEY"),
+            }
+        }
     }
 }

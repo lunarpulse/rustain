@@ -55,6 +55,14 @@ impl StreamingProvider for QuickCompleteProvider {
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 async fn make_provider() -> (

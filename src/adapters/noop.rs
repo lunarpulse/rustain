@@ -57,6 +57,14 @@ impl StreamingProvider for NoOpProvider {
         Ok(())
     }
 
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        Ok(crate::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+
     fn provider_descriptor(&self) -> ProviderDescriptor {
         ProviderDescriptor {
             provider_id: "noop".to_string(),

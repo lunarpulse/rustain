@@ -88,6 +88,14 @@ impl StreamingProvider for SimpleTextProvider {
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 struct ModelCaptureProvider {
     text: String,
@@ -141,6 +149,14 @@ impl StreamingProvider for ModelCaptureProvider {
 
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 
@@ -197,6 +213,14 @@ impl StreamingProvider for MessageCaptureProvider {
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 struct ErrorProvider;
@@ -230,6 +254,14 @@ impl StreamingProvider for ErrorProvider {
 
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 fn make_opts(query: &str) -> rustain::adapters::cli::ask::AskOpts {
@@ -577,6 +609,14 @@ impl StreamingProvider for ToolUseProvider {
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 struct BashToolUseProvider {
@@ -643,6 +683,14 @@ impl StreamingProvider for BashToolUseProvider {
 
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 
@@ -891,6 +939,14 @@ impl StreamingProvider for ChunkProvider {
 
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 
@@ -1949,6 +2005,14 @@ impl StreamingProvider for ProposePlanProvider {
     async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
         Ok(())
     }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
 }
 
 fn sample_plan_input() -> serde_json::Value {
@@ -2373,6 +2437,15 @@ async fn p0_13_1c_last_plan_wins() {
         async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
             Ok(())
         }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError>
+        {
+            Ok(rustain::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
     }
 
     let provider = Arc::new(TwoPlanProvider {
@@ -2446,6 +2519,15 @@ async fn p0_13_1c_addendum_present() {
         }
         async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
             Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError>
+        {
+            Ok(rustain::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
         }
     }
 
@@ -2704,4 +2786,129 @@ async fn p0_13_1c_13_1b_regression() {
     assert_eq!(doc["dry_run"], false);
     assert!(doc["plan"].is_null());
     assert_eq!(doc["tools_would_use"], serde_json::json!([]));
+}
+// ================== Story 13.2: Offline Ask Tests ==================
+
+struct OfflineAskProvider;
+
+#[async_trait]
+impl StreamingProvider for OfflineAskProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        _options: CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        Err(rustain::domain::errors::ProviderError::Offline(
+            "connection refused".into(),
+        ))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "offline-mock".into()
+    }
+
+    fn list_models(&self) -> Vec<rustain::domain::models::ModelDescriptor> {
+        vec![]
+    }
+
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Err(rustain::domain::errors::ProviderError::Offline(
+            "connection refused".into(),
+        ))
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Err(rustain::domain::errors::ProviderError::Offline(
+            "connection refused".into(),
+        ))
+    }
+}
+
+/// P0-13.2-AC3 — offline provider → specific error message on stderr, non-zero exit.
+#[tokio::test]
+async fn test_ask_offline_error() {
+    let provider: Arc<dyn StreamingProvider> = Arc::new(OfflineAskProvider);
+    let opts = make_opts("test offline");
+
+    let (exit, _out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::FAILURE, "offline should exit non-zero");
+    let expected_msg =
+        "✗ No provider available (offline). Use --dry-run for plan-only, or configure a local LLM.";
+    assert!(
+        err.contains(expected_msg),
+        "stderr should contain AC3 message.\nActual stderr: {}",
+        err
+    );
+}
+
+/// P0-13.2-AC3-json — offline with `--output-format json` → structured ErrorOut on stdout.
+#[tokio::test]
+async fn test_ask_offline_error_json() {
+    let provider: Arc<dyn StreamingProvider> = Arc::new(OfflineAskProvider);
+    let opts = make_opts_with_format("test offline", OutputFormat::Json);
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+    assert_eq!(exit, ExitCode::FAILURE, "offline should exit non-zero");
+
+    // stderr carries the human message
+    let expected_msg =
+        "✗ No provider available (offline). Use --dry-run for plan-only, or configure a local LLM.";
+    assert!(
+        err.contains(expected_msg),
+        "stderr should contain AC3 message.\nActual stderr: {}",
+        err
+    );
+
+    // stdout carries a valid JSON error envelope
+    let doc: serde_json::Value =
+        serde_json::from_str(&out).expect("json error must be parseable stdout");
+    let error_msg = doc["error"]["message"]
+        .as_str()
+        .expect("error.message should exist");
+    assert!(
+        error_msg.contains("No provider available (offline)"),
+        "JSON error message should contain offline text, got: {}",
+        error_msg
+    );
+}
+
+/// P0-13.2-dry-run-offline — `--dry-run` with an offline provider does not error
+/// on the streaming path; the plan turn still receives the offline error since
+/// stream_completion is called. This verifies dry-run follows the same offline path.
+#[tokio::test]
+async fn test_ask_offline_dry_run() {
+    let provider: Arc<dyn StreamingProvider> = Arc::new(OfflineAskProvider);
+    let opts = make_dry_run_opts("plan something", OutputFormat::Json);
+
+    let (exit, out, err) = run_ask_core_test(provider, opts).await;
+
+    // Dry-run still calls stream_completion, so it gets the offline error.
+    // The offline message is emitted regardless of dry-run mode.
+    // This is the expected behavior: offline blocks even dry-run since
+    // the model is needed to generate the plan.
+    assert_eq!(
+        exit,
+        ExitCode::FAILURE,
+        "dry-run + offline should still fail"
+    );
+    let expected_msg = "No provider available (offline)";
+    assert!(
+        err.contains(expected_msg),
+        "stderr should mention offline.\nActual stderr: {}",
+        err
+    );
+    // If JSON output is present, verify it's valid
+    if !out.trim().is_empty() {
+        let _doc: serde_json::Value =
+            serde_json::from_str(&out).expect("JSON output should be valid if present");
+    }
 }

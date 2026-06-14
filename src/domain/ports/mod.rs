@@ -62,7 +62,7 @@ pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
-pub use provider::StreamingProvider;
+pub use provider::{ProbeOutcome, StreamingProvider};
 pub use provider_info::ProviderInfoPort;
 pub use recall_provider::RecallProviderPort;
 pub use sandbox::SandboxManager;

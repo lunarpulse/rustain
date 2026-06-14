@@ -181,6 +181,14 @@ impl StreamingProvider for FailingHealthCheckProvider {
         ))
     }
 
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
+    }
+
     async fn stream_completion(
         &self,
         _messages: Vec<Message>,

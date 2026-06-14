@@ -683,6 +683,14 @@ mod tests {
         async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
             Ok(())
         }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
     }
 
     async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {

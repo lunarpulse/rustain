@@ -114,8 +114,26 @@ pub enum ProviderError {
     #[error("Request cancelled")]
     Cancelled,
 
+    /// Network unreachable — transport-level connect/timeout/DNS failure.
+    /// Classified at the adapter boundary where `reqwest::Error` exists.
+    /// All consumers match on this domain variant — zero `reqwest` coupling above the adapter.
+    #[error("Offline: {0}")]
+    Offline(String),
+
+    /// The provider's probe endpoint is not implemented by this provider/base-url.
+    /// Not a failure — the provider may still work for billable operations.
+    #[error("endpoint unsupported (HTTP {0})")]
+    EndpointUnsupported(u16),
+
     #[error("{0}")]
     Other(String),
+}
+
+impl ProviderError {
+    /// True when the error indicates network-level unreachability (connect/timeout/DNS).
+    pub fn is_offline(&self) -> bool {
+        matches!(self, ProviderError::Offline(_))
+    }
 }
 
 #[allow(dead_code)]

@@ -6,6 +6,14 @@ use crate::domain::errors::ProviderError;
 use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use crate::domain::models::{CompletionOptions, Message, StreamChunk};
 
+/// Outcome of a non-billable connectivity probe (Story 13.2 AC8).
+/// Proves auth + reachability only — NOT that streaming/messages works.
+#[derive(Debug, Clone)]
+pub struct ProbeOutcome {
+    /// Round-trip latency of the probe request.
+    pub latency: std::time::Duration,
+}
+
 /// Single port for LLM streaming completions.
 ///
 /// Every provider (Anthropic, OpenAI, Ollama, ...) implements this trait.
@@ -47,6 +55,18 @@ pub trait StreamingProvider: Send + Sync {
     /// reachable, `Err(ProviderError)` on timeout or auth failure.
     /// Must not block for more than 5 seconds.
     async fn health_check(&self) -> Result<(), ProviderError>;
+
+    /// Non-billable connectivity probe (Story 13.2 AC8).
+    ///
+    /// Uses a free, idempotent endpoint (`GET /v1/models` for Anthropic/OpenAI,
+    /// `GET /api/tags` for Ollama) to validate auth + reachability WITHOUT
+    /// costing a token or writing to provider logs.
+    ///
+    /// Returns `Ok(ProbeOutcome)` with latency on success.
+    /// - 401/403 → `Err(ProviderError::AuthenticationFailed)`
+    /// - Transport/connect/timeout → `Err(ProviderError::Offline(…))`
+    /// - 404/405 → `Err(ProviderError::Other(…))` (endpoint unsupported)
+    async fn connectivity_probe(&self) -> Result<ProbeOutcome, ProviderError>;
 
     /// Return a provider-level descriptor for UI display.
     fn provider_descriptor(&self) -> ProviderDescriptor {

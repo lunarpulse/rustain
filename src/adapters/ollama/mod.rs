@@ -153,16 +153,7 @@ impl StreamingProvider for OllamaAdapter {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    ProviderError::ConnectionFailed(format!(
-                        "Local LLM not reachable at {}. Is Ollama running?",
-                        self.base_url
-                    ))
-                } else {
-                    ProviderError::ConnectionFailed(e.to_string())
-                }
-            })?;
+            .map_err(|e| crate::adapters::provider::classify_reqwest_error(&e))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -330,16 +321,38 @@ impl StreamingProvider for OllamaAdapter {
                 "Health check failed: HTTP {}",
                 resp.status()
             ))),
-            Err(e) => {
-                if e.is_connect() || e.is_timeout() {
-                    Err(ProviderError::ConnectionFailed(format!(
-                        "Local LLM not reachable at {}. Is Ollama running?",
-                        self.base_url
-                    )))
-                } else {
-                    Err(ProviderError::ConnectionFailed(e.to_string()))
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
+        }
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        use std::time::Instant;
+        // Non-billable: GET /api/tags (Ollama's model list endpoint, free).
+        let url = format!("{}/api/tags", self.base_url);
+        let start = Instant::now();
+        let response = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+        let latency = start.elapsed();
+        match response {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                match status {
+                    200..=299 => Ok(crate::domain::ports::ProbeOutcome { latency }),
+                    401 | 403 => Err(ProviderError::AuthenticationFailed),
+                    404 | 405 => Err(ProviderError::EndpointUnsupported(status)),
+                    _ => Err(ProviderError::Other(format!(
+                        "Probe failed: HTTP {}",
+                        status
+                    ))),
                 }
             }
+            Err(e) => Err(crate::adapters::provider::classify_reqwest_error(&e)),
         }
     }
 }

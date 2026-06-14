@@ -3,8 +3,8 @@
 use clap::Parser;
 use rustain::adapters::cli::commands::{Cli, Command};
 use rustain::adapters::cli::doctor::{
-    ApiKeyCheck, CheckResult, CheckStatus, GlobalConfigCheck, HealthCheck, SessionStorageCheck,
-    WorkspaceConfigCheck, WorkspaceDirCheck, display_results,
+    ApiKeyCheck, CheckResult, CheckStatus, CheckTier, GlobalConfigCheck, HealthCheck,
+    SessionStorageCheck, WorkspaceConfigCheck, WorkspaceDirCheck, display_results,
 };
 use rustain::domain::models::AppConfig;
 
@@ -21,7 +21,8 @@ fn test_cli_doctor_subcommand() {
         cli.command,
         Some(Command::Doctor {
             terminal: false,
-            adapters: false
+            adapters: false,
+            json: false
         })
     ));
     assert!(!cli.new);
@@ -41,7 +42,8 @@ fn test_cli_doctor_terminal_flag() {
         cli.command,
         Some(Command::Doctor {
             terminal: true,
-            adapters: false
+            adapters: false,
+            json: false
         })
     ));
 }
@@ -89,7 +91,8 @@ fn test_cli_log_level_with_doctor() {
         cli.command,
         Some(Command::Doctor {
             terminal: false,
-            adapters: false
+            adapters: false,
+            json: false
         })
     ));
     assert_eq!(cli.log_level.as_deref(), Some("debug"));
@@ -105,21 +108,30 @@ fn test_display_results_formats_all_statuses() {
     let results = vec![
         CheckResult {
             name: "Pass check".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Pass,
             message: "all good".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "Warn check".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Warning,
             message: "something off".to_string(),
             fix: Some("try this".to_string()),
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "Fail check".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Fail,
             message: "broken".to_string(),
             fix: Some("fix it".to_string()),
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
     ];
     // Should not panic; output goes to stdout
@@ -136,39 +148,57 @@ fn test_summary_counts_various_combos() {
     let results = [
         CheckResult {
             name: "A".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Pass,
             message: "".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "B".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Pass,
             message: "".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "C".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Pass,
             message: "".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "D".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Warning,
             message: "".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "E".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Fail,
             message: "".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
         CheckResult {
             name: "F".to_string(),
+            category: "test".to_string(),
             status: CheckStatus::Fail,
             message: "".to_string(),
             fix: None,
+            latency: None,
+            tier: CheckTier::ExitAffecting,
         },
     ];
     let pass = results
@@ -429,12 +459,12 @@ async fn test_terminal_check_runs() {
 // ──────────────────────────────────────────────────
 
 // Covers: FR98 (doctor health), NFR11 (no API keys logged)
+// Story 13.2 AC8b: DELIBERATE UPDATE — ApiKeyCheck is now key-presence only (no network).
+// Network-based auth validation moved to ProviderConnectivityCheck (AC8).
 #[tokio::test]
 async fn test_api_key_not_set() {
     let check = ApiKeyCheck {
         key_var_override: Some(None), // simulate no key found
-        key_value_override: None,
-        base_url_override: Some(None),
     };
     let result = check.run().await;
     assert_eq!(result.status, CheckStatus::Fail);
@@ -442,107 +472,53 @@ async fn test_api_key_not_set() {
     assert!(result.fix.is_some());
 }
 
-// Covers: FR98 (doctor health), NFR11 (no API keys logged)
+// Story 13.2 AC8b: ApiKeyCheck now returns Pass (key-presence) — no mock server needed.
 #[tokio::test]
 async fn test_api_key_valid_with_mock_400() {
-    let mut server = mockito::Server::new_async().await;
-
-    let mock = server
-        .mock("POST", "/v1/messages")
-        .with_status(400)
-        .with_body(r#"{"type":"error","error":{"type":"invalid_request_error"}}"#)
-        .create_async()
-        .await;
-
+    // De-billed: ApiKeyCheck no longer makes network calls.
+    // Auth validation is now ProviderConnectivityCheck's job (AC8).
     let check = ApiKeyCheck {
         key_var_override: Some(Some("ANTHROPIC_API_KEY")),
-        key_value_override: Some("test-key-value".to_string()),
-        base_url_override: Some(Some(server.url())),
     };
     let result = check.run().await;
     assert_eq!(result.status, CheckStatus::Pass);
-    assert!(result.message.contains("valid"));
+    assert!(result.message.contains("set"));
     assert!(result.message.contains("ANTHROPIC_API_KEY"));
-
-    mock.assert_async().await;
 }
 
-// Covers: FR98 (doctor health), NFR11 (no API keys logged)
+// Story 13.2 AC8b: ApiKeyCheck returns Pass for any set key — auth validation is separate.
 #[tokio::test]
 async fn test_api_key_invalid_401_with_mock() {
-    let mut server = mockito::Server::new_async().await;
-
-    let mock = server
-        .mock("POST", "/v1/messages")
-        .with_status(401)
-        .with_body(r#"{"type":"error","error":{"type":"authentication_error"}}"#)
-        .create_async()
-        .await;
-
+    // De-billed: key is set → Pass. Auth failure detection moved to ProviderConnectivityCheck.
     let check = ApiKeyCheck {
         key_var_override: Some(Some("ANTHROPIC_API_KEY")),
-        key_value_override: Some("bad-key".to_string()),
-        base_url_override: Some(Some(server.url())),
     };
     let result = check.run().await;
-    assert_eq!(result.status, CheckStatus::Fail);
-    assert!(result.message.contains("invalid key"));
-
-    mock.assert_async().await;
+    assert_eq!(result.status, CheckStatus::Pass);
+    assert!(result.message.contains("set"));
 }
 
-// Covers: FR98 (doctor health), NFR11 (no API keys logged)
+// Story 13.2 AC8b: Bearer token key presence check.
 #[tokio::test]
 async fn test_api_key_bearer_auth_token() {
-    let mut server = mockito::Server::new_async().await;
-
-    let mock = server
-        .mock("POST", "/v1/messages")
-        .match_header(
-            "authorization",
-            mockito::Matcher::Regex("Bearer .+".to_string()),
-        )
-        .with_status(400)
-        .create_async()
-        .await;
-
     let check = ApiKeyCheck {
         key_var_override: Some(Some("ANTHROPIC_AUTH_TOKEN")),
-        key_value_override: Some("some-uuid-token".to_string()),
-        base_url_override: Some(Some(server.url())),
     };
     let result = check.run().await;
     assert_eq!(result.status, CheckStatus::Pass);
     assert!(result.message.contains("ANTHROPIC_AUTH_TOKEN"));
-
-    mock.assert_async().await;
 }
 
-// Covers: FR98 (doctor health), NFR11 (no API keys logged)
+// Story 13.2 AC8b: Custom URL key presence.
 #[tokio::test]
 async fn test_api_key_custom_url_fix_message() {
-    let mut server = mockito::Server::new_async().await;
-
-    let mock = server
-        .mock("POST", "/v1/messages")
-        .with_status(401)
-        .create_async()
-        .await;
-
+    // De-billed: key is set → Pass regardless of URL. Custom URL auth → ProviderConnectivityCheck.
     let check = ApiKeyCheck {
         key_var_override: Some(Some("ANTHROPIC_API_KEY")),
-        key_value_override: Some("bad-key".to_string()),
-        base_url_override: Some(Some(server.url())),
     };
     let result = check.run().await;
-    assert_eq!(result.status, CheckStatus::Fail);
-    assert!(
-        result.fix.as_ref().unwrap().contains("your provider"),
-        "Fix should mention provider for custom URL, got: {}",
-        result.fix.unwrap()
-    );
-
-    mock.assert_async().await;
+    assert_eq!(result.status, CheckStatus::Pass);
+    assert!(result.message.contains("set"));
 }
 
 // ──────────────────────────────────────────────────
@@ -697,28 +673,17 @@ async fn test_workspace_dir_missing_integration() {
 // Review patches: API server error 5xx (P2)
 // ──────────────────────────────────────────────────
 
-// Covers: FR98 (doctor health), NFR11 (no API keys logged)
+// Story 13.2 AC8b: DELIBERATE UPDATE — ApiKeyCheck is now key-presence only (no network).
+// Server error detection moved to ProviderConnectivityCheck (AC8).
 #[tokio::test]
 async fn test_api_key_server_error_500() {
-    let mut server = mockito::Server::new_async().await;
-
-    let mock = server
-        .mock("POST", "/v1/messages")
-        .with_status(500)
-        .with_body(r#"{"type":"error","error":{"type":"api_error"}}"#)
-        .create_async()
-        .await;
-
+    // De-billed: ApiKeyCheck no longer makes network calls. Key is set → Pass.
     let check = ApiKeyCheck {
         key_var_override: Some(Some("ANTHROPIC_API_KEY")),
-        key_value_override: Some("test-key".to_string()),
-        base_url_override: Some(Some(server.url())),
     };
     let result = check.run().await;
-    assert_eq!(result.status, CheckStatus::Warning);
-    assert!(result.message.contains("API server error"));
-
-    mock.assert_async().await;
+    assert_eq!(result.status, CheckStatus::Pass);
+    assert!(result.message.contains("set"));
 }
 
 // ──────────────────────────────────────────────────
