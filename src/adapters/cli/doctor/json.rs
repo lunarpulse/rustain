@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::{CheckResult, CheckStatus};
 
-pub const DOCTOR_SCHEMA_VERSION: &str = "1.0";
+pub const DOCTOR_SCHEMA_VERSION: &str = "1.1";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +35,7 @@ pub struct CheckResultOut {
 #[serde(rename_all = "snake_case")]
 pub struct DoctorSummary {
     pub passed: usize,
+    pub info: usize,
     pub warnings: usize,
     pub failures: usize,
     pub skipped: usize,
@@ -45,6 +46,7 @@ impl From<&CheckResult> for CheckResultOut {
     fn from(r: &CheckResult) -> Self {
         let status = match &r.status {
             CheckStatus::Pass => "pass",
+            CheckStatus::Info => "info",
             CheckStatus::Warning => "warning",
             CheckStatus::Fail => "fail",
             CheckStatus::Skipped(_) => "skipped",
@@ -68,6 +70,10 @@ impl DoctorReport {
             .iter()
             .filter(|r| r.status == CheckStatus::Pass)
             .count();
+        let info = results
+            .iter()
+            .filter(|r| r.status == CheckStatus::Info)
+            .count();
         let warnings = results
             .iter()
             .filter(|r| r.status == CheckStatus::Warning)
@@ -82,6 +88,7 @@ impl DoctorReport {
             checks,
             summary: DoctorSummary {
                 passed,
+                info,
                 warnings,
                 failures,
                 skipped,

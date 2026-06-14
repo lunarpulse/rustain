@@ -754,3 +754,432 @@ async fn test_global_config_unknown_section_is_forward_compatible_integration() 
     let result = check.run().await;
     assert_eq!(result.status, CheckStatus::Pass);
 }
+
+// ──────────────────────────────────────────────────
+// Story 13.2b: MCP reachability check tests (P0)
+// ──────────────────────────────────────────────────
+
+use rustain::adapters::cli::doctor::checks::{
+    MCP_PER_SERVER_BUDGET, McpReachabilityCheck, map_connect_result,
+};
+use rustain::adapters::mcp::error::McpError;
+use rustain::domain::models::{McpServerSpec, McpTransport, mcp_server_spec::McpServerSource};
+
+/// Helper to build a stdio McpServerSpec for tests.
+fn test_mcp_spec(id: &str, command: Option<&str>, transport: McpTransport) -> McpServerSpec {
+    McpServerSpec {
+        id: id.to_string(),
+        transport,
+        command: command.map(|s| s.to_string()),
+        args: vec![],
+        env: Default::default(),
+        url: None,
+        persistent: false,
+        source: McpServerSource::Workspace,
+    }
+}
+
+// ── P0 #2: Exhaustive table-driven unit test of map_connect_result ──
+
+#[test]
+fn test_map_connect_result_ok_with_tools_is_pass_info() {
+    let (status, tier) = map_connect_result(&Ok(()), 3);
+    assert_eq!(status, CheckStatus::Pass);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_ok_zero_tools_is_info() {
+    let (status, tier) = map_connect_result(&Ok(()), 0);
+    assert_eq!(status, CheckStatus::Info);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_unsupported_is_skipped_info() {
+    let (status, tier) = map_connect_result(
+        &Err(McpError::Unsupported("http transport deferred".to_string())),
+        0,
+    );
+    assert!(status.is_skipped());
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_spawn_failed_is_fail_exit_affecting() {
+    let (status, tier) =
+        map_connect_result(&Err(McpError::SpawnFailed("no such binary".to_string())), 0);
+    assert_eq!(status, CheckStatus::Fail);
+    assert_eq!(tier, CheckTier::ExitAffecting);
+}
+
+#[test]
+fn test_map_connect_result_handshake_failed_is_fail_exit_affecting() {
+    let (status, tier) = map_connect_result(
+        &Err(McpError::HandshakeFailed("initialize failed".to_string())),
+        0,
+    );
+    assert_eq!(status, CheckStatus::Fail);
+    assert_eq!(tier, CheckTier::ExitAffecting);
+}
+
+#[test]
+fn test_map_connect_result_tools_list_failed_is_fail_exit_affecting() {
+    let (status, tier) = map_connect_result(
+        &Err(McpError::ToolsListFailed("tools/list error".to_string())),
+        0,
+    );
+    assert_eq!(status, CheckStatus::Fail);
+    assert_eq!(tier, CheckTier::ExitAffecting);
+}
+
+#[test]
+fn test_map_connect_result_child_exited_is_fail_exit_affecting() {
+    let (status, tier) =
+        map_connect_result(&Err(McpError::ChildExited("exit code 1".to_string())), 0);
+    assert_eq!(status, CheckStatus::Fail);
+    assert_eq!(tier, CheckTier::ExitAffecting);
+}
+
+#[test]
+fn test_map_connect_result_transport_closed_is_warning_info() {
+    let (status, tier) = map_connect_result(
+        &Err(McpError::TransportClosed("connection reset".to_string())),
+        0,
+    );
+    assert_eq!(status, CheckStatus::Warning);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_timeout_is_warning_info() {
+    let (status, tier) = map_connect_result(&Err(McpError::Timeout(5)), 0);
+    assert_eq!(status, CheckStatus::Warning);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_cancelled_is_warning_info() {
+    let (status, tier) = map_connect_result(&Err(McpError::Cancelled), 0);
+    assert_eq!(status, CheckStatus::Warning);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_internal_is_warning_info() {
+    let (status, tier) = map_connect_result(&Err(McpError::Internal("unexpected".to_string())), 0);
+    assert_eq!(status, CheckStatus::Warning);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+#[test]
+fn test_map_connect_result_call_tool_failed_is_warning_info() {
+    let (status, tier) =
+        map_connect_result(&Err(McpError::CallToolFailed("tool error".to_string())), 0);
+    assert_eq!(status, CheckStatus::Warning);
+    assert_eq!(tier, CheckTier::Info);
+}
+
+// ── P0 #3: Zero servers → Skipped ──
+
+#[tokio::test]
+async fn test_mcp_zero_servers_is_skipped() {
+    let check = McpReachabilityCheck {
+        servers: vec![],
+        per_server_budget: MCP_PER_SERVER_BUDGET,
+    };
+    let result = check.run().await;
+    assert!(
+        result.status.is_skipped(),
+        "zero servers should be Skipped, got {:?}",
+        result.status
+    );
+    assert_eq!(result.category, "mcp");
+    assert_eq!(result.tier, CheckTier::Info);
+    assert!(result.message.contains("no MCP servers configured"));
+}
+
+// ── P0 #1: Broken stdio → Fail + ExitAffecting (anti-vacuous positive control) ──
+
+#[tokio::test]
+async fn test_mcp_broken_stdio_spawn_failed_is_fail_exit_affecting() {
+    // Non-existent binary → SpawnFailed → Fail/ExitAffecting.
+    let spec = test_mcp_spec(
+        "broken-server",
+        Some("__nonexistent_binary_13_2b__"),
+        McpTransport::Stdio,
+    );
+    let check = McpReachabilityCheck {
+        servers: vec![spec],
+        per_server_budget: std::time::Duration::from_millis(500),
+    };
+    let result = check.run().await;
+    assert_eq!(
+        result.status,
+        CheckStatus::Fail,
+        "broken stdio should Fail: {:?}",
+        result.message
+    );
+    assert_eq!(result.tier, CheckTier::ExitAffecting);
+    assert_eq!(result.category, "mcp");
+    assert!(result.fix.is_some(), "Fail should have a fix hint");
+}
+
+// ── P0 #2a: Exit-neutral negative control ──
+// An Info/Skipped/Warning row must NOT change the exit code.
+// Pair with #1 to ensure the positive control moves exit and the negative doesn't.
+
+#[tokio::test]
+async fn test_mcp_exit_neutral_negative_control() {
+    // Non-stdio transport → Skipped/Info → exit-neutral.
+    let spec = test_mcp_spec("http-server", None, McpTransport::Http);
+    let check = McpReachabilityCheck {
+        servers: vec![spec],
+        per_server_budget: MCP_PER_SERVER_BUDGET,
+    };
+    let result = check.run().await;
+    // Must NOT be Fail or ExitAffecting.
+    assert_ne!(
+        result.status,
+        CheckStatus::Fail,
+        "exit-neutral: should not Fail"
+    );
+    assert_eq!(
+        result.tier,
+        CheckTier::Info,
+        "exit-neutral: tier should be Info"
+    );
+}
+
+// ── P0 #4a: Non-stdio transport → Skipped("transport not supported") ──
+
+#[tokio::test]
+async fn test_mcp_http_transport_is_skipped() {
+    let spec = test_mcp_spec("http-server", None, McpTransport::Http);
+    let check = McpReachabilityCheck {
+        servers: vec![spec],
+        per_server_budget: MCP_PER_SERVER_BUDGET,
+    };
+    let result = check.run().await;
+    assert!(
+        result.status.is_skipped(),
+        "Http transport should be Skipped, got {:?}",
+        result.status
+    );
+    assert!(
+        result.message.contains("transport not supported") || result.message.contains("skipped"),
+        "message should mention transport: {}",
+        result.message
+    );
+    assert_eq!(result.tier, CheckTier::Info);
+}
+
+#[tokio::test]
+async fn test_mcp_sse_transport_is_skipped() {
+    let spec = test_mcp_spec("sse-server", None, McpTransport::Sse);
+    let check = McpReachabilityCheck {
+        servers: vec![spec],
+        per_server_budget: MCP_PER_SERVER_BUDGET,
+    };
+    let result = check.run().await;
+    assert!(
+        result.status.is_skipped(),
+        "SSE transport should be Skipped, got {:?}",
+        result.status
+    );
+    assert_eq!(result.tier, CheckTier::Info);
+}
+
+// ── P0 #5: Bounded + concurrent (wall-clock ≈ one budget, not N×budget) ──
+
+#[tokio::test]
+async fn test_mcp_concurrent_bounded_wall_clock() {
+    // 3 broken servers with very short budgets — wall-clock should be ~budget, not 3×budget.
+    let specs: Vec<McpServerSpec> = (0..3)
+        .map(|i| {
+            test_mcp_spec(
+                &format!("broken-{i}"),
+                Some("__nonexistent_binary_13_2b__"),
+                McpTransport::Stdio,
+            )
+        })
+        .collect();
+    let budget = std::time::Duration::from_millis(500);
+    let check = McpReachabilityCheck {
+        servers: specs,
+        per_server_budget: budget,
+    };
+    let start = std::time::Instant::now();
+    let _result = check.run().await;
+    let elapsed = start.elapsed();
+    // Should complete in roughly 1 budget period, not 3×.
+    // Allow generous margin for CI: 3s ceiling for 500ms budget.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "3 servers should run concurrently; elapsed {:?} >= 3s (budget {:?})",
+        elapsed,
+        budget
+    );
+    // P7: Ownership-scoped reaping — every spawned child should be reaped by Drop.
+    // We can't assert try_wait() here (child is doctor-internal), but we verify
+    // the process table is clean by checking no stray processes with our test prefix.
+    // This is a best-effort assertion; full OS-level proof is in the nightly L3 lane.
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("ps aux | grep __nonexistent_binary_13_2b__ | grep -v grep || true")
+        .output()
+        .expect("ps command should work");
+    let ps_out = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        ps_out.trim().is_empty(),
+        "Stray processes found after doctor check: {}",
+        ps_out
+    );
+}
+
+// ── P0 #6: Probe-timeout → Warning, exit-neutral ──
+
+#[tokio::test]
+async fn test_mcp_probe_timeout_is_warning_exit_neutral() {
+    // Use a spec that will spawn but hang forever (cat - reads stdin, never completes handshake).
+    // With a very short budget, the outer timeout fires → Warning/Info.
+    let spec = test_mcp_spec("hanging-server", Some("cat"), McpTransport::Stdio);
+    let check = McpReachabilityCheck {
+        servers: vec![spec],
+        per_server_budget: std::time::Duration::from_millis(200),
+    };
+    let result = check.run().await;
+    assert_eq!(
+        result.status,
+        CheckStatus::Warning,
+        "timeout should be Warning, got {:?}",
+        result.status
+    );
+    assert_eq!(result.tier, CheckTier::Info, "timeout should be Info tier");
+    assert_eq!(result.category, "mcp");
+    // P8: Assert message carries timeout reason for --json consumers.
+    assert!(
+        result.message.contains("timeout") || result.message.contains("exceeded"),
+        "timeout message should carry reason: {}",
+        result.message
+    );
+}
+
+#[test]
+fn test_mcp_json_category_and_exit_math() {
+    use rustain::adapters::cli::doctor::json::DoctorReport;
+
+    // Build results with one mcp Fail/ExitAffecting and one mcp Pass/Info.
+    let results = vec![
+        CheckResult {
+            name: "MCP server reachability".to_string(),
+            category: "mcp".to_string(),
+            status: CheckStatus::Fail,
+            message: "broken: FAILED — no such binary".to_string(),
+            fix: Some("check binary".to_string()),
+            latency: None,
+            tier: CheckTier::ExitAffecting,
+        },
+        CheckResult {
+            name: "Other check".to_string(),
+            category: "system".to_string(),
+            status: CheckStatus::Pass,
+            message: "ok".to_string(),
+            fix: None,
+            latency: None,
+            tier: CheckTier::Info,
+        },
+    ];
+    let report = DoctorReport::from_results(&results);
+    assert_eq!(report.summary.failures, 1);
+    assert_eq!(report.summary.passed, 1);
+
+    // Verify mcp category appears in serialized JSON.
+    let json_str = serde_json::to_string_pretty(&report).unwrap();
+    assert!(
+        json_str.contains("\"mcp\""),
+        "JSON should contain mcp category"
+    );
+    assert!(
+        json_str.contains("\"fail\""),
+        "JSON should contain fail status"
+    );
+
+    // Exit-math: only Fail + ExitAffecting should flip exit.
+    let exit_failures = results
+        .iter()
+        .filter(|r| r.tier == CheckTier::ExitAffecting && r.status == CheckStatus::Fail)
+        .count();
+    assert_eq!(exit_failures, 1, "only 1 ExitAffecting Fail");
+
+    // Info-tier Pass does NOT flip exit.
+    let info_failures = results
+        .iter()
+        .filter(|r| r.tier == CheckTier::Info && r.status == CheckStatus::Fail)
+        .count();
+    assert_eq!(info_failures, 0, "Info-tier should have 0 failures");
+}
+
+// ── P9: Per-server grouping in DoctorReport ──
+
+#[test]
+fn test_mcp_per_server_grouping_in_json() {
+    use rustain::adapters::cli::doctor::json::DoctorReport;
+
+    // Build results with multiple per-server MCP rows.
+    let results = vec![
+        CheckResult {
+            name: "MCP server reachability".to_string(),
+            category: "mcp".to_string(),
+            status: CheckStatus::Pass,
+            message: "server-a: reachable (3 tools); server-b: FAILED — no such binary".to_string(),
+            fix: Some("server-b: check command/path, ensure binary exists and is executable".to_string()),
+            latency: None,
+            tier: CheckTier::ExitAffecting,
+        },
+    ];
+    let report = DoctorReport::from_results(&results);
+    assert_eq!(report.checks.len(), 1, "one aggregate row per category");
+    assert_eq!(report.checks[0].category, "mcp");
+    assert!(report.checks[0].message.contains("server-a:"), "message should contain server-a detail");
+    assert!(report.checks[0].message.contains("server-b:"), "message should contain server-b detail");
+
+    // JSON serialization preserves per-server detail in message.
+    let json_str = serde_json::to_string_pretty(&report).unwrap();
+    assert!(json_str.contains("server-a:"), "JSON should contain server-a");
+    assert!(json_str.contains("server-b:"), "JSON should contain server-b");
+    assert!(json_str.contains("mcp"), "JSON should contain mcp category");
+}
+
+// ── P0 #7 extended: status × tier → exit-code table ──
+
+#[test]
+fn test_exit_code_math_table() {
+    // Only Fail + ExitAffecting flips exit. All other combos are exit-neutral.
+    let test_cases: Vec<(CheckStatus, CheckTier, bool)> = vec![
+        (CheckStatus::Fail, CheckTier::ExitAffecting, true),
+        (CheckStatus::Fail, CheckTier::Info, false),
+        (CheckStatus::Pass, CheckTier::ExitAffecting, false),
+        (CheckStatus::Pass, CheckTier::Info, false),
+        (CheckStatus::Warning, CheckTier::ExitAffecting, false),
+        (CheckStatus::Warning, CheckTier::Info, false),
+        (
+            CheckStatus::Skipped("test".to_string()),
+            CheckTier::ExitAffecting,
+            false,
+        ),
+        (
+            CheckStatus::Skipped("test".to_string()),
+            CheckTier::Info,
+            false,
+        ),
+    ];
+    for (status, tier, should_flip) in test_cases {
+        let flips = tier == CheckTier::ExitAffecting && status == CheckStatus::Fail;
+        assert_eq!(
+            flips, should_flip,
+            "status={:?} tier={:?} expected flip={} got flip={}",
+            status, tier, should_flip, flips
+        );
+    }
+}

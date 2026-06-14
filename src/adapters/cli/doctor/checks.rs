@@ -1280,3 +1280,248 @@ impl HealthCheck for SkillsCheck {
         }
     }
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Story 13.2b: MCP server reachability check (AC1-AC3a)
+// Feature-gated: `mcp` (default ON).
+// ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "mcp")]
+mod mcp_check {
+    use super::*;
+
+    use crate::adapters::mcp::error::McpError;
+    use crate::domain::models::McpServerSpec;
+
+    /// Doctor-side budget for each MCP server probe.
+    /// Wraps the adapter's internal 10s timeout — this fires first.
+    /// NOT config (OQ-B2: one const, not a user-facing knob).
+    pub const MCP_PER_SERVER_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// Pure mapper: all branch logic for MCP connect outcomes.
+    /// Zero I/O, exhaustively unit-testable.
+    ///
+    /// `res` is the result of `McpClientAdapter::connect()`.
+    /// `tool_count` is from `McpClientAdapter::tool_count()` (0 if connect failed).
+    pub fn map_connect_result(
+        res: &Result<(), McpError>,
+        tool_count: usize,
+    ) -> (CheckStatus, CheckTier) {
+        match res {
+            Ok(()) if tool_count >= 1 => (CheckStatus::Pass, CheckTier::Info),
+            Ok(()) => (CheckStatus::Info, CheckTier::Info),
+            Err(McpError::Unsupported(reason)) => (
+                CheckStatus::Skipped(format!("transport not supported: {reason}")),
+                CheckTier::Info,
+            ),
+            Err(McpError::SpawnFailed(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
+            Err(McpError::HandshakeFailed(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
+            Err(McpError::ToolsListFailed(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
+            Err(McpError::ChildExited(_)) => (CheckStatus::Fail, CheckTier::ExitAffecting),
+            Err(McpError::TransportClosed(_)) => (CheckStatus::Warning, CheckTier::Info),
+            Err(McpError::Timeout(_)) => (CheckStatus::Warning, CheckTier::Info),
+            Err(McpError::Cancelled) => (CheckStatus::Warning, CheckTier::Info),
+            Err(McpError::Internal(_)) => (CheckStatus::Warning, CheckTier::Info),
+            Err(McpError::CallToolFailed(_)) => (CheckStatus::Warning, CheckTier::Info),
+        }
+    }
+
+    /// MCP server reachability check (Story 13.2b AC1-AC3a).
+    ///
+    /// For each configured `McpServerSpec`, attempts a bounded reachability handshake
+    /// via `McpClientAdapter::connect()` and maps the result through `map_connect_result`.
+    /// Servers are probed concurrently via `JoinSet`; each adapter is task-local and
+    /// dropped inside the task (teardown via `kill_on_drop`, AC2).
+    pub struct McpReachabilityCheck {
+        pub servers: Vec<McpServerSpec>,
+        pub per_server_budget: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl HealthCheck for McpReachabilityCheck {
+        fn name(&self) -> &str {
+            "MCP server reachability"
+        }
+
+        async fn run(&self) -> CheckResult {
+            // Zero servers → Skipped (not a vacuous Pass).
+            if self.servers.is_empty() {
+                return CheckResult {
+                    name: self.name().to_string(),
+                    category: "mcp".to_string(),
+                    status: CheckStatus::Skipped("no MCP servers configured".to_string()),
+                    message: "no MCP servers configured".to_string(),
+                    fix: None,
+                    latency: None,
+                    tier: CheckTier::Info,
+                };
+            }
+
+            use crate::adapters::mcp::client::McpClientAdapter;
+
+            let budget = self.per_server_budget;
+            let mut join_set = tokio::task::JoinSet::new();
+            // P5: Bounded concurrency — cap concurrent probes to avoid resource exhaustion.
+            let concurrency_limit = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+            let start = std::time::Instant::now();
+
+            for spec in &self.servers {
+                let spec = spec.clone();
+                let per_budget = budget;
+                let server_id = spec.id.clone();
+                let limit = concurrency_limit.clone();
+                join_set.spawn(async move {
+                    let _permit = limit.acquire().await.expect("semaphore never closed");
+                    // Doctor path: adapter is NOT Arc-wrapped; self_weak is None.
+                    // This means ClientHandler callbacks get a dangling weak ref.
+                    // Acceptable for doctor (no callbacks needed), but fragile.
+                    // P4: If callbacks become needed, wrap in Arc + call set_self_weak.
+                    let adapter = McpClientAdapter::new(spec, None);
+                    let res = tokio::time::timeout(per_budget, adapter.connect()).await;
+                    let (connect_result, tool_count) = match res {
+                        Ok(inner) => {
+                            let tc = adapter.tool_count();
+                            (inner, tc)
+                        }
+                        Err(_elapsed) => {
+                            // Outer timeout fired — Info/Warning (not Fail).
+                            // Use millis for sub-second budgets (P2 fix).
+                            let millis = per_budget.as_millis() as u64;
+                            (Err(McpError::Timeout(millis)), 0)
+                        }
+                    };
+                    let (status, tier) = map_connect_result(&connect_result, tool_count);
+                    // Adapter drops here → kill_on_drop tears down child.
+                    (server_id, status, tier, connect_result, tool_count)
+                });
+            }
+
+            // Collect results with an outer wall-clock ceiling.
+            let wall_ceiling = budget + std::time::Duration::from_secs(2);
+            let collect_result = tokio::time::timeout(wall_ceiling, async {
+                let mut rows = Vec::new();
+                while let Some(res) = join_set.join_next().await {
+                    match res {
+                        Ok(row) => rows.push(row),
+                        Err(e) => {
+                            // JoinError (panic/cancel) — treat as Warning.
+                            // server_id is not available here; use task index or "unknown".
+                            rows.push((
+                                "unknown".to_string(),
+                                CheckStatus::Warning,
+                                CheckTier::Info,
+                                Err(McpError::Internal(format!("task join error: {e}"))),
+                                0,
+                            ));
+                        }
+                    }
+                }
+                rows
+            })
+            .await;
+
+            let rows = match collect_result {
+                Ok(rows) => rows,
+                Err(_wall_timeout) => {
+                    // Wall-clock ceiling breached — abort remaining tasks.
+                    join_set.abort_all();
+                    return CheckResult {
+                        name: self.name().to_string(),
+                        category: "mcp".to_string(),
+                        status: CheckStatus::Warning,
+                        message: "MCP reachability check exceeded wall-clock budget".to_string(),
+                        fix: None,
+                        latency: Some(start.elapsed()),
+                        tier: CheckTier::Info,
+                    };
+                }
+            };
+
+            // Aggregate: find the worst status + build message.
+            let mut any_fail = false;
+            let mut any_exit_affecting = false;
+            let mut messages = Vec::with_capacity(rows.len());
+            let mut fix_hints = Vec::new();
+
+            for (server_id, status, tier, connect_result, tool_count) in &rows {
+                let detail = match &status {
+                    CheckStatus::Pass => format!("{server_id}: reachable ({tool_count} tool(s))"),
+                    CheckStatus::Info => {
+                        if *tool_count == 0 && connect_result.is_ok() {
+                            format!("{server_id}: reachable, 0 tools exposed")
+                        } else {
+                            let reason = connect_result
+                                .as_ref()
+                                .err()
+                                .map(|e| e.to_string())
+                                .unwrap_or_else(|| "reachable, 0 tools exposed".to_string());
+                            format!("{server_id}: {reason}")
+                        }
+                    }
+                    CheckStatus::Warning => {
+                        let reason = connect_result
+                            .as_ref()
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "warning".to_string());
+                        format!("{server_id}: {reason}")
+                    }
+                    CheckStatus::Fail => {
+                        any_fail = true;
+                        let reason = connect_result
+                            .as_ref()
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_default();
+                        fix_hints.push(format!(
+                            "{server_id}: check command/path, ensure binary exists and is executable"
+                        ));
+                        format!("{server_id}: FAILED — {reason}")
+                    }
+                    CheckStatus::Skipped(reason) => format!("{server_id}: skipped — {reason}"),
+                };
+                if *tier == CheckTier::ExitAffecting {
+                    any_exit_affecting = true;
+                }
+                messages.push(detail);
+            }
+
+            let overall_status = if any_fail {
+                CheckStatus::Fail
+            } else if rows
+                .iter()
+                .any(|(_, s, _, _, _)| matches!(s, CheckStatus::Warning))
+            {
+                CheckStatus::Warning
+            } else if rows.iter().any(|(_, s, _, _, _)| matches!(s, CheckStatus::Info)) {
+                CheckStatus::Info
+            } else if rows.iter().all(|(_, s, _, _, _)| s.is_skipped()) {
+                CheckStatus::Skipped("all MCP servers skipped".to_string())
+            } else {
+                CheckStatus::Pass
+            };
+            let overall_tier = if any_exit_affecting {
+                CheckTier::ExitAffecting
+            } else {
+                CheckTier::Info
+            };
+
+            CheckResult {
+                name: self.name().to_string(),
+                category: "mcp".to_string(),
+                status: overall_status,
+                message: messages.join("; "),
+                fix: if fix_hints.is_empty() {
+                    None
+                } else {
+                    Some(fix_hints.join("; "))
+                },
+                latency: Some(start.elapsed()),
+                tier: overall_tier,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "mcp")]
+pub use mcp_check::*;

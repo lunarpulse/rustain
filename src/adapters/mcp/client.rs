@@ -110,6 +110,16 @@ impl McpClientAdapter {
         self.cached_tools.read().unwrap().clone()
     }
 
+    /// Number of cached tools (0 if not yet connected).
+    /// Reads `cached_tools.len()` — sync, in-policy under `CONFORMANCE_EXCEPTION_STD_SYNC_LOCK`.
+    pub fn tool_count(&self) -> usize {
+        self.cached_tools
+            .read()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |v| v.len())
+    }
+
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel_token.read().unwrap().clone()
     }

@@ -240,12 +240,27 @@ pub async fn run() -> Result<()> {
             .into_iter()
             .map(|(id, provider)| (id, Some(provider)))
             .collect();
-        return crate::adapters::cli::doctor::run_doctor(terminal, adapters, json, provider_pairs)
-            .await
-            .map_err(|e| {
-                tracing::error!("Doctor subcommand failed: {e}");
-                SubcommandExit.into()
-            });
+        // Story 13.2b: resolve MCP servers from active profile (mirrors `providers` threading).
+        let mcp_servers = {
+            use crate::domain::ports::ProfileResolver;
+            profile_resolver_swap
+                .load()
+                .resolve_active()
+                .map(|p| p.mcp_servers.clone())
+                .unwrap_or_default()
+        };
+        return crate::adapters::cli::doctor::run_doctor(
+            terminal,
+            adapters,
+            json,
+            provider_pairs,
+            mcp_servers,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Doctor subcommand failed: {e}");
+            SubcommandExit.into()
+        });
     }
     if let Some(Command::Migrate {
         from,

@@ -25,6 +25,7 @@ pub enum CheckTier {
 #[derive(Debug, PartialEq, Eq)]
 pub enum CheckStatus {
     Pass,
+    Info,
     Warning,
     Fail,
     /// Check was skipped (e.g., offline — network probes unavailable).
@@ -70,6 +71,7 @@ fn build_check_list(
         String,
         Option<std::sync::Arc<dyn crate::domain::ports::StreamingProvider>>,
     )],
+    mcp_servers: Vec<crate::domain::models::McpServerSpec>,
 ) -> Vec<Box<dyn HealthCheck>> {
     let mut checks: Vec<Box<dyn HealthCheck>> = vec![
         Box::new(ApiKeyCheck {
@@ -110,7 +112,13 @@ fn build_check_list(
             }));
         }
     }
-    // 13-2b: append mcp + update_health checks here when seams exist.
+    // Story 13.2b: MCP reachability check (AC1-AC3a).
+    #[cfg(feature = "mcp")]
+    checks.push(Box::new(McpReachabilityCheck {
+        servers: mcp_servers,
+        per_server_budget: checks::MCP_PER_SERVER_BUDGET,
+    }));
+    // 13.3a: append update_health check here when self-update ships.
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
     }
@@ -126,6 +134,7 @@ pub async fn run_doctor(
         String,
         Option<std::sync::Arc<dyn crate::domain::ports::StreamingProvider>>,
     )>,
+    mcp_servers: Vec<crate::domain::models::McpServerSpec>,
 ) -> Result<()> {
     if adapters {
         let ports = [
@@ -205,7 +214,7 @@ pub async fn run_doctor(
         return Ok(());
     }
 
-    let checks = build_check_list(terminal_detail, &providers);
+    let checks = build_check_list(terminal_detail, &providers, mcp_servers);
     let mut results = Vec::with_capacity(checks.len());
     for check in &checks {
         results.push(check.run().await);
@@ -235,9 +244,10 @@ pub async fn run_doctor(
 pub fn display_results(results: &[CheckResult]) {
     for r in results {
         let icon = match &r.status {
-            CheckStatus::Pass => "\u{2713}", // ✓
+            CheckStatus::Pass => "\u{2713}",     // ✓
+            CheckStatus::Info => "\u{2139}",     // ℹ
             CheckStatus::Warning => "!",
-            CheckStatus::Fail => "\u{2717}",       // ✗
+            CheckStatus::Fail => "\u{2717}",     // ✗
             CheckStatus::Skipped(_) => "\u{2298}", // ⊘
         };
         println!("{} {}: {}", icon, r.name, r.message);
@@ -249,10 +259,13 @@ pub fn display_results(results: &[CheckResult]) {
             println!("  {}: {}", label, fix);
         }
     }
-
     let pass_count = results
         .iter()
         .filter(|r| r.status == CheckStatus::Pass)
+        .count();
+    let info_count = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Info)
         .count();
     let warn_count = results
         .iter()
@@ -264,8 +277,8 @@ pub fn display_results(results: &[CheckResult]) {
         .count();
     let skip_count = results.iter().filter(|r| r.status.is_skipped()).count();
     println!(
-        "\n{} passed, {} warnings, {} failures, {} skipped",
-        pass_count, warn_count, fail_count, skip_count
+        "\n{} passed, {} info, {} warnings, {} failures, {} skipped",
+        pass_count, info_count, warn_count, fail_count, skip_count
     );
 }
 
@@ -649,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_build_check_list_default() {
-        let checks = build_check_list(false, &[]);
+        let checks = build_check_list(false, &[], vec![]);
         assert!(checks.len() >= 8, "Should have at least 8 checks");
         // Verify names
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
@@ -670,8 +683,8 @@ mod tests {
 
     #[test]
     fn test_build_check_list_with_terminal_detail() {
-        let checks_without = build_check_list(false, &[]);
-        let checks_with = build_check_list(true, &[]);
+        let checks_without = build_check_list(false, &[], vec![]);
+        let checks_with = build_check_list(true, &[], vec![]);
         assert_eq!(
             checks_with.len(),
             checks_without.len() + 1,
@@ -679,6 +692,32 @@ mod tests {
         );
         let names: Vec<&str> = checks_with.iter().map(|c| c.name()).collect();
         assert!(names.contains(&"Terminal details"));
+    }
+
+    // ── Story 13.2b ratchets: MCP check present, no update_health ──
+
+    #[test]
+    fn test_mcp_check_present_in_build_check_list() {
+        let checks = build_check_list(false, &[], vec![]);
+        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+        assert!(
+            names.contains(&"MCP server reachability"),
+            "MCP reachability check should be in default check list: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_no_update_health_row_in_build_check_list() {
+        let checks = build_check_list(false, &[], vec![]);
+        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+        assert!(
+            !names.iter().any(|n| {
+                n.to_lowercase().contains("update_health") || n.to_lowercase().contains("version")
+            }),
+            "No update_health or version check should exist (OQ-B1=A, deferred to 13.3a): {:?}",
+            names
+        );
     }
 
     // ── MemoryDirSizeCheck tests (Story 11.1, AC7) ──
