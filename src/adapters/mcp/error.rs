@@ -14,7 +14,7 @@ pub enum McpError {
     ChildExited(String),
     #[error("Transport closed: {0}")]
     TransportClosed(String),
-    #[error("timeout after {0}s")]
+    #[error("Timeout after {0}s")]
     Timeout(u64),
     #[error("Unsupported transport: {0}")]
     Unsupported(String),

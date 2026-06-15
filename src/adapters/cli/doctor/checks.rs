@@ -1385,8 +1385,9 @@ mod mcp_check {
                         }
                         Err(_elapsed) => {
                             // Outer timeout fired — Info/Warning (not Fail).
-                            // McpError::Timeout carries seconds (matches client.rs call sites).
-                            let secs = per_budget.as_secs().max(1);
+                            // McpError::Timeout carries whole seconds (matches client.rs call sites).
+                            // Ceiling so sub-second budgets report 1s, not 0s.
+                            let secs = (per_budget.as_millis() as u64).div_ceil(1000).max(1);
                             (Err(McpError::Timeout(secs)), 0)
                         }
                     };

@@ -119,9 +119,20 @@ jobs:
           find artifacts -type f -exec cp {} release/ \;
           ls -la release/
 
+      - name: Verify P0 Linux artifact exists (AC1 required)
+        run: |
+          if ! ls release/rustain-*-x86_64-unknown-linux-gnu 2>/dev/null; then
+            echo "ERROR: P0 Linux x86_64 artifact missing — cannot publish release"
+            exit 1
+          fi
+
       - name: Generate SHA256SUMS
         run: |
           cd release
+          if ! ls rustain-* >/dev/null 2>&1; then
+            echo "ERROR: No release artifacts found"
+            exit 1
+          fi
           sha256sum rustain-* > SHA256SUMS
           cat SHA256SUMS
 
@@ -132,14 +143,14 @@ jobs:
           # Normalize the secret key into the 2-line format minisign requires:
           #   line 1: "untrusted comment: ..." (header)
           #   line 2: base64 secret key
-          # If the user pasted only the base64 line into the GitHub secret, prepend
-          # the comment. minisign's loader rejects a file with no comment line.
-          if printf '%s' "$MINISIGN_SECRET_KEY" | head -1 | grep -q '^untrusted'; then
-            printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          # Handle both real newlines and literal \n in the GitHub secret value.
+          KEY="$(printf '%s' "$MINISIGN_SECRET_KEY" | sed 's/\\n/\n/g')"
+          if printf '%s' "$KEY" | head -1 | grep -q '^untrusted'; then
+            printf '%s\n' "$KEY" > /tmp/minisign.key
           else
             {
               echo 'untrusted comment: minisign encrypted secret key'
-              printf '%s\n' "$MINISIGN_SECRET_KEY"
+              printf '%s\n' "$KEY"
             } > /tmp/minisign.key
           fi
           chmod 600 /tmp/minisign.key

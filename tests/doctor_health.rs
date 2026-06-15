@@ -1059,7 +1059,7 @@ async fn test_mcp_probe_timeout_is_warning_exit_neutral() {
     assert_eq!(result.category, "mcp");
     // P8: Assert message carries timeout reason for --json consumers.
     assert!(
-        result.message.contains("timeout") || result.message.contains("exceeded"),
+        result.message.to_lowercase().contains("timeout") || result.message.contains("exceeded"),
         "timeout message should carry reason: {}",
         result.message
     );
