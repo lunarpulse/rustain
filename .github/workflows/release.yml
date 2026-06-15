@@ -127,7 +127,8 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           # Write secret key to temp file (deleted below — key is passwordless: -W)
-          printf '%s' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          # \n: minisign requires the key file to end with a newline (printf '%s' strips it)
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
           chmod 600 /tmp/minisign.key
           # -W: passwordless key. -H: prehashed (Blake2b→Ed25519, large-file appropriate).
           minisign -S -H -W \
