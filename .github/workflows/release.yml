@@ -89,6 +89,9 @@ jobs:
     name: Sign & Publish
     needs: build
     runs-on: ubuntu-latest
+    # Run even if some matrix jobs failed (e.g., Windows P2 best-effort)
+    # We only sign artifacts from successful builds.
+    if: always() && !cancelled()
     # Protected environment — required reviewers + encrypted secrets
     environment: release
     steps:

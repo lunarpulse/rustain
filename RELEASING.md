@@ -25,7 +25,7 @@ The manifest is signed, not each binary individually. One signed manifest binds 
 
 P1/P2 targets may be added incrementally, but the asset-naming convention must accommodate all of them from day one so that 13-3a's target-triple selection never needs a contract change.
 
-## Binary Size Guard (NFR9)
+**Note on Windows (P2):** The rustain codebase currently uses Unix-specific APIs (`tokio::signal::unix`, `std::os::unix::fs`, `tokio::net::UnixListener`/`UnixStream`, `libc` for PID files and daemon lifecycle) without `#[cfg(unix)]` gates in all paths. Windows builds will fail at compile time. The release workflow is configured with `fail-fast: false` and the sign job uses `if: always() \u0026\u0026 !cancelled()` so that Windows failures do not block signing and publishing of Linux/macOS artifacts. Full Windows support requires a dedicated Epic (not currently scheduled).
 
 The release pipeline asserts each published binary is **< 30 MB** (PRD aspirational: < 20 MB). The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
 
