@@ -12,6 +12,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write  # GITHUB_TOKEN needs this to create releases + upload assets
+
 jobs:
   build:
     name: Build (${{ matrix.target }})
