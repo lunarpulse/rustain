@@ -45,20 +45,24 @@ The **public key is pinned in the binary** at `self_update/trust.rs` (13-3a `TRU
 
 ## Key Generation (Human-Gated — Do This Once)
 
-**Generate the keypair offline on a trusted machine. Use `-W` (passwordless):**
+**Generate the keypair offline on a trusted machine using C minisign (NOT rsign2).** CI uses C minisign 0.12 (`apt-get install minisign`); rsign2-generated passwordless keys are read-incompatible with C minisign's passwordless marker and trigger `Password: get_password()` failures in CI.
 
 ```bash
-# Using rsign2 (Rust implementation of minisign)
-cargo install rsign2
-rsign generate -W
-
-# Or using the original minisign
-minisign -G -W
+# Install C minisign (Arch/Manjaro: pacman -S minisign; Debian/Ubuntu: apt install minisign; macOS: brew install minisign)
+minisign -G -W -p ~/.minisign/minisign.pub -s ~/.minisign/minisign.key
 ```
 
-This produces:
-- `~/.rsign/rsign.key` (or `~/.minisign/minisign.key`) — **SECRET KEY** (never commit, never echo)
-- `~/.rsign/rsign.pub` (or `~/.minisign/minisign.pub`) — **PUBLIC KEY** (embed in 13-3a `trust.rs`)
+`-W` = passwordless (see rationale below). This produces:
+- `~/.minisign/minisign.key` — **SECRET KEY** (never commit, never echo)
+- `~/.minisign/minisign.pub` — **PUBLIC KEY** (embed in 13-3a `trust.rs`)
+
+**Verify the key is CI-compatible before storing it as a secret:**
+```bash
+echo test > /tmp/t.txt
+minisign -S -H -W -m /tmp/t.txt -s ~/.minisign/minisign.key -x /tmp/t.sig -t test
+minisign -V -m /tmp/t.txt -x /tmp/t.sig -p ~/.minisign/minisign.pub
+# Both commands must succeed with NO password prompt
+```
 
 ### Why passwordless (`-W`)?
 

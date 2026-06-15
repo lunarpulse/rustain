@@ -126,9 +126,19 @@ jobs:
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          # Write secret key to temp file (deleted below — key is passwordless: -W)
-          # \n: minisign requires the key file to end with a newline (printf '%s' strips it)
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          # Normalize the secret key into the 2-line format minisign requires:
+          #   line 1: "untrusted comment: ..." (header)
+          #   line 2: base64 secret key
+          # If the user pasted only the base64 line into the GitHub secret, prepend
+          # the comment. minisign's loader rejects a file with no comment line.
+          if printf '%s' "$MINISIGN_SECRET_KEY" | head -1 | grep -q '^untrusted'; then
+            printf '%s\n' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
+          else
+            {
+              echo 'untrusted comment: minisign encrypted secret key'
+              printf '%s\n' "$MINISIGN_SECRET_KEY"
+            } > /tmp/minisign.key
+          fi
           chmod 600 /tmp/minisign.key
           # -W: passwordless key. -H: prehashed (Blake2b→Ed25519, large-file appropriate).
           minisign -S -H -W \
