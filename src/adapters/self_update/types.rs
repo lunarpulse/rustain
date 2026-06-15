@@ -11,12 +11,18 @@ pub use crate::domain::ports::self_update::{ReleaseAsset, ReleaseInfo, UpdateErr
 /// Single-source-of-truth for the repository coordinates.
 pub const GH_OWNER_REPO: &str = "lunarpulse/rustain";
 
-/// Hosts trusted for download redirects (AC7 channel-pin).
-pub const TRUSTED_HOSTS: &[&str] = &[
-    "github.com",
-    "api.github.com",
-    "objects.githubusercontent.com",
-];
+/// Exact-match hosts trusted for download redirects (AC7 channel-pin) — GitHub's
+/// API + web origins.
+pub const TRUSTED_HOSTS: &[&str] = &["github.com", "api.github.com"];
+
+/// Trusted suffix for GitHub's user-content / release-asset CDN. Every subdomain
+/// of `githubusercontent.com` is GitHub-controlled infrastructure, so we match by
+/// suffix instead of pinning one CDN host: GitHub rotates them (release assets
+/// moved `objects.` → `release-assets.githubusercontent.com`, which broke the
+/// old exact allowlist). Suffix-matching `.githubusercontent.com` still rejects
+/// look-alikes — `evilgithubusercontent.com` (no leading dot) and
+/// `github.com.evil.com` (ends in `.evil.com`) both fail.
+pub const TRUSTED_HOST_SUFFIX: &str = ".githubusercontent.com";
 
 /// Maximum binary download size: 64 MB (well above the ~16-30 MB release binaries).
 pub const MAX_BINARY_SIZE: usize = 64 * 1024 * 1024;

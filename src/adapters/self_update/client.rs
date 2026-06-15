@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use crate::adapters::self_update::types::{
-    GH_OWNER_REPO, MAX_BINARY_SIZE, ReleaseAsset, ReleaseInfo, TRUSTED_HOSTS, UpdateError,
+    GH_OWNER_REPO, MAX_BINARY_SIZE, ReleaseAsset, ReleaseInfo, TRUSTED_HOST_SUFFIX, TRUSTED_HOSTS,
+    UpdateError,
 };
 use crate::domain::ports::self_update::SelfUpdatePort;
 
@@ -60,7 +61,13 @@ fn validate_channel_pin(url: &str) -> Result<(), UpdateError> {
             parsed.scheme()
         )));
     }
-    if !TRUSTED_HOSTS.contains(&host) {
+    // Exact GitHub origins, OR any subdomain of githubusercontent.com (the
+    // GitHub-controlled CDN — see TRUSTED_HOST_SUFFIX). The apex itself is
+    // included for completeness though assets always use a subdomain.
+    let trusted = TRUSTED_HOSTS.contains(&host)
+        || host == "githubusercontent.com"
+        || host.ends_with(TRUSTED_HOST_SUFFIX);
+    if !trusted {
         return Err(UpdateError::UntrustedHost(host.to_string()));
     }
     Ok(())
@@ -216,5 +223,45 @@ impl SelfUpdatePort for GithubReleaseClient {
         }
         String::from_utf8(buf)
             .map_err(|e| UpdateError::ConnectionFailed(format!("asset is not valid UTF-8: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AC7: GitHub origins + ALL githubusercontent.com subdomains are trusted —
+    // including release-assets.githubusercontent.com, the CDN host the exact
+    // allowlist missed (caught by the C2 real-swap proof, 2026-06-15).
+    #[test]
+    fn channel_pin_allows_github_and_cdn_subdomains() {
+        for url in [
+            "https://github.com/lunarpulse/rustain/releases/download/v0.1.1/rustain-x",
+            "https://api.github.com/repos/lunarpulse/rustain/releases/latest",
+            "https://release-assets.githubusercontent.com/abc/def",
+            "https://objects.githubusercontent.com/abc", // legacy CDN host still ok
+        ] {
+            assert!(validate_channel_pin(url).is_ok(), "must allow {url}");
+        }
+    }
+
+    // AC7: non-HTTPS, off-allowlist hosts, and look-alikes must all be rejected.
+    #[test]
+    fn channel_pin_rejects_untrusted_and_lookalikes() {
+        for url in [
+            "https://evil.example.com/x",
+            "https://github.com.evil.com/x", // suffix attack on github.com
+            "https://evilgithubusercontent.com/x", // no leading dot before suffix
+            "https://x.githubusercontent.com.evil.com/x", // ends in .evil.com
+            "http://github.com/x",           // non-HTTPS
+        ] {
+            assert!(
+                matches!(
+                    validate_channel_pin(url),
+                    Err(UpdateError::UntrustedHost(_))
+                ),
+                "must reject {url}"
+            );
+        }
     }
 }
