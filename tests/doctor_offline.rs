@@ -315,7 +315,7 @@ fn test_provider_error_other_not_offline() {
 
 #[test]
 fn test_doctor_json_schema_version() {
-    assert_eq!(DOCTOR_SCHEMA_VERSION, "1.1");
+    assert_eq!(DOCTOR_SCHEMA_VERSION, "1.2");
 }
 #[test]
 fn test_doctor_json_serialization() {
@@ -363,7 +363,7 @@ fn test_doctor_json_serialization() {
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
     // Schema version present
-    assert_eq!(parsed["schema_version"], "1.1");
+    assert_eq!(parsed["schema_version"], "1.2");
     // Checks array with correct count
     let checks = parsed["checks"].as_array().unwrap();
     assert_eq!(checks.len(), 4);

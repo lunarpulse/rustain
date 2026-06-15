@@ -292,6 +292,31 @@ pub async fn run() -> Result<()> {
             "update-catalog requires the 'openai' feature — rebuild with --features openai"
         );
     }
+    #[cfg(feature = "self-update")]
+    if let Some(Command::Update {
+        check,
+        output_format,
+    }) = cli.command
+    {
+        if check {
+            // run_check always returns ExitCode::SUCCESS; we discard it and exit 0.
+            let _exit_code =
+                crate::adapters::self_update::orchestrator::run_check(&output_format).await;
+            std::process::exit(0);
+        }
+        return crate::adapters::self_update::orchestrator::run_update()
+            .await
+            .map_err(|e| {
+                eprintln!("✗ {e}");
+                SubcommandExit.into()
+            });
+    }
+    #[cfg(not(feature = "self-update"))]
+    if let Some(Command::Update { .. }) = cli.command {
+        anyhow::bail!(
+            "self-update requires the 'self-update' feature — rebuild with --features self-update"
+        );
+    }
     // Story 8.1 AC-9 + Story 13.2a — Config subcommand intercept
     if let Some(Command::Config { action }) = &cli.command {
         match action {

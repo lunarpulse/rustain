@@ -118,7 +118,8 @@ fn build_check_list(
         servers: mcp_servers,
         per_server_budget: checks::MCP_PER_SERVER_BUDGET,
     }));
-    // 13.3a: append update_health check here when self-update ships.
+    #[cfg(feature = "self-update")]
+    checks.push(Box::new(checks::UpdateHealthCheck));
     if terminal_detail {
         checks.push(Box::new(TerminalDetailCheck));
     }
@@ -707,16 +708,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_no_update_health_row_in_build_check_list() {
+    #[cfg(feature = "self-update")]
+    #[tokio::test]
+    async fn test_update_health_is_info_tier_and_present() {
         let checks = build_check_list(false, &[], vec![]);
         let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
         assert!(
-            !names.iter().any(|n| {
-                n.to_lowercase().contains("update_health") || n.to_lowercase().contains("version")
-            }),
-            "No update_health or version check should exist (OQ-B1=A, deferred to 13.3a): {:?}",
-            names
+            names.contains(&"Update health"),
+            "Update health check should be present when self-update feature is enabled: {names:?}"
+        );
+        // AC11: must be Info-tier (never ExitAffecting) and must not Fail.
+        let check = checks
+            .iter()
+            .find(|c| c.name() == "Update health")
+            .expect("Update health check present");
+        let result = check.run().await;
+        assert_eq!(
+            result.tier,
+            CheckTier::Info,
+            "Update health must be Info-tier (AC11): {result:?}"
+        );
+        assert_ne!(
+            result.status,
+            CheckStatus::Fail,
+            "Update health must not Fail (AC11): {result:?}"
+        );
+    }
+
+    #[cfg(not(feature = "self-update"))]
+    #[test]
+    fn test_no_update_health_without_feature() {
+        let checks = build_check_list(false, &[], vec![]);
+        let names: Vec<&str> = checks.iter().map(|c| c.name()).collect();
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.to_lowercase().contains("update") && n.to_lowercase().contains("health")),
+            "Update health check should not exist without self-update feature: {names:?}"
         );
     }
 

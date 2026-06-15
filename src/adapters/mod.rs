@@ -28,6 +28,8 @@ pub mod sandbox;
 #[cfg(feature = "cron")]
 pub mod scheduler;
 pub mod security_adapter;
+#[cfg(feature = "self-update")]
+pub mod self_update;
 pub mod skill_activation;
 pub mod skill_exposure;
 pub mod skill_provider;

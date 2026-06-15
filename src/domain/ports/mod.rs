@@ -34,6 +34,8 @@ mod sandbox;
 mod scheduler;
 #[allow(unused_imports)]
 mod security;
+#[cfg(feature = "self-update")]
+pub mod self_update;
 #[allow(unused_imports)]
 mod session_port;
 #[allow(unused_imports)]
@@ -48,6 +50,8 @@ mod tool_exposure;
 mod toolset;
 #[allow(unused_imports)]
 mod usage_ledger;
+#[cfg(feature = "self-update")]
+pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
 pub use approval_persistence::ApprovalPersistencePort;
 pub use capability_provider::CapabilityProvider;

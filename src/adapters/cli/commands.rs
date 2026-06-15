@@ -161,6 +161,16 @@ pub enum Command {
         #[arg(long, conflicts_with = "yolo")]
         dry_run: bool,
     },
+    /// Check for updates or update rustain to the latest version (Story 13.3a, FR103).
+    /// Verifies cryptographic signatures and checksums before replacing the binary.
+    Update {
+        /// Check for updates without downloading or replacing (script-safe; exit 0 always).
+        #[arg(long)]
+        check: bool,
+        /// Output format for --check results
+        #[arg(long, value_parser = ["text", "json"], default_value = "text")]
+        output_format: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

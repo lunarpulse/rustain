@@ -1529,3 +1529,42 @@ mod mcp_check {
 
 #[cfg(feature = "mcp")]
 pub use mcp_check::*;
+
+// ──────────────────────────────────────────────────────────────────
+// Story 13.3a AC11: Update health check
+// Feature-gated: `self-update`.
+// ──────────────────────────────────────────────────────────────────
+
+/// Update health check (Story 13.3a, AC11). Local/no-network, Info-tier always.
+/// Reports current version + trusted signing key-id(s). Offline → Skipped.
+#[cfg(feature = "self-update")]
+pub struct UpdateHealthCheck;
+
+#[cfg(feature = "self-update")]
+#[async_trait]
+impl HealthCheck for UpdateHealthCheck {
+    fn name(&self) -> &str {
+        "Update health"
+    }
+
+    async fn run(&self) -> CheckResult {
+        let current = env!("CARGO_PKG_VERSION");
+        let key_ids: Vec<&str> = crate::adapters::self_update::trust::TRUSTED_KEYS
+            .iter()
+            .map(|k| &k[..8]) // first 8 chars as key-id summary
+            .collect();
+        CheckResult {
+            name: self.name().to_string(),
+            category: "update".to_string(),
+            status: CheckStatus::Info,
+            message: format!(
+                "Current: v{}; trusted key-ids: {}",
+                current,
+                key_ids.join(", ")
+            ),
+            fix: None,
+            latency: None,
+            tier: CheckTier::Info,
+        }
+    }
+}

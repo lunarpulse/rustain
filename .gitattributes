@@ -1,0 +1,4 @@
+
+# Signed self-update trust fixtures (Story 13-3a) — NEVER convert line endings,
+# or the signature/manifest bytes change and verification false-fails on CRLF checkouts.
+tests/fixtures/self_update/** -text

@@ -96,6 +96,17 @@ hex = "0.4"
 gray_matter = "0.2"
 url = "2"
 
+# ── Self-update (Story 13.3a, feature-gated `self-update`) ──────
+# Port-based design: SelfUpdatePort (network) + BinaryReplacerPort (filesystem).
+# Rejects the `self_update` crate (untestable monolith + 2nd TLS stack).
+# `reqwest` is shared with provider features (already optional); `self-replace`
+# handles the running-binary swap (Windows locked-exe + same-fs rename);
+# `semver` for correct version comparison; `minisign-verify` for Ed25519
+# signature verification (verify-only, pure Rust, ED prehash native).
+self-replace = { version = "1", optional = true }
+semver = { version = "1", optional = true }
+minisign-verify = { version = "0.2", optional = true }
+
 # ── Local vector search (Story 11.3a, feature-gated `vector-search`) ──
 # Local ONNX embeddings (downloads + caches the model on first use → AC5) and
 # the binary `index.bin` codec (architecture.md:576). BOTH optional + kept OUT
@@ -152,6 +163,7 @@ predicates = "3"
 tracing-test = "0.2"
 rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Story 9-7c)
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
+minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 procfs = "0.17"
@@ -185,6 +197,12 @@ cron = ["dep:croner"]
 # `meta-search`); listing them here makes `--features vector-search` self-
 # sufficient even when those features are off (Cargo features are additive).
 vector-search = ["dep:fastembed", "dep:bincode", "dep:reqwest", "dep:bm25"]
+# Story 13.3a — self-update with cryptographic signature verification. OUT of
+# `default` (not all platforms have release assets yet; AC9 hard-errors). Reuses
+# `reqwest` for GitHub API + binary download; `self-replace` for atomic binary
+# swap; `semver` for correct version comparison; `minisign-verify` for Ed25519
+# signature verification (verify-only, pure-Rust, ED prehash native).
+self-update = ["dep:reqwest", "dep:self-replace", "dep:semver", "dep:minisign-verify"]
 
 # Package-wide lint posture (Epic 12 retro AI-12.1). Unlike the `#![allow]` block in
 # src/lib.rs + src/main.rs (which only covers lib + bin), Cargo `[lints]` applies to

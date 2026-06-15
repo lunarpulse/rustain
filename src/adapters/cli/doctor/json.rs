@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::{CheckResult, CheckStatus};
 
-pub const DOCTOR_SCHEMA_VERSION: &str = "1.1";
+pub const DOCTOR_SCHEMA_VERSION: &str = "1.2";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
