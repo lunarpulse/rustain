@@ -6,7 +6,7 @@ rust-version = "1.91"
 description = "A fast, extensible, terminal-native AI coding agent"
 license = "MIT"
 readme = "README.md"
-
+repository = "https://github.com/lunarpulse/rustain"
 [lib]
 name = "rustain"
 path = "src/lib.rs"
