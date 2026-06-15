@@ -231,6 +231,10 @@ fn expected_asset_name(version: &Version, target: &str) -> String {
 fn check_writable() -> Result<(), UpdateError> {
     let exe = std::env::current_exe()
         .map_err(|e| UpdateError::ManagedInstall(format!("cannot locate self: {e}")))?;
+    // CB-3: resolve symlinks so we probe the directory `self_replace` actually
+    // mutates (e.g. Homebrew /usr/local/bin/rustain -> Cellar/...), not the
+    // symlink's directory. Matches DefaultBinaryReplacer::new()'s resolution.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let dir = exe
         .parent()
         .ok_or_else(|| UpdateError::ManagedInstall("binary has no parent directory".to_string()))?;

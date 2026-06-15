@@ -59,7 +59,11 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        # `--features self-update` is REQUIRED: self-update is NOT a default feature
+        # (Cargo.toml default = anthropic/openai/ollama/clipboard/mcp/meta-search).
+        # Without it the published binary hits the feature-absent bail and `rustain
+        # update` does not exist — the feature would ship dead (Story 13-3a B0).
+        run: cargo build --release --target ${{ matrix.target }} --features self-update
 
       - name: Stage asset
         shell: bash

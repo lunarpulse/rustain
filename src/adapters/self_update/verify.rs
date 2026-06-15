@@ -130,6 +130,12 @@ mod tests {
     /// (minisign-verify requires valid base64 encoding and correct length.)
     const STRAY_KEY: &str = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
 
+    /// The throwaway "attacker" public key whose SECRET minted
+    /// `SHA256SUMS.attacker.minisig` — a cryptographically VALID prehashed-`ED`
+    /// minisign signature over the golden `SHA256SUMS`, produced with the same C
+    /// minisign 0.12 toolchain as production, by a key NOT in the trust set.
+    const ATTACKER_KEY: &str = "RWRflQkU3WXzDDzBsKTCqcm2YXYcp2GfaUVdROMvPOMQ9o+r27x4LpI2";
+
     fn load_fixture(name: &str) -> Vec<u8> {
         std::fs::read(format!("{FIXTURES}/{name}")).unwrap_or_else(|e| {
             panic!("fixture {name}: {e}");
@@ -190,6 +196,49 @@ mod tests {
     }
 
     // ── Negative tests ─────────────────────────────────────────────
+
+    /// N4 (supply-chain core, CB-1): an attacker who mints their OWN valid
+    /// signature over the manifest must still be rejected, because their key is
+    /// not in the trust set. This is strictly stronger than `g_stray` (which only
+    /// checks the real sig against an unrelated pubkey → key-id mismatch); here a
+    /// self-consistent sig+key pair is rejected purely on trust-set membership.
+    #[test]
+    fn n4_attacker_signed_manifest_rejected_by_trust_set() {
+        let manifest = load_fixture("SHA256SUMS");
+        let attacker_sig = load_fixture("SHA256SUMS.attacker.minisig");
+
+        // Positive control: the attacker signature IS cryptographically valid
+        // under the attacker's own key — proves the fixture is a real, well-formed
+        // signature, so the rejection below is genuinely a trust-set decision and
+        // not an artifact of a malformed/garbage signature.
+        assert!(
+            verify_signature(&manifest, &attacker_sig, &[ATTACKER_KEY]).is_ok(),
+            "positive control: attacker sig must verify under the attacker's OWN key"
+        );
+
+        // N4: the SAME valid sig+manifest, verified against the PRODUCTION trust
+        // set, MUST be rejected.
+        let result = verify_signature(&manifest, &attacker_sig, &[PROD_KEY]);
+        assert!(
+            matches!(result, Err(VerifyError::BadSignature(_))),
+            "N4: attacker-signed manifest must be rejected by the trust set, got {result:?}"
+        );
+
+        // End-to-end through verify_release: the sig gate aborts before the hash
+        // comparison, so artifact bytes are irrelevant.
+        let artifact = b"irrelevant - the signature gate must reject first";
+        let e2e = verify_release(
+            &manifest,
+            &attacker_sig,
+            artifact,
+            "rustain-0.1.0-x86_64-unknown-linux-gnu",
+            &[PROD_KEY],
+        );
+        assert!(
+            matches!(e2e, Err(VerifyError::BadSignature(_))),
+            "N4 e2e: verify_release must reject the attacker sig, got {e2e:?}"
+        );
+    }
 
     #[test]
     fn n1_missing_minisig() {

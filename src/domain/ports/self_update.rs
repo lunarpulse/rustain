@@ -53,8 +53,10 @@ pub enum UpdateError {
     #[error("Restore failed: {0}")]
     RestoreFailed(String),
 
-    #[error("Another update is already in progress")]
-    LockConflict,
+    #[error(
+        "Another update is already in progress (lock held at {0}). If no other 'rustain update' is running, remove the stale lockfile."
+    )]
+    LockConflict(String),
 
     #[error("Downgrade refused: latest {latest} is older than current {current}")]
     DowngradeRefused { current: String, latest: String },

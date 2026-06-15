@@ -18,3 +18,7 @@ __pycache__/
 .opencode
 graphify-out
 AGENTS.md
+# minisign / release signing SECRET keys — NEVER commit (Story 13-3a / 13-3c).
+# A leaked signing secret lets an attacker mint binaries that pass self-update
+# verification. Store cold/offline + as a protected GitHub Actions secret.
+*.key

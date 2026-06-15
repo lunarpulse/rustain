@@ -43,6 +43,15 @@ We use [minisign](https://jedisct1.github.io/minisign/) (Ed25519, prehashed `ED`
 
 The **public key is pinned in the binary** at `self_update/trust.rs` (13-3a `TRUSTED_KEYS`). The runtime trusts only the embedded `const` — a fetched key is theater. Publishing the public key as a release asset for human convenience is fine, but the runtime does not use it.
 
+### Key Inventory
+
+| Role | Public key (base64) | Secret custody | In CI signing step? |
+|------|---------------------|----------------|---------------------|
+| `PROD_KEY_1` (active signer) | `RWSUI8k3UrzEelNHSLUobmr5IbvKMx73rDg7gWVBy8vhID/OGxpiJKYF` | GitHub secret `MINISIGN_SECRET_KEY` (protected `release` env) | **Yes** — signs every release |
+| `PROD_KEY_BACKUP` (cold recovery, minted 2026-06-15) | `RWSZ9j4/sNRoSbgHcslCc6c4kv3n/ILVmb4WdfrWMfWFCqdW3X2IP2na` | Cold/offline storage **and** GitHub secret `MINISIGN_SECRET_KEY_BACKUP` (protected `release` env) | **No (deliberate)** — wired into `release.yml` only during an actual rotation/dual-sign window |
+
+Both keys are passwordless C-minisign (0.12) keypairs (prehashed `ED`). Both are embedded in `TRUSTED_KEYS`, so field binaries trust **either** signer; the active signer is `PROD_KEY_1` until a rotation. Keeping `PROD_KEY_BACKUP` out of the workflow until needed means a leaked CI token alone cannot mint a binary signed by the recovery key. Pubkeys verified to parse via `PublicKey::from_base64`; the trust set is asserted ≥2 members by `trust.rs::tests::all_trusted_keys_parse_and_backup_present`.
+
 ## Key Generation (Human-Gated — Do This Once)
 
 **Generate the keypair offline on a trusted machine using C minisign (NOT rsign2).** CI uses C minisign 0.12 (`apt-get install minisign`); rsign2-generated passwordless keys are read-incompatible with C minisign's passwordless marker and trigger `Password: get_password()` failures in CI.
