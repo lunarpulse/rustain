@@ -97,6 +97,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install minisign
+        run: |
+          if ! command -v minisign >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y minisign
+          fi
+          minisign --version || minisign -v || true
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -118,21 +125,24 @@ jobs:
       - name: Sign SHA256SUMS (prehashed ED)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
-          # Write secret key to temp file (deleted in post-step)
+          # Write secret key to temp file (deleted below — key is passwordless: -W)
           printf '%s' "$MINISIGN_SECRET_KEY" > /tmp/minisign.key
-          # Sign with prehashed Ed25519 (ED) — appropriate for large files
-          minisign -S -m release/SHA256SUMS -s /tmp/minisign.key -x release/SHA256SUMS.minisig -p -t "rustain ${GITHUB_REF_NAME}"
+          chmod 600 /tmp/minisign.key
+          # -W: passwordless key. -H: prehashed (Blake2b→Ed25519, large-file appropriate).
+          minisign -S -H -W \
+            -m release/SHA256SUMS \
+            -s /tmp/minisign.key \
+            -x release/SHA256SUMS.minisig \
+            -t "rustain ${GITHUB_REF_NAME}"
           rm -f /tmp/minisign.key
 
       - name: Verify signature (fail-closed)
         env:
           MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
         run: |
-          printf '%s' "$MINISIGN_PUBLIC_KEY" > /tmp/minisign.pub
-          minisign -V -m release/SHA256SUMS -x release/SHA256SUMS.minisig -p /tmp/minisign.pub
-          rm -f /tmp/minisign.pub
+          # -P takes the pubkey as a base64 string (pinned trust — no fetched key)
+          minisign -V -m release/SHA256SUMS -x release/SHA256SUMS.minisig -P "$MINISIGN_PUBLIC_KEY"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

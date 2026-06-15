@@ -45,20 +45,30 @@ The **public key is pinned in the binary** at `self_update/trust.rs` (13-3a `TRU
 
 ## Key Generation (Human-Gated — Do This Once)
 
-**Generate the keypair offline on a trusted machine:**
+**Generate the keypair offline on a trusted machine. Use `-W` (passwordless):**
 
 ```bash
 # Using rsign2 (Rust implementation of minisign)
 cargo install rsign2
-rsign2 generate
+rsign generate -W
 
 # Or using the original minisign
-minisign -G
+minisign -G -W
 ```
 
 This produces:
-- `minisign.key` — **SECRET KEY** (never commit, never echo)
-- `minisign.pub` — **PUBLIC KEY** (embed in 13-3a `trust.rs`)
+- `~/.rsign/rsign.key` (or `~/.minisign/minisign.key`) — **SECRET KEY** (never commit, never echo)
+- `~/.rsign/rsign.pub` (or `~/.minisign/minisign.pub`) — **PUBLIC KEY** (embed in 13-3a `trust.rs`)
+
+### Why passwordless (`-W`)?
+
+Both minisign (C) and rsign2 read the key password from `/dev/tty` via `getpass()`. There is **no env var, no stdin pipe** that works in GitHub Actions — the TTY is absent. A password on the key would block CI signing. The key's protection instead comes from:
+
+1. GitHub encrypted secret (encrypted at rest)
+2. Protected `release` environment with required reviewers (human gate on every use)
+3. Branch protection on `main` (no unauthorized workflow changes)
+
+This is defense-in-depth equivalent to a password on a key that lives on a single-purpose CI runner.
 
 ## Secret Key Custody (Human-Gated — Do This Once)
 
@@ -67,10 +77,11 @@ Store the secret key as a GitHub Actions encrypted secret in a **protected `rele
 1. Go to Settings → Environments → New environment → Name: `release`
 2. Enable **Required reviewers** — add at least one maintainer
 3. Add secrets:
-   - `MINISIGN_SECRET_KEY` — the full content of `minisign.key` (base64-encode if it contains newlines)
-   - `MINISIGN_PASSWORD` — the password used during key generation (if any)
-   - `MINISIGN_PUBLIC_KEY` — the full content of `minisign.pub` (used for fail-closed in-workflow verification)
+   - `MINISIGN_SECRET_KEY` — the full content of the secret key file (both lines: comment + base64 key)
+   - `MINISIGN_PUBLIC_KEY` — the full content of the public key file (used for fail-closed in-workflow verification with `-P`)
 4. The release workflow (`release.yml`) runs only from this protected environment — a single leaked token cannot mint a release
+
+> **Note:** The runner needs `minisign` installed. The workflow includes an `Install minisign` step (`apt-get install -y minisign`) since it is not pre-installed on `ubuntu-latest`.
 
 ## Key Rotation Ladder
 
@@ -131,11 +142,12 @@ fi
 # 6. Generate manifest
 sha256sum "$ASSET" > SHA256SUMS
 
-# 7. Sign manifest (prehashed ED)
-minisign -S -m SHA256SUMS -s /path/to/minisign.key -x SHA256SUMS.minisig
+# 7. Sign manifest (prehashed ED, passwordless)
+minisign -S -H -W -m SHA256SUMS -s /path/to/minisign.key -x SHA256SUMS.minisig -t "rustain v${VERSION}"
 
-# 8. Verify signature fail-closed
-minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -p /path/to/minisign.pub
+# 8. Verify signature fail-closed (-P pubkey as pinned base64 string)
+PUBKEY=$(grep -v '^untrusted' /path/to/minisign.pub)
+minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY"
 
 # 9. Create GitHub release and upload: rustain-*, SHA256SUMS, SHA256SUMS.minisig
 #    (Use GitHub web UI or gh CLI: gh release create "v${VERSION}" ...)
