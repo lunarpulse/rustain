@@ -1127,27 +1127,39 @@ fn test_mcp_per_server_grouping_in_json() {
     use rustain::adapters::cli::doctor::json::DoctorReport;
 
     // Build results with multiple per-server MCP rows.
-    let results = vec![
-        CheckResult {
-            name: "MCP server reachability".to_string(),
-            category: "mcp".to_string(),
-            status: CheckStatus::Pass,
-            message: "server-a: reachable (3 tools); server-b: FAILED — no such binary".to_string(),
-            fix: Some("server-b: check command/path, ensure binary exists and is executable".to_string()),
-            latency: None,
-            tier: CheckTier::ExitAffecting,
-        },
-    ];
+    let results = vec![CheckResult {
+        name: "MCP server reachability".to_string(),
+        category: "mcp".to_string(),
+        status: CheckStatus::Pass,
+        message: "server-a: reachable (3 tools); server-b: FAILED — no such binary".to_string(),
+        fix: Some(
+            "server-b: check command/path, ensure binary exists and is executable".to_string(),
+        ),
+        latency: None,
+        tier: CheckTier::ExitAffecting,
+    }];
     let report = DoctorReport::from_results(&results);
     assert_eq!(report.checks.len(), 1, "one aggregate row per category");
     assert_eq!(report.checks[0].category, "mcp");
-    assert!(report.checks[0].message.contains("server-a:"), "message should contain server-a detail");
-    assert!(report.checks[0].message.contains("server-b:"), "message should contain server-b detail");
+    assert!(
+        report.checks[0].message.contains("server-a:"),
+        "message should contain server-a detail"
+    );
+    assert!(
+        report.checks[0].message.contains("server-b:"),
+        "message should contain server-b detail"
+    );
 
     // JSON serialization preserves per-server detail in message.
     let json_str = serde_json::to_string_pretty(&report).unwrap();
-    assert!(json_str.contains("server-a:"), "JSON should contain server-a");
-    assert!(json_str.contains("server-b:"), "JSON should contain server-b");
+    assert!(
+        json_str.contains("server-a:"),
+        "JSON should contain server-a"
+    );
+    assert!(
+        json_str.contains("server-b:"),
+        "JSON should contain server-b"
+    );
     assert!(json_str.contains("mcp"), "JSON should contain mcp category");
 }
 

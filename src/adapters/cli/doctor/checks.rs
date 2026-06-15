@@ -1385,9 +1385,9 @@ mod mcp_check {
                         }
                         Err(_elapsed) => {
                             // Outer timeout fired — Info/Warning (not Fail).
-                            // Use millis for sub-second budgets (P2 fix).
-                            let millis = per_budget.as_millis() as u64;
-                            (Err(McpError::Timeout(millis)), 0)
+                            // McpError::Timeout carries seconds (matches client.rs call sites).
+                            let secs = per_budget.as_secs().max(1);
+                            (Err(McpError::Timeout(secs)), 0)
                         }
                     };
                     let (status, tier) = map_connect_result(&connect_result, tool_count);
@@ -1493,7 +1493,10 @@ mod mcp_check {
                 .any(|(_, s, _, _, _)| matches!(s, CheckStatus::Warning))
             {
                 CheckStatus::Warning
-            } else if rows.iter().any(|(_, s, _, _, _)| matches!(s, CheckStatus::Info)) {
+            } else if rows
+                .iter()
+                .any(|(_, s, _, _, _)| matches!(s, CheckStatus::Info))
+            {
                 CheckStatus::Info
             } else if rows.iter().all(|(_, s, _, _, _)| s.is_skipped()) {
                 CheckStatus::Skipped("all MCP servers skipped".to_string())

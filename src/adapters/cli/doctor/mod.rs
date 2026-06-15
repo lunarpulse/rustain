@@ -244,10 +244,10 @@ pub async fn run_doctor(
 pub fn display_results(results: &[CheckResult]) {
     for r in results {
         let icon = match &r.status {
-            CheckStatus::Pass => "\u{2713}",     // ✓
-            CheckStatus::Info => "\u{2139}",     // ℹ
+            CheckStatus::Pass => "\u{2713}", // ✓
+            CheckStatus::Info => "\u{2139}", // ℹ
             CheckStatus::Warning => "!",
-            CheckStatus::Fail => "\u{2717}",     // ✗
+            CheckStatus::Fail => "\u{2717}",       // ✗
             CheckStatus::Skipped(_) => "\u{2298}", // ⊘
         };
         println!("{} {}: {}", icon, r.name, r.message);
