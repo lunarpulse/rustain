@@ -234,9 +234,9 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    // Story 13.4a — Auth subcommand intercept. Runs before provider construction
-    // and terminal setup. `auth login` needs network only to *validate*, not a
-    // provider build — constructs the candidate adapter ad hoc inside the handler.
+    // Story 13.4a/13.4b — Auth subcommand intercept. Runs before provider
+    // construction and terminal setup. `auth status` is read-only/offline-safe;
+    // `auth login` validates via an ad hoc candidate adapter inside the handler.
     if let Some(Command::Auth { action }) = &cli.command {
         match action {
             AuthAction::Login { provider, json } => {
@@ -252,6 +252,16 @@ pub async fn run() -> Result<()> {
                     tracing::error!("Auth login subcommand failed: {e}");
                     SubcommandExit.into()
                 });
+            }
+            AuthAction::Status { json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::status::run_auth_status(*json, &store)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Auth status subcommand failed: {e}");
+                        SubcommandExit.into()
+                    });
             }
         }
     }

@@ -1,7 +1,7 @@
 # Authentication (`rustain auth`)
 
-Story 13.4a introduces the `auth` subcommand family for managing provider
-credentials from the command line.
+Stories 13.4a/13.4b introduce the `auth` subcommand family for managing and
+inspecting provider credentials from the command line.
 
 ## `rustain auth login <provider>`
 
@@ -31,11 +31,14 @@ rustain auth login ollama       # reports "no API key required"
 When constructing a provider, the key is resolved in this order (highest wins):
 
 1. **Environment variable** (e.g. `ANTHROPIC_API_KEY`) — always takes precedence.
+   Anthropic also accepts `ANTHROPIC_AUTH_TOKEN`; either env credential wins.
 2. **`auth.json`** — the stored credential from `rustain auth login`.
-3. **Config layers** — figment/TOML config.
+3. **Config** — reserved for future auth sources; current config stores env var
+   names, not plaintext keys.
 
 This means `auth.json` is a convenient alternative to env vars, but an env var
-will always override it (AC7, backward compatible).
+will always override it (AC7, backward compatible). `auth status` reports the
+same winning source the provider construction path uses.
 
 ### Supported providers
 
@@ -56,16 +59,64 @@ will always override it (AC7, backward compatible).
 - Writes use advisory locking (`flock`) and atomic temp+rename.
 - The `Credential` type masks its contents in `Debug`, `Display`, and `Serialize`.
 
+
 ### JSON output
 
-Use `--json` for machine-readable output:
+Use `--json` for machine-readable login output:
 
 ```bash
 rustain auth login anthropic --json
 # → {"provider":"anthropic","status":"authenticated","validated":true}
 ```
 
+## `rustain auth status`
+
+Show configured credential sources without validating keys or making network
+calls. The command is read-only and exits successfully when no credentials are
+configured.
+
+```bash
+rustain auth status
+```
+
+Example:
+
+```text
+PROVIDER         STATUS SOURCE     LAST VALIDATED
+Anthropic        ✓      auth.json  2026-06-15T22:00:00+00:00
+OpenAI           ⚠      env        —
+```
+
+Status markers:
+
+- `✓` — stored credential was validated by `auth login`.
+- `⚠` — credential is present but rustain has no validation record, usually
+  because it came from an env var.
+- `✗` — reserved for invalid credentials; `status` does not probe, so it does
+  not produce this today.
+
+Use `--json` for scripts:
+
+```bash
+rustain auth status --json
+# → {
+#     \"schema_version\": \"1.0\",
+#     \"providers\": [
+#       {
+#         \"provider\": \"anthropic\",
+#         \"status\": \"authenticated\",
+#         \"source\": \"auth_json\",
+#         \"last_validated\": \"2026-06-15T22:00:00+00:00\",
+#         \"requires_key\": true
+#       }
+#     ]
+#   }
+```
+
+`auth status` lists configured providers only. Use the later `auth list` command
+for the full provider catalog.
+
+
 ### Future commands
 
-- `rustain auth status` (Story 13.4b) — show provider authentication status.
 - `rustain auth list` (Story 13.4c) — list all supported providers and their auth state.

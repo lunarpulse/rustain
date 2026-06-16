@@ -848,7 +848,7 @@ impl StoragePort for FileSystemStorage {
 
         // Sort by updatedAt desc (most recent first)
         let mut summaries: Vec<_> = by_id.into_values().collect();
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
         Ok(summaries)
     }
 
@@ -1523,7 +1523,7 @@ impl StoragePort for FileSystemStorage {
         }
 
         // 3. Sort descending by cp_id (Amendment 1: reverse chronological order).
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
 
         // 4. Per-path dedup: track the LOWEST cp_id (oldest original content for
         //    restoration) AND the HIGHEST cp_id (most recent tool write — its
@@ -1836,7 +1836,7 @@ impl StoragePort for FileSystemStorage {
 
         // Per-path dedup: sort descending first, then track lowest (for path
         // display) and highest (for conflict detection via expected_current_hash).
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
 
         // (lowest_snapshot_path, highest_snapshot_path)
         let mut deduped: HashMap<String, (PathBuf, PathBuf)> = HashMap::new();

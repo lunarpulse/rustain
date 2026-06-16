@@ -192,7 +192,7 @@ pub enum Command {
     },
 }
 
-/// Auth subcommand actions (Story 13.4a — login only; 13.4b adds status, 13.4c adds list).
+/// Auth subcommand actions (Story 13.4a login; 13.4b status; 13.4c adds list).
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuthAction {
     /// Configure API credentials for an AI provider via interactive masked entry
@@ -200,6 +200,13 @@ pub enum AuthAction {
     Login {
         /// Provider id (e.g. "anthropic", "openai", "ollama").
         provider: String,
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report configured provider credential status without network validation
+    /// (Story 13.4b, FR123).
+    Status {
         /// Machine-readable JSON output instead of human text.
         #[arg(long)]
         json: bool,

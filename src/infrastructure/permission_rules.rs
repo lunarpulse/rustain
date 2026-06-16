@@ -156,7 +156,7 @@ pub fn load_rules(
     }
 
     // Sort descending by priority (None → 0), stable sort preserves file order for ties.
-    rules.sort_by(|a, b| b.priority.unwrap_or(0).cmp(&a.priority.unwrap_or(0)));
+    rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority.unwrap_or(0)));
 
     // Compile globs; skip rules with invalid patterns (graceful degradation).
     let mut compiled_rules = Vec::with_capacity(rules.len());

@@ -163,7 +163,12 @@ across TUI sessions. Systemd and launchd service templates are in `dist/`.
 ```sh
 rustain auth login anthropic   # store API key (masked entry + validation)
 rustain auth login openai      # store OpenAI key
+rustain auth status            # show configured providers, source, validation time
+rustain auth status --json     # scriptable status envelope
 ```
+
+Env vars still win over `~/.rustain/auth.json`; `auth status` reports that
+winning source without probing the network.
 
 ### 🛠️ Develop Rustain
 
