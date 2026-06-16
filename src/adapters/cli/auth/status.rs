@@ -76,28 +76,24 @@ fn build_status_rows(
             continue;
         }
 
-        if env_present(meta, &env_lookup) {
+        if let Some((source, last_validated)) =
+            super::detect_source(meta, &auth_by_provider, &env_lookup)
+        {
+            let status = if last_validated.is_some() {
+                AuthStatus::Authenticated
+            } else {
+                AuthStatus::Unknown
+            };
             rows.push(StatusRow {
                 provider: meta.id.to_string(),
                 display_name: meta.display_name.to_string(),
-                status: AuthStatus::Unknown,
-                source: AuthSource::Env,
-                last_validated: None,
+                status,
+                source,
+                last_validated,
                 requires_key: meta.requires_key,
             });
-            continue;
-        }
-
-        if let Some(stored) = auth_by_provider.get(meta.id) {
-            rows.push(auth_json_row(
-                meta.id,
-                meta.display_name,
-                meta.requires_key,
-                stored.last_validated,
-            ));
         }
     }
-
     let unknown_ids: BTreeSet<&str> = auth_json
         .iter()
         .map(|status| status.provider.as_str())
@@ -117,21 +113,20 @@ fn build_status_rows(
     rows
 }
 
-fn env_present(
-    meta: &providers::ProviderMeta,
-    env_lookup: &impl Fn(&str) -> Option<String>,
-) -> bool {
-    if meta.id == "anthropic" {
-        return env_value_present("ANTHROPIC_AUTH_TOKEN", env_lookup)
-            || env_value_present("ANTHROPIC_API_KEY", env_lookup);
-    }
-
-    !meta.api_key_env.is_empty() && env_value_present(meta.api_key_env, env_lookup)
+/// Test-only: expose `build_status_rows` result for cross-module parity checks.
+/// Returns `(provider_id, requires_key)` pairs for configured providers.
+#[cfg(test)]
+pub fn build_status_rows_for_test(
+    providers: &[providers::ProviderMeta],
+    auth_json: &[ProviderStatus],
+    env_lookup: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, bool)> {
+    build_status_rows(providers, auth_json, env_lookup)
+        .into_iter()
+        .map(|r| (r.provider, r.requires_key))
+        .collect()
 }
 
-fn env_value_present(env_name: &str, env_lookup: &impl Fn(&str) -> Option<String>) -> bool {
-    env_lookup(env_name).is_some_and(|value| !value.trim().is_empty())
-}
 
 fn auth_json_row(
     provider: &str,

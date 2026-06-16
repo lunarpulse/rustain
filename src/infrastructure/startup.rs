@@ -234,9 +234,9 @@ pub async fn run() -> Result<()> {
             SubcommandExit.into()
         });
     }
-    // Story 13.4a/13.4b — Auth subcommand intercept. Runs before provider
-    // construction and terminal setup. `auth status` is read-only/offline-safe;
-    // `auth login` validates via an ad hoc candidate adapter inside the handler.
+    // Story 13.4a/13.4b/13.4c — Auth subcommand intercept. Runs before provider
+    // construction and terminal setup. All auth subcommands are read-only/offline-safe
+    // except `auth login` which validates via an ad hoc candidate adapter.
     if let Some(Command::Auth { action }) = &cli.command {
         match action {
             AuthAction::Login { provider, json } => {
@@ -262,6 +262,20 @@ pub async fn run() -> Result<()> {
                         tracing::error!("Auth status subcommand failed: {e}");
                         SubcommandExit.into()
                     });
+            }
+            AuthAction::List { json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::list::run_auth_list(
+                    *json,
+                    &app_config,
+                    &store,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Auth list subcommand failed: {e}");
+                    SubcommandExit.into()
+                });
             }
         }
     }

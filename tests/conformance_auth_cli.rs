@@ -1,13 +1,13 @@
 //! Conformance ratchets for `rustain auth` CLI subcommands.
-//! Stories 13.4a/13.4b.
+//! Stories 13.4a/13.4b/13.4c — final auth subcommand in Epic 13.
 
 use clap::CommandFactory;
 
-/// Ratchet: EXPECTED_AUTH_SUBCOMMANDS = 2 (login + status in 13.4b).
-/// 13.4c bumps to 3.
+/// Ratchet: EXPECTED_AUTH_SUBCOMMANDS = 3 (login + status + list).
+/// All three auth subcommands now exist — this is the final Epic 13 auth count.
 #[test]
-fn test_auth_subcommand_count_is_two() {
-    const EXPECTED_AUTH_SUBCOMMANDS: usize = 2;
+fn test_auth_subcommand_count_is_three() {
+    const EXPECTED_AUTH_SUBCOMMANDS: usize = 3;
     let cmd = rustain::adapters::cli::commands::Cli::command();
     let auth_cmd = cmd
         .find_subcommand("auth")
@@ -15,8 +15,8 @@ fn test_auth_subcommand_count_is_two() {
     let subcommand_count = auth_cmd.get_subcommands().count();
     assert_eq!(
         subcommand_count, EXPECTED_AUTH_SUBCOMMANDS,
-        "Expected {EXPECTED_AUTH_SUBCOMMANDS} auth subcommand(s), found {subcommand_count}. \
-         13.4c bumps this to 3 when `auth list` lands."
+        "Expected {EXPECTED_AUTH_SUBCOMMANDS} auth subcommand(s) (login + status + list), \
+         found {subcommand_count}."
     );
 }
 
@@ -67,5 +67,21 @@ fn test_auth_status_subcommand_exists() {
     assert!(
         status_cmd.get_arguments().any(|arg| arg.get_id() == "json"),
         "status should expose a local --json flag"
+    );
+}
+
+/// Ratchet: auth list subcommand exists and exposes local --json (Story 13.4c).
+#[test]
+fn test_auth_list_subcommand_exists() {
+    let cmd = rustain::adapters::cli::commands::Cli::command();
+    let auth_cmd = cmd
+        .find_subcommand("auth")
+        .expect("'auth' subcommand should exist");
+    let list_cmd = auth_cmd
+        .find_subcommand("list")
+        .expect("'list' subcommand should exist");
+    assert!(
+        list_cmd.get_arguments().any(|arg| arg.get_id() == "json"),
+        "list should expose a local --json flag"
     );
 }

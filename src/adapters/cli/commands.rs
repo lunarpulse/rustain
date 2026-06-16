@@ -211,6 +211,13 @@ pub enum AuthAction {
         #[arg(long)]
         json: bool,
     },
+    /// List all supported providers with auth methods, configured status,
+    /// and signup URLs (Story 13.4c, FR123).
+    List {
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

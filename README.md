@@ -165,10 +165,13 @@ rustain auth login anthropic   # store API key (masked entry + validation)
 rustain auth login openai      # store OpenAI key
 rustain auth status            # show configured providers, source, validation time
 rustain auth status --json     # scriptable status envelope
+rustain auth list              # list all providers, auth methods, signup URLs
+rustain auth list --json       # structured provider catalog
 ```
 
 Env vars still win over `~/.rustain/auth.json`; `auth status` reports that
-winning source without probing the network.
+winning source without probing the network. `auth list` shows the full provider
+catalog including unconfigured and keyless providers.
 
 ### 🛠️ Develop Rustain
 

@@ -113,10 +113,86 @@ rustain auth status --json
 #   }
 ```
 
-`auth status` lists configured providers only. Use the later `auth list` command
-for the full provider catalog.
+`auth status` lists configured providers only. Use `auth list` (below) for the
+full provider catalog.
 
+## `rustain auth list`
 
-### Future commands
+List **all** supported providers — including unconfigured and keyless ones — with
+auth methods, configured status, signup URLs, and the active default marker.
+The command is read-only, offline-safe, and never builds a provider.
 
-- `rustain auth list` (Story 13.4c) — list all supported providers and their auth state.
+```bash
+rustain auth list
+```
+
+Example:
+
+```text
+PROVIDER       AUTH METHODS  CONFIGURED  SIGNUP URL
+Anthropic *    api-key       ✓           https://console.anthropic.com/
+OpenAI         api-key       ✓           https://platform.openai.com/api-keys
+OpenRouter     api-key                   https://openrouter.ai/keys
+Google AI      api-key                   https://aistudio.google.com/apikey
+DeepSeek       api-key                   https://platform.deepseek.com/api_keys
+Moonshot AI    api-key                   https://platform.moonshot.cn/console/api-keys
+Ollama         none (local)  n/a         https://ollama.com/
+
+* = active default provider
+Run `rustain auth status` for credential sources, or `rustain auth login <provider>` to add one.
+```
+
+### Column legend
+
+- **PROVIDER** — display name; `*` suffix marks the active default provider
+  (the first enabled `[provider]` entry in config, else `anthropic`).
+- **AUTH METHODS** — `api-key` for key-requiring providers; `none (local)` for
+  keyless providers like Ollama.
+- **CONFIGURED** — `✓` if a credential is found (env var or `auth.json`);
+  blank if absent; `n/a` for keyless providers (no credential concept).
+- **SIGNUP URL** — where to create/manage API keys for this provider.
+
+The env-var credential always wins over `auth.json` (same precedence as
+`auth status` and the runtime provider construction).
+
+### JSON output
+
+Use `--json` for machine-readable output:
+
+```bash
+rustain auth list --json
+```
+
+```json
+{
+  "schema_version": "1.0",
+  "providers": [
+    {
+      "provider": "anthropic",
+      "display_name": "Anthropic",
+      "auth_methods": ["api_key"],
+      "signup_url": "https://console.anthropic.com/",
+      "requires_key": true,
+      "configured": true,
+      "is_default": true
+    },
+    {
+      "provider": "ollama",
+      "display_name": "Ollama",
+      "auth_methods": ["none"],
+      "signup_url": "https://ollama.com/",
+      "requires_key": false,
+      "configured": null,
+      "is_default": false
+    }
+  ]
+}
+```
+
+Notes:
+- `configured` is `true`/`false` for key-requiring providers, `null` for keyless
+  (`null` ≠ `false` — keyless providers have no credential concept).
+- `is_default` marks the configured default provider (config-intent, not
+  build-verified).
+- `auth_methods` tokens are snake_case (`api_key`, `none`).
+- No `source` field — use `auth status --json` for credential provenance.
