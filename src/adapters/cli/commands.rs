@@ -184,6 +184,26 @@ pub enum Command {
         #[arg(long)]
         bin_name: Option<String>,
     },
+    /// Manage provider authentication credentials (Story 13.4a, FR123).
+    /// `auth login` validates and stores API keys; env vars remain highest-priority.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+/// Auth subcommand actions (Story 13.4a — login only; 13.4b adds status, 13.4c adds list).
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthAction {
+    /// Configure API credentials for an AI provider via interactive masked entry
+    /// with pre-storage validation (Story 13.4a, FR123).
+    Login {
+        /// Provider id (e.g. "anthropic", "openai", "ollama").
+        provider: String,
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

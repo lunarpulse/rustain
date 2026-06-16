@@ -143,7 +143,8 @@ OPENROUTER_API_KEY=sk-... cargo run --release
 ```
 
 First-run creates `~/.rustain/` for configuration, logs, and session data. No
-config files required for the basic flow — just an API key in the environment.
+config files required for the basic flow — just an API key in the environment
+or stored via `rustain auth login <provider>`.
 
 **As a daemon** (personal assistant mode):
 
@@ -156,6 +157,13 @@ rustain daemon stop        # shut down
 
 Daemon mode enables always-on channels (Telegram, scheduled tasks) that persist
 across TUI sessions. Systemd and launchd service templates are in `dist/`.
+
+**Authentication** (credential management):
+
+```sh
+rustain auth login anthropic   # store API key (masked entry + validation)
+rustain auth login openai      # store OpenAI key
+```
 
 ### 🛠️ Develop Rustain
 

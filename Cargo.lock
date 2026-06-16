@@ -4170,6 +4170,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmcp",
+ "rpassword",
  "scopeguard",
  "self-replace",
  "semver",
@@ -4193,6 +4194,7 @@ dependencies = [
  "unicode-width",
  "url",
  "wiremock",
+ "zeroize",
 ]
 
 [[package]]

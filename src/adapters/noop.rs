@@ -8,8 +8,9 @@ use std::path::Path;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-use crate::domain::errors::{PermissionError, ProviderError, StorageError, ToolError};
+use crate::domain::errors::{AuthError, PermissionError, ProviderError, StorageError, ToolError};
 use crate::domain::models::ApprovalScope;
+use crate::domain::models::credential::{Credential, ProviderStatus};
 use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use crate::domain::models::usage::UsageLedgerEntry;
 use crate::domain::models::{
@@ -17,9 +18,9 @@ use crate::domain::models::{
     PermissionMode, StreamChunk, ToolDefinition, ToolResult,
 };
 use crate::domain::ports::{
-    ApprovalPersistencePort, ChannelPort, ContextPort, MemoryPort, PersonaPort, RecallProviderPort,
-    SchedulerPort, SecurityPort, SessionPort, StoragePort, StreamingProvider, ToolSetPort,
-    UsageLedgerPort,
+    ApprovalPersistencePort, AuthStorePort, ChannelPort, ContextPort, MemoryPort, PersonaPort,
+    RecallProviderPort, SchedulerPort, SecurityPort, SessionPort, StoragePort, StreamingProvider,
+    ToolSetPort, UsageLedgerPort,
 };
 use crate::domain::services::approval_runtime::SessionApprovalSet;
 use tokio_util::sync::CancellationToken;
@@ -253,6 +254,27 @@ impl ApprovalPersistencePort for NoOpApprovalPersistence {
         _scope: ApprovalScope,
     ) -> Result<(), crate::domain::errors::ApprovalPersistenceError> {
         Ok(())
+    }
+}
+
+// ── AuthStorePort ───────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct NoOpAuthStore;
+
+#[async_trait]
+impl AuthStorePort for NoOpAuthStore {
+    async fn get(&self, _provider: &str) -> Result<Option<Credential>, AuthError> {
+        Ok(None)
+    }
+    async fn set(&self, _provider: &str, _cred: Credential) -> Result<(), AuthError> {
+        Ok(())
+    }
+    async fn remove(&self, _provider: &str) -> Result<(), AuthError> {
+        Ok(())
+    }
+    async fn list(&self) -> Result<Vec<ProviderStatus>, AuthError> {
+        Ok(vec![])
     }
 }
 

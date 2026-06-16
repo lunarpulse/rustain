@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
-use crate::adapters::cli::commands::{Cli, Command, ConfigAction, ProfileAction};
+use crate::adapters::cli::commands::{AuthAction, Cli, Command, ConfigAction, ProfileAction};
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
 use crate::adapters::persona_adapter::PersonaAdapter;
@@ -233,6 +233,27 @@ pub async fn run() -> Result<()> {
             eprintln!("{e}");
             SubcommandExit.into()
         });
+    }
+    // Story 13.4a — Auth subcommand intercept. Runs before provider construction
+    // and terminal setup. `auth login` needs network only to *validate*, not a
+    // provider build — constructs the candidate adapter ad hoc inside the handler.
+    if let Some(Command::Auth { action }) = &cli.command {
+        match action {
+            AuthAction::Login { provider, json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::login::run_auth_login(
+                    provider.clone(),
+                    *json,
+                    &store,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Auth login subcommand failed: {e}");
+                    SubcommandExit.into()
+                });
+            }
+        }
     }
     if let Some(Command::Doctor {
         terminal,
@@ -1780,6 +1801,12 @@ fn build_anthropic_provider_from_env(
         } else if let Some(key) = api_key {
             tracing::info!("Using ANTHROPIC_API_KEY (X-Api-Key auth)");
             AuthMode::ApiKey(key)
+        } else if let Some(stored_key) =
+            crate::adapters::auth_store::FileAuthStore::get_sync("anthropic")
+        {
+            // Story 13.4a AC7: auth.json fallback — strictly below env vars.
+            tracing::info!("Using stored credential from auth.json (X-Api-Key auth)");
+            AuthMode::ApiKey(stored_key)
         } else {
             anyhow::bail!(
                 "No API key found.\n\n\
@@ -1787,6 +1814,7 @@ fn build_anthropic_provider_from_env(
                  \n\
                  export ANTHROPIC_API_KEY=sk-ant-...       # Direct Anthropic\n\
                  export ANTHROPIC_AUTH_TOKEN=your-key       # Anthropic-compatible gateway\n\
+                 rustain auth login anthropic               # Store via auth.json\n\
                  \n\
                  Get your API key at: https://console.anthropic.com/"
             );

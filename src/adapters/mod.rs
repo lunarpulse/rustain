@@ -1,6 +1,7 @@
 pub mod agent_activation;
 pub mod agent_registry;
 pub mod approval_persistence_toml;
+pub mod auth_store;
 pub mod budget;
 pub mod builtin;
 #[cfg(feature = "telegram")]

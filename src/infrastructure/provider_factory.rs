@@ -10,6 +10,34 @@ use crate::domain::ports::StreamingProvider;
 #[cfg(any(test, feature = "test-instrumentation"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Resolve auth for a provider: env var → auth.json fallback (Story 13.4a AC7).
+///
+/// Returns `Some(ResolvedAuth)` if the env var is set (trimmed, non-empty), OR if
+/// `auth.json` has a stored credential for `provider_id`.  Env var always wins
+/// (backward compatible).  Returns `None` only when neither source has a key.
+///
+/// Forward-compat scaffold: returns `ResolvedAuth` (today only `ApiKey`; Epic 19
+/// adds `OAuth` which selects `Authorization: Bearer` + provider betas).
+pub fn resolve_auth(
+    api_key_env: &str,
+    provider_id: &str,
+) -> Option<crate::domain::models::credential::ResolvedAuth> {
+    use crate::domain::models::credential::ResolvedAuth;
+    if !api_key_env.is_empty() {
+        if let Some(key) = crate::infrastructure::utils::env_var_trimmed(api_key_env) {
+            return Some(ResolvedAuth::ApiKey(key));
+        }
+    }
+    // Fallback: auth.json (Story 13.4a read-path integration).
+    crate::adapters::auth_store::FileAuthStore::get_sync(provider_id).map(ResolvedAuth::ApiKey)
+}
+
+/// Convenience wrapper that unwraps `ResolvedAuth` to a plain `String` key.
+/// Used by the OpenAI-compatible builders that take a bare `String`.
+pub fn resolve_api_key(api_key_env: &str, provider_id: &str) -> Option<String> {
+    resolve_auth(api_key_env, provider_id).and_then(|a| a.to_api_key())
+}
+
 /// Runtime call counter for provider construction — Story 13.2a P0-3 sentinel.
 ///
 /// Incremented in `build_provider_for_config`. Integration tests assert this
@@ -50,11 +78,26 @@ pub fn build_provider_for_config(
     PROVIDER_CTOR_COUNT.fetch_add(1, Ordering::Relaxed);
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     match kind {
-        "anthropic" => build_anthropic_from_config(cfg),
+        "anthropic" => {
+            // Story 13.4a AC7: env var → auth.json → None.
+            let api_key = if cfg.api_key_env.is_empty() {
+                None
+            } else {
+                resolve_api_key(&cfg.api_key_env, &cfg.provider_id)
+            };
+            build_anthropic_from_config(cfg, api_key)
+        }
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
-                build_openai_from_config(provider_id, cfg)
+                // Story 13.4a AC7: env var → auth.json → empty.
+                let api_key = resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default();
+                let adapter = build_openai_from_config(provider_id, cfg, api_key)?;
+                OPENAI_ADAPTERS
+                    .lock()
+                    .unwrap()
+                    .insert(provider_id.to_string(), Arc::clone(&adapter));
+                Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -78,7 +121,77 @@ pub fn build_provider_for_config(
         "openai-compatible" => {
             #[cfg(feature = "openai")]
             {
-                build_openai_compatible_from_config(provider_id, cfg)
+                // Story 13.4a AC7: env var → auth.json → empty.
+                let api_key = resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default();
+                let adapter = build_openai_compatible_from_config(provider_id, cfg, api_key)?;
+                OPENAI_ADAPTERS
+                    .lock()
+                    .unwrap()
+                    .insert(provider_id.to_string(), Arc::clone(&adapter));
+                Ok(adapter)
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                Err(ProviderError::Other(
+                    "openai feature not enabled — rebuild with --features openai".to_string(),
+                ))
+            }
+        }
+        _ => Err(ProviderError::Other(format!(
+            "unknown provider kind '{}' for '{}'",
+            kind, provider_id
+        ))),
+    }
+}
+
+/// Build a provider adapter with an **explicit** candidate key (Story 13.4a DN-1).
+///
+/// Used by `auth login`'s validation step to probe a candidate key WITHOUT
+/// injecting it into the process environment (the old path did
+/// `std::env::set_var`, which leaked the key via `/proc/self/environ` and was
+/// unsafe under the multi-threaded tokio runtime). Same kind dispatch as
+/// [`build_provider_for_config`]; the key is passed straight to the per-kind
+/// builder instead of being resolved from env / `auth.json`. The built adapter
+/// is NOT registered in the `OPENAI_ADAPTERS` cache (it is a throwaway probe).
+pub fn build_provider_for_config_with_key(
+    provider_id: &str,
+    cfg: &ProviderConfig,
+    key: &str,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    let kind = cfg.kind.as_deref().unwrap_or(provider_id);
+    match kind {
+        "anthropic" => build_anthropic_from_config(cfg, Some(key.to_string())),
+        "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
+            #[cfg(feature = "openai")]
+            {
+                let adapter = build_openai_from_config(provider_id, cfg, key.to_string())?;
+                Ok(adapter)
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                Err(ProviderError::Other(
+                    "openai feature not enabled — rebuild with --features openai".to_string(),
+                ))
+            }
+        }
+        "ollama" => {
+            #[cfg(feature = "ollama")]
+            {
+                build_ollama_from_config(cfg)
+            }
+            #[cfg(not(feature = "ollama"))]
+            {
+                Err(ProviderError::Other(
+                    "ollama feature not enabled — rebuild with --features ollama".to_string(),
+                ))
+            }
+        }
+        "openai-compatible" => {
+            #[cfg(feature = "openai")]
+            {
+                let adapter =
+                    build_openai_compatible_from_config(provider_id, cfg, key.to_string())?;
+                Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
             {
@@ -96,16 +209,11 @@ pub fn build_provider_for_config(
 
 fn build_anthropic_from_config(
     cfg: &ProviderConfig,
+    api_key: Option<String>,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     #[cfg(feature = "anthropic")]
     {
         use crate::adapters::anthropic::{AnthropicAdapter, AuthMode};
-
-        let api_key = if cfg.api_key_env.is_empty() {
-            None
-        } else {
-            crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env)
-        };
 
         let auth_mode = match api_key {
             Some(key) if cfg.api_key_env.contains("API_KEY") => AuthMode::ApiKey(key),
@@ -146,15 +254,11 @@ fn build_anthropic_from_config(
 fn build_openai_from_config(
     provider_id: &str,
     cfg: &ProviderConfig,
-) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    api_key: String,
+) -> Result<Arc<crate::adapters::openai::OpenAiAdapter>, ProviderError> {
     use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
 
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
-    let api_key = if cfg.api_key_env.is_empty() {
-        String::new()
-    } else {
-        crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
-    };
 
     let variant = match kind {
         "openai" => OpenAiCompatibleVariant::OpenAI,
@@ -174,18 +278,15 @@ fn build_openai_from_config(
         OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), cfg.base_url.clone())
             .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
     );
-    OPENAI_ADAPTERS
-        .lock()
-        .unwrap()
-        .insert(provider_id.to_string(), Arc::clone(&adapter));
     Ok(adapter)
 }
 
 #[cfg(feature = "openai")]
 fn build_openai_compatible_from_config(
-    provider_id: &str,
+    _provider_id: &str,
     cfg: &ProviderConfig,
-) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    api_key: String,
+) -> Result<Arc<crate::adapters::openai::OpenAiAdapter>, ProviderError> {
     use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
 
     let base_url = cfg.base_url.clone().ok_or_else(|| {
@@ -194,12 +295,6 @@ fn build_openai_compatible_from_config(
             cfg.provider_id
         ))
     })?;
-
-    let api_key = if cfg.api_key_env.is_empty() {
-        String::new()
-    } else {
-        crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
-    };
 
     let variant = OpenAiCompatibleVariant::Custom {
         provider_id: cfg.provider_id.clone(),
@@ -212,10 +307,6 @@ fn build_openai_compatible_from_config(
         OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), Some(base_url))
             .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
     );
-    OPENAI_ADAPTERS
-        .lock()
-        .unwrap()
-        .insert(provider_id.to_string(), Arc::clone(&adapter));
     Ok(adapter)
 }
 
@@ -238,10 +329,11 @@ pub fn build_openai_for_discovery(
             }
             // Fallback: build a fresh adapter (e.g., when called from tests).
             use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+            // Story 13.4a AC7/P-5: env var → auth.json → empty (was env-only).
             let api_key = if cfg.api_key_env.is_empty() {
                 String::new()
             } else {
-                crate::infrastructure::utils::env_var_trimmed(&cfg.api_key_env).unwrap_or_default()
+                resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default()
             };
             let variant = match kind {
                 "openai" => OpenAiCompatibleVariant::OpenAI,

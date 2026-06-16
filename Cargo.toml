@@ -95,6 +95,8 @@ bm25 = { version = "=2.3.2", optional = true }
 hex = "0.4"
 gray_matter = "0.2"
 url = "2"
+zeroize = { version = "1", features = ["alloc"] }
+rpassword = "7"
 
 # ── Self-update (Story 13.3a, feature-gated `self-update`) ──────
 # Port-based design: SelfUpdatePort (network) + BinaryReplacerPort (filesystem).
