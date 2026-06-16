@@ -225,6 +225,15 @@ pub async fn run() -> Result<()> {
     if let Some(Command::Init) = cli.command {
         return crate::adapters::cli::init::run_init().await;
     }
+    // Story 13.3b — Completions subcommand intercept. Sync (no .await), no provider needed.
+    if let Some(Command::Completions { shell, bin_name }) = cli.command {
+        return crate::adapters::cli::completions::run_completions(shell, bin_name).map_err(|e| {
+            // Surface the error to the user on stderr; main.rs suppresses
+            // SubcommandExit errors, so logging alone would hide the message.
+            eprintln!("{e}");
+            SubcommandExit.into()
+        });
+    }
     if let Some(Command::Doctor {
         terminal,
         adapters,

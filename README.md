@@ -266,6 +266,10 @@ LRU trim).
 recovery (latest-only crash journal + capped logs), multi-client attach via Unix
 socket, foreground detection with boot-id veto and process nonce verification.
 
+**Shell completions** — tab-completion scripts generated on demand for bash, zsh,
+fish, and PowerShell via `rustain completions <shell>`. See
+[docs/shell-completions.md](docs/shell-completions.md) for per-shell install paths.
+
 ## Profile system
 
 Profiles are named TOML files that compose one adapter per port dimension:

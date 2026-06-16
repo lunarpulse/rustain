@@ -171,6 +171,19 @@ pub enum Command {
         #[arg(long, value_parser = ["text", "json"], default_value = "text")]
         output_format: String,
     },
+    /// Generate a shell completion script and print it to stdout (Story 13.3b, FR104).
+    /// Pipe into your shell config, e.g. `rustain completions bash > ~/.local/share/bash-completion/completions/rustain`.
+    /// Completions reflect the subcommands compiled into THIS binary — re-run after upgrading.
+    Completions {
+        /// Target shell. bash/zsh/fish/powershell are supported (FR104); others
+        /// that clap_complete knows (e.g. elvish) also work but are unadvertised.
+        #[arg(value_enum)]
+        shell: clap_complete::aot::Shell,
+        /// Program name to embed in the script (default: "rustain").
+        /// Override for packaging where the installed binary is invoked under a different name.
+        #[arg(long)]
+        bin_name: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

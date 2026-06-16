@@ -2,6 +2,7 @@ pub mod ask;
 #[cfg(feature = "meta-search")]
 pub mod catalog;
 pub mod commands;
+pub mod completions;
 pub mod config_cmd;
 pub mod doctor;
 pub mod init;
