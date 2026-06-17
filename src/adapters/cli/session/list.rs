@@ -307,8 +307,9 @@ fn format_timestamp(ts: i64) -> String {
 }
 
 /// Replace control characters with a single space and strip ANSI escape
-/// sequences so titles cannot shatter the table or inject terminal controls.
-fn sanitize_title(title: &str) -> String {
+/// sequences (CSI and OSC) so titles cannot shatter the table or inject
+/// terminal controls. Shared by `session list` and `session delete`.
+pub(crate) fn sanitize_title(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut chars = title.chars().peekable();
 
@@ -324,15 +325,36 @@ fn sanitize_title(title: &str) -> String {
 }
 
 fn skip_ansi_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    if chars.peek() == Some(&'[') {
-        chars.next();
-        for ch in chars.by_ref() {
-            if ('\x40'..='\x7e').contains(&ch) {
-                break;
+    match chars.peek() {
+        // CSI: ESC [ <params> <0x40..=0x7E final>.
+        Some('[') => {
+            chars.next();
+            for ch in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&ch) {
+                    break;
+                }
             }
         }
-    } else {
-        let _ = chars.next();
+        // OSC: ESC ] <payload> BEL (\x07) or ST (ESC \). Strips terminal-title
+        // injections like `\x1b]0;evil\x07` instead of leaking the payload.
+        Some(']') => {
+            chars.next();
+            let mut prev = None;
+            for ch in chars.by_ref() {
+                if ch == '\x07' {
+                    break;
+                }
+                if prev == Some('\x1b') && ch == '\\' {
+                    break;
+                }
+                prev = Some(ch);
+            }
+        }
+        // Other Fe introducers (DCS/SOS/PM/APC): drop ESC + the introducer byte.
+        Some(_) => {
+            let _ = chars.next();
+        }
+        None => {}
     }
 }
 

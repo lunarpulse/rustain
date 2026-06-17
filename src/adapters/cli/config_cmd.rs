@@ -705,7 +705,10 @@ pub async fn run_config_validate(
                 eprintln!("Configuration is invalid: {error_msg}");
             }
             // Non-zero exit via SubcommandExit (mirrors profile validate)
-            Err(crate::infrastructure::startup::SubcommandExit.into())
+            Err(crate::infrastructure::startup::SubcommandExit(
+                crate::infrastructure::startup::SubcommandExit::GENERIC,
+            )
+            .into())
         }
     }
 }

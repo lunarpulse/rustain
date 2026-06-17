@@ -45,7 +45,7 @@ pub async fn run_migrate(
                 "Unsupported import source: {}. Supported sources: {}",
                 from, sources
             );
-            anyhow::bail!(SubcommandExit);
+            anyhow::bail!(SubcommandExit(SubcommandExit::GENERIC));
         }
     };
 
@@ -77,11 +77,11 @@ pub async fn run_migrate_with(
         Ok(c) => c,
         Err(StorageError::NotFound(msg)) => {
             eprintln!("{}", msg);
-            anyhow::bail!(SubcommandExit);
+            anyhow::bail!(SubcommandExit(SubcommandExit::GENERIC));
         }
         Err(e) => {
             eprintln!("Discovery failed: {}", e);
-            anyhow::bail!(SubcommandExit);
+            anyhow::bail!(SubcommandExit(SubcommandExit::GENERIC));
         }
     };
 
@@ -204,7 +204,7 @@ pub async fn run_migrate_with(
 
     // Non-zero exit code if any import failed — matters for CI/scripting.
     if failed > 0 {
-        anyhow::bail!(SubcommandExit);
+        anyhow::bail!(SubcommandExit(SubcommandExit::GENERIC));
     }
 
     Ok(())

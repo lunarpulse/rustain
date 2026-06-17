@@ -39,6 +39,8 @@ mod security;
 #[cfg(feature = "self-update")]
 pub mod self_update;
 #[allow(unused_imports)]
+mod session_holder;
+#[allow(unused_imports)]
 mod session_port;
 #[allow(unused_imports)]
 mod skill_exposure;
@@ -77,6 +79,7 @@ pub use recall_provider::RecallProviderPort;
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
+pub use session_holder::{HeldSession, HolderState, SessionHolderPort};
 pub use session_port::SessionPort;
 pub use subagent_runner::SubagentRunner;
 pub mod search;

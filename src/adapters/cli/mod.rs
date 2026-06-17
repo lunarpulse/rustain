@@ -12,3 +12,4 @@ pub mod profile;
 pub mod session;
 #[cfg(feature = "openai")]
 pub mod update_catalog;
+pub mod util;

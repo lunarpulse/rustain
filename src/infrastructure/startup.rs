@@ -31,13 +31,19 @@ use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, paths, permission_rules, signals};
 
 /// Error type for subcommand exits where output was already printed.
-/// Used by `main.rs` to suppress redundant error display.
+/// Carries the exit code so destructive/scriptable subcommands can return
+/// distinct non-zero codes (Story 13.5b).
 #[derive(Debug)]
-pub struct SubcommandExit;
+pub struct SubcommandExit(pub i32);
+
+impl SubcommandExit {
+    /// Generic non-zero exit code used by most subcommand failures.
+    pub const GENERIC: i32 = 1;
+}
 
 impl std::fmt::Display for SubcommandExit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "subcommand exited with error")
+        write!(f, "subcommand exited with code {}", self.0)
     }
 }
 
@@ -233,7 +239,7 @@ pub async fn run() -> Result<()> {
             // Surface the error to the user on stderr; main.rs suppresses
             // SubcommandExit errors, so logging alone would hide the message.
             eprintln!("{e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     // Story 13.4a/13.4b/13.4c — Auth subcommand intercept. Runs before provider
@@ -252,7 +258,7 @@ pub async fn run() -> Result<()> {
                 .await
                 .map_err(|e| {
                     tracing::error!("Auth login subcommand failed: {e}");
-                    SubcommandExit.into()
+                    SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
             AuthAction::Status { json } => {
@@ -262,7 +268,7 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Auth status subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             AuthAction::List { json } => {
@@ -272,14 +278,15 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Auth list subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
         }
     }
-    // Story 13.5a — Session subcommand intercept. Runs before provider
+    // Story 13.5a / 13.5b — Session subcommand intercept. Runs before provider
     // construction and terminal setup. `session list` is read-only, offline-safe,
-    // and non-billable (AC5/AC6).
+    // and non-billable. `session delete` is the first irreversible, scriptable
+    // destructive operation; it carries distinct exit codes.
     if let Some(Command::Session { action }) = &cli.command {
         match action {
             SessionAction::List { json, all } => {
@@ -296,7 +303,57 @@ pub async fn run() -> Result<()> {
                 .await
                 .map_err(|e| {
                     tracing::error!("Session list subcommand failed: {e}");
-                    SubcommandExit.into()
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
+            SessionAction::Delete {
+                id,
+                all,
+                all_workspaces,
+                workspace,
+                force,
+                dry_run,
+                json,
+            } => {
+                use std::io::IsTerminal;
+                let workspace_root = paths::workspace_dir()?;
+                let storage_for = |ws: &std::path::Path| -> Arc<dyn StoragePort> {
+                    Arc::new(FileSystemStorage::with_workspace_root(
+                        paths::sessions_dir(ws),
+                        ws.to_path_buf(),
+                    ))
+                };
+                let reader: Arc<dyn WorkspaceRegistryReaderPort> =
+                    Arc::new(FileWorkspaceRegistry::new()?);
+                let holder = crate::adapters::daemon::session_holder::DaemonSessionHolder;
+                let stdin = std::io::stdin();
+                let mut stdin_lock = stdin.lock();
+                let mut stdout = std::io::stdout();
+                let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+                return crate::adapters::cli::session::delete::run_session_delete(
+                    id.clone(),
+                    *all,
+                    *all_workspaces,
+                    workspace.clone(),
+                    *force,
+                    *dry_run,
+                    *json,
+                    &workspace_root,
+                    storage_for,
+                    &holder,
+                    &*reader,
+                    is_tty,
+                    &mut stdin_lock,
+                    &mut stdout,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Session delete subcommand failed: {e}");
+                    if e.downcast_ref::<SubcommandExit>().is_some() {
+                        e
+                    } else {
+                        SubcommandExit(SubcommandExit::GENERIC).into()
+                    }
                 });
             }
         }
@@ -335,7 +392,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Doctor subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Migrate {
@@ -350,7 +407,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("Migrate subcommand failed: {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
     #[cfg(feature = "openai")]
@@ -359,7 +416,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("UpdateCatalog subcommand failed: {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
     #[cfg(not(feature = "openai"))]
@@ -384,7 +441,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 eprintln!("✗ {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
     #[cfg(not(feature = "self-update"))]
@@ -401,7 +458,7 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Config reload subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             ConfigAction::Show { json } => {
@@ -413,7 +470,7 @@ pub async fn run() -> Result<()> {
                 .await
                 .map_err(|e| {
                     tracing::error!("Config show subcommand failed: {e}");
-                    SubcommandExit.into()
+                    SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
             ConfigAction::Edit { global } => {
@@ -421,7 +478,7 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Config edit subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             ConfigAction::Path { json } => {
@@ -429,7 +486,7 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Config path subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             ConfigAction::Validate { json } => {
@@ -441,7 +498,7 @@ pub async fn run() -> Result<()> {
                 .await
                 .map_err(|e| {
                     tracing::error!("Config validate subcommand failed: {e}");
-                    SubcommandExit.into()
+                    SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
         }
@@ -456,7 +513,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("Profile switch subcommand failed: {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
 
@@ -474,7 +531,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile list subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -497,7 +554,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile show subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -520,7 +577,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile create subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -537,7 +594,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile edit subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -555,7 +612,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile validate subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -572,7 +629,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile export subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -590,7 +647,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile import subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     // Profile install (Story 8.6b) — public-repo HTTPS fetch + validate + community/ dir install.
@@ -618,7 +675,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile install subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
@@ -629,7 +686,7 @@ pub async fn run() -> Result<()> {
         eprintln!(
             "Error: 'rustain profile install' requires HTTPS support. Rebuild with --features anthropic."
         );
-        return Err(SubcommandExit.into());
+        return Err(SubcommandExit(SubcommandExit::GENERIC).into());
     }
 
     // Story 9.8 — Catalog dev-tool dispatch (before TUI initialization)
@@ -678,7 +735,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Daemon subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
 
@@ -709,7 +766,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Ask subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
 

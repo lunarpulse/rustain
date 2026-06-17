@@ -40,13 +40,12 @@ async fn main() {
     }
 
     if let Err(e) = infrastructure::startup::run().await {
-        // Subcommand errors (init, doctor) already printed their own output.
+        // Subcommand errors already printed their own output; use their exit code.
         // Only print the error for non-subcommand failures to avoid duplicate output.
-        if e.downcast_ref::<infrastructure::startup::SubcommandExit>()
-            .is_none()
-        {
-            eprintln!("{e}");
+        if let Some(se) = e.downcast_ref::<infrastructure::startup::SubcommandExit>() {
+            std::process::exit(se.0);
         }
+        eprintln!("{e}");
         std::process::exit(1);
     }
 }

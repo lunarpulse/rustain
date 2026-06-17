@@ -191,8 +191,11 @@ pub enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
-    /// List and manage conversation sessions (Story 13.5a, FR125).
-    /// `session list` shows persisted sessions in the current workspace.
+    /// List and manage conversation sessions (Stories 13.5a / 13.5a-1 list,
+    /// 13.5b delete, FR125).
+    /// `session list` shows persisted sessions; `session delete` removes them.
+    /// The delete guard can detect a daemon-held session, but open TUIs cannot
+    /// be detected — close any session windows you care about first.
     Session {
         #[command(subcommand)]
         action: SessionAction,

@@ -88,7 +88,10 @@ pub async fn run_profile_edit(
                         "Saved file is invalid. Run 'rustain profile validate {}' for details, or 'rustain profile edit {}' to fix.",
                         name, name
                     );
-                    return Err(crate::infrastructure::startup::SubcommandExit.into());
+                    return Err(crate::infrastructure::startup::SubcommandExit(
+                        crate::infrastructure::startup::SubcommandExit::GENERIC,
+                    )
+                    .into());
                 }
             }
         }
