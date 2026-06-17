@@ -17,7 +17,7 @@ fn test_session_subcommand_count_is_one() {
     );
 }
 
-/// Ratchet: `session list` subcommand exists and exposes local --json.
+/// Ratchet: `session list` subcommand exists and exposes local `--json` + `--all`.
 #[test]
 fn test_session_list_subcommand_exists() {
     let cmd = rustain::adapters::cli::commands::Cli::command();
@@ -30,6 +30,10 @@ fn test_session_list_subcommand_exists() {
     assert!(
         list_cmd.get_arguments().any(|arg| arg.get_id() == "json"),
         "session list should expose a local --json flag"
+    );
+    assert!(
+        list_cmd.get_arguments().any(|arg| arg.get_id() == "all"),
+        "session list should expose a local --all flag"
     );
 }
 

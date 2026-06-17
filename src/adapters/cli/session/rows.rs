@@ -1,15 +1,15 @@
 //! Shared pure decision-core for `session list` / `session delete` (Story 13.5a).
 //!
 //! `build_session_rows` is the single source of truth for filtering, sorting,
-//! indexing, and default-resume marking. It is deterministic, disk-free, and
-//! TTY-free so both render and future delete logic can reuse it.
+//! indexing, and default-resume marking. Story 13.5a-1 layers cross-workspace
+//! merge logic on top without changing the single-workspace contract.
 
 use std::cmp::Reverse;
 
 use crate::domain::models::ConversationSummary;
 
 /// Schema version for `rustain session list --json`.
-pub const SESSION_LIST_SCHEMA_VERSION: &str = "1.0";
+pub const SESSION_LIST_SCHEMA_VERSION: &str = "1.1";
 
 /// One presentation row. Derived purely from a `ConversationSummary` + position.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,15 @@ pub struct SessionRow {
     pub has_fork_source: bool,
     /// `(index == 1)`: what a bare `rustain` resumes. NOT `is_active` (no daemon claim).
     pub is_default_resume: bool,
+}
+
+/// Cross-workspace wrapper. `SessionRow` stays byte-stable; the workspace address
+/// lives alongside it for 13.5a-1 / 13.5b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSessionRow {
+    /// Canonical absolute workspace path.
+    pub workspace: String,
+    pub row: SessionRow,
 }
 
 /// Pure: filter empties, sort (total order), assign 1-based indices, mark the
@@ -63,6 +72,39 @@ pub fn build_session_rows(summaries: Vec<ConversationSummary>) -> Vec<SessionRow
             }
         })
         .collect()
+}
+
+/// Merge per-workspace rows into a single global listing.
+pub fn build_all_workspace_rows(
+    current_workspace: &str,
+    per_workspace: Vec<(String, Vec<ConversationSummary>)>,
+) -> Vec<WorkspaceSessionRow> {
+    let mut rows: Vec<WorkspaceSessionRow> = per_workspace
+        .into_iter()
+        .flat_map(|(workspace, summaries)| {
+            build_session_rows(summaries)
+                .into_iter()
+                .map(move |row| WorkspaceSessionRow {
+                    workspace: workspace.clone(),
+                    row,
+                })
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.row
+            .updated_at
+            .cmp(&a.row.updated_at)
+            .then_with(|| a.workspace.cmp(&b.workspace))
+            .then_with(|| a.row.id.cmp(&b.row.id))
+    });
+
+    for (idx, row) in rows.iter_mut().enumerate() {
+        row.row.index = idx + 1;
+        row.row.is_default_resume = row.workspace == current_workspace && row.row.is_default_resume;
+    }
+
+    rows
 }
 
 #[cfg(test)]
@@ -180,5 +222,169 @@ mod tests {
         assert_eq!(ids, vec!["a", "m", "z"]);
         assert!(rows[0].is_default_resume);
         assert_eq!(rows[0].index, 1);
+    }
+
+    #[test]
+    fn p0_1_all_workspace_rows_global_total_order() {
+        let rows = build_all_workspace_rows(
+            "/ws-b",
+            vec![
+                (
+                    "/ws-a".to_string(),
+                    vec![
+                        summary("id-2", "Two", 300, 0, 1, false),
+                        summary("id-1", "One", 300, 0, 1, false),
+                    ],
+                ),
+                (
+                    "/ws-b".to_string(),
+                    vec![summary("id-3", "Three", 400, 0, 1, false)],
+                ),
+                (
+                    "/ws-c".to_string(),
+                    vec![summary("id-4", "Four", 300, 0, 1, false)],
+                ),
+            ],
+        );
+
+        let order: Vec<_> = rows
+            .iter()
+            .map(|row| (row.workspace.as_str(), row.row.id.as_str(), row.row.index))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("/ws-b", "id-3", 1),
+                ("/ws-a", "id-1", 2),
+                ("/ws-a", "id-2", 3),
+                ("/ws-c", "id-4", 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn p0_2_all_workspace_excludes_per_workspace_empties() {
+        let rows = build_all_workspace_rows(
+            "/ws-a",
+            vec![
+                (
+                    "/ws-a".to_string(),
+                    vec![
+                        summary("keep-a", "Keep A", 200, 0, 2, false),
+                        summary("drop-a", "Drop A", 100, 0, 0, false),
+                    ],
+                ),
+                (
+                    "/ws-b".to_string(),
+                    vec![
+                        summary("drop-b", "Drop B", 300, 0, 0, false),
+                        summary("keep-b", "Keep B", 150, 0, 1, false),
+                    ],
+                ),
+            ],
+        );
+
+        let ids: Vec<_> = rows.iter().map(|row| row.row.id.as_str()).collect();
+        assert_eq!(ids, vec!["keep-a", "keep-b"]);
+        assert_eq!(rows[0].row.index, 1);
+        assert_eq!(rows[1].row.index, 2);
+    }
+
+    #[test]
+    fn p0_3_single_current_workspace_marker_under_all() {
+        let rows = build_all_workspace_rows(
+            "/ws-b",
+            vec![
+                (
+                    "/ws-a".to_string(),
+                    vec![summary("a1", "A1", 300, 0, 1, false)],
+                ),
+                (
+                    "/ws-b".to_string(),
+                    vec![
+                        summary("b1", "B1", 200, 0, 1, false),
+                        summary("b2", "B2", 100, 0, 1, false),
+                    ],
+                ),
+                (
+                    "/ws-c".to_string(),
+                    vec![summary("c1", "C1", 400, 0, 1, false)],
+                ),
+            ],
+        );
+
+        let marked: Vec<_> = rows
+            .iter()
+            .filter(|row| row.row.is_default_resume)
+            .map(|row| (row.workspace.as_str(), row.row.id.as_str()))
+            .collect();
+        assert_eq!(marked, vec![("/ws-b", "b1")]);
+    }
+
+    #[test]
+    fn p0_3_zero_markers_when_current_workspace_not_listed() {
+        let rows = build_all_workspace_rows(
+            "/ws-missing",
+            vec![
+                (
+                    "/ws-a".to_string(),
+                    vec![summary("a1", "A1", 200, 0, 1, false)],
+                ),
+                (
+                    "/ws-b".to_string(),
+                    vec![summary("b1", "B1", 100, 0, 1, false)],
+                ),
+            ],
+        );
+
+        assert_eq!(
+            rows.iter().filter(|row| row.row.is_default_resume).count(),
+            0
+        );
+    }
+
+    #[test]
+    fn p0_4_id_tokens_preserved_through_merge() {
+        let current_workspace = "/ws-a";
+        let standalone = build_session_rows(vec![
+            summary("keep-a", "Keep A", 200, 0, 2, false),
+            summary("keep-b", "Keep B", 100, 0, 1, false),
+        ]);
+        let merged = build_all_workspace_rows(
+            current_workspace,
+            vec![(
+                current_workspace.to_string(),
+                vec![
+                    summary("keep-a", "Keep A", 200, 0, 2, false),
+                    summary("keep-b", "Keep B", 100, 0, 1, false),
+                ],
+            )],
+        );
+
+        let standalone_ids: Vec<_> = standalone.iter().map(|row| row.id.as_str()).collect();
+        let merged_ids: Vec<_> = merged.iter().map(|row| row.row.id.as_str()).collect();
+        assert_eq!(merged_ids, standalone_ids);
+    }
+
+    #[test]
+    fn p0_5_same_id_in_two_workspaces_not_deduped() {
+        let rows = build_all_workspace_rows(
+            "/ws-a",
+            vec![
+                (
+                    "/ws-a".to_string(),
+                    vec![summary("same-id", "A", 200, 0, 1, false)],
+                ),
+                (
+                    "/ws-b".to_string(),
+                    vec![summary("same-id", "B", 100, 0, 1, false)],
+                ),
+            ],
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].row.id, "same-id");
+        assert_eq!(rows[1].row.id, "same-id");
+        assert_ne!(rows[0].workspace, rows[1].workspace);
     }
 }

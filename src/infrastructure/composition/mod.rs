@@ -10,12 +10,13 @@ use crate::adapters::noop::{NoOpChannel, NoOpContext, NoOpMemory, NoOpScheduler,
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
+use crate::adapters::workspace_registry::FileWorkspaceRegistry;
 use crate::domain::errors::AdapterCompositionError;
 use crate::domain::models::profile::{AdapterRef, PortDimension, ProfileSelection};
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::ports::{
     ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SecurityPort,
-    SessionPort, StoragePort, StreamingProvider, ToolSetPort,
+    SessionPort, StoragePort, StreamingProvider, ToolSetPort, WorkspaceRegistrarPort,
 };
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
@@ -81,6 +82,18 @@ pub struct ComposeContext {
     pub search_config: crate::domain::models::SearchConfig,
     #[cfg(feature = "meta-search")]
     pub meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
+}
+
+fn build_workspace_registrar() -> Result<Arc<dyn WorkspaceRegistrarPort>, AdapterCompositionError> {
+    FileWorkspaceRegistry::new()
+        .map(|registry| Arc::new(registry) as Arc<dyn WorkspaceRegistrarPort>)
+        .map_err(
+            |source| AdapterCompositionError::AdapterConstructionFailed {
+                port: PortDimension::Session,
+                name: "workspace-registry".to_string(),
+                source: Box::new(source),
+            },
+        )
 }
 
 impl AgentCore {
@@ -1213,10 +1226,10 @@ pub fn build_daemon_core(
     // ── Eager parts (cheap, connection-free) ────────────────────────────────
     let memory = build_daemon_memory(workspace, memory_adapter)?;
     let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
-    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        sessions_dir.clone(),
-        workspace.to_path_buf(),
-    ));
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(sessions_dir.clone(), workspace.to_path_buf())
+            .with_workspace_registrar(build_workspace_registrar()?),
+    );
     // Headless security policy — permanently Normal (AC6).
     // `HeadlessSecurityAdapter` ignores `set_mode` so Yolo is structurally
     // unreachable, not just administratively avoided.
@@ -1267,10 +1280,13 @@ pub fn build_daemon_core(
                     approval.clone(),
                     raw_capacity,
                 );
-                let fs_storage = Arc::new(FileSystemStorage::with_workspace_root(
-                    crate::infrastructure::paths::sessions_dir(&workspace),
-                    workspace.clone(),
-                ));
+                let fs_storage = Arc::new(
+                    FileSystemStorage::with_workspace_root(
+                        crate::infrastructure::paths::sessions_dir(&workspace),
+                        workspace.clone(),
+                    )
+                    .with_workspace_registrar(build_workspace_registrar()?),
+                );
                 Ok(Arc::new(DaemonTurnRuntime {
                     provider,
                     app_config: config.clone(),
@@ -1352,10 +1368,10 @@ pub fn build_cli_core(
     };
 
     let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
-    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        sessions_dir,
-        workspace.to_path_buf(),
-    ));
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(sessions_dir, workspace.to_path_buf())
+            .with_workspace_registrar(build_workspace_registrar()?),
+    );
 
     let ctx = ComposeContext {
         workspace_path: workspace.to_path_buf(),

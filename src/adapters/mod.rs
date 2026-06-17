@@ -39,6 +39,7 @@ pub mod subagent;
 pub mod tool_exposure;
 pub mod toolset_adapter;
 pub mod tui;
+pub mod workspace_registry;
 
 // Story 11.3a — local semantic-search memory adapter. Feature-gated so the
 // default build pulls neither fastembed/ort nor bincode (NFR9 preserved).

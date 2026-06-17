@@ -1,25 +1,41 @@
-//! Integration tests for `rustain session list` (Story 13.5a).
+//! Integration tests for `rustain session list` (Stories 13.5a / 13.5a-1).
 //!
-//! Covers offline-safe operation, read-only behavior, flat+dir dedup,
-//! end-to-end CLI output, and the shared `build_session_rows` core over
-//! real `FileSystemStorage`.
+//! Covers offline-safe operation, read-only behavior, flat+dir dedup, cross-
+//! workspace `--all`, and the shared `build_session_rows` core over real
+//! `FileSystemStorage`.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use assert_cmd::Command;
+use async_trait::async_trait;
 use predicates::str::contains;
 use rustain::adapters::cli::session::list::run_session_list;
 use rustain::adapters::cli::session::rows::build_session_rows;
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::domain::models::session_meta::SessionMeta;
-use rustain::domain::ports::StoragePort;
+use rustain::domain::ports::{StoragePort, WorkspaceRegistryReaderPort};
 use rustain::infrastructure::provider_factory::PROVIDER_CTOR_COUNT;
+use serial_test::serial;
 
 fn rustain_cmd() -> Command {
     Command::cargo_bin("rustain").unwrap()
+}
+
+struct EmptyWorkspaceReader;
+
+#[async_trait]
+impl WorkspaceRegistryReaderPort for EmptyWorkspaceReader {
+    async fn live_workspaces(
+        &self,
+    ) -> Result<
+        Vec<rustain::domain::ports::WorkspaceEntry>,
+        rustain::domain::ports::WorkspaceRegistryError,
+    > {
+        Ok(vec![])
+    }
 }
 
 /// Build a `SessionMeta` fixture.
@@ -91,12 +107,55 @@ fn snapshot_dir(
     (paths, hashes)
 }
 
+fn registry_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("workspaces.json")
+}
+
+fn write_registry(data_dir: &Path, workspaces: &[(&Path, i64)]) {
+    let rows: Vec<_> = workspaces
+        .iter()
+        .map(|(path, last_seen)| {
+            serde_json::json!({
+                "path": path.canonicalize().unwrap_or_else(|_| (*path).to_path_buf()),
+                "last_seen": last_seen,
+            })
+        })
+        .collect();
+    std::fs::write(
+        registry_path(data_dir),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "1.0",
+            "workspaces": rows,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+async fn make_workspace_fixture(
+    dir: &Path,
+    id: &str,
+    title: &str,
+    updated_at: i64,
+    message_count: usize,
+) {
+    let sessions_dir = dir.join(".claude").join("sessions");
+    tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
+    write_dir_session(
+        &sessions_dir,
+        id,
+        &meta(id, title, updated_at, message_count),
+    )
+    .await;
+}
+
 // =========================================================================
-// P0-10/11: offline-safe + no provider construction
+// P0-12: offline-safe + no provider construction
 // =========================================================================
 
 #[tokio::test]
-async fn p0_11_run_session_list_does_not_construct_provider() {
+#[serial(session_cli)]
+async fn p0_12_run_session_list_all_does_not_construct_provider() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
     tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
@@ -105,86 +164,73 @@ async fn p0_11_run_session_list_does_not_construct_provider() {
         sessions_dir,
         dir.path().to_path_buf(),
     ));
+    let reader: Arc<dyn WorkspaceRegistryReaderPort> = Arc::new(EmptyWorkspaceReader);
 
     PROVIDER_CTOR_COUNT.store(0, Ordering::SeqCst);
 
-    run_session_list(false, &storage).await.unwrap();
+    run_session_list(false, true, dir.path(), &storage, &reader)
+        .await
+        .unwrap();
 
     let count = PROVIDER_CTOR_COUNT.load(Ordering::SeqCst);
     assert_eq!(
         count, 0,
-        "session list must not construct any provider, got {count}"
+        "session list --all must not construct any provider, got {count}"
     );
 }
 
 // =========================================================================
-// P0-12: read-only — no new files, content hashes unchanged
+// P0-13: read-only — no new files, no content changes, registry unchanged
 // =========================================================================
 
 #[tokio::test]
-async fn p0_12_session_list_is_read_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let sessions_dir = dir.path().join(".claude").join("sessions");
-    tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
+#[serial(session_cli)]
+async fn p0_13_session_list_all_is_read_only() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let current = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("RUSTAIN_DATA_DIR", data_dir.path());
+    }
 
-    write_dir_session(&sessions_dir, "dir-sess", &meta("dir-sess", "Dir", 200, 2)).await;
-    write_flat_session(
-        &sessions_dir,
-        "flat-sess",
-        &meta("flat-sess", "Flat", 100, 1),
-    )
-    .await;
-    // Legacy fork fixture: list_conversations() would backfill this sidecar on read.
-    tokio::fs::write(
-        sessions_dir.join("legacy-fork.meta.json"),
-        serde_json::to_string(&serde_json::json!({
-            "id": "legacy-fork",
-            "title": "Legacy Fork",
-            "messages": [],
-            "turns": [],
-            "createdAt": 90,
-            "updatedAt": 91,
-            "forkSource": {
-                "conversationId": "parent-id",
-                "messageIndex": 3,
-                "checkpointId": 3
-            },
-            "cleanExit": true
-        }))
-        .unwrap(),
-    )
-    .await
-    .unwrap();
-    tokio::fs::write(
-        sessions_dir.join("legacy-fork.session.json"),
-        serde_json::to_string(&serde_json::json!({
-            "version": 1,
-            "title": "Legacy Fork",
-            "createdAt": 90,
-            "updatedAt": 91,
-            "messageCount": 0,
-            "bookmarks": []
-        }))
-        .unwrap(),
-    )
-    .await
-    .unwrap();
-    let (paths_before, hashes_before) = snapshot_dir(&sessions_dir);
+    make_workspace_fixture(current.path(), "curr-sess", "Current", 300, 2).await;
+    make_workspace_fixture(other.path(), "other-sess", "Other", 200, 1).await;
+    write_registry(data_dir.path(), &[(other.path(), 200)]);
 
-    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        sessions_dir.clone(),
-        dir.path().to_path_buf(),
-    ));
-    run_session_list(false, &storage).await.unwrap();
+    let current_sessions = current.path().join(".claude").join("sessions");
+    let other_sessions = other.path().join(".claude").join("sessions");
+    let (current_paths_before, current_hashes_before) = snapshot_dir(&current_sessions);
+    let (other_paths_before, other_hashes_before) = snapshot_dir(&other_sessions);
+    let registry_before = std::fs::read_to_string(registry_path(data_dir.path())).unwrap();
+    let registry_mtime_before = std::fs::metadata(registry_path(data_dir.path()))
+        .unwrap()
+        .modified()
+        .unwrap();
 
-    let (paths_after, hashes_after) = snapshot_dir(&sessions_dir);
+    let mut cmd = rustain_cmd();
+    cmd.current_dir(current.path())
+        .env("RUSTAIN_DATA_DIR", data_dir.path())
+        .arg("session")
+        .arg("list")
+        .arg("--all");
+    cmd.assert().success();
+
+    let (current_paths_after, current_hashes_after) = snapshot_dir(&current_sessions);
+    let (other_paths_after, other_hashes_after) = snapshot_dir(&other_sessions);
+    assert_eq!(current_paths_before, current_paths_after);
+    assert_eq!(current_hashes_before, current_hashes_after);
+    assert_eq!(other_paths_before, other_paths_after);
+    assert_eq!(other_hashes_before, other_hashes_after);
     assert_eq!(
-        paths_before, paths_after,
-        "session list must not add or remove files"
+        registry_before,
+        std::fs::read_to_string(registry_path(data_dir.path())).unwrap()
     );
     assert_eq!(
-        hashes_before, hashes_after,
-        "session list must not modify any file content"
+        registry_mtime_before,
+        std::fs::metadata(registry_path(data_dir.path()))
+            .unwrap()
+            .modified()
+            .unwrap()
     );
 }
 
@@ -193,6 +239,7 @@ async fn p0_12_session_list_is_read_only() {
 // =========================================================================
 
 #[tokio::test]
+#[serial(session_cli)]
 async fn p0_10_flat_and_dir_dedup() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
@@ -200,7 +247,6 @@ async fn p0_10_flat_and_dir_dedup() {
 
     let id = "shared-id";
     let m = meta(id, "Shared", 300, 3);
-    // Create both layouts for the same id.
     write_dir_session(&sessions_dir, id, &m).await;
     write_flat_session(&sessions_dir, id, &m).await;
 
@@ -221,6 +267,7 @@ async fn p0_10_flat_and_dir_dedup() {
 // =========================================================================
 
 #[tokio::test]
+#[serial(session_cli)]
 async fn e2e_session_list_human_table() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
@@ -241,7 +288,8 @@ async fn e2e_session_list_human_table() {
 }
 
 #[tokio::test]
-async fn e2e_session_list_json_envelope() {
+#[serial(session_cli)]
+async fn e2e_session_list_json_envelope_includes_workspace() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
     tokio::fs::create_dir_all(&sessions_dir).await.unwrap();
@@ -263,13 +311,105 @@ async fn e2e_session_list_json_envelope() {
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(parsed["schema_version"].as_str().unwrap(), "1.0");
+    assert_eq!(parsed["schema_version"].as_str().unwrap(), "1.1");
     let sessions = parsed["sessions"].as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["id"].as_str().unwrap(), "json-sess");
+    assert_eq!(
+        sessions[0]["workspace"].as_str().unwrap(),
+        dir.path().canonicalize().unwrap().to_string_lossy()
+    );
 }
 
 #[tokio::test]
+#[serial(session_cli)]
+async fn e2e_session_list_all_human_table() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let current = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let dead = tempfile::tempdir().unwrap();
+
+    make_workspace_fixture(current.path(), "curr-sess", "Current", 300, 2).await;
+    make_workspace_fixture(other.path(), "other-sess", "Other", 200, 1).await;
+    write_registry(
+        data_dir.path(),
+        &[
+            (current.path(), 300),
+            (other.path(), 200),
+            (dead.path(), 100),
+        ],
+    );
+
+    let mut cmd = rustain_cmd();
+    cmd.current_dir(current.path())
+        .env("RUSTAIN_DATA_DIR", data_dir.path())
+        .arg("session")
+        .arg("list")
+        .arg("--all");
+    cmd.assert().success();
+
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("WORKSPACE"));
+    assert!(stdout.contains("Current"));
+    assert!(stdout.contains("Other"));
+    assert!(
+        stdout.contains(
+            current
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+    assert!(stdout.contains(other.path().file_name().unwrap().to_string_lossy().as_ref()));
+    assert!(!stdout.contains(dead.path().file_name().unwrap().to_string_lossy().as_ref()));
+    assert!(stdout.contains("* = resumes by default (most recent in current workspace"));
+}
+
+#[tokio::test]
+#[serial(session_cli)]
+async fn e2e_session_list_all_json_composite_workspace_address() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let current = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+
+    make_workspace_fixture(current.path(), "same-id", "Current Same", 300, 2).await;
+    make_workspace_fixture(other.path(), "same-id", "Other Same", 200, 1).await;
+    write_registry(
+        data_dir.path(),
+        &[(current.path(), 300), (other.path(), 200)],
+    );
+
+    let mut cmd = rustain_cmd();
+    cmd.current_dir(current.path())
+        .env("RUSTAIN_DATA_DIR", data_dir.path())
+        .arg("session")
+        .arg("list")
+        .arg("--all")
+        .arg("--json");
+    cmd.assert().success();
+
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let sessions = parsed["sessions"].as_array().unwrap();
+    assert_eq!(
+        sessions.len(),
+        2,
+        "current workspace must not be double-listed"
+    );
+    assert_eq!(sessions[0]["id"].as_str().unwrap(), "same-id");
+    assert_eq!(sessions[1]["id"].as_str().unwrap(), "same-id");
+    assert_ne!(
+        sessions[0]["workspace"].as_str().unwrap(),
+        sessions[1]["workspace"].as_str().unwrap()
+    );
+}
+
+#[tokio::test]
+#[serial(session_cli)]
 async fn e2e_session_list_empty_state() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");
@@ -292,7 +432,7 @@ async fn e2e_session_list_empty_state() {
     let output = cmd_json.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(parsed["schema_version"].as_str().unwrap(), "1.0");
+    assert_eq!(parsed["schema_version"].as_str().unwrap(), "1.1");
     assert_eq!(parsed["sessions"].as_array().unwrap().len(), 0);
 }
 
@@ -301,6 +441,7 @@ async fn e2e_session_list_empty_state() {
 // =========================================================================
 
 #[tokio::test]
+#[serial(session_cli)]
 async fn e2e_session_list_shows_full_id_and_message_count() {
     let dir = tempfile::tempdir().unwrap();
     let sessions_dir = dir.path().join(".claude").join("sessions");

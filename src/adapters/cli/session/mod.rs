@@ -11,11 +11,15 @@ pub mod rows;
 /// Session subcommand actions.
 #[derive(Subcommand, Debug, Clone)]
 pub enum SessionAction {
-    /// List persisted sessions in the current workspace (Story 13.5a, FR125).
+    /// List persisted sessions in the current workspace, or across all
+    /// registered workspaces with `--all` (Stories 13.5a / 13.5a-1, FR125).
     /// Read-only, offline-safe, and non-billable.
     List {
         /// Machine-readable JSON output instead of human table.
         #[arg(long)]
         json: bool,
+        /// Include sessions from every registered workspace.
+        #[arg(long)]
+        all: bool,
     },
 }

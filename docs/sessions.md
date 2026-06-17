@@ -1,8 +1,9 @@
 # Session management
 
 Rustain stores conversation sessions per workspace under `.claude/sessions/`,
-next to the project they belong to (git-repo-local, like `.git`). This keeps
-project history with the project and avoids a global registry of directories.
+next to the project they belong to (git-repo-local, like `.git`). Cross-
+workspace `session list --all` uses a separate hint registry at
+`~/.rustain/workspaces.json` populated on the first successful save per workspace.
 
 ## `rustain session list`
 
@@ -36,7 +37,7 @@ Emits a versioned snake_case envelope:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "sessions": [
     {
       "id": "sess-id",
@@ -46,7 +47,8 @@ Emits a versioned snake_case envelope:
       "created_at": 1730000000,
       "updated_at": 1730000100,
       "has_fork_source": false,
-      "is_default_resume": true
+      "is_default_resume": true,
+      "workspace": "/absolute/workspace/path"
     }
   ]
 }
@@ -55,18 +57,42 @@ Emits a versioned snake_case envelope:
 `id` is the stable address; `index` is snapshot-relative and valid only within
 one listing output.
 
+## `rustain session list --all`
+
+List sessions across every registered workspace:
+
+```sh
+rustain session list --all
+rustain session list --all --json
+```
+
+Notes:
+
+- The human table adds a `WORKSPACE` column and keeps a single `*` marker for
+  the current workspace's default resume target.
+- The JSON envelope stays `1.1`; every row carries an always-present absolute
+  `workspace` path so scripts can address `(workspace, id)` pairs directly.
+- `--all` is read-only for both session files and the registry. Dead/moved
+  workspaces are omitted from output but not pruned from `workspaces.json`.
+- The registry stores only `{path,last_seen}` per workspace, written `0600` on
+  Unix. Home-abbreviation is display-only; the JSON `workspace` field is always
+  absolute.
+
+
 ## Notes
 
-- `session list` is read-only: it never writes, deletes, migrates, or creates
-  files in `.claude/sessions/`.
-- It is offline-safe: no provider is constructed and no network call is made.
+- `session list` / `session list --all` are read-only: they never write,
+  delete, migrate, or create files in `.claude/sessions/`. `--all` also never
+  rewrites `~/.rustain/workspaces.json`.
+- They are offline-safe: no provider is constructed and no network call is made.
 - Empty sessions (zero messages) are excluded from the list.
-- Sessions are sorted by `updated_at` descending, tie-broken by `id` ascending,
-  so the order is deterministic and reproducible.
+- Sessions are sorted by `updated_at` descending, tie-broken by `id` ascending
+  in single-workspace mode, or by `(workspace, id)` after `updated_at` in
+  `--all`, so the order is deterministic and reproducible.
 
 ## Future
 
 - `rustain session delete <id>` (Story 13.5b) will delete a session by its
   stable `id`, with an in-use guard for sessions held by a daemon.
-- Cross-workspace listing (`--all`) is planned as Story 13.5a-1 and requires
-  a workspace-registry primitive.
+- Cross-workspace delete will use the composite `(workspace, id)` address that
+  `session list --all --json` already exposes.

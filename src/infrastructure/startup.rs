@@ -14,13 +14,14 @@ use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
+use crate::adapters::workspace_registry::FileWorkspaceRegistry;
 use crate::domain::errors::ProviderError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
 use crate::domain::models::{AutoApprovePolicy, PermissionMode, ProviderConfig, SandboxPolicy};
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProfileResolver, SecurityPort, StoragePort, StreamingProvider,
-    ToolSetPort,
+    ToolSetPort, WorkspaceRegistryReaderPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
@@ -281,18 +282,22 @@ pub async fn run() -> Result<()> {
     // and non-billable (AC5/AC6).
     if let Some(Command::Session { action }) = &cli.command {
         match action {
-            SessionAction::List { json } => {
+            SessionAction::List { json, all } => {
                 let workspace = paths::workspace_dir()?;
                 let sessions_dir = paths::sessions_dir(&workspace);
                 let storage: Arc<dyn StoragePort> = Arc::new(
-                    FileSystemStorage::with_workspace_root(sessions_dir, workspace),
+                    FileSystemStorage::with_workspace_root(sessions_dir, workspace.clone()),
                 );
-                return crate::adapters::cli::session::list::run_session_list(*json, &storage)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Session list subcommand failed: {e}");
-                        SubcommandExit.into()
-                    });
+                let reader: Arc<dyn WorkspaceRegistryReaderPort> =
+                    Arc::new(FileWorkspaceRegistry::new()?);
+                return crate::adapters::cli::session::list::run_session_list(
+                    *json, *all, &workspace, &storage, &reader,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Session list subcommand failed: {e}");
+                    SubcommandExit.into()
+                });
             }
         }
     }
@@ -1008,10 +1013,10 @@ pub async fn run() -> Result<()> {
     // Story 4-3b P2: pass the real workspace root so `snapshot_file` can enforce
     // path-traversal checks without falling back to the sessions_dir grandparent proxy.
     let tools_sessions_dir = paths::sessions_dir(&workspace_path);
-    let tools_storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        tools_sessions_dir.clone(),
-        workspace_path.clone(),
-    ));
+    let tools_storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(tools_sessions_dir.clone(), workspace_path.clone())
+            .with_workspace_registrar(Arc::new(FileWorkspaceRegistry::new()?)),
+    );
     let shared_skill_registry = Arc::new(tokio::sync::RwLock::new(SkillRegistry::new()));
     let skill_activator = Arc::new(SkillActivator::with_registry(shared_skill_registry));
     skill_activator.set_event_tx(domain_tx.clone()).await;
@@ -1475,6 +1480,7 @@ pub async fn run() -> Result<()> {
         .snapshot_retention
         .or(app_config.snapshot_retention_count);
     let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace_path.clone())
+        .with_workspace_registrar(Arc::new(FileWorkspaceRegistry::new()?))
         .with_snapshot_retention(retention);
     if let Err(e) = storage.ensure_dir().await {
         tracing::warn!("Failed to create sessions directory: {}", e);

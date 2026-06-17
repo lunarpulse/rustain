@@ -2,15 +2,17 @@
 //!
 //! Implements `StoragePort` using async file I/O via `tokio::fs`.
 //! Session files use CC-compatible camelCase JSON format (`.meta.json`).
-
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::domain::errors::StorageError;
 use crate::domain::models::{Conversation, ConversationSummary, ImageReference, SessionMeta};
-use crate::domain::ports::StoragePort;
+use crate::domain::ports::{StoragePort, WorkspaceRegistrarPort};
 
 /// Compute a content-addressed hash of image bytes for filename generation.
 ///
@@ -61,7 +63,6 @@ pub enum SessionLayout {
 ///
 /// Stores each conversation as `{sessions_dir}/{id}.meta.json` (flat) or
 /// `{sessions_dir}/{id}/` (directory layout, used when images are attached).
-#[derive(Debug)]
 pub struct FileSystemStorage {
     sessions_dir: PathBuf,
     /// Workspace root used by `snapshot_file` for path-traversal validation.
@@ -69,10 +70,29 @@ pub struct FileSystemStorage {
     /// constructors. Production composition root SHOULD use
     /// [`with_workspace_root`] to pass the real workspace root.
     workspace_root: Option<PathBuf>,
+    /// Best-effort session-persistence side-effect for Story 13.5a-1.
+    workspace_registrar: Option<Arc<dyn WorkspaceRegistrarPort>>,
+    /// Performance throttle only. Correctness lives in the registrar's
+    /// path-keyed upsert; never turn this into a once-latch.
+    last_noted: Arc<AtomicU64>,
     /// Maximum checkpoints to retain per conversation (DF-106).
     /// Older checkpoints are pruned opportunistically in `create_checkpoint`.
     /// `None` = unlimited (test use only). Default: 100.
     snapshot_retention_count: Option<usize>,
+}
+
+impl fmt::Debug for FileSystemStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSystemStorage")
+            .field("sessions_dir", &self.sessions_dir)
+            .field("workspace_root", &self.workspace_root)
+            .field(
+                "has_workspace_registrar",
+                &self.workspace_registrar.is_some(),
+            )
+            .field("snapshot_retention_count", &self.snapshot_retention_count)
+            .finish()
+    }
 }
 
 impl FileSystemStorage {
@@ -86,6 +106,8 @@ impl FileSystemStorage {
         Self {
             sessions_dir,
             workspace_root: None,
+            workspace_registrar: None,
+            last_noted: Arc::new(AtomicU64::new(0)),
             snapshot_retention_count: Some(100),
         }
     }
@@ -98,6 +120,8 @@ impl FileSystemStorage {
         Self {
             sessions_dir,
             workspace_root: Some(workspace_root),
+            workspace_registrar: None,
+            last_noted: Arc::new(AtomicU64::new(0)),
             snapshot_retention_count: Some(100),
         }
     }
@@ -107,6 +131,41 @@ impl FileSystemStorage {
     pub fn with_snapshot_retention(mut self, count: Option<usize>) -> Self {
         self.snapshot_retention_count = count;
         self
+    }
+    /// Opt-in best-effort workspace registration on successful persistence.
+    pub fn with_workspace_registrar(mut self, registrar: Arc<dyn WorkspaceRegistrarPort>) -> Self {
+        self.workspace_registrar = Some(registrar);
+        self
+    }
+
+    /// Best-effort registration after a successful session save.
+    ///
+    /// The `last_noted` atomic is a performance throttle only. Correctness
+    /// lives in the registrar's path-keyed upsert and internal coalescing.
+    async fn maybe_note_workspace(&self) {
+        const NOTE_THROTTLE_SECS: u64 = 300;
+
+        let Some(registrar) = &self.workspace_registrar else {
+            return;
+        };
+        let Some(workspace_root) = &self.workspace_root else {
+            return;
+        };
+
+        let now = crate::infrastructure::clock_util::now_unix().max(0) as u64;
+        let last = self.last_noted.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < NOTE_THROTTLE_SECS {
+            return;
+        }
+
+        match registrar.note_workspace(workspace_root).await {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(
+                workspace = %workspace_root.display(),
+                "failed to note workspace in registry: {err}"
+            ),
+        }
+        self.last_noted.store(now, Ordering::Relaxed);
     }
 
     /// Ensure the sessions directory exists.
@@ -526,7 +585,7 @@ impl FileSystemStorage {
                 );
             }
         }
-
+        self.maybe_note_workspace().await;
         Ok(())
     }
 
@@ -2735,6 +2794,35 @@ mod tests {
             fork_source: None,
             compaction: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_save_conversation_swallows_workspace_registry_error() {
+        struct FailingRegistrar;
+
+        #[async_trait::async_trait]
+        impl WorkspaceRegistrarPort for FailingRegistrar {
+            async fn note_workspace(
+                &self,
+                _workspace: &std::path::Path,
+            ) -> Result<(), crate::domain::ports::WorkspaceRegistryError> {
+                Err(crate::domain::ports::WorkspaceRegistryError::Io(
+                    "boom".to_string(),
+                ))
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::with_workspace_root(
+            tmp.path().join("sessions"),
+            tmp.path().to_path_buf(),
+        )
+        .with_workspace_registrar(Arc::new(FailingRegistrar));
+        let conv = make_test_conversation();
+
+        storage.save_conversation(&conv).await.unwrap();
+
+        assert!(tmp.path().join("sessions/test-conv-123.meta.json").exists());
     }
 
     // 6.1: save_conversation creates valid JSON with camelCase keys

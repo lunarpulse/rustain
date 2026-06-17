@@ -52,6 +52,8 @@ mod tool_exposure;
 mod toolset;
 #[allow(unused_imports)]
 mod usage_ledger;
+#[allow(unused_imports)]
+mod workspace_registry;
 #[cfg(feature = "self-update")]
 pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
@@ -84,3 +86,6 @@ pub use storage::StoragePort;
 pub use tool_exposure::ToolExposurePort;
 pub use toolset::ToolSetPort;
 pub use usage_ledger::UsageLedgerPort;
+pub use workspace_registry::{
+    WorkspaceEntry, WorkspaceRegistrarPort, WorkspaceRegistryError, WorkspaceRegistryReaderPort,
+};

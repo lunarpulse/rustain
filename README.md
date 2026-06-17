@@ -178,12 +178,17 @@ catalog including unconfigured and keyless providers.
 ```sh
 rustain session list              # show saved sessions in current workspace
 rustain session list --json       # structured output for scripts
+rustain session list --all        # merge sessions across registered workspaces
+rustain session list --all --json # same, with absolute workspace addresses
 ```
 
-Sessions are stored per workspace under `.claude/sessions/`. The `*` marker
-in the human table indicates the session that a bare `rustain` command resumes
-by default (most recent). The `id` column is the stable address; use it with
-future `rustain session delete <id>` instead of positional indexes.
+Sessions are stored per workspace under `.claude/sessions/`. `session list --all`
+uses a hint registry at `~/.rustain/workspaces.json`, populated on the first
+successful save per workspace. The `*` marker in the human table indicates the
+session that a bare `rustain` command resumes by default (most recent in the
+current workspace). The `id` column is the stable address; use it with future
+`rustain session delete <id>` instead of positional indexes. In JSON, every row
+now carries an always-present absolute `workspace` field.
 
 ### 🛠️ Develop Rustain
 
