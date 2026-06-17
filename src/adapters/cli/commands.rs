@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::adapters::cli::session::SessionAction;
 use clap::{Parser, Subcommand};
 
 /// Rustain — terminal-native AI coding agent.
@@ -189,6 +190,12 @@ pub enum Command {
     Auth {
         #[command(subcommand)]
         action: AuthAction,
+    },
+    /// List and manage conversation sessions (Story 13.5a, FR125).
+    /// `session list` shows persisted sessions in the current workspace.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
     },
 }
 

@@ -173,6 +173,18 @@ Env vars still win over `~/.rustain/auth.json`; `auth status` reports that
 winning source without probing the network. `auth list` shows the full provider
 catalog including unconfigured and keyless providers.
 
+**Sessions** (conversation history):
+
+```sh
+rustain session list              # show saved sessions in current workspace
+rustain session list --json       # structured output for scripts
+```
+
+Sessions are stored per workspace under `.claude/sessions/`. The `*` marker
+in the human table indicates the session that a bare `rustain` command resumes
+by default (most recent). The `id` column is the stable address; use it with
+future `rustain session delete <id>` instead of positional indexes.
+
 ### 🛠️ Develop Rustain
 
 ```sh

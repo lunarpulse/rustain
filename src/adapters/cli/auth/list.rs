@@ -46,10 +46,8 @@ fn build_list_rows(
     env_lookup: impl Fn(&str) -> Option<String>,
     default_provider_id: &str,
 ) -> Vec<ListRow> {
-    let auth_by_provider: HashMap<&str, &ProviderStatus> = auth_json
-        .iter()
-        .map(|s| (s.provider.as_str(), s))
-        .collect();
+    let auth_by_provider: HashMap<&str, &ProviderStatus> =
+        auth_json.iter().map(|s| (s.provider.as_str(), s)).collect();
 
     providers
         .iter()
@@ -155,10 +153,7 @@ pub async fn run_auth_list(
     tracing::info!(
         subcommand = "auth-list",
         providers = rows.len(),
-        configured = rows
-            .iter()
-            .filter(|r| r.configured == Some(true))
-            .count()
+        configured = rows.iter().filter(|r| r.configured == Some(true)).count()
     );
     Ok(())
 }
@@ -243,7 +238,11 @@ fn human_methods(row: &ListRow) -> String {
     if !row.requires_key {
         return "none (local)".to_string();
     }
-    row.auth_methods.iter().map(auth_method_token).collect::<Vec<_>>().join(", ")
+    row.auth_methods
+        .iter()
+        .map(auth_method_token)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -402,15 +401,15 @@ mod tests {
             "anthropic",
         );
         let openai_env = with_env.iter().find(|r| r.provider == "openai").unwrap();
-        assert_eq!(openai_env.configured, Some(true), "env present → configured");
+        assert_eq!(
+            openai_env.configured,
+            Some(true),
+            "env present → configured"
+        );
 
         // Auth.json only → configured = Some(true).
-        let json_only = build_list_rows(
-            providers::all_providers(),
-            &entries,
-            |_| None,
-            "anthropic",
-        );
+        let json_only =
+            build_list_rows(providers::all_providers(), &entries, |_| None, "anthropic");
         let openai_json = json_only.iter().find(|r| r.provider == "openai").unwrap();
         assert_eq!(
             openai_json.configured,
@@ -471,13 +470,7 @@ mod tests {
         let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
         let default_count = rows.iter().filter(|r| r.is_default).count();
         assert_eq!(default_count, 1, "exactly one default");
-        assert!(
-            rows.iter()
-                .find(|r| r.is_default)
-                .unwrap()
-                .provider
-                == "anthropic"
-        );
+        assert!(rows.iter().find(|r| r.is_default).unwrap().provider == "anthropic");
     }
 
     // P0-5b: Active-default — skips disabled
@@ -552,19 +545,17 @@ api_key_env = "DEEPSEEK_API_KEY"
 
         let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
         let openai_row = rows.iter().find(|r| r.provider == "openai").unwrap();
-        assert!(openai_row.is_default, "config-intent: * even if build would fail");
+        assert!(
+            openai_row.is_default,
+            "config-intent: * even if build would fail"
+        );
     }
 
     // P0-8: --json shape + snake_case
     #[test]
     fn json_shape_snake_case_and_complete() {
         let entries = vec![status("anthropic", Some(fixed_time()))];
-        let rows = build_list_rows(
-            providers::all_providers(),
-            &entries,
-            |_| None,
-            "anthropic",
-        );
+        let rows = build_list_rows(providers::all_providers(), &entries, |_| None, "anthropic");
         let json_str = render_json(&rows).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -587,7 +578,10 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert!(anthropic.get("source").is_none());
 
         // Keyless provider.
-        let ollama = providers_arr.iter().find(|p| p["provider"] == "ollama").unwrap();
+        let ollama = providers_arr
+            .iter()
+            .find(|p| p["provider"] == "ollama")
+            .unwrap();
         assert!(
             ollama["configured"].is_null(),
             "keyless configured should be null, not false"
@@ -606,17 +600,26 @@ api_key_env = "DEEPSEEK_API_KEY"
         let rows = build_list_rows(providers::all_providers(), &[], |_| None, "anthropic");
         let ollama = rows.iter().find(|r| r.provider == "ollama").unwrap();
         assert_eq!(ollama.configured, None, "keyless → None");
-        assert!(ollama.auth_methods.is_empty(), "keyless → empty auth_methods");
+        assert!(
+            ollama.auth_methods.is_empty(),
+            "keyless → empty auth_methods"
+        );
 
         // Negative guard: does NOT echo the placeholder ApiKey.
         assert!(
-            !ollama.auth_methods.iter().any(|m| matches!(m, AuthMethod::ApiKey)),
+            !ollama
+                .auth_methods
+                .iter()
+                .any(|m| matches!(m, AuthMethod::ApiKey)),
             "keyless should not echo placeholder ApiKey"
         );
 
         // Human render.
         let human = render_human(&rows);
-        assert!(human.contains("none (local)"), "human: 'none (local)' for keyless");
+        assert!(
+            human.contains("none (local)"),
+            "human: 'none (local)' for keyless"
+        );
         assert!(human.contains("n/a"), "human: 'n/a' for keyless configured");
 
         // JSON render.
@@ -662,10 +665,8 @@ api_key_env = "DEEPSEEK_API_KEY"
             &auth_entries,
             env_lookup,
         );
-        let status_configured: std::collections::HashSet<&str> = status_rows
-            .iter()
-            .map(|(pid, _)| pid.as_str())
-            .collect();
+        let status_configured: std::collections::HashSet<&str> =
+            status_rows.iter().map(|(pid, _)| pid.as_str()).collect();
 
         // For every key-requiring provider in the static table, list and status
         // must agree on configured-ness.

@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
 use crate::adapters::cli::commands::{AuthAction, Cli, Command, ConfigAction, ProfileAction};
+use crate::adapters::cli::session::SessionAction;
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
 use crate::adapters::persona_adapter::PersonaAdapter;
@@ -266,16 +267,32 @@ pub async fn run() -> Result<()> {
             AuthAction::List { json } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
                     Arc::new(crate::adapters::auth_store::FileAuthStore::new());
-                return crate::adapters::cli::auth::list::run_auth_list(
-                    *json,
-                    &app_config,
-                    &store,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Auth list subcommand failed: {e}");
-                    SubcommandExit.into()
-                });
+                return crate::adapters::cli::auth::list::run_auth_list(*json, &app_config, &store)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Auth list subcommand failed: {e}");
+                        SubcommandExit.into()
+                    });
+            }
+        }
+    }
+    // Story 13.5a — Session subcommand intercept. Runs before provider
+    // construction and terminal setup. `session list` is read-only, offline-safe,
+    // and non-billable (AC5/AC6).
+    if let Some(Command::Session { action }) = &cli.command {
+        match action {
+            SessionAction::List { json } => {
+                let workspace = paths::workspace_dir()?;
+                let sessions_dir = paths::sessions_dir(&workspace);
+                let storage: Arc<dyn StoragePort> = Arc::new(
+                    FileSystemStorage::with_workspace_root(sessions_dir, workspace),
+                );
+                return crate::adapters::cli::session::list::run_session_list(*json, &storage)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Session list subcommand failed: {e}");
+                        SubcommandExit.into()
+                    });
             }
         }
     }

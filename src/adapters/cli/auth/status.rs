@@ -127,7 +127,6 @@ pub fn build_status_rows_for_test(
         .collect()
 }
 
-
 fn auth_json_row(
     provider: &str,
     display_name: &str,
