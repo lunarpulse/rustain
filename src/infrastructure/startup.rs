@@ -74,6 +74,18 @@ pub async fn run() -> Result<()> {
     let _log_guard = logging::init(cli.log_level.as_deref().unwrap_or("info"))?;
     tracing::info!("Starting rustain...");
 
+    let cli_config_overrides = if cli.config_override.is_empty() {
+        None
+    } else {
+        match config::parse_config_overrides(&cli.config_override) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                eprintln!("{e}");
+                return Err(anyhow::anyhow!("Invalid -c override: {e}"));
+            }
+        }
+    };
+
     // Story 8.1 AC-10 — capture CLI snapshot for config reload handler
     let cli_snapshot = Cli {
         log_level: cli.log_level.clone(),
@@ -83,6 +95,7 @@ pub async fn run() -> Result<()> {
         snapshot_retention: cli.snapshot_retention,
         config_file: cli.config_file.clone(),
         model: cli.model.clone(),
+        config_override: cli.config_override.clone(),
         profile: cli.profile.clone(),
         persona: cli.persona.clone(),
         memory: cli.memory.clone(),
@@ -100,7 +113,8 @@ pub async fn run() -> Result<()> {
     //
     // Pass 1: bootstrap config with NoopProfileResolver to discover active_profile name
     let noop = crate::adapters::profile_resolver::noop::NoopProfileResolver;
-    let bootstrap_config = config::load(&cli, &noop);
+    let bootstrap_config =
+        config::load_with_config_overrides(&cli, &noop, cli_config_overrides.as_ref());
 
     // Resolve effective active profile name (CLI > env > config > default "coding")
     let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
@@ -155,7 +169,8 @@ pub async fn run() -> Result<()> {
         }
     };
 
-    let app_config = config::load(&cli, &toml_resolver);
+    let app_config =
+        config::load_with_config_overrides(&cli, &toml_resolver, cli_config_overrides.as_ref());
 
     // Story 9.4 — validate tools.exposure BEFORE AgentCore composition
     if let Err(e) = validate_tools_exposure(&app_config.tools.exposure) {
@@ -462,10 +477,11 @@ pub async fn run() -> Result<()> {
                     });
             }
             ConfigAction::Show { json } => {
-                return crate::adapters::cli::config_cmd::run_config_show(
+                return crate::adapters::cli::config_cmd::run_config_show_with_overrides(
                     *json,
                     &profile_resolver_arc,
                     &cli,
+                    cli_config_overrides.as_ref(),
                 )
                 .await
                 .map_err(|e| {
@@ -490,10 +506,11 @@ pub async fn run() -> Result<()> {
                     });
             }
             ConfigAction::Validate { json } => {
-                return crate::adapters::cli::config_cmd::run_config_validate(
+                return crate::adapters::cli::config_cmd::run_config_validate_with_overrides(
                     *json,
                     &profile_resolver_arc,
                     &cli,
+                    cli_config_overrides.as_ref(),
                 )
                 .await
                 .map_err(|e| {
@@ -1521,6 +1538,7 @@ pub async fn run() -> Result<()> {
         compose_snapshot,
         profile_resolver_swap,
         cli_snapshot,
+        cli_config_overrides.clone(),
         telemetry,
         #[cfg(feature = "meta-search")]
         catalog_registry_for_app_state,

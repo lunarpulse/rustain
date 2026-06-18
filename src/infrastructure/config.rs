@@ -8,6 +8,7 @@
 //!
 //! Layer order (later layers override earlier layers at the key level):
 //!
+//! 0. **`-c` overrides** — dynamic CLI key/value overrides (Story 13.6)
 //! 1. **CLI flags** — `CliOverrides` from `Cli` struct (Story 8.1 AC-2)
 //! 2. **Environment variables** — `RUSTAIN_*` prefixed env vars (Story 8.1 AC-3)
 //! 3. **Local override** — `{workspace}/.claude/rustain-settings.json` (Story 8.1 AC-4)
@@ -21,12 +22,183 @@ use std::path::Path;
 use figment::Figment;
 use figment::providers::{Env, Format, Json, Serialized, Toml};
 use serde::Serialize;
+use serde_json::{Map, Value};
 
 use crate::adapters::cli::commands::Cli;
 use crate::domain::errors::{ConfigError, DomainError};
 use crate::domain::models::AppConfig;
 use crate::domain::ports::ProfileResolver;
 
+pub const CONFIG_OVERRIDE_PRIORITY: u8 = 0;
+pub const CLI_FLAGS_PRIORITY: u8 = 1;
+pub const ENV_VARS_PRIORITY: u8 = 2;
+pub const LOCAL_OVERRIDE_PRIORITY: u8 = 3;
+pub const WORKSPACE_CONFIG_PRIORITY: u8 = 4;
+pub const USER_GLOBAL_CONFIG_PRIORITY: u8 = 5;
+pub const ACTIVE_PROFILE_PRIORITY: u8 = 6;
+pub const BUILT_IN_DEFAULTS_PRIORITY: u8 = 7;
+
+pub const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &[
+    "model",
+    "active_profile",
+    "log_level",
+    "log_max_size_mb",
+    "log_retain_count",
+    "snapshot_retention_count",
+    "skills",
+    "runtime",
+    "layout",
+    "default_plan_mode",
+    "provider",
+    "mouse",
+    "tool_progress",
+    "router",
+    "pricing",
+    "budget",
+    "tools",
+    "assembler",
+    "skill_exposure",
+    "sandbox",
+    "search",
+    "plan",
+    "subagents",
+    "daemon",
+];
+
+const CREDENTIAL_PATH_SEGMENTS: &[&str] = &[
+    "api_key_env",
+    "api_key",
+    "secret",
+    "token",
+    "credential",
+    "password",
+];
+const CREDENTIAL_TOP_LEVEL: &[&str] = &["auth"];
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("{message}")]
+pub struct ConfigOverrideError {
+    message: String,
+}
+
+impl ConfigOverrideError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+pub fn parse_config_overrides(pairs: &[String]) -> Result<Value, ConfigOverrideError> {
+    let mut root = Map::new();
+
+    for pair in pairs {
+        let (key, raw_value) = pair.split_once('=').ok_or_else(|| {
+            ConfigOverrideError::new(format!(
+                "Invalid -c override '{pair}'. Expected KEY=VALUE, for example: -c model=gpt-4o"
+            ))
+        })?;
+        if key.is_empty() {
+            return Err(ConfigOverrideError::new(
+                "Invalid -c override: key must not be empty. Expected KEY=VALUE.",
+            ));
+        }
+
+        let segments: Vec<&str> = key.split('.').collect();
+        if segments.iter().any(|segment| segment.is_empty()) {
+            return Err(ConfigOverrideError::new(format!(
+                "Invalid -c override '{key}': dot-path segments must not be empty."
+            )));
+        }
+
+        validate_config_override_key(key, &segments)?;
+        warn_unknown_config_override_top_level(key, segments[0]);
+        insert_config_override_value(&mut root, &segments, raw_value)?;
+    }
+
+    Ok(Value::Object(root))
+}
+
+fn validate_config_override_key(key: &str, segments: &[&str]) -> Result<(), ConfigOverrideError> {
+    if let Some(blocked) = segments
+        .iter()
+        .find(|segment| CREDENTIAL_PATH_SEGMENTS.contains(segment))
+    {
+        let provider = provider_hint_for_segments(segments);
+        if *blocked == "api_key_env" {
+            return Err(ConfigOverrideError::new(format!(
+                "Cannot set credential-adjacent key '{key}' via -c (credential keys are restricted). To change the env var source, edit your config file or use: rustain auth login {provider}"
+            )));
+        }
+        return Err(ConfigOverrideError::new(format!(
+            "Cannot set credential key '{key}' via -c (secrets would appear in shell history). Use: rustain auth login {provider}"
+        )));
+    }
+
+    if CREDENTIAL_TOP_LEVEL.contains(&segments[0]) {
+        return Err(ConfigOverrideError::new(format!(
+            "Cannot set credential key '{key}' via -c (secrets would appear in shell history). Use: rustain auth login <provider>"
+        )));
+    }
+
+    Ok(())
+}
+
+fn provider_hint_for_segments<'a>(segments: &'a [&'a str]) -> &'a str {
+    if segments.len() > 1 && segments[0] == "provider" {
+        segments[1]
+    } else {
+        "<provider>"
+    }
+}
+
+fn warn_unknown_config_override_top_level(key: &str, top_level: &str) {
+    if KNOWN_TOP_LEVEL_FIELDS.contains(&top_level) {
+        return;
+    }
+    let message = format!(
+        "warning: unknown config key '{top_level}' from -c '{key}'. The key will still be passed to the config loader. Known keys include: model, provider, router, tools, daemon"
+    );
+    tracing::warn!("{message}");
+    eprintln!("{message}");
+}
+
+fn insert_config_override_value(
+    root: &mut Map<String, Value>,
+    segments: &[&str],
+    raw_value: &str,
+) -> Result<(), ConfigOverrideError> {
+    let leaf = segments[segments.len() - 1];
+    let mut current = root;
+    for (depth, segment) in segments[..segments.len() - 1].iter().enumerate() {
+        let depth = depth + 1;
+        let entry = current
+            .entry((*segment).to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !entry.is_object() {
+            let prior_key = segments[..depth].join(".");
+            let conflict_key = segments.join(".");
+            return Err(ConfigOverrideError::new(format!(
+                "Conflicting -c overrides: '{prior_key}' and '{conflict_key}' cannot both be set."
+            )));
+        }
+        current = entry
+            .as_object_mut()
+            .expect("entry was just verified to be object");
+    }
+
+    let value = serde_json::from_str::<Value>(raw_value)
+        .unwrap_or_else(|_| Value::String(raw_value.to_owned()));
+    if !matches!(value, Value::String(_) | Value::Bool(_) | Value::Number(_)) {
+        return Err(ConfigOverrideError::new(format!(
+            "Invalid -c value for '{key}': arrays, objects, and null are not supported. Use scalar values (strings, numbers, booleans).",
+            key = segments.join(".")
+        )));
+    }
+
+    current.insert(leaf.to_string(), value);
+    Ok(())
+}
 /// CLI overrides for the figment chain (Story 8.1 AC-2).
 /// Each field is an `Option` — absent flags contribute nothing to the layer.
 #[derive(Serialize, Default)]
@@ -99,7 +271,15 @@ impl From<&Cli> for CliOverrides {
 /// figment errors occur. Malformed files trigger a `tracing::error!` and
 /// fall through to the next layer (file is skipped, not fatal).
 pub fn load(cli: &Cli, profile_resolver: &dyn ProfileResolver) -> AppConfig {
-    match try_load(cli, profile_resolver) {
+    load_with_config_overrides(cli, profile_resolver, None)
+}
+
+pub fn load_with_config_overrides(
+    cli: &Cli,
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+) -> AppConfig {
+    match try_load_with_config_overrides(cli, profile_resolver, cli_config_overrides) {
         Ok(config) => config,
         Err(e) => {
             tracing::error!(
@@ -119,7 +299,15 @@ pub fn try_load(
     cli: &Cli,
     profile_resolver: &dyn ProfileResolver,
 ) -> Result<AppConfig, DomainError> {
-    let figment = build_figment(cli, profile_resolver);
+    try_load_with_config_overrides(cli, profile_resolver, None)
+}
+
+pub fn try_load_with_config_overrides(
+    cli: &Cli,
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+) -> Result<AppConfig, DomainError> {
+    let figment = build_figment(cli, profile_resolver, cli_config_overrides);
 
     let mut config: AppConfig = figment.extract().map_err(|e| {
         DomainError::Config(ConfigError::Extract {
@@ -139,12 +327,16 @@ pub fn try_load(
     Ok(config)
 }
 
-/// Build the full 7-layer figment chain.
+/// Build the full config figment chain.
 ///
 /// File-layer paths are derived from `config_layer_paths()` (the shared
 /// source of truth introduced in Story 13.2a AC4) so `build_figment`,
 /// `config path`, and `config edit` all agree.
-fn build_figment(cli: &Cli, profile_resolver: &dyn ProfileResolver) -> Figment {
+fn build_figment(
+    cli: &Cli,
+    profile_resolver: &dyn ProfileResolver,
+    cli_config_overrides: Option<&Value>,
+) -> Figment {
     let layers = match crate::adapters::cli::config_cmd::config_layer_paths(cli) {
         Ok(layers) => layers,
         Err(e) => {
@@ -159,31 +351,40 @@ fn build_figment(cli: &Cli, profile_resolver: &dyn ProfileResolver) -> Figment {
     let mut figment = Figment::new();
     for layer in layers.iter().rev() {
         match layer.priority {
-            7 => figment = figment.merge(Serialized::defaults(AppConfig::default())),
-            6 => {
+            CONFIG_OVERRIDE_PRIORITY => {}
+            BUILT_IN_DEFAULTS_PRIORITY => {
+                figment = figment.merge(Serialized::defaults(AppConfig::default()));
+            }
+            ACTIVE_PROFILE_PRIORITY => {
                 if let Some(profile_value) = profile_resolver.resolve_active_profile_defaults() {
                     figment = figment.merge(Serialized::defaults(profile_value));
                 }
             }
-            5 => {
+            USER_GLOBAL_CONFIG_PRIORITY => {
                 if let Some(path) = &layer.path {
                     figment = merge_toml_if_valid(figment, path, "user-global");
                 }
             }
-            4 => {
+            WORKSPACE_CONFIG_PRIORITY => {
                 if let Some(path) = &layer.path {
                     figment = merge_toml_if_valid(figment, path, "workspace");
                 }
             }
-            3 => {
+            LOCAL_OVERRIDE_PRIORITY => {
                 if let Some(path) = &layer.path {
                     figment = merge_json_if_valid(figment, path, "local-override");
                 }
             }
-            2 => figment = figment.merge(Env::prefixed("RUSTAIN_").split("__")),
-            1 => figment = figment.merge(Serialized::globals(CliOverrides::from(cli))),
+            ENV_VARS_PRIORITY => figment = figment.merge(Env::prefixed("RUSTAIN_").split("__")),
+            CLI_FLAGS_PRIORITY => {
+                figment = figment.merge(Serialized::globals(CliOverrides::from(cli)));
+            }
             _ => {}
         }
+    }
+
+    if let Some(overrides) = cli_config_overrides {
+        figment = figment.merge(Serialized::globals(overrides));
     }
 
     figment
@@ -200,6 +401,7 @@ pub fn load_default() -> AppConfig {
         snapshot_retention: None,
         config_file: None,
         model: None,
+        config_override: Vec::new(),
         profile: None,
         persona: None,
         memory: None,
@@ -304,6 +506,7 @@ mod tests {
             snapshot_retention: None,
             config_file: None,
             model: None,
+            config_override: Vec::new(),
             profile: None,
             persona: None,
             memory: None,
@@ -775,5 +978,100 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("claude-sonnet-4-6")
         );
+    }
+
+    #[test]
+    fn config_override_parser_builds_typed_deep_merge_tree() {
+        let pairs = vec![
+            "provider.ollama.base_url=http://localhost:11434/v1".to_string(),
+            "provider.ollama.model_id=llama3.2".to_string(),
+            "router.threshold_tokens=100000".to_string(),
+            "default_plan_mode=true".to_string(),
+            "model=".to_string(),
+            "base_url=http://host?key=val".to_string(),
+        ];
+
+        let value = parse_config_overrides(&pairs).expect("valid -c overrides");
+
+        assert_eq!(
+            value
+                .pointer("/provider/ollama/base_url")
+                .and_then(|v| v.as_str()),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            value
+                .pointer("/provider/ollama/model_id")
+                .and_then(|v| v.as_str()),
+            Some("llama3.2")
+        );
+        assert_eq!(
+            value
+                .pointer("/router/threshold_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(100000)
+        );
+        assert_eq!(
+            value
+                .pointer("/default_plan_mode")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(value.pointer("/model").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(
+            value.pointer("/base_url").and_then(|v| v.as_str()),
+            Some("http://host?key=val")
+        );
+    }
+
+    #[test]
+    fn config_override_parser_rejects_credentials_and_malformed_only() {
+        for pair in [
+            "api_key_env=X",
+            "provider.openai.api_key_env=X",
+            "auth.token=X",
+            "secret=X",
+            "model",
+            "=value",
+            "..key=value",
+            "key..sub=value",
+        ] {
+            assert!(
+                parse_config_overrides(&[pair.to_string()]).is_err(),
+                "{pair} must fail"
+            );
+        }
+
+        for pair in [
+            "provider.ollama.model_id=X",
+            "provider.openai.base_url=http://localhost",
+            "model=gpt-4o",
+            "router.threshold_tokens=100000",
+            "tokenizer=cl100k",
+            "secretary=enabled",
+            "credentials_note=metadata-only",
+            "nonexistent.key=value",
+        ] {
+            assert!(
+                parse_config_overrides(&[pair.to_string()]).is_ok(),
+                "{pair} must pass"
+            );
+        }
+    }
+
+    #[test]
+    fn config_override_layer_beats_typed_cli_flags() {
+        let cli = Cli {
+            model: Some("typed-model".to_string()),
+            ..test_cli()
+        };
+        let overrides =
+            parse_config_overrides(&["model=override-model".to_string()]).expect("override parses");
+
+        let config: AppConfig = build_figment(&cli, &NoopProfileResolver, Some(&overrides))
+            .extract()
+            .expect("extract config");
+
+        assert_eq!(config.model, "override-model");
     }
 }

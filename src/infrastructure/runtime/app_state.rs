@@ -65,6 +65,8 @@ pub struct AppState {
     pub profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     /// CLI snapshot for config reload (Story 8.1 AC-10).
     pub cli_snapshot: crate::adapters::cli::commands::Cli,
+    /// Pre-parsed `-c` overrides so TUI config reload preserves them (Story 13.6).
+    pub cli_config_overrides: Option<serde_json::Value>,
     /// Story 9.5 — telemetry aggregator for 7-day rolling-window active-ratio
     /// metrics + adapter-status panel warning surface.
     pub telemetry: Arc<ActiveRatioWindow>,
@@ -94,6 +96,7 @@ impl AppState {
         compose_snapshot: Arc<ComposeContext>,
         profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
         cli_snapshot: crate::adapters::cli::commands::Cli,
+        cli_config_overrides: Option<serde_json::Value>,
         telemetry: Arc<ActiveRatioWindow>,
         #[cfg(feature = "meta-search")]
         catalog_registry: Option<Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>>,
@@ -122,6 +125,7 @@ impl AppState {
                 compose_snapshot,
                 profile_resolver,
                 cli_snapshot,
+                cli_config_overrides,
                 telemetry,
                 #[cfg(feature = "meta-search")]
                 catalog_registry,

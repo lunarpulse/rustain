@@ -1,11 +1,12 @@
 # Configuration
 
-rustain merges configuration from 7 layers using [figment](https://crates.io/crates/figment). Each layer fills in values not set by higher-priority layers — field-level merge, not whole-file replacement.
+rustain merges configuration from 8 possible layers using [figment](https://crates.io/crates/figment). Each layer fills in values not set by higher-priority layers — field-level merge, not whole-file replacement.
 
 ## Layer priority (highest to lowest)
 
 | # | Layer | Source | Format |
 |---|-------|--------|--------|
+| 0 | `-c` / `--set` overrides | `-c key=value`, `--set router.threshold_tokens=100000` | Parsed scalar key/value |
 | 1 | CLI flags | `--model`, `--log-level`, `--snapshot-retention`, `--config-file` | Parsed args |
 | 2 | Environment | `RUSTAIN_*` prefixed env vars | Env |
 | 3 | Local override | `<workspace>/.claude/rustain-settings.json` | JSON (camelCase) |
@@ -23,6 +24,7 @@ The *highest* layer that defines a key wins. Lower layers fill in fields not tou
 | TOML (layers 4, 5, 6) | `snake_case` | `log_level`, `daily_limit_usd`, `cache_ttl_seconds` |
 | JSON (layer 3) | `camelCase` | `logLevel`, `dailyLimitUsd`, `cacheTtlSeconds` |
 | Env (layer 2) | `snake_case` with `__` nesting | `RUSTAIN_LOG_LEVEL=debug`, `RUSTAIN_BUDGET__DAILY_LIMIT_USD=5.00` |
+| `-c` / `--set` (layer 0) | dot-path `snake_case` | `-c model=gpt-4o`, `-c router.threshold_tokens=100000` |
 
 ## Configuration reloading
 
@@ -41,6 +43,16 @@ On reload, malformed config is skipped and the previous config remains active. A
 ```sh
 rustain --model claude-opus-4-7
 ```
+
+### Override one invocation with `-c` / `--set`
+
+```sh
+rustain ask \"summarize this\" -c model=gpt-4o -c router.threshold_tokens=100000
+```
+
+`-c` is ephemeral and is not written to any config file. Dot-path keys map to nested config sections, and values are scalar JSON leaves: numbers, booleans, `null`, or strings. Array/map replacement is intentionally out of scope; use a config file for those.
+
+Credential-like keys are rejected because command-line arguments can leak through shell history or process listings. Use `rustain auth login <provider>` for API keys and tokens.
 
 ### Override log level via env
 

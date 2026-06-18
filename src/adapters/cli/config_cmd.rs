@@ -49,11 +49,11 @@ pub struct LayerDescriptor {
     pub path: Option<PathBuf>,
     /// Whether the path exists on disk (always `false` for non-file layers).
     pub exists: bool,
-    /// Priority rank: 1 = highest (CLI flags), 7 = lowest (built-in defaults).
+    /// Priority rank: 0 = highest (`-c` overrides), 1 = CLI flags, 7 = built-in defaults.
     pub priority: u8,
 }
 
-/// Compute the 7-layer descriptor list for the figment merge chain.
+/// Compute the config descriptor list for the figment merge chain.
 ///
 /// This is the single source of truth for layer ordering. Both `build_figment`
 /// (which BUILDS the config) and `config path`/`config edit` (which REPORT it)
@@ -76,50 +76,61 @@ pub fn config_layer_paths(cli: &Cli) -> Result<Vec<LayerDescriptor>> {
     let user_global_path =
         dirs::home_dir().map(|h| h.join(".config").join("rustain").join("config.toml"));
 
-    Ok(vec![
+    let mut layers = Vec::with_capacity(8);
+    if !cli.config_override.is_empty() {
+        layers.push(LayerDescriptor {
+            kind: "-c CLI overrides",
+            path: None,
+            exists: false,
+            priority: crate::infrastructure::config::CONFIG_OVERRIDE_PRIORITY,
+        });
+    }
+    layers.extend([
         LayerDescriptor {
             kind: "CLI flags",
             path: None,
             exists: false,
-            priority: 1,
+            priority: crate::infrastructure::config::CLI_FLAGS_PRIORITY,
         },
         LayerDescriptor {
             kind: "RUSTAIN_* env vars",
             path: None,
             exists: false,
-            priority: 2,
+            priority: crate::infrastructure::config::ENV_VARS_PRIORITY,
         },
         LayerDescriptor {
             kind: "local override (rustain-settings.json)",
             path: Some(local_override_path.clone()),
             exists: local_override_path.exists(),
-            priority: 3,
+            priority: crate::infrastructure::config::LOCAL_OVERRIDE_PRIORITY,
         },
         LayerDescriptor {
             kind: "workspace config",
             path: Some(workspace_path.clone()),
             exists: workspace_path.exists(),
-            priority: 4,
+            priority: crate::infrastructure::config::WORKSPACE_CONFIG_PRIORITY,
         },
         LayerDescriptor {
             kind: "user-global config",
             path: user_global_path.clone(),
             exists: user_global_path.as_ref().is_some_and(|p| p.exists()),
-            priority: 5,
+            priority: crate::infrastructure::config::USER_GLOBAL_CONFIG_PRIORITY,
         },
         LayerDescriptor {
             kind: "active profile defaults",
             path: None,
             exists: false,
-            priority: 6,
+            priority: crate::infrastructure::config::ACTIVE_PROFILE_PRIORITY,
         },
         LayerDescriptor {
             kind: "built-in defaults",
             path: None,
             exists: false,
-            priority: 7,
+            priority: crate::infrastructure::config::BUILT_IN_DEFAULTS_PRIORITY,
         },
-    ])
+    ]);
+
+    Ok(layers)
 }
 // ---------------------------------------------------------------------------
 // Fail-closed ConfigDisplay DTO (Story 13.2a AC2 — OQ3 resolution)
@@ -473,7 +484,20 @@ pub async fn render_config_show(
     profile_resolver: &Arc<dyn ProfileResolver>,
     cli: &Cli,
 ) -> Result<String> {
-    let config = match crate::infrastructure::config::try_load(cli, profile_resolver.as_ref()) {
+    render_config_show_with_overrides(json, profile_resolver, cli, None).await
+}
+
+pub async fn render_config_show_with_overrides(
+    json: bool,
+    profile_resolver: &Arc<dyn ProfileResolver>,
+    cli: &Cli,
+    cli_config_overrides: Option<&serde_json::Value>,
+) -> Result<String> {
+    let config = match crate::infrastructure::config::try_load_with_config_overrides(
+        cli,
+        profile_resolver.as_ref(),
+        cli_config_overrides,
+    ) {
         Ok(c) => c,
         Err(e) => {
             // Log the original error (may contain raw config values) for diagnostics,
@@ -507,6 +531,18 @@ pub async fn render_config_show(
 /// `std::env::var()` or `env_var_trimmed` calls — it serializes the resolved
 /// config as-loaded. The config holds env-var *names* (`api_key_env`), not
 /// secret values.
+pub async fn run_config_show_with_overrides(
+    json: bool,
+    profile_resolver: &Arc<dyn ProfileResolver>,
+    cli: &Cli,
+    cli_config_overrides: Option<&serde_json::Value>,
+) -> Result<()> {
+    let output =
+        render_config_show_with_overrides(json, profile_resolver, cli, cli_config_overrides)
+            .await?;
+    println!("{output}");
+    Ok(())
+}
 pub async fn run_config_show(
     json: bool,
     profile_resolver: &Arc<dyn ProfileResolver>,
@@ -624,6 +660,12 @@ pub fn render_config_path(json: bool, cli: &Cli) -> Result<String> {
                     "priority".into(),
                     serde_json::Value::Number(l.priority.into()),
                 );
+                if l.priority == crate::infrastructure::config::CONFIG_OVERRIDE_PRIORITY {
+                    obj.insert(
+                        "pairs".into(),
+                        serde_json::Value::Number(cli.config_override.len().into()),
+                    );
+                }
                 if let Some(p) = &l.path {
                     obj.insert(
                         "path".into(),
@@ -645,6 +687,17 @@ pub fn render_config_path(json: bool, cli: &Cli) -> Result<String> {
                 } else {
                     format!("✗ {} — {} (absent)", layer.kind, p.display())
                 }
+            } else if layer.priority == crate::infrastructure::config::CONFIG_OVERRIDE_PRIORITY {
+                format!(
+                    "· {} ({} {})",
+                    layer.kind,
+                    cli.config_override.len(),
+                    if cli.config_override.len() == 1 {
+                        "pair"
+                    } else {
+                        "pairs"
+                    }
+                )
             } else {
                 format!("· {} (non-file layer)", layer.kind)
             };
@@ -673,7 +726,20 @@ pub async fn run_config_validate(
     profile_resolver: &Arc<dyn ProfileResolver>,
     cli: &Cli,
 ) -> Result<()> {
-    match crate::infrastructure::config::try_load(cli, profile_resolver.as_ref()) {
+    run_config_validate_with_overrides(json, profile_resolver, cli, None).await
+}
+
+pub async fn run_config_validate_with_overrides(
+    json: bool,
+    profile_resolver: &Arc<dyn ProfileResolver>,
+    cli: &Cli,
+    cli_config_overrides: Option<&serde_json::Value>,
+) -> Result<()> {
+    match crate::infrastructure::config::try_load_with_config_overrides(
+        cli,
+        profile_resolver.as_ref(),
+        cli_config_overrides,
+    ) {
         Ok(_config) => {
             if json {
                 println!(

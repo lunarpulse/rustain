@@ -29,6 +29,8 @@ pub struct ReloadContext<'a> {
     pub cli: &'a Cli,
     pub config_store: &'a dyn ConfigStorePort,
     pub profile_store: &'a Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
+    /// Pre-parsed `-c` overrides from startup so reload does not silently drop them.
+    pub cli_config_overrides: Option<&'a serde_json::Value>,
     /// Story 8.3 AC-8 — AgentCore for re-composition on profile change.
     pub agent_core: &'a Arc<crate::infrastructure::runtime::agent_core::AgentCore>,
     /// Story 8.3 AC-8 — ComposeContext snapshot for reload-time re-composition.
@@ -38,7 +40,12 @@ pub struct ReloadContext<'a> {
 pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutcome {
     // Pass 1: bootstrap with NoopProfileResolver to discover active_profile
     let noop = crate::adapters::profile_resolver::noop::NoopProfileResolver;
-    let bootstrap = crate::infrastructure::config::try_load(ctx.cli, &noop);
+    let cli_config_overrides = ctx.cli_config_overrides;
+    let bootstrap = crate::infrastructure::config::try_load_with_config_overrides(
+        ctx.cli,
+        &noop,
+        cli_config_overrides,
+    );
     let effective_name = ctx
         .cli
         .profile
@@ -87,8 +94,11 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
         };
 
     let resolver_ref = new_resolver.as_deref();
-    let result = crate::infrastructure::config::try_load(ctx.cli, resolver_ref.unwrap_or(&noop));
-
+    let result = crate::infrastructure::config::try_load_with_config_overrides(
+        ctx.cli,
+        resolver_ref.unwrap_or(&noop),
+        cli_config_overrides,
+    );
     match result {
         Ok(new_config) => {
             ctx.config_store.store(new_config);
@@ -211,6 +221,7 @@ mod tests {
             snapshot_retention: None,
             model: None,
             config_file: None,
+            config_override: Vec::new(),
             profile: None,
             persona: None,
             memory: None,
@@ -271,6 +282,7 @@ mod tests {
             cli: &test_cli(),
             config_store: &store,
             profile_store: &profile_swap,
+            cli_config_overrides: None,
             agent_core: &agent_core_arc,
             compose_snapshot: &compose_snapshot_arc,
         };

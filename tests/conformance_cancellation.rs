@@ -318,6 +318,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             snapshot_retention: None,
             config_file: None,
             model: None,
+            config_override: Vec::new(),
             profile: None,
             persona: None,
             memory: None,
@@ -330,6 +331,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             skill_exposure: None,
             sandbox_adapter: None,
         },
+        None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,

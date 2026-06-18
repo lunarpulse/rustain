@@ -33,6 +33,10 @@ pub struct Cli {
     /// Path to a workspace-level config file (overrides {workspace}/.rustain/config.toml)
     #[arg(long)]
     pub config_file: Option<PathBuf>,
+
+    /// Override a config value for this invocation only. Dot-paths for nested keys: -c router.threshold_tokens=100000. See available keys: rustain config show --json
+    #[arg(short = 'c', long = "set", global = true, value_name = "KEY=VALUE")]
+    pub config_override: Vec<String>,
     /// Active profile name. Overrides RUSTAIN_PROFILE env var and active_profile config field. Default: coding.
     #[arg(long, short = 'p', global = true)]
     pub profile: Option<String>,

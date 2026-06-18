@@ -37,6 +37,7 @@ mod tests {
             snapshot_retention: None,
             config_file: None,
             model: None,
+            config_override: Vec::new(),
             profile: profile.map(|s| s.to_string()),
             persona: None,
             memory: None,

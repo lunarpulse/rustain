@@ -33,6 +33,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         snapshot_retention: None,
         config_file: None,
         model: None,
+        config_override: Vec::new(),
         profile: None,
         persona: None,
         memory: None,
@@ -118,6 +119,7 @@ fn test_app_state_honors_raw_capacity() {
         )
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
+        None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,
@@ -196,6 +198,7 @@ fn test_app_state_session_cancel_is_root_token() {
         )
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
+        None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,

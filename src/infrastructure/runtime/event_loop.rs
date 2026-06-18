@@ -7410,6 +7410,7 @@ pub async fn run(
                             cli: &app_state.cli_snapshot,
                             config_store: app_state.config_store.as_ref(),
                             profile_store: &app_state.profile_resolver,
+                            cli_config_overrides: app_state.cli_config_overrides.as_ref(),
                             // Story 8.3 AC-8 — pass AgentCore + ComposeContext for reload re-composition
                             agent_core: &app_state.agent_core,
                             compose_snapshot: &app_state.compose_snapshot,
