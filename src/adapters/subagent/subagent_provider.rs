@@ -223,7 +223,6 @@ impl SubagentProvider {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let tier_hint = input.get("tier_hint").and_then(|v| v.as_str());
-
         let _ = description;
 
         // 2. Resolve agent definition
@@ -556,6 +555,12 @@ impl SubagentProvider {
         let mut task_input = input;
         if task_input.get("subagent_type").is_none() {
             task_input["subagent_type"] = serde_json::json!(id.tool);
+        }
+        // Legacy agent schemas advertise only `prompt` (see discover(), ~:143-160);
+        // supply a default `description` so the shared `invoke_task` validator
+        // passes. The agent name is a faithful short label for the task.
+        if task_input.get("description").is_none() {
+            task_input["description"] = serde_json::json!(id.tool);
         }
         self.invoke_task(task_input, cancel).await
     }

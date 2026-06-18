@@ -357,6 +357,12 @@ Three built-in profiles ship with the binary:
 Switch at runtime via the TUI or CLI. Custom profiles are TOML files in
 `~/.rustain/profiles/` or `.rustain/profiles/`.
 
+**Subagent delegation** (`task` tool, `@Agents/<name>`, plan delegation) requires
+the `composite` tools adapter, which only **`coding`** selects by default. `base`
+and custom profiles that extend it compose a plain builtin tools adapter and will
+**not** expose the `task` tool — `rustain doctor` reports this on the `Profiles`
+line. To enable delegation in any profile, set `[tools] adapter = "composite"`.
+
 ## Four-layer extensibility
 
 ```

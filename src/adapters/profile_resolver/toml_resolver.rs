@@ -148,18 +148,24 @@ impl TomlProfileResolver {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
 
-            // Auto-rewrite "composite" to "builtin-full" if no MCP servers configured
-            if let Some(tools_ref) = resolved
-                .selection
-                .dimensions
-                .get_mut(&crate::domain::models::PortDimension::Tools)
-            {
-                if tools_ref.adapter == "composite" && resolved.mcp_servers.is_empty() {
-                    tracing::warn!(
-                        "Profile '{}' selects composite tools adapter but defines no MCP servers and workspace has no .claude/mcp.json. Falling back to 'builtin-full'.",
-                        active_name
-                    );
-                    tools_ref.adapter = "builtin-full".to_string();
+            // ADR-10-5 S1: "composite" exists only when the `mcp` cargo feature is
+            // enabled. Gate the fallback on feature *availability*, not on configured
+            // server count — an mcp-enabled workspace with zero MCP servers still hosts
+            // the builtin/skill/subagent providers through the composite adapter.
+            if cfg!(not(feature = "mcp")) {
+                if let Some(tools_ref) = resolved
+                    .selection
+                    .dimensions
+                    .get_mut(&crate::domain::models::PortDimension::Tools)
+                {
+                    if tools_ref.adapter == "composite" {
+                        tracing::warn!(
+                            "Profile '{}' selects the composite tools adapter but the 'mcp' \
+                             cargo feature is disabled; falling back to 'builtin-full'.",
+                            active_name
+                        );
+                        tools_ref.adapter = "builtin-full".to_string();
+                    }
                 }
             }
         }

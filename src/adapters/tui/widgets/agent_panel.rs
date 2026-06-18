@@ -48,7 +48,7 @@ pub fn render(
                     .add_modifier(Modifier::ITALIC),
             )),
             Line::from(Span::styled(
-                "Spawn one with `rustain spawn --agent <name>` or via plan delegation.",
+                "Ask the assistant to delegate or use plan mode.",
                 Style::default()
                     .fg(theme.colors.fg_muted)
                     .add_modifier(Modifier::ITALIC),

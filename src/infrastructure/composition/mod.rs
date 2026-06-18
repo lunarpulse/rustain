@@ -540,13 +540,6 @@ pub fn build_tools(
         }
         #[cfg(feature = "mcp")]
         "composite" => {
-            if ctx.mcp_servers.is_empty() {
-                return Err(AdapterCompositionError::MissingComposeContext {
-                    port: PortDimension::Tools,
-                    name: name.to_string(),
-                    missing_field: "mcp_servers (empty Vec) — composite requires at least one server; profile should use 'builtin-full' instead".into(),
-                });
-            }
             let builtin = build_tools("builtin-full", None, ctx)?;
             let mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>> = ctx
                 .mcp_servers
@@ -1771,15 +1764,16 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mcp")]
-    fn test_build_tools_composite_empty_fails() {
+    fn test_build_tools_composite_empty_succeeds() {
+        // ADR-10-5 S1: composite must compose with zero MCP servers — MCP is an
+        // additive capability provider, not constitutive of the adapter. The default
+        // `coding` profile relies on this (it selects composite with no MCP config).
         let ctx = test_compose_ctx();
         let result = build_tools("composite", None, &ctx);
-        match result {
-            Err(AdapterCompositionError::MissingComposeContext { port, .. }) => {
-                assert_eq!(port, PortDimension::Tools);
-            }
-            _ => panic!("expected MissingComposeContext for composite with empty mcp_servers"),
-        }
+        assert!(
+            result.is_ok(),
+            "composite must compose with zero MCP servers (ADR-10-5 S1)"
+        );
     }
 
     #[test]
