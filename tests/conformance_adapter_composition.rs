@@ -90,10 +90,26 @@ fn test_all_catalog_names_dispatched() {
                     }
                     _ => build_tools(name, None, &ctx).is_ok(),
                 },
-                PortDimension::Channels => match build_channels(name, None, &ctx) {
-                    Ok(_) => true,
-                    Err(e) => e.to_string().contains("feature not compiled"),
-                },
+                PortDimension::Channels => {
+                    let (turn_tx, _turn_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<
+                            rustain::domain::models::ChannelTurnRequest,
+                        >();
+                    let mut telegram_ctx = ctx.clone();
+                    telegram_ctx.channel_turn_tx = Some(turn_tx);
+                    let telegram_config = toml::Value::try_from(toml::toml! {
+                        bot_token = "dummy-token"
+                        allowed_chat_ids = [1]
+                    })
+                    .expect("static telegram config");
+                    match *name {
+                        "telegram" => build_channels(name, Some(&telegram_config), &telegram_ctx).is_ok(),
+                        _ => match build_channels(name, None, &ctx) {
+                            Ok(_) => true,
+                            Err(e) => e.to_string().contains("feature not compiled"),
+                        },
+                    }
+                }
                 PortDimension::Scheduler => match build_scheduler(name, None, &ctx) {
                     Ok(_) => true,
                     Err(e) => e.to_string().contains("feature not compiled"),

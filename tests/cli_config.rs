@@ -231,9 +231,9 @@ fn p0_2b_resolve_editor_increments_env_var_trimmed_counter() {
 
 /// P0-3a: Valid config → exit 0, no provider constructed.
 #[tokio::test]
+#[serial]
 async fn p0_3a_config_validate_valid_no_provider_constructed() {
     use rustain::infrastructure::provider_factory::PROVIDER_CTOR_COUNT;
-
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, "model = \"test\"\n").unwrap();
