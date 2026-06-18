@@ -615,3 +615,52 @@ fn test_filtered_skill_catalog_serde_round_trip() {
     let back: FilteredSkillCatalog = serde_json::from_str(&json).unwrap();
     assert_eq!(back.len(), 1);
 }
+
+#[tokio::test]
+async fn test_skill_view_execution() {
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::toolset_adapter::ToolSetAdapter;
+    use rustain::domain::ports::ToolSetPort;
+    use tokio_util::sync::CancellationToken;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let sessions = ws.join(".claude").join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let storage: Arc<dyn rustain::domain::ports::StoragePort> =
+        Arc::new(FileSystemStorage::new(sessions));
+
+    let mut tools = ToolSetAdapter::new(
+        ws,
+        Arc::clone(&storage),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(rustain::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn rustain::domain::ports::SandboxManager>,
+        )),
+        Arc::new(tokio::sync::RwLock::new(
+            rustain::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
+    );
+
+    let cache = test_cache();
+    let meta = SkillMetadata {
+        name: "test-skill-view".into(),
+        description: "Test skill description".into(),
+        source: SkillSource::WorkspaceAgents,
+        terse: None,
+    };
+    cache.insert("test-skill-view", meta, "test skill body".into()).await;
+
+    tools.set_skill_cache(cache);
+
+    let input = serde_json::json!({
+        "name": "test-skill-view"
+    });
+    let result = tools.execute("skill_view", input, CancellationToken::new()).await.unwrap();
+
+    assert!(!result.is_error);
+    assert!(result.content.contains("<skill name=\"test-skill-view\" trust=\"workspace\">"));
+    assert!(result.content.contains("test skill body"));
+    assert!(result.content.contains("</skill>"));
+}

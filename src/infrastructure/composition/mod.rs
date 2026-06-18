@@ -492,6 +492,7 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_slot),
                 Arc::clone(&ctx.sandbox_policy),
             );
+            adapter.set_skill_cache(Arc::clone(&ctx.skill_cache));
             // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
             // can emit PlanProposed / PlanApprovalRequested. Without this the
             // composed adapter's event_tx stays None and plan approval cards
@@ -519,6 +520,7 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_policy),
             );
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
+            adapter.set_skill_cache(Arc::clone(&ctx.skill_cache));
             // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
             // can emit PlanProposed / PlanApprovalRequested. Without this the
             // composed adapter's event_tx stays None and plan approval cards
