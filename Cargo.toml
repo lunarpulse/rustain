@@ -21,6 +21,10 @@ path = "tests/common/fake_mcp_server.rs"
 test = true
 bench = false
 required-features = ["mcp"]
+[[bin]]
+name = "startup-panic-harness"
+path = "tests/common/startup_panic_harness.rs"
+test = false
 
 [[test]]
 name = "scheduler_overhead"

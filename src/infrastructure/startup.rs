@@ -58,6 +58,12 @@ impl std::error::Error for SubcommandExit {}
 /// 6. Setup terminal
 /// 7. Enter event loop
 pub async fn run() -> Result<()> {
+    // Story 13.7 AC1 — install the startup panic hook BEFORE everything else
+    // (even CLI parsing) so any panic during arg parsing, logging init, `-c`
+    // override parsing, or config loading is captured to ~/.rustain/panic.log
+    // with a user-friendly stderr message. The TUI hook (install_panic_hook)
+    // installs later (~line 245) and superseds this one via AtomicBool.
+    signals::install_startup_panic_hook();
     // 1. Parse CLI args — augment with rich long_version (FR109)
     let cli = {
         use clap::{CommandFactory, FromArgMatches};

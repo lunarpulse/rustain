@@ -699,7 +699,8 @@ mod tests {
     fn truncate_helpers_do_not_byte_slice() {
         let s = "中文标题";
         assert_eq!(truncate_end(s, 3), "中…");
-        assert_eq!(truncate_middle(s, 3), "中…题");
+        assert_eq!(truncate_middle(s, 3), "…");
+        assert_eq!(truncate_middle(s, 5), "中…题");
         assert_eq!(truncate_end(s, 10), s);
     }
 }
