@@ -15,6 +15,19 @@ pub struct OpenAiRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<OpenAiToolDef>,
+    /// Request token-usage statistics in the stream. Per the OpenAI streaming
+    /// spec, usage data is NOT sent unless `stream_options.include_usage` is
+    /// `true`. Providers that don't recognize the key ignore it (JSON tolerant
+    /// deserialization) — worst case is `None` usage, same as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+}
+
+/// `stream_options` payload — currently only `include_usage` is defined by the
+/// OpenAI spec. Sent as `{"include_usage": true}` when streaming.
+#[derive(Debug, Serialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -184,6 +197,11 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
             stream: true,
             temperature: options.temperature,
             tools,
+            // Always ask for usage stats when streaming. Providers that don't
+            // support `stream_options` ignore the key (no error); supported
+            // providers (OpenAI, DeepSeek, OpenRouter) return usage on the
+            // final SSE chunk. See case file: openai-usage-calculation.
+            stream_options: Some(StreamOptions { include_usage: true }),
         }
     }
 }
@@ -201,6 +219,45 @@ pub struct OpenAiStreamEvent {
     #[allow(dead_code)]
     pub model: Option<String>,
     pub choices: Vec<OpenAiChoice>,
+    /// Token usage. Only present on the final SSE chunk when the request set
+    /// `stream_options.include_usage = true`. `#[serde(default)]` ensures every
+    /// non-final chunk (which omits the key) deserializes as `None`.
+    #[serde(default)]
+    pub usage: Option<OpenAiUsage>,
+}
+
+/// Token usage payload sent by OpenAI-compatible providers on the final stream
+/// chunk. All sub-fields are permissive (`#[serde(default)]`) for cross-provider
+/// compatibility (DeepSeek, Gemini compat shim, OpenRouter passthrough).
+#[derive(Debug, Deserialize, Default)]
+pub struct OpenAiUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    /// Redundant sum (prompt + completion). Not all providers populate it
+    /// correctly — never read; totals are derived in the ledger/cost layer.
+    #[serde(default)]
+    pub total_tokens: Option<u32>,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
+}
+
+/// Breakdown of prompt-side token usage (e.g. cached tokens). Currently unused
+/// by Rustain's cost model (designed around Anthropic's cache semantics); kept
+/// for forward-compat so unknown sub-keys don't break deserialization.
+#[derive(Debug, Deserialize, Default)]
+pub struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
+}
+
+/// Breakdown of completion-side token usage. `reasoning_tokens` carries the
+/// o1/o3/DeepSeek-R1 reasoning effort and is mapped into `UsageInfo`.
+#[derive(Debug, Deserialize, Default)]
+pub struct OpenAiCompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

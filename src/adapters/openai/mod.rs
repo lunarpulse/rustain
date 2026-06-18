@@ -357,6 +357,38 @@ impl StreamingProvider for OpenAiAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn request_serializes_stream_options_include_usage() {
+        // The fix for non-Anthropic token tracking: the request must ask the
+        // server for usage data via stream_options.include_usage = true.
+        use crate::adapters::openai::types::OpenAiRequest;
+        use crate::domain::models::{CompletionOptions, Message, MessageRole};
+
+        let msgs: Vec<Message> = vec![Message {
+            role: MessageRole::User,
+            content: "hi".to_string(),
+            images: vec![],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+            reasoning_content: None,
+        }];
+        let opts = CompletionOptions {
+            model: "gpt-4o".to_string(),
+            max_tokens: 4096,
+            system_prompt: String::new(),
+            temperature: None,
+            tools: vec![],
+        };
+        let req: OpenAiRequest = (&msgs[..], &opts).into();
+
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["stream"], true, "streaming is always on");
+        assert_eq!(
+            json["stream_options"]["include_usage"], true,
+            "request must request usage stats"
+        );
+    }
 
     #[test]
     fn test_openai_adapter_debug_masks_api_key() {
