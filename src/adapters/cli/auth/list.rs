@@ -42,6 +42,10 @@ struct ListRow {
 /// mutating the process environment.
 fn build_list_rows(
     providers: &[providers::ProviderMeta],
+    configured_providers: &std::collections::BTreeMap<
+        String,
+        crate::domain::models::ProviderConfig,
+    >,
     auth_json: &[ProviderStatus],
     env_lookup: impl Fn(&str) -> Option<String>,
     default_provider_id: &str,
@@ -49,7 +53,7 @@ fn build_list_rows(
     let auth_by_provider: HashMap<&str, &ProviderStatus> =
         auth_json.iter().map(|s| (s.provider.as_str(), s)).collect();
 
-    providers
+    let mut rows: Vec<ListRow> = providers
         .iter()
         .map(|meta| {
             let configured = if meta.requires_key {
@@ -76,7 +80,30 @@ fn build_list_rows(
                 is_default: meta.id == default_provider_id,
             }
         })
-        .collect()
+        .collect();
+
+    // Add providers that are configured in config.toml but not in the static table.
+    let known_ids: std::collections::HashSet<&str> = providers.iter().map(|p| p.id).collect();
+    for (id, cfg) in configured_providers {
+        if known_ids.contains(id.as_str()) {
+            continue;
+        }
+        let configured = Some(
+            super::detect_source_for(id, &cfg.api_key_env, &auth_by_provider, &env_lookup)
+                .is_some(),
+        );
+        rows.push(ListRow {
+            provider: id.clone(),
+            display_name: id.clone(),
+            auth_methods: vec![crate::domain::models::credential::AuthMethod::ApiKey],
+            signup_url: String::new(),
+            requires_key: true,
+            configured,
+            is_default: id == default_provider_id,
+        });
+    }
+
+    rows
 }
 
 /// Map `AuthMethod` variants to human-readable tokens.
@@ -139,6 +166,7 @@ pub async fn run_auth_list(
     let default_id = active_default_provider_id(app_config);
     let rows = build_list_rows(
         providers::all_providers(),
+        &app_config.provider,
         &entries,
         |k| crate::infrastructure::utils::env_var_trimmed(k),
         &default_id,
@@ -353,6 +381,7 @@ mod tests {
         const SECRET: &str = "SECRET-CANARY-DEADBEEF";
         let rows = build_list_rows(
             providers::all_providers(),
+            &std::collections::BTreeMap::new(),
             &[],
             |name| (name == "ANTHROPIC_API_KEY").then(|| SECRET.to_string()),
             "anthropic",
@@ -380,7 +409,13 @@ mod tests {
     // P0-2: All 7 providers listed
     #[test]
     fn all_seven_providers_listed() {
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, "anthropic");
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            "anthropic",
+        );
         assert_eq!(rows.len(), 7, "expected 7 providers from static table");
         assert!(
             rows.iter().any(|r| r.provider == "ollama"),
@@ -396,6 +431,7 @@ mod tests {
         // Env present → configured = Some(true).
         let with_env = build_list_rows(
             providers::all_providers(),
+            &std::collections::BTreeMap::new(),
             &entries,
             |name| (name == "OPENAI_API_KEY").then(|| "sk-env".to_string()),
             "anthropic",
@@ -408,8 +444,13 @@ mod tests {
         );
 
         // Auth.json only → configured = Some(true).
-        let json_only =
-            build_list_rows(providers::all_providers(), &entries, |_| None, "anthropic");
+        let json_only = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &entries,
+            |_| None,
+            "anthropic",
+        );
         let openai_json = json_only.iter().find(|r| r.provider == "openai").unwrap();
         assert_eq!(
             openai_json.configured,
@@ -418,7 +459,13 @@ mod tests {
         );
 
         // Neither → configured = Some(false).
-        let neither = build_list_rows(providers::all_providers(), &[], |_| None, "anthropic");
+        let neither = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            "anthropic",
+        );
         let openai_none = neither.iter().find(|r| r.provider == "openai").unwrap();
         assert_eq!(
             openai_none.configured,
@@ -432,6 +479,7 @@ mod tests {
     fn anthropic_dual_token_auth_token_counts() {
         let rows = build_list_rows(
             providers::all_providers(),
+            &std::collections::BTreeMap::new(),
             &[],
             |name| (name == "ANTHROPIC_AUTH_TOKEN").then(|| "bearer-token".to_string()),
             "anthropic",
@@ -448,6 +496,7 @@ mod tests {
     fn anthropic_dual_token_empty_whitespace_is_absent() {
         let rows = build_list_rows(
             providers::all_providers(),
+            &std::collections::BTreeMap::new(),
             &[],
             |name| (name == "ANTHROPIC_AUTH_TOKEN").then(|| "   ".to_string()),
             "anthropic",
@@ -467,7 +516,13 @@ mod tests {
         let default_id = active_default_provider_id(&cfg);
         assert_eq!(default_id, "anthropic", "BTreeMap: anthropic < openai");
 
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            &default_id,
+        );
         let default_count = rows.iter().filter(|r| r.is_default).count();
         assert_eq!(default_count, 1, "exactly one default");
         assert!(rows.iter().find(|r| r.is_default).unwrap().provider == "anthropic");
@@ -480,7 +535,13 @@ mod tests {
         let default_id = active_default_provider_id(&cfg);
         assert_eq!(default_id, "openai");
 
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            &default_id,
+        );
         let default_count = rows.iter().filter(|r| r.is_default).count();
         assert_eq!(default_count, 1);
     }
@@ -492,7 +553,13 @@ mod tests {
         let default_id = active_default_provider_id(&cfg);
         assert_eq!(default_id, "anthropic");
 
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            &default_id,
+        );
         let default_count = rows.iter().filter(|r| r.is_default).count();
         assert_eq!(default_count, 1);
     }
@@ -523,7 +590,13 @@ api_key_env = "DEEPSEEK_API_KEY"
         let default_id = active_default_provider_id(&cfg);
         assert_eq!(default_id, "custom-llm");
 
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            &default_id,
+        );
         assert_eq!(rows.len(), 7, "still 7 static rows");
         let default_count = rows.iter().filter(|r| r.is_default).count();
         assert_eq!(
@@ -543,7 +616,13 @@ api_key_env = "DEEPSEEK_API_KEY"
         let default_id = active_default_provider_id(&cfg);
         assert_eq!(default_id, "openai");
 
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, &default_id);
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            &default_id,
+        );
         let openai_row = rows.iter().find(|r| r.provider == "openai").unwrap();
         assert!(
             openai_row.is_default,
@@ -555,7 +634,13 @@ api_key_env = "DEEPSEEK_API_KEY"
     #[test]
     fn json_shape_snake_case_and_complete() {
         let entries = vec![status("anthropic", Some(fixed_time()))];
-        let rows = build_list_rows(providers::all_providers(), &entries, |_| None, "anthropic");
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &entries,
+            |_| None,
+            "anthropic",
+        );
         let json_str = render_json(&rows).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -597,7 +682,13 @@ api_key_env = "DEEPSEEK_API_KEY"
     // P0-9: Keyless rendering
     #[test]
     fn keyless_rendering() {
-        let rows = build_list_rows(providers::all_providers(), &[], |_| None, "anthropic");
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &std::collections::BTreeMap::new(),
+            &[],
+            |_| None,
+            "anthropic",
+        );
         let ollama = rows.iter().find(|r| r.provider == "ollama").unwrap();
         assert_eq!(ollama.configured, None, "keyless → None");
         assert!(
@@ -656,6 +747,7 @@ api_key_env = "DEEPSEEK_API_KEY"
 
         let list_rows = build_list_rows(
             providers::all_providers(),
+            &std::collections::BTreeMap::new(),
             &auth_entries,
             env_lookup,
             "anthropic",
@@ -698,5 +790,42 @@ api_key_env = "DEEPSEEK_API_KEY"
         assert!(!source.contains(&probe));
         assert!(!source.contains(&builder));
         assert!(!source.contains(&init));
+    }
+    // Configured providers that are not in the static table should still appear.
+    #[test]
+    fn configured_custom_provider_appears_in_list() {
+        let mut configured = std::collections::BTreeMap::new();
+        configured.insert(
+            "zai".to_string(),
+            crate::domain::models::ProviderConfig {
+                provider_id: "zai".to_string(),
+                model_id: "glm-5.2".to_string(),
+                api_key_env: "ZAI_API_KEY".to_string(),
+                enabled: true,
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://api.z.ai/v1".to_string()),
+                context_window: None,
+                supports_tools: None,
+                discover_models: false,
+                model_filter: vec![],
+                cache_ttl_seconds: 3600,
+            },
+        );
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &configured,
+            &[],
+            |_| None,
+            "anthropic",
+        );
+        let zai = rows
+            .iter()
+            .find(|r| r.provider == "zai")
+            .expect("zai row present");
+        assert_eq!(zai.display_name, "zai");
+        assert_eq!(zai.signup_url, "");
+        assert!(zai.requires_key);
+        assert_eq!(zai.configured, Some(false));
+        assert!(!zai.is_default);
     }
 }

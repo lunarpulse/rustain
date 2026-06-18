@@ -14,6 +14,31 @@ use crate::domain::models::ProviderConfig;
 use crate::domain::models::credential::Credential;
 use crate::domain::ports::{AuthStorePort, StreamingProvider};
 use crate::infrastructure::provider_factory;
+/// Provider metadata needed by the login flow.
+///
+/// Separated from the static [`providers::ProviderMeta`] so `auth login` can
+/// handle providers that are configured in `config.toml` but not in the
+/// built-in static table (e.g. an `openai-compatible` provider like `zai`).
+#[derive(Debug, Clone)]
+struct LoginProviderMeta {
+    id: String,
+    display_name: String,
+    signup_url: String,
+    requires_key: bool,
+    api_key_env: String,
+}
+
+impl LoginProviderMeta {
+    fn from_static(meta: &'static providers::ProviderMeta) -> Self {
+        Self {
+            id: meta.id.to_string(),
+            display_name: meta.display_name.to_string(),
+            signup_url: meta.signup_url.to_string(),
+            requires_key: meta.requires_key,
+            api_key_env: meta.api_key_env.to_string(),
+        }
+    }
+}
 
 /// Run the `auth login` flow.
 ///
@@ -26,19 +51,10 @@ pub async fn run_auth_login(
     provider_id: String,
     json: bool,
     store: &Arc<dyn AuthStorePort>,
+    app_config: &crate::domain::models::AppConfig,
 ) -> Result<()> {
-    // 1. Resolve provider from the metadata table.
-    let meta = match providers::lookup(&provider_id) {
-        Some(m) => m,
-        None => {
-            let valid: Vec<&str> = providers::all_provider_ids().collect();
-            eprintln!(
-                "Error: unknown provider '{provider_id}'.\n\nValid providers: {}",
-                valid.join(", ")
-            );
-            anyhow::bail!("unknown provider");
-        }
-    };
+    // 1. Resolve provider from the static table or config.toml.
+    let (meta, validation_cfg) = resolve_provider(&provider_id, app_config)?;
 
     // AC8 — keyless provider (e.g. ollama): no key required.
     if !meta.requires_key {
@@ -62,11 +78,12 @@ pub async fn run_auth_login(
     // AC1/P-4 — refuse non-TTY BEFORE any interactive read (overwrite confirm + key
     // entry). Previously the overwrite-confirm read stdin before this guard ran.
     if !atty_stdin() {
-        anyhow::bail!(
-            "auth login requires an interactive terminal (stdin is not a TTY).\n\
+        eprintln!(
+            "Error: auth login requires an interactive terminal (stdin is not a TTY).\n\
              Set {} instead, or pipe through a TTY.",
             meta.api_key_env
         );
+        anyhow::bail!("auth login requires a TTY");
     }
 
     // AC5 — overwrite warning: if a credential already exists, confirm.
@@ -101,13 +118,13 @@ pub async fn run_auth_login(
 
         // AC2 — validate before store.
         eprintln!("Validating key against {}…", meta.display_name);
-        let outcome = validate_key(&provider_id, meta, &key).await;
+        let outcome = validate_key(&provider_id, &validation_cfg, &key).await;
         (key, outcome)
     } else {
         (String::new(), Ok(())) // unused on the decline path
     };
 
-    match execute_login(meta, store, json, proceed, key, outcome).await {
+    match execute_login(&meta, store, json, proceed, key, outcome).await {
         LoginOutcome::Stored { output, .. } => {
             println!("{output}");
             Ok(())
@@ -122,14 +139,65 @@ pub async fn run_auth_login(
         }
     }
 }
+/// Resolve a provider for login.
+///
+/// First checks the static built-in table. If the id is not built-in, falls back
+/// to any `[provider.<id>]` section in `config.toml`. This keeps `auth login` in
+/// sync with `rustain doctor`, which probes every configured provider.
+fn resolve_provider(
+    provider_id: &str,
+    app_config: &crate::domain::models::AppConfig,
+) -> Result<(LoginProviderMeta, ProviderConfig)> {
+    if let Some(meta) = providers::lookup(provider_id) {
+        let cfg = ProviderConfig {
+            provider_id: provider_id.to_owned(),
+            model_id: String::new(),
+            api_key_env: meta.api_key_env.to_owned(),
+            enabled: true,
+            kind: Some(provider_id.to_owned()),
+            base_url: None,
+            context_window: None,
+            supports_tools: None,
+            discover_models: false,
+            model_filter: vec![],
+            cache_ttl_seconds: 0,
+        };
+        return Ok((LoginProviderMeta::from_static(meta), cfg));
+    }
+
+    if let Some(cfg) = app_config.provider.get(provider_id) {
+        let meta = LoginProviderMeta {
+            id: provider_id.to_owned(),
+            display_name: provider_id.to_owned(),
+            signup_url: String::new(),
+            requires_key: true,
+            api_key_env: cfg.api_key_env.clone(),
+        };
+        return Ok((meta, cfg.clone()));
+    }
+
+    let mut valid: Vec<String> = providers::all_provider_ids()
+        .map(|s| s.to_string())
+        .collect();
+    for id in app_config.provider.keys() {
+        if !valid.contains(id) {
+            valid.push(id.clone());
+        }
+    }
+    eprintln!(
+        "Error: unknown provider '{provider_id}'.\n\nValid providers: {}",
+        valid.join(", ")
+    );
+    anyhow::bail!("unknown provider");
+}
 
 // ---------------------------------------------------------------------------
 // Decision core (testable without a TTY / network / rpassword — P-10..P-14)
 // ---------------------------------------------------------------------------
 
 /// Outcome of the login decision core. Owns all store + output-string logic so the
-/// validate/signup-URL/offline/redaction/decline gates can be asserted against a
-/// mock store, independent of the interactive I/O in [`run_auth_login`].
+/// validate/signup-URL/offline/redaction/decline gates are asserted against a mock
+/// store, independent of the interactive I/O in [`run_auth_login`].
 enum LoginOutcome {
     /// Credential stored. `output` is the success line (json or human) — never the key.
     Stored { validated: bool, output: String },
@@ -149,7 +217,7 @@ enum LoginOutcome {
 /// validate-before-store / signup-URL / offline / redaction / decline gates assert
 /// store behaviour against a mock.
 async fn execute_login(
-    meta: &providers::ProviderMeta,
+    meta: &LoginProviderMeta,
     store: &Arc<dyn AuthStorePort>,
     json: bool,
     proceed: bool,
@@ -190,7 +258,7 @@ async fn execute_login(
 
     // AC3 — store via port (P-3: record the validation outcome for last_validated).
     let cred = Credential::new_api_key(key);
-    match store.set_validated(meta.id, cred, validated).await {
+    match store.set_validated(&meta.id, cred, validated).await {
         Ok(()) => {
             // AC6 — success output never echoes the key.
             let output = if json {
@@ -236,25 +304,11 @@ enum ValidationOutcome {
 /// `/proc/self/environ` and was unsafe under the multi-threaded tokio runtime).
 async fn validate_key(
     provider_id: &str,
-    meta: &providers::ProviderMeta,
+    cfg: &ProviderConfig,
     key: &str,
 ) -> Result<(), ValidationOutcome> {
-    let cfg = ProviderConfig {
-        provider_id: provider_id.to_owned(),
-        model_id: String::new(),
-        api_key_env: meta.api_key_env.to_owned(),
-        enabled: true,
-        kind: Some(provider_id.to_owned()),
-        base_url: None,
-        context_window: None,
-        supports_tools: None,
-        discover_models: false,
-        model_filter: vec![],
-        cache_ttl_seconds: 0,
-    };
-
     let provider: Arc<dyn StreamingProvider> =
-        match provider_factory::build_provider_for_config_with_key(provider_id, &cfg, key) {
+        match provider_factory::build_provider_for_config_with_key(provider_id, cfg, key) {
             Ok(p) => p,
             Err(ProviderError::Other(msg)) if msg.contains("feature not enabled") => {
                 // Provider feature not compiled in — can't validate, treat as inconclusive.
@@ -345,8 +399,10 @@ mod tests {
         }
     }
 
-    fn anthropic_meta() -> &'static providers::ProviderMeta {
-        providers::lookup("anthropic").expect("anthropic is in the provider table")
+    fn anthropic_meta() -> LoginProviderMeta {
+        LoginProviderMeta::from_static(
+            providers::lookup("anthropic").expect("anthropic is in the provider table"),
+        )
     }
 
     // P-10: validate-before-store — a valid key is stored; an invalid key is NOT.
@@ -356,7 +412,7 @@ mod tests {
         let meta = anthropic_meta();
 
         // Valid (Ok) → stored, validated=true.
-        let out = execute_login(meta, &port, false, true, "sk-good".to_string(), Ok(())).await;
+        let out = execute_login(&meta, &port, false, true, "sk-good".to_string(), Ok(())).await;
         assert!(
             matches!(
                 out,
@@ -375,7 +431,7 @@ mod tests {
 
         // Invalid → Rejected, store untouched (still 1 call from the valid case).
         let out = execute_login(
-            meta,
+            &meta,
             &port,
             false,
             true,
@@ -400,7 +456,7 @@ mod tests {
         let (_counts, port) = CountingStore::double();
         let meta = anthropic_meta();
         let out = execute_login(
-            meta,
+            &meta,
             &port,
             false,
             true,
@@ -411,7 +467,7 @@ mod tests {
         match out {
             LoginOutcome::Rejected { message } => {
                 assert!(
-                    message.contains(meta.signup_url),
+                    message.contains(&meta.signup_url),
                     "rejection must include the signup URL; got: {message}"
                 );
             }
@@ -425,7 +481,7 @@ mod tests {
         let (store, port) = CountingStore::double();
         let meta = anthropic_meta();
         let out = execute_login(
-            meta,
+            &meta,
             &port,
             false,
             true,
@@ -450,7 +506,7 @@ mod tests {
         let (store, port) = CountingStore::double();
         let meta = anthropic_meta();
         let out = execute_login(
-            meta,
+            &meta,
             &port,
             false,
             true,
@@ -481,7 +537,7 @@ mod tests {
         let meta = anthropic_meta();
 
         // Decline (proceed=false) → Declined, store untouched.
-        let out = execute_login(meta, &port, false, false, String::new(), Ok(())).await;
+        let out = execute_login(&meta, &port, false, false, String::new(), Ok(())).await;
         assert!(
             matches!(out, LoginOutcome::Declined { .. }),
             "decline → Declined"
@@ -493,7 +549,7 @@ mod tests {
         );
 
         // Accept (proceed=true) → stored.
-        let out = execute_login(meta, &port, false, true, "sk-new".to_string(), Ok(())).await;
+        let out = execute_login(&meta, &port, false, true, "sk-new".to_string(), Ok(())).await;
         assert!(
             matches!(out, LoginOutcome::Stored { .. }),
             "accept → Stored"
@@ -508,14 +564,14 @@ mod tests {
         let meta = anthropic_meta();
         const SENTINEL: &str = "SECRET-CANARY-DEADBEEF";
 
-        match execute_login(meta, &port, false, true, SENTINEL.to_string(), Ok(())).await {
+        match execute_login(&meta, &port, false, true, SENTINEL.to_string(), Ok(())).await {
             LoginOutcome::Stored { output, .. } => assert!(
                 !output.contains(SENTINEL),
                 "human success output leaked the key: {output}"
             ),
             _ => panic!("expected Stored"),
         }
-        match execute_login(meta, &port, true, true, SENTINEL.to_string(), Ok(())).await {
+        match execute_login(&meta, &port, true, true, SENTINEL.to_string(), Ok(())).await {
             LoginOutcome::Stored { output, .. } => {
                 assert!(
                     !output.contains(SENTINEL),
@@ -528,5 +584,52 @@ mod tests {
             }
             _ => panic!("expected Stored"),
         }
+    }
+    // -----------------------------------------------------------------------
+    // Provider resolution
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_provider_static_table() {
+        let cfg = crate::domain::models::AppConfig::default();
+        let (meta, validation_cfg) = resolve_provider("anthropic", &cfg).unwrap();
+        assert_eq!(meta.id, "anthropic");
+        assert_eq!(validation_cfg.kind, Some("anthropic".to_string()));
+    }
+
+    #[test]
+    fn resolve_provider_config_fallback() {
+        let mut cfg = crate::domain::models::AppConfig::default();
+        cfg.provider.insert(
+            "zai".to_string(),
+            crate::domain::models::ProviderConfig {
+                provider_id: "zai".to_string(),
+                model_id: "zai-model".to_string(),
+                api_key_env: "ZAI_API_KEY".to_string(),
+                enabled: true,
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://api.z.ai/v1".to_string()),
+                context_window: None,
+                supports_tools: None,
+                discover_models: false,
+                model_filter: vec![],
+                cache_ttl_seconds: 3600,
+            },
+        );
+        let (meta, validation_cfg) = resolve_provider("zai", &cfg).unwrap();
+        assert_eq!(meta.id, "zai");
+        assert_eq!(meta.api_key_env, "ZAI_API_KEY");
+        assert!(meta.requires_key);
+        assert_eq!(validation_cfg.kind, Some("openai-compatible".to_string()));
+        assert_eq!(
+            validation_cfg.base_url,
+            Some("https://api.z.ai/v1".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_provider_unknown_errors() {
+        let cfg = crate::domain::models::AppConfig::default();
+        assert!(resolve_provider("not-a-provider", &cfg).is_err());
     }
 }

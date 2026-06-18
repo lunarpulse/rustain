@@ -107,8 +107,7 @@ pub async fn handle_clear_adapter_override(
         None
     };
 
-    let adapter_name = default_name
-        .unwrap_or_else(|| default_adapter_fallback(port).to_string());
+    let adapter_name = default_name.unwrap_or_else(|| default_adapter_fallback(port).to_string());
 
     let adapter_ref = AdapterRef {
         adapter: adapter_name.clone(),

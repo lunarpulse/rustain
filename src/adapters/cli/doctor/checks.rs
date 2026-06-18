@@ -1613,8 +1613,14 @@ mod reachability_label_tests {
     #[test]
     fn composite_adapter_reports_subagents_available() {
         let label = tools_reachability_label(Some("composite"));
-        assert!(label.contains("available"), "composite must be available, got: {label}");
-        assert!(!label.contains("UNAVAILABLE"), "composite must not be UNAVAILABLE, got: {label}");
+        assert!(
+            label.contains("available"),
+            "composite must be available, got: {label}"
+        );
+        assert!(
+            !label.contains("UNAVAILABLE"),
+            "composite must not be UNAVAILABLE, got: {label}"
+        );
     }
 
     #[test]
@@ -1622,14 +1628,23 @@ mod reachability_label_tests {
         // `base` (and `personal-assistant`, which inherits it) resolve to
         // builtin-only — the silent-missing-feature trap this check closes.
         let label = tools_reachability_label(Some("builtin-only"));
-        assert!(label.contains("UNAVAILABLE"), "builtin-only must be UNAVAILABLE, got: {label}");
-        assert!(label.contains("composite"), "hint must name the fix (composite), got: {label}");
+        assert!(
+            label.contains("UNAVAILABLE"),
+            "builtin-only must be UNAVAILABLE, got: {label}"
+        );
+        assert!(
+            label.contains("composite"),
+            "hint must name the fix (composite), got: {label}"
+        );
     }
 
     #[test]
     fn builtin_full_adapter_reports_subagents_unavailable() {
         let label = tools_reachability_label(Some("builtin-full"));
-        assert!(label.contains("UNAVAILABLE"), "builtin-full must be UNAVAILABLE, got: {label}");
+        assert!(
+            label.contains("UNAVAILABLE"),
+            "builtin-full must be UNAVAILABLE, got: {label}"
+        );
     }
 
     #[test]

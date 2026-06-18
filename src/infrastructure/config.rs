@@ -715,7 +715,7 @@ mod tests {
             provider_id = "zhipu"
             kind = "openai-compatible"
             model_id = "glm-4.7-flash"
-            api_key_env = "ZHIPU_API_KEY"
+            api_key_env = "ZAI_API_KEY"
             enabled = true
             base_url = "https://api.z.ai/api/coding/paas/v4"
             discover_models = true

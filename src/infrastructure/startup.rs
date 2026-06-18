@@ -275,6 +275,7 @@ pub async fn run() -> Result<()> {
                     provider.clone(),
                     *json,
                     &store,
+                    &app_config,
                 )
                 .await
                 .map_err(|e| {

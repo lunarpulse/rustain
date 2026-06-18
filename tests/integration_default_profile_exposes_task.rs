@@ -25,9 +25,7 @@ use rustain::adapters::agent_registry::AgentRegistry;
 use rustain::adapters::profile_resolver::toml_resolver::TomlProfileResolver;
 use rustain::adapters::subagent::SubagentProvider;
 use rustain::domain::models::PortDimension;
-use rustain::domain::ports::{
-    ProfileResolver, ProviderInfoPort, SubagentRunner,
-};
+use rustain::domain::ports::{ProfileResolver, ProviderInfoPort, SubagentRunner};
 use rustain::infrastructure::composition::{ComposeContext, build_tools};
 use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
 
@@ -41,8 +39,7 @@ impl SubagentRunner for StubRunner {
         &self,
         _spec: rustain::domain::models::AgentLaunchSpec,
         _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<rustain::domain::models::TaskHandle, rustain::domain::models::SubagentError>
-    {
+    ) -> Result<rustain::domain::models::TaskHandle, rustain::domain::models::SubagentError> {
         unimplemented!("reachability test does not spawn")
     }
 }
@@ -156,11 +153,7 @@ async fn coding_resolved_tool_names() -> Vec<String> {
     let agent_registry = Arc::new(tokio::sync::RwLock::new(AgentRegistry::new()));
     let model_router = Arc::new(StubInfo) as Arc<dyn ProviderInfoPort>;
     let tmp = tempfile::tempdir().unwrap();
-    let spool = Arc::new(
-        SubagentSpool::new(tmp.path().join("spool"))
-            .await
-            .unwrap(),
-    );
+    let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
     let provider = Arc::new(SubagentProvider::new(
         runner,
         registry,
@@ -224,4 +217,3 @@ async fn test_coding_profile_exposes_read_task_output() {
         "default coding profile must expose `read_task_output`; got: {names:?}"
     );
 }
-
