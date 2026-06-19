@@ -84,6 +84,13 @@ pub fn models_cache_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("models_cache.json"))
 }
 
+/// Path to the models.dev pricing cache JSON file (`~/.rustain/models_pricing.json`).
+/// Stores the live per-million pricing snapshot fetched from models.dev.
+/// Sync since `data_dir()` already creates the parent dir; no need to async-create.
+pub fn models_dev_pricing_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("models_pricing.json"))
+}
+
 // ── Daemon path resolution (Story 12.1a AC-12-1a-8) ──────────────────────────
 //
 // "Hybrid" scoping (author decision, 2026-06-06): the PID file is

@@ -324,6 +324,12 @@ pub fn try_load_with_config_overrides(
         );
         config.layout.auto_panels = Default::default();
     }
+
+    // models.dev live pricing: overlay the cached snapshot onto the bundled +
+    // user-merged `config.pricing` (config wins, models.dev fills gaps). No
+    // network here — the background refresh task keeps the disk cache fresh.
+    #[cfg(feature = "models-dev")]
+    crate::adapters::models_dev::merge_into_config(&mut config);
     Ok(config)
 }
 

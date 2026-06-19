@@ -1708,6 +1708,30 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // models.dev live pricing — best-effort background refresh (60-min spaced).
+    // Keeps the disk cache fresh; `config` load merges it into the effective
+    // pricing map. Detached + non-blocking: failures log and retry next cycle.
+    // Mirrors opencode's spaced-refresh posture.
+    #[cfg(feature = "models-dev")]
+    {
+        tokio::spawn(async {
+            use crate::adapters::models_dev::{CACHE_TTL, load_cache, refresh};
+            loop {
+                // Skip the network fetch when the on-disk cache is still fresh —
+                // avoids a blocking HTTP request on every app launch.
+                let fresh = load_cache()
+                    .map(|c| !c.is_stale(CACHE_TTL))
+                    .unwrap_or(false);
+                if !fresh {
+                    if let Err(e) = refresh().await {
+                        tracing::warn!(error = %e, "models.dev pricing refresh failed; will retry");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+            }
+        });
+    }
+
     let result = event_loop::run(
         &mut tui,
         domain_rx,

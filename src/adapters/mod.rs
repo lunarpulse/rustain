@@ -18,6 +18,8 @@ pub mod ledger;
 pub mod long_term_memory;
 pub mod memory_context;
 pub mod model_catalog_cache;
+#[cfg(feature = "models-dev")]
+pub mod models_dev;
 pub mod noop;
 pub mod palette_registry;
 pub mod persona_adapter;

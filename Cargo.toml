@@ -175,13 +175,16 @@ minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT 
 procfs = "0.17"
 
 [features]
-default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search"]
+default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses
 # SseLineBuffer from crate::adapters::anthropic::sse (Story 7.1b).
 openai = ["anthropic", "dep:reqwest"]
 ollama = ["dep:reqwest"]
+# models.dev live pricing catalog fetch. reqwest is the HTTP client; the
+# resolver + disk-cache logic compile unconditionally (pure serde/fs).
+models-dev = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
 skills-validation = []
 meta-search = ["dep:bm25"]

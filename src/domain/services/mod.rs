@@ -7,6 +7,7 @@ pub mod command_normalize;
 pub mod compaction;
 pub mod consolidation;
 pub mod cost_calculator;
+pub mod pricing_resolver;
 pub mod cross_search;
 pub mod export;
 pub mod frontmatter;

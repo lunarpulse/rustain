@@ -41,7 +41,7 @@ pub fn cost_for_entry(
     entry: &UsageLedgerEntry,
     pricing: &HashMap<String, PricingConfig>,
 ) -> Option<f64> {
-    let p = pricing.get(&entry.model)?;
+    let p = crate::domain::services::pricing_resolver::lookup_pricing(pricing, &entry.model)?;
     let u = &entry.usage;
 
     let input_rate = p.input_per_million / 1_000_000.0;
@@ -124,7 +124,8 @@ pub fn cache_savings(
 ) -> f64 {
     let mut saved: f64 = 0.0;
     for entry in entries {
-        let Some(p) = pricing.get(&entry.model) else {
+        let Some(p) = crate::domain::services::pricing_resolver::lookup_pricing(pricing, &entry.model)
+        else {
             continue;
         };
         let cache_read = entry.usage.cache_read_tokens.unwrap_or(0) as f64;
