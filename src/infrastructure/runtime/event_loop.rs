@@ -6852,8 +6852,6 @@ pub async fn run(
                                     state.active_agent_name = None;
                                     session_index.set_open(&conversation.id, true);
                                     session_index.set_active(Some(&conversation.id));
-                                    state.compacting = false;
-                                    state.needs_redraw = true;
                                     let event = AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id),
                                         level: NoticeLevel::Warning,
@@ -6873,11 +6871,17 @@ pub async fn run(
                                     let fb_id = fb.id.clone();
                                     state.feedback_blocks.insert(fb_id.clone(), fb);
                                     state.active_feedback_id = Some(fb_id);
-                                    state.compacting = false;
-                                    state.needs_redraw = true;
                                 }
                             }
                         }
+                        // Release the global `compacting` flag regardless of whether the
+                        // originating conversation is still the active tab. A mid-compaction
+                        // tab switch makes `is_active` false; clearing only inside the
+                        // `is_active` blocks would leave the flag set forever and wedge all
+                        // future /compact attempts (guard: compaction.rs `state.compacting`).
+                        // Mirrors the unconditional clear in the CompactionComplete arm above.
+                        state.compacting = false;
+                        state.needs_redraw = true;
                     }
                     AppEvent::AskUserQuestion {
                         conversation_id,

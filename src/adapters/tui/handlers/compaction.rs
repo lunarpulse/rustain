@@ -53,10 +53,15 @@ pub async fn flush_then_compact(memory: Arc<dyn MemoryPort>, payload: Compaction
     run_compaction(payload).await;
 }
 
-/// Background task timeout for compaction summary generation. Mirrors
-/// `event_loop.rs::BACKGROUND_TASK_TIMEOUT` (kept duplicate at extraction time
-/// per anti-scope "do not introduce new abstractions" — Phase 4 may consolidate).
-pub(super) const COMPACTION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for compaction summary generation. Unlike
+/// `event_loop.rs::BACKGROUND_TASK_TIMEOUT` (10s, used for short/local tasks:
+/// discovery, session save, title generation), compaction is a heavyweight
+/// summarization — it generates up to 2048 output tokens
+/// (`generate_compaction_summary`) over near-entire conversation history (the
+/// kept-window boundary is the most recent user message). At 10s this can
+/// expire mid-summary and fail `/compact`, so compaction gets its own larger
+/// budget. Do NOT lower this back to `BACKGROUND_TASK_TIMEOUT`.
+pub(super) const COMPACTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Effective model id: `state.selected_model` if set, else `config.model`.
 /// Co-located with the compaction handlers since both helpers in this module

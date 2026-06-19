@@ -28,7 +28,7 @@ use crate::domain::services::tool_scheduler::ToolScheduler;
 /// 3. On TurnComplete(ToolUse): execute tools, append results, loop to 1
 /// 4. On TurnComplete(EndTurn): done
 /// Maximum number of tool execution loop iterations before forcing termination.
-const MAX_TOOL_ITERATIONS: usize = 25;
+const MAX_TOOL_ITERATIONS: usize = 256;
 
 pub async fn run_turn(
     provider: Arc<dyn StreamingProvider>,
