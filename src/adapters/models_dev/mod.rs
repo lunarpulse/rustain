@@ -28,11 +28,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::AppConfig;
 use crate::domain::models::pricing::PricingConfig;
 use crate::domain::services::pricing_resolver::bare_model_id;
-use crate::infrastructure::paths;
-use crate::domain::models::AppConfig;
 use crate::domain::services::pricing_resolver::resolve_effective_pricing;
+use crate::infrastructure::paths;
 
 /// Default source URL. Overridable via `RUSTAIN_MODELS_DEV_URL` for tests/CI.
 pub const DEFAULT_SOURCE: &str = "https://models.dev";
@@ -152,7 +152,8 @@ pub fn reduce_catalog(raw_json: &str) -> Result<HashMap<String, PricingConfig>> 
             let bare = bare_model_id(model_id);
             // entry().or_insert = first (alphabetically-earliest) canonical
             // provider wins on collision, deterministically.
-            out.entry(bare.to_string()).or_insert_with(|| cost.clone().into());
+            out.entry(bare.to_string())
+                .or_insert_with(|| cost.clone().into());
         }
     }
     Ok(out)
@@ -264,7 +265,9 @@ mod tests {
         // google lists gemini-3.5-flash bare under provider "google" (canonical).
         let raw = r#"{"google":{"models":{"gemini-3.5-flash":{"cost":{"input":1.5,"output":9,"cache_read":0.15}}}}}"#;
         let m = reduce_catalog(raw).unwrap();
-        let p = m.get("gemini-3.5-flash").expect("canonical bare entry kept");
+        let p = m
+            .get("gemini-3.5-flash")
+            .expect("canonical bare entry kept");
         assert_eq!(p.input_per_million, 1.5);
         assert_eq!(p.output_per_million, 9.0);
         assert_eq!(p.cache_read_per_million, Some(0.15));
@@ -277,10 +280,7 @@ mod tests {
         // not vercel → dropped even though no separate google entry exists here.
         let raw = r#"{"vercel":{"models":{"google/gemini-3.5-flash":{"cost":{"input":1.5,"output":9}}}}}"#;
         let m = reduce_catalog(raw).unwrap();
-        assert!(
-            m.is_empty(),
-            "gateway entry must be dropped, got {m:?}"
-        );
+        assert!(m.is_empty(), "gateway entry must be dropped, got {m:?}");
     }
 
     #[test]
@@ -328,7 +328,10 @@ mod tests {
         // A future non-provider metadata key must not fail the whole parse.
         let raw = r#"{"_metadata":{"schema":2},"google":{"models":{"gemini-3.5-flash":{"cost":{"input":1.5,"output":9}}}}}"#;
         let m = reduce_catalog(raw).unwrap();
-        assert!(m.contains_key("gemini-3.5-flash"), "provider entry survives");
+        assert!(
+            m.contains_key("gemini-3.5-flash"),
+            "provider entry survives"
+        );
     }
 
     #[test]
@@ -392,7 +395,9 @@ mod tests {
     #[ignore]
     async fn models_dev_live_resolves_user_na_models() {
         use crate::domain::models::AppConfig;
-        use crate::domain::services::pricing_resolver::{lookup_pricing, resolve_effective_pricing};
+        use crate::domain::services::pricing_resolver::{
+            lookup_pricing, resolve_effective_pricing,
+        };
 
         let cache = refresh().await.expect("live models.dev fetch");
         // The user's dashboard `n/a` models must now carry canonical pricing.

@@ -27,9 +27,9 @@ use self::types::AnthropicRequest;
 #[derive(Clone)]
 pub enum AuthMode {
     /// Standard Anthropic auth: sends `X-Api-Key: {key}` header.
-    ApiKey(String),
+    ApiKey(crate::domain::models::SecretString),
     /// Gateway/proxy auth: sends `Authorization: Bearer {token}` header.
-    BearerToken(String),
+    BearerToken(crate::domain::models::SecretString),
 }
 
 /// Anthropic API adapter. Implements `StreamingProvider` for streaming completions.
@@ -54,8 +54,8 @@ impl AnthropicAdapter {
         base_url: Option<String>,
     ) -> Result<Self, ProviderError> {
         let credential = match &auth_mode {
-            AuthMode::ApiKey(key) => key,
-            AuthMode::BearerToken(token) => token,
+            AuthMode::ApiKey(s) => s.expose_secret(),
+            AuthMode::BearerToken(s) => s.expose_secret(),
         };
         if credential.trim().is_empty() {
             return Err(ProviderError::AuthenticationFailed);
@@ -79,6 +79,15 @@ impl AnthropicAdapter {
             ),
             abort_handle: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Single consolidated expose site for the auth header.
+    /// Returns `(header_name, header_value)`.
+    fn auth_header(&self) -> (&'static str, String) {
+        match &self.auth_mode {
+            AuthMode::ApiKey(s) => ("x-api-key", s.expose_secret().to_owned()),
+            AuthMode::BearerToken(s) => ("authorization", format!("Bearer {}", s.expose_secret())),
+        }
     }
 }
 
@@ -113,10 +122,7 @@ impl StreamingProvider for AnthropicAdapter {
 
         let url = format!("{}/v1/messages", self.base_url);
 
-        let auth_header_name = match &self.auth_mode {
-            AuthMode::ApiKey(_) => "x-api-key",
-            AuthMode::BearerToken(_) => "authorization",
-        };
+        let (auth_header_name, auth_header_value) = self.auth_header();
         tracing::debug!(
             target_url = %url,
             auth_type = auth_header_name,
@@ -129,13 +135,10 @@ impl StreamingProvider for AnthropicAdapter {
             "Full request body"
         );
 
-        let request = match &self.auth_mode {
-            AuthMode::ApiKey(key) => self.client.post(&url).header("x-api-key", key),
-            AuthMode::BearerToken(token) => self
-                .client
-                .post(&url)
-                .header("authorization", format!("Bearer {}", token)),
-        };
+        let request = self
+            .client
+            .post(&url)
+            .header(auth_header_name, auth_header_value);
 
         let response = request
             .header("anthropic-version", "2023-06-01")
@@ -263,24 +266,15 @@ impl StreamingProvider for AnthropicAdapter {
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "hi"}]
         });
-        let request = match &self.auth_mode {
-            AuthMode::ApiKey(key) => self
-                .client
-                .post(&url)
-                .header("x-api-key", key.to_string())
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .timeout(std::time::Duration::from_secs(5))
-                .body(serde_json::to_string(&body).unwrap_or_default()),
-            AuthMode::BearerToken(token) => self
-                .client
-                .post(&url)
-                .header("authorization", format!("Bearer {}", token))
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .timeout(std::time::Duration::from_secs(5))
-                .body(serde_json::to_string(&body).unwrap_or_default()),
-        };
+        let (auth_name, auth_value) = self.auth_header();
+        let request = self
+            .client
+            .post(&url)
+            .header(auth_name, auth_value)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .timeout(std::time::Duration::from_secs(5))
+            .body(serde_json::to_string(&body).unwrap_or_default());
         let response = request.send().await;
         match response {
             Ok(resp) if resp.status().is_success() => Ok(()),
@@ -305,17 +299,13 @@ impl StreamingProvider for AnthropicAdapter {
         } else {
             format!("{}/v1/models", self.base_url)
         };
-        let mut req = self
+        let (auth_name, auth_value) = self.auth_header();
+        let req = self
             .client
             .get(&url)
             .header("anthropic-version", "2023-06-01")
+            .header(auth_name, auth_value)
             .timeout(std::time::Duration::from_secs(5));
-        req = match &self.auth_mode {
-            AuthMode::ApiKey(key) => req.header("x-api-key", key.as_str()),
-            AuthMode::BearerToken(token) => {
-                req.header("authorization", format!("Bearer {}", token))
-            }
-        };
         let response = req.send().await;
         let latency = start.elapsed();
         match response {
@@ -343,7 +333,9 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_debug_masks_api_key() {
         let adapter = AnthropicAdapter::new(
-            AuthMode::ApiKey("sk-ant-test-key".to_string()),
+            AuthMode::ApiKey(crate::domain::models::SecretString::new(
+                "sk-ant-test-key".to_string(),
+            )),
             "claude-sonnet-4-6".to_string(),
             None,
         )
@@ -359,7 +351,9 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_debug_masks_bearer_token() {
         let adapter = AnthropicAdapter::new(
-            AuthMode::BearerToken("my-secret-token".to_string()),
+            AuthMode::BearerToken(crate::domain::models::SecretString::new(
+                "my-secret-token".to_string(),
+            )),
             "glm-4.7".to_string(),
             None,
         )
@@ -374,7 +368,7 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_missing_api_key() {
         let result = AnthropicAdapter::new(
-            AuthMode::ApiKey(String::new()),
+            AuthMode::ApiKey(crate::domain::models::SecretString::new(String::new())),
             "claude-sonnet-4-6".to_string(),
             None,
         );
@@ -388,7 +382,7 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_missing_bearer_token() {
         let result = AnthropicAdapter::new(
-            AuthMode::BearerToken(String::new()),
+            AuthMode::BearerToken(crate::domain::models::SecretString::new(String::new())),
             "claude-sonnet-4-6".to_string(),
             None,
         );
@@ -402,7 +396,9 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_provider_id() {
         let adapter = AnthropicAdapter::new(
-            AuthMode::ApiKey("test-key".to_string()),
+            AuthMode::ApiKey(crate::domain::models::SecretString::new(
+                "test-key".to_string(),
+            )),
             "claude-sonnet-4-6".to_string(),
             None,
         )
@@ -413,7 +409,9 @@ mod tests {
     #[test]
     fn test_anthropic_adapter_custom_base_url() {
         let adapter = AnthropicAdapter::new(
-            AuthMode::ApiKey("test-key".to_string()),
+            AuthMode::ApiKey(crate::domain::models::SecretString::new(
+                "test-key".to_string(),
+            )),
             "claude-sonnet-4-6".to_string(),
             Some("http://localhost:8080".to_string()),
         )
@@ -426,7 +424,7 @@ mod tests {
     fn test_api_key_never_in_serialized_output() {
         let key = "sk-ant-secret-key-12345";
         let adapter = AnthropicAdapter::new(
-            AuthMode::ApiKey(key.to_string()),
+            AuthMode::ApiKey(crate::domain::models::SecretString::new(key.to_string())),
             "claude-sonnet-4-6".to_string(),
             None,
         )
@@ -443,7 +441,7 @@ mod tests {
     fn test_bearer_token_never_in_serialized_output() {
         let token = "super-secret-bearer-token-xyz";
         let adapter = AnthropicAdapter::new(
-            AuthMode::BearerToken(token.to_string()),
+            AuthMode::BearerToken(crate::domain::models::SecretString::new(token.to_string())),
             "glm-4.7".to_string(),
             None,
         )

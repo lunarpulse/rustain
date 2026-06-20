@@ -25,7 +25,7 @@ pub struct ProviderConfig {
     pub kind: Option<String>,
     /// Overrides the adapter's default endpoint URL.
     #[serde(default)]
-    pub base_url: Option<String>,
+    pub base_url: Option<crate::domain::models::redacted_url::RedactedUrl>,
     /// Context window for single-model servers that cannot self-describe.
     #[serde(default)]
     pub context_window: Option<u32>,
@@ -1325,7 +1325,7 @@ supports_tools = true
 
         let ollama = config.provider.get("ollama").expect("ollama provider");
         assert_eq!(
-            ollama.base_url.as_deref(),
+            ollama.base_url.as_ref().map(|u| u.expose_url()),
             Some("http://192.168.1.50:11434")
         );
         assert_eq!(ollama.kind, None);
@@ -1334,7 +1334,10 @@ supports_tools = true
 
         let local = config.provider.get("local").expect("local provider");
         assert_eq!(local.kind.as_deref(), Some("openai-compatible"));
-        assert_eq!(local.base_url.as_deref(), Some("http://localhost:8080/v1"));
+        assert_eq!(
+            local.base_url.as_ref().map(|u| u.expose_url()),
+            Some("http://localhost:8080/v1")
+        );
         assert_eq!(local.context_window, Some(32_768));
         assert_eq!(local.supports_tools, Some(true));
 

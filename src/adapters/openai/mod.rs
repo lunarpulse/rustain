@@ -38,7 +38,7 @@ use crate::adapters::anthropic::sse::SseLineBuffer;
 /// `Debug` is manually implemented to mask credentials (prevent accidental key leakage).
 pub struct OpenAiAdapter {
     client: reqwest::Client,
-    api_key: String,
+    api_key: crate::domain::models::SecretString,
     model: String,
     base_url: String,
     variant: OpenAiCompatibleVariant,
@@ -80,7 +80,7 @@ impl OpenAiAdapter {
 
         Ok(Self {
             client,
-            api_key,
+            api_key: crate::domain::models::SecretString::new(api_key),
             model,
             base_url: resolved_base_url,
             variant,
@@ -99,8 +99,8 @@ impl OpenAiAdapter {
             .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(5));
-        if !self.api_key.is_empty() {
-            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        if !self.api_key.expose_secret().is_empty() {
+            req = req.header("authorization", self.bearer_header_value());
         }
         let response = req.send().await;
         match response {
@@ -134,6 +134,11 @@ impl OpenAiAdapter {
     /// Clear the discovered models overlay (falls back to bundled snapshot).
     pub fn clear_discovered_models(&self) {
         self.discovered_models.store(Arc::new(None));
+    }
+
+    /// Single consolidated expose site for the `Authorization: Bearer` header.
+    fn bearer_header_value(&self) -> String {
+        format!("Bearer {}", self.api_key.expose_secret())
     }
 }
 
@@ -180,8 +185,8 @@ impl StreamingProvider for OpenAiAdapter {
             .post(&url)
             .header("content-type", "application/json")
             .json(&request_body);
-        if !self.api_key.is_empty() {
-            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        if !self.api_key.expose_secret().is_empty() {
+            req = req.header("authorization", self.bearer_header_value());
         }
         let response = req
             .send()
@@ -304,8 +309,8 @@ impl StreamingProvider for OpenAiAdapter {
             .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(5));
-        if !self.api_key.is_empty() {
-            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        if !self.api_key.expose_secret().is_empty() {
+            req = req.header("authorization", self.bearer_header_value());
         }
         let response = req.send().await;
         match response {
@@ -331,8 +336,8 @@ impl StreamingProvider for OpenAiAdapter {
             .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(5));
-        if !self.api_key.is_empty() {
-            req = req.header("authorization", format!("Bearer {}", self.api_key));
+        if !self.api_key.expose_secret().is_empty() {
+            req = req.header("authorization", self.bearer_header_value());
         }
         let response = req.send().await;
         let latency = start.elapsed();

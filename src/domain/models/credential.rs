@@ -1,7 +1,8 @@
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+
+use super::secret::SecretString;
 
 // ---------------------------------------------------------------------------
 // Credential
@@ -10,15 +11,16 @@ use zeroize::Zeroizing;
 /// A stored authentication credential.
 ///
 /// Forward-compat scaffold: Epic 19 adds an OAuth variant.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Credential {
-    ApiKey(Zeroizing<String>),
+    ApiKey(SecretString),
 }
 
 impl Credential {
     /// Wrap a raw API key string into a [`Credential::ApiKey`].
     pub fn new_api_key(key: String) -> Self {
-        Self::ApiKey(Zeroizing::new(key))
+        Self::ApiKey(SecretString::new(key))
     }
 
     /// Expose the inner API-key value.
@@ -26,22 +28,15 @@ impl Credential {
     /// Use **only** at disk-write and provider-construction boundaries.
     pub fn expose_api_key(&self) -> Option<&str> {
         match self {
-            Self::ApiKey(k) => Some(k.as_str()),
+            Self::ApiKey(s) => Some(s.expose_secret()),
         }
     }
 }
-
-impl std::fmt::Debug for Credential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ApiKey(_) => write!(f, "Credential::ApiKey(<redacted>)"),
-        }
-    }
-}
-
 impl std::fmt::Display for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "***")
+        match self {
+            Self::ApiKey(s) => write!(f, "{s}"),
+        }
     }
 }
 
@@ -139,27 +134,17 @@ pub enum AuthMethod {
 
 /// A fully-resolved credential ready for use in an API call.
 #[non_exhaustive]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ResolvedAuth {
-    ApiKey(String),
+    ApiKey(SecretString),
     // Epic 19 will add: OAuth { access_token, ... }
 }
 
-impl std::fmt::Debug for ResolvedAuth {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // NEVER expose the resolved key — mask every variant (AC6/NFR11).
-        // Hand-impl (not derived) so a future variant can't accidentally print it.
-        match self {
-            Self::ApiKey(_) => write!(f, "ResolvedAuth::ApiKey(<redacted>)"),
-        }
-    }
-}
-
 impl ResolvedAuth {
-    /// Extract the API key if this is the `ApiKey` variant.
-    pub fn to_api_key(self) -> Option<String> {
+    /// Extract the API key as a `SecretString` if this is the `ApiKey` variant.
+    pub fn to_api_key(self) -> Option<SecretString> {
         match self {
-            Self::ApiKey(k) => Some(k),
+            Self::ApiKey(s) => Some(s),
         }
     }
 }
@@ -168,7 +153,7 @@ impl ResolvedAuth {
 mod tests {
     use super::*;
 
-    // P0-1a: Redaction canary — Credential Debug mask
+    // P0-1a: Redaction canary — Credential Debug mask (delegates to SecretString)
     #[test]
     fn credential_debug_never_exposes_secret() {
         let cred = Credential::new_api_key("SECRET-CANARY-DEADBEEF".to_string());
@@ -183,7 +168,7 @@ mod tests {
         );
     }
 
-    // P0-1b: Redaction canary — Credential Display mask
+    // P0-1b: Redaction canary — Credential Display mask (delegates to SecretString)
     #[test]
     fn credential_display_never_exposes_secret() {
         let cred = Credential::new_api_key("SECRET-CANARY-DEADBEEF".to_string());
@@ -204,7 +189,6 @@ mod tests {
             !json.contains("SECRET-CANARY-DEADBEEF"),
             "Serialize leaked the secret: {json}"
         );
-        // Positive control: the json SHOULD contain some masked form and the type tag
         assert!(
             json.contains("***") || json.contains("redacted"),
             "Serialize should mask: {json}"
@@ -233,14 +217,14 @@ mod tests {
     // ResolvedAuth
     #[test]
     fn resolved_auth_api_key_converts() {
-        let auth = ResolvedAuth::ApiKey("key123".into());
-        assert_eq!(auth.to_api_key(), Some("key123".to_string()));
+        let auth = ResolvedAuth::ApiKey(SecretString::new("key123".into()));
+        assert_eq!(auth.to_api_key().unwrap().expose_secret(), "key123");
     }
 
     // P-1: ResolvedAuth Debug must never leak the key (canary).
     #[test]
     fn resolved_auth_debug_never_exposes_secret() {
-        let auth = ResolvedAuth::ApiKey("SECRET-CANARY-DEADBEEF".into());
+        let auth = ResolvedAuth::ApiKey(SecretString::new("SECRET-CANARY-DEADBEEF".into()));
         let debug = format!("{:?}", auth);
         assert!(
             !debug.contains("SECRET-CANARY-DEADBEEF"),

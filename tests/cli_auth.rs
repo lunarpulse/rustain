@@ -113,7 +113,7 @@ fn resolve_auth_returns_typed_api_key() {
         provider_factory::resolve_auth("TEST_RESOLVE_AUTH_KEY", "any").expect("should resolve");
     match auth {
         ResolvedAuth::ApiKey(k) => {
-            assert_eq!(k, "typed-key");
+            assert_eq!(k.expose_secret(), "typed-key");
         }
         _ => panic!("Expected ResolvedAuth::ApiKey"),
     }

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::secret::{SecretString, expose_secret_string};
+
 use crate::domain::errors::AuthError;
 use crate::domain::models::credential::{AuthSource, AuthStatus, Credential, ProviderStatus};
 use crate::domain::ports::AuthStorePort;
@@ -27,31 +29,22 @@ struct AuthFile {
 }
 
 /// Per-provider entry. Tagged enum for forward-compat (Epic 19 OAuth).
-#[derive(Serialize, Deserialize)]
+///
+/// `api_key` field is `SecretString` — `Debug` derive is safe (redacts automatically).
+/// The `serialize_with` chokepoint is the ONLY cleartext-to-disk egress (AC3/D2).
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum AuthEntry {
     #[serde(rename = "api_key")]
     ApiKey {
-        api_key: String,
+        #[serde(serialize_with = "expose_secret_string")]
+        api_key: SecretString,
         /// RFC 3339 timestamp of last validation, if known.
         last_validated: Option<String>,
     },
     // Epic 19 will add:
     // #[serde(rename = "oauth")]
     // OAuth { access: String, refresh: String, expires: String },
-}
-
-impl std::fmt::Debug for AuthEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Redact the secret. Never `#[derive(Debug)]` here — it would leak `api_key` (AC6/NFR11).
-        match self {
-            Self::ApiKey { last_validated, .. } => f
-                .debug_struct("AuthEntry::ApiKey")
-                .field("api_key", &"<redacted>")
-                .field("last_validated", last_validated)
-                .finish(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +88,7 @@ impl FileAuthStore {
             }
         };
         data.providers.get(provider).map(|entry| match entry {
-            AuthEntry::ApiKey { api_key, .. } => api_key.clone(),
+            AuthEntry::ApiKey { api_key, .. } => api_key.expose_secret().to_owned(),
         })
     }
 
@@ -237,7 +230,7 @@ impl AuthStorePort for FileAuthStore {
         let path = Self::auth_file_path()?;
         let data = Self::read_auth_file(&path)?;
         Ok(data.providers.get(provider).map(|entry| match entry {
-            AuthEntry::ApiKey { api_key, .. } => Credential::new_api_key(api_key.clone()),
+            AuthEntry::ApiKey { api_key, .. } => Credential::ApiKey(api_key.clone()),
         }))
     }
 
@@ -259,10 +252,8 @@ impl AuthStorePort for FileAuthStore {
         let _guard = self.lock.lock().await;
         let path = Self::auth_file_path()?;
 
-        let key_str = cred
-            .expose_api_key()
-            .ok_or_else(|| AuthError::Io("Cannot store non-API-key credential".into()))?
-            .to_owned();
+        // Extract the SecretString from the Credential — clone the wrapper, not the inner.
+        let Credential::ApiKey(secret) = cred;
 
         let last_validated = if validated {
             Some(chrono::Utc::now().to_rfc3339())
@@ -275,7 +266,7 @@ impl AuthStorePort for FileAuthStore {
             data.providers.insert(
                 provider,
                 AuthEntry::ApiKey {
-                    api_key: key_str,
+                    api_key: secret,
                     last_validated,
                 },
             );
@@ -544,6 +535,57 @@ mod tests {
         // Unknown provider returns None
         let missing = FileAuthStore::get_sync("nonexistent");
         assert!(missing.is_none());
+
+        restore_data_dir(original);
+    }
+
+    // AC3 anti-vacuous round-trip: real key on disk, no `***`, read-back equality.
+    #[tokio::test]
+    #[serial]
+    async fn auth_json_round_trip_persists_real_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original = set_data_dir(tmp.path());
+
+        let real_key = "sk-REAL-KEY-FOR-ROUND-TRIP-TEST";
+        let store = FileAuthStore::new();
+        store
+            .set("rt-provider", Credential::new_api_key(real_key.to_string()))
+            .await
+            .expect("set");
+
+        // 1. Read raw auth.json bytes — assert they CONTAIN the real key
+        let auth_path = tmp.path().join("auth.json");
+        let raw = std::fs::read_to_string(&auth_path).expect("read auth.json");
+        assert!(
+            raw.contains(real_key),
+            "auth.json must persist the REAL key on disk, got: {raw}"
+        );
+
+        // 2. Negative control — assert they do NOT contain `***`
+        assert!(
+            !raw.contains("***"),
+            "auth.json must NOT contain masked `***` — that would corrupt the credential: {raw}"
+        );
+
+        // 3. Read-back via get_sync — assert the real value is returned
+        let got = FileAuthStore::get_sync("rt-provider");
+        assert_eq!(
+            got.as_deref(),
+            Some(real_key),
+            "get_sync should return the real key"
+        );
+
+        // 4. Read-back via async get — assert expose_api_key returns the real value
+        let cred = store
+            .get("rt-provider")
+            .await
+            .expect("get")
+            .expect("should be Some");
+        assert_eq!(
+            cred.expose_api_key(),
+            Some(real_key),
+            "get should return the real key via expose_api_key"
+        );
 
         restore_data_dir(original);
     }

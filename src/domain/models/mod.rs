@@ -40,10 +40,12 @@ pub mod profile;
 pub mod project_context;
 pub mod provider;
 pub mod provider_capabilities;
+pub mod redacted_url;
 pub mod redaction;
 pub mod router;
 pub mod sandbox;
 pub mod search_hit;
+pub mod secret;
 pub mod session;
 pub mod session_boundary;
 pub mod session_meta;
@@ -126,7 +128,9 @@ pub use plan::{
     DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanSubTask, PlanTask,
     PlanTaskStatus, TaskResult,
 };
+pub use redacted_url::RedactedUrl;
 pub use sandbox::SandboxPolicy;
+pub use secret::SecretString;
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};
 pub use session_boundary::SessionBoundary;

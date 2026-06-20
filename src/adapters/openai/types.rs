@@ -201,7 +201,9 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
             // support `stream_options` ignore the key (no error); supported
             // providers (OpenAI, DeepSeek, OpenRouter) return usage on the
             // final SSE chunk. See case file: openai-usage-calculation.
-            stream_options: Some(StreamOptions { include_usage: true }),
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
         }
     }
 }

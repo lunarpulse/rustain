@@ -608,7 +608,7 @@ mod tests {
                 api_key_env: "ZAI_API_KEY".to_string(),
                 enabled: true,
                 kind: Some("openai-compatible".to_string()),
-                base_url: Some("https://api.z.ai/v1".to_string()),
+                base_url: Some("https://api.z.ai/v1".to_string().into()),
                 context_window: None,
                 supports_tools: None,
                 discover_models: false,
@@ -622,8 +622,8 @@ mod tests {
         assert!(meta.requires_key);
         assert_eq!(validation_cfg.kind, Some("openai-compatible".to_string()));
         assert_eq!(
-            validation_cfg.base_url,
-            Some("https://api.z.ai/v1".to_string())
+            validation_cfg.base_url.as_ref().map(|u| u.expose_url()),
+            Some("https://api.z.ai/v1")
         );
     }
 

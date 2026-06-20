@@ -22,20 +22,24 @@ pub fn resolve_auth(
     api_key_env: &str,
     provider_id: &str,
 ) -> Option<crate::domain::models::credential::ResolvedAuth> {
+    use crate::domain::models::SecretString;
     use crate::domain::models::credential::ResolvedAuth;
     if !api_key_env.is_empty() {
         if let Some(key) = crate::infrastructure::utils::env_var_trimmed(api_key_env) {
-            return Some(ResolvedAuth::ApiKey(key));
+            return Some(ResolvedAuth::ApiKey(SecretString::new(key)));
         }
     }
     // Fallback: auth.json (Story 13.4a read-path integration).
-    crate::adapters::auth_store::FileAuthStore::get_sync(provider_id).map(ResolvedAuth::ApiKey)
+    crate::adapters::auth_store::FileAuthStore::get_sync(provider_id)
+        .map(|s| ResolvedAuth::ApiKey(SecretString::new(s)))
 }
 
 /// Convenience wrapper that unwraps `ResolvedAuth` to a plain `String` key.
 /// Used by the OpenAI-compatible builders that take a bare `String`.
 pub fn resolve_api_key(api_key_env: &str, provider_id: &str) -> Option<String> {
-    resolve_auth(api_key_env, provider_id).and_then(|a| a.to_api_key())
+    resolve_auth(api_key_env, provider_id)
+        .and_then(|a| a.to_api_key())
+        .map(|s| s.expose_secret().to_owned())
 }
 
 /// Runtime call counter for provider construction — Story 13.2a P0-3 sentinel.
@@ -214,10 +218,13 @@ fn build_anthropic_from_config(
     #[cfg(feature = "anthropic")]
     {
         use crate::adapters::anthropic::{AnthropicAdapter, AuthMode};
+        use crate::domain::models::SecretString;
 
         let auth_mode = match api_key {
-            Some(key) if cfg.api_key_env.contains("API_KEY") => AuthMode::ApiKey(key),
-            Some(token) => AuthMode::BearerToken(token),
+            Some(key) if cfg.api_key_env.contains("API_KEY") => {
+                AuthMode::ApiKey(SecretString::new(key))
+            }
+            Some(token) => AuthMode::BearerToken(SecretString::new(token)),
             None => {
                 return Err(ProviderError::AuthenticationFailed);
             }
@@ -233,7 +240,8 @@ fn build_anthropic_from_config(
         // brings the config-driven path to parity.
         let base_url = cfg
             .base_url
-            .clone()
+            .as_ref()
+            .map(|u| u.expose_url().to_owned())
             .or_else(|| crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_BASE_URL"));
 
         let adapter =
@@ -275,8 +283,13 @@ fn build_openai_from_config(
     };
 
     let adapter = Arc::new(
-        OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), cfg.base_url.clone())
-            .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+        OpenAiAdapter::new(
+            variant,
+            api_key,
+            cfg.model_id.clone(),
+            cfg.base_url.as_ref().map(|u| u.expose_url().to_owned()),
+        )
+        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
     );
     Ok(adapter)
 }
@@ -289,12 +302,16 @@ fn build_openai_compatible_from_config(
 ) -> Result<Arc<crate::adapters::openai::OpenAiAdapter>, ProviderError> {
     use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
 
-    let base_url = cfg.base_url.clone().ok_or_else(|| {
-        ProviderError::Other(format!(
-            "openai-compatible provider '{}' requires a base_url",
-            cfg.provider_id
-        ))
-    })?;
+    let base_url = cfg
+        .base_url
+        .as_ref()
+        .map(|u| u.expose_url().to_owned())
+        .ok_or_else(|| {
+            ProviderError::Other(format!(
+                "openai-compatible provider '{}' requires a base_url",
+                cfg.provider_id
+            ))
+        })?;
 
     let variant = OpenAiCompatibleVariant::Custom {
         provider_id: cfg.provider_id.clone(),
@@ -349,7 +366,7 @@ pub fn build_openai_for_discovery(
                 },
                 _ => unreachable!(),
             };
-            let base_url = cfg.base_url.clone();
+            let base_url = cfg.base_url.as_ref().map(|u| u.expose_url().to_owned());
             let adapter = Arc::new(
                 OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), base_url).map_err(
                     |e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)),
@@ -386,8 +403,11 @@ fn build_ollama_from_config(
         );
     }
 
-    let adapter = OllamaAdapter::new(cfg.model_id.clone(), cfg.base_url.clone())
-        .map_err(|e| ProviderError::Other(format!("Failed to create Ollama adapter: {}", e)))?;
+    let adapter = OllamaAdapter::new(
+        cfg.model_id.clone(),
+        cfg.base_url.as_ref().map(|u| u.expose_url().to_owned()),
+    )
+    .map_err(|e| ProviderError::Other(format!("Failed to create Ollama adapter: {}", e)))?;
     Ok(Arc::new(adapter))
 }
 
@@ -415,7 +435,7 @@ mod tests {
                 enabled: true,
                 model_id: "test".to_string(),
                 api_key_env: "RUSTAIN_TEST_KEY".to_string(),
-                base_url: Some("http://localhost".to_string()),
+                base_url: Some("http://localhost".to_string().into()),
                 kind: Some(kind.to_string()),
                 context_window: None,
                 supports_tools: None,
@@ -439,7 +459,7 @@ mod tests {
                 enabled: true,
                 model_id: "test".to_string(),
                 api_key_env: "RUSTAIN_TEST_KEY".to_string(),
-                base_url: Some("http://localhost".to_string()),
+                base_url: Some("http://localhost".to_string().into()),
                 kind: Some(kind.to_string()),
                 context_window: None,
                 supports_tools: None,

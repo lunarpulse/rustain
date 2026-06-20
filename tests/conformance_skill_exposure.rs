@@ -650,17 +650,26 @@ async fn test_skill_view_execution() {
         source: SkillSource::WorkspaceAgents,
         terse: None,
     };
-    cache.insert("test-skill-view", meta, "test skill body".into()).await;
+    cache
+        .insert("test-skill-view", meta, "test skill body".into())
+        .await;
 
     tools.set_skill_cache(cache);
 
     let input = serde_json::json!({
         "name": "test-skill-view"
     });
-    let result = tools.execute("skill_view", input, CancellationToken::new()).await.unwrap();
+    let result = tools
+        .execute("skill_view", input, CancellationToken::new())
+        .await
+        .unwrap();
 
     assert!(!result.is_error);
-    assert!(result.content.contains("<skill name=\"test-skill-view\" trust=\"workspace\">"));
+    assert!(
+        result
+            .content
+            .contains("<skill name=\"test-skill-view\" trust=\"workspace\">")
+    );
     assert!(result.content.contains("test skill body"));
     assert!(result.content.contains("</skill>"));
 }

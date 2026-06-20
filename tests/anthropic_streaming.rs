@@ -873,9 +873,12 @@ data: {\"type\":\"message_stop\"}\n\
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .expect("ANTHROPIC_API_KEY must be set for live test");
 
-        let adapter =
-            AnthropicAdapter::new(AuthMode::ApiKey(api_key), "claude-sonnet-4-6".into(), None)
-                .unwrap();
+        let adapter = AnthropicAdapter::new(
+            AuthMode::ApiKey(api_key.into()),
+            "claude-sonnet-4-6".into(),
+            None,
+        )
+        .unwrap();
 
         let stream = adapter
             .stream_completion(

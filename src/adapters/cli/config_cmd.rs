@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::adapters::cli::commands::Cli;
 use crate::domain::ports::ProfileResolver;
-use crate::infrastructure::utils::strip_url_userinfo;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
@@ -143,9 +142,9 @@ pub fn config_layer_paths(cli: &Cli) -> Result<Vec<LayerDescriptor>> {
 /// the developer makes a redaction decision. This DTO feeds BOTH TOML and JSON
 /// output — one format cannot leak while the other is clean.
 ///
-/// URL-bearing fields pass through `strip_url_userinfo` during mapping.
+/// URL-bearing fields use `RedactedUrl::Display` (strips userinfo automatically).
 #[derive(Debug, Serialize)]
-pub struct ConfigDisplay<'a> {
+pub struct ConfigDisplay {
     model: String,
     active_profile: String,
     log_level: String,
@@ -156,7 +155,7 @@ pub struct ConfigDisplay<'a> {
     skills: SkillsDisplay,
     runtime: RuntimeDisplay,
     layout: LayoutDisplay,
-    provider: std::collections::BTreeMap<String, ProviderDisplay<'a>>,
+    provider: std::collections::BTreeMap<String, ProviderDisplay>,
     mouse: MouseDisplay,
     tool_progress: ToolProgressDisplay,
     router: RouterDisplay,
@@ -170,16 +169,16 @@ pub struct ConfigDisplay<'a> {
     plan: PlanDisplay,
     subagents: SubagentsDisplay,
     daemon: DaemonDisplay,
-    mcp_servers: Vec<McpServerDisplay<'a>>,
+    mcp_servers: Vec<McpServerDisplay>,
 }
 
 #[derive(Debug, Serialize)]
-struct McpServerDisplay<'a> {
+struct McpServerDisplay {
     id: String,
     transport: String,
     command: Option<String>,
     args: Vec<String>,
-    url: Option<std::borrow::Cow<'a, str>>,
+    url: Option<String>,
     env: std::collections::BTreeMap<String, String>,
     persistent: bool,
     source: String,
@@ -211,7 +210,7 @@ struct LayoutDisplay {
 }
 
 #[derive(Debug, Serialize)]
-struct ProviderDisplay<'a> {
+struct ProviderDisplay {
     provider_id: String,
     model_id: String,
     /// Env var NAME (safe — never the resolved value).
@@ -219,7 +218,7 @@ struct ProviderDisplay<'a> {
     enabled: bool,
     kind: Option<String>,
     /// URL with userinfo stripped.
-    base_url: Option<std::borrow::Cow<'a, str>>,
+    base_url: Option<String>,
     context_window: Option<u32>,
     supports_tools: Option<bool>,
     discover_models: bool,
@@ -307,15 +306,15 @@ struct DaemonDisplay {
     low_power_emits_boundary: bool,
 }
 
-impl<'a> ConfigDisplay<'a> {
+impl ConfigDisplay {
     /// Build the fail-closed DTO from a resolved `AppConfig` and optional active profile.
     ///
-    /// Every URL field passes through `strip_url_userinfo`. Every field is
+    /// Every URL field uses `RedactedUrl::Display` (strips userinfo). Every field is
     /// an explicit opt-in — if `AppConfig` gains a new field, it stays
     /// invisible here until mapped.
     pub fn from_config(
-        config: &'a crate::domain::models::AppConfig,
-        active_profile: Option<&'a crate::domain::models::ResolvedProfile>,
+        config: &crate::domain::models::AppConfig,
+        active_profile: Option<&crate::domain::models::ResolvedProfile>,
     ) -> Self {
         let provider = config
             .provider
@@ -329,7 +328,7 @@ impl<'a> ConfigDisplay<'a> {
                         api_key_env: p.api_key_env.clone(),
                         enabled: p.enabled,
                         kind: p.kind.clone(),
-                        base_url: p.base_url.as_deref().map(strip_url_userinfo),
+                        base_url: p.base_url.as_ref().map(|u| u.to_string()),
                         context_window: p.context_window,
                         supports_tools: p.supports_tools,
                         discover_models: p.discover_models,
@@ -349,7 +348,7 @@ impl<'a> ConfigDisplay<'a> {
                 transport: format!("{:?}", s.transport).to_lowercase(),
                 command: s.command.clone(),
                 args: s.args.clone(),
-                url: s.url.as_deref().map(strip_url_userinfo),
+                url: s.url.as_ref().map(|u| u.to_string()),
                 env: s.env.clone(),
                 persistent: s.persistent,
                 source: format!("{:?}", s.source).to_lowercase(),
@@ -830,13 +829,13 @@ fn sanitize_toml_map_keys(value: toml::Value) -> toml::Value {
     }
 }
 /// Render a `ConfigDisplay` to pretty TOML with TOML-safe provider/pricing keys.
-fn config_display_to_toml(display: &ConfigDisplay<'_>) -> Result<String> {
+fn config_display_to_toml(display: &ConfigDisplay) -> Result<String> {
     let mut value = toml::Value::try_from(display)?;
     value = sanitize_toml_map_keys(value);
     Ok(toml::to_string_pretty(&value)?)
 }
 
 /// Render a `ConfigDisplay` to pretty JSON with finite floats guaranteed.
-fn config_display_to_json(display: &ConfigDisplay<'_>) -> Result<String> {
+fn config_display_to_json(display: &ConfigDisplay) -> Result<String> {
     Ok(serde_json::to_string_pretty(display)?)
 }

@@ -19,7 +19,7 @@ pub struct McpServerSpec {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// URL for HTTP/SSE transports (ignored for stdio).
-    pub url: Option<String>,
+    pub url: Option<crate::domain::models::redacted_url::RedactedUrl>,
     /// If true, preserve across profile switches via warm-storage pool.
     #[serde(default)]
     pub persistent: bool,

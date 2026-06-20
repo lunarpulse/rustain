@@ -611,7 +611,7 @@ api_key_env = "DEEPSEEK_API_KEY"
         // Config whose first-enabled would fail to build (bogus base_url / missing key).
         let mut cfg = AppConfig::default();
         let mut pc = make_provider_config("openai", true);
-        pc.base_url = Some("http://bogus:1/fake".to_string());
+        pc.base_url = Some("http://bogus:1/fake".to_string().into());
         cfg.provider.insert("openai".to_string(), pc);
         let default_id = active_default_provider_id(&cfg);
         assert_eq!(default_id, "openai");
@@ -803,7 +803,7 @@ api_key_env = "DEEPSEEK_API_KEY"
                 api_key_env: "ZAI_API_KEY".to_string(),
                 enabled: true,
                 kind: Some("openai-compatible".to_string()),
-                base_url: Some("https://api.z.ai/v1".to_string()),
+                base_url: Some("https://api.z.ai/v1".to_string().into()),
                 context_window: None,
                 supports_tools: None,
                 discover_models: false,

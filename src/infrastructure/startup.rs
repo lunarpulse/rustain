@@ -1950,16 +1950,16 @@ fn build_anthropic_provider_from_env(
 
         let auth_mode = if let Some(token) = auth_token {
             tracing::info!("Using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
-            AuthMode::BearerToken(token)
+            AuthMode::BearerToken(token.into())
         } else if let Some(key) = api_key {
             tracing::info!("Using ANTHROPIC_API_KEY (X-Api-Key auth)");
-            AuthMode::ApiKey(key)
+            AuthMode::ApiKey(key.into())
         } else if let Some(stored_key) =
             crate::adapters::auth_store::FileAuthStore::get_sync("anthropic")
         {
             // Story 13.4a AC7: auth.json fallback — strictly below env vars.
             tracing::info!("Using stored credential from auth.json (X-Api-Key auth)");
-            AuthMode::ApiKey(stored_key)
+            AuthMode::ApiKey(stored_key.into())
         } else {
             anyhow::bail!(
                 "No API key found.\n\n\

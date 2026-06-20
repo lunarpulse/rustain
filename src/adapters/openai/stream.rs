@@ -293,7 +293,9 @@ mod tests {
         let chunks = t.transform(&frame(data));
 
         assert!(
-            !chunks.iter().any(|c| matches!(c, StreamChunk::Usage { .. })),
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::Usage { .. })),
             "no Usage chunk should be emitted for a content-only delta"
         );
     }

@@ -678,7 +678,7 @@ base_url = "https://clean.example.com/v1"
     let has_injected_url = config.provider.values().any(|p| {
         p.base_url
             .as_ref()
-            .is_some_and(|u| u.contains("injected.example.com"))
+            .is_some_and(|u| u.expose_url().contains("injected.example.com"))
     });
     assert!(
         has_injected_url,
@@ -829,7 +829,11 @@ async fn config_show_strips_mcp_server_url_userinfo() {
         transport: McpTransport::Http,
         command: None,
         args: vec![],
-        url: Some("https://admin:MCP-SECRET@mcp.example.com/api".to_string()),
+        url: Some(
+            "https://admin:MCP-SECRET@mcp.example.com/api"
+                .to_string()
+                .into(),
+        ),
         env: Default::default(),
         persistent: false,
         source: McpServerSource::Workspace,

@@ -130,7 +130,10 @@ mod tests {
     #[test]
     fn bare_model_id_strips_single_prefix() {
         assert_eq!(bare_model_id("google/gemini-3.5-flash"), "gemini-3.5-flash");
-        assert_eq!(bare_model_id("anthropic/claude-haiku-4-5"), "claude-haiku-4-5");
+        assert_eq!(
+            bare_model_id("anthropic/claude-haiku-4-5"),
+            "claude-haiku-4-5"
+        );
     }
 
     #[test]

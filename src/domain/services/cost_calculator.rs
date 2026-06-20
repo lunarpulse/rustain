@@ -124,7 +124,8 @@ pub fn cache_savings(
 ) -> f64 {
     let mut saved: f64 = 0.0;
     for entry in entries {
-        let Some(p) = crate::domain::services::pricing_resolver::lookup_pricing(pricing, &entry.model)
+        let Some(p) =
+            crate::domain::services::pricing_resolver::lookup_pricing(pricing, &entry.model)
         else {
             continue;
         };
