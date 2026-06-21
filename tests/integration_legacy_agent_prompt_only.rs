@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 use rustain::adapters::agent_registry::AgentRegistry;
 use rustain::adapters::subagent::SubagentProvider;
-use rustain::domain::models::{AgentDef, SubagentRunStatus};
+use rustain::domain::models::{AgentDef, NodeState};
 use rustain::domain::ports::{CapabilityProvider, ProviderInfoPort, SubagentRunner};
-use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 use tokio_util::sync::CancellationToken;
 
 // Minimal stub info port — mirrors conformance_subagent_provider_protocol.rs.
@@ -69,10 +69,10 @@ impl ProviderInfoPort for StubInfo {
 #[tokio::test]
 async fn legacy_agent_prompt_only_invoke_succeeds() {
     let runner = Arc::new(StubSubagentRunner::new(
-        SubagentRunStatus::Completed,
+        NodeState::Completed,
         "code review complete",
     )) as Arc<dyn SubagentRunner>;
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let agent_registry = Arc::new(tokio::sync::RwLock::new(AgentRegistry::from_agents(vec![
         AgentDef {
             name: "code-reviewer".into(),

@@ -65,6 +65,23 @@ pub fn cost_for_entry(
     Some(cost)
 }
 
+/// Cost for a simple `(model, tokens_in, tokens_out)` pair.
+///
+/// Used by lightweight read-only projections such as the Agent Inspector,
+/// which have real token counts and a resolved model id but no cache/reasoning
+/// breakdown. Returns `None` when pricing for `model` is unavailable.
+pub fn cost_for_model_tokens(
+    model: &str,
+    tokens_in: u32,
+    tokens_out: u32,
+    pricing: &HashMap<String, PricingConfig>,
+) -> Option<f64> {
+    let p = crate::domain::services::pricing_resolver::lookup_pricing(pricing, model)?;
+    let input_rate = p.input_per_million / 1_000_000.0;
+    let output_rate = p.output_per_million / 1_000_000.0;
+    Some(tokens_in as f64 * input_rate + tokens_out as f64 * output_rate)
+}
+
 /// Aggregate `entries` into per-model totals + cumulative cost, collecting
 /// any model_ids with missing pricing into `missing_pricing_models`.
 pub fn cost_breakdown(

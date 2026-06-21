@@ -3,7 +3,7 @@
 //!
 //! Emits a chosen terminal status immediately and writes a known string into the spool.
 
-use rustain::domain::models::{AgentLaunchSpec, SubagentRunStatus, TaskHandle};
+use rustain::domain::models::{AgentLaunchSpec, NodeState, TaskHandle};
 use rustain::domain::ports::SubagentRunner;
 use rustain::infrastructure::subagent::SubagentSpool;
 use tokio::sync::mpsc;
@@ -12,12 +12,12 @@ use tokio_util::sync::CancellationToken;
 /// A stub runner that immediately returns a pre-configured terminal status.
 #[allow(dead_code)]
 pub struct StubSubagentRunner {
-    outcome: SubagentRunStatus,
+    outcome: NodeState,
     spool_text: String,
 }
 
 impl StubSubagentRunner {
-    pub fn new(outcome: SubagentRunStatus, spool_text: impl Into<String>) -> Self {
+    pub fn new(outcome: NodeState, spool_text: impl Into<String>) -> Self {
         Self {
             outcome,
             spool_text: spool_text.into(),
@@ -34,6 +34,7 @@ impl SubagentRunner for StubSubagentRunner {
     ) -> Result<TaskHandle, rustain::domain::models::SubagentError> {
         let (status_tx, status_rx) = mpsc::channel(4);
         let _ = status_tx.send(self.outcome).await;
+        let (parent_disconnect, _parent_disconnect_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Ok(TaskHandle {
             agent_id: rustain::domain::models::AgentId::new(),
@@ -43,6 +44,7 @@ impl SubagentRunner for StubSubagentRunner {
             cancel,
             subagent_type: "stub".to_string(),
             spawned_at: chrono::Utc::now().timestamp_millis(),
+            parent_disconnect,
         })
     }
 }

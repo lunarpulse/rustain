@@ -129,13 +129,22 @@ pub fn daemon_pid_path(workspace: &std::path::Path) -> Result<PathBuf> {
     Ok(rustain_workspace_dir(workspace)?.join("daemon.pid"))
 }
 
+/// Core logic: build socket path from an explicit `data_dir` root.
+/// Extracted so tests can call it directly without mutating `RUSTAIN_DATA_DIR`.
+fn daemon_socket_path_inner(
+    data_dir: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<PathBuf> {
+    let dir = data_dir.join("daemons");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir.join(format!("{}.sock", workspace_hash(workspace))))
+}
+
 /// Path to the per-workspace daemon Unix socket (Story 12.1a AC-12-1a-8).
 /// `{data_dir}/daemons/<workspace-hash>.sock` — short root avoids the AF_UNIX
 /// path-length limit; the hash keeps it per-workspace and collision-free.
 pub fn daemon_socket_path(workspace: &std::path::Path) -> Result<PathBuf> {
-    let dir = data_dir()?.join("daemons");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    Ok(dir.join(format!("{}.sock", workspace_hash(workspace))))
+    daemon_socket_path_inner(&data_dir()?, workspace)
 }
 
 /// Path to the daemon's stdio/log file (re-exec child redirects stdout+stderr
@@ -278,15 +287,9 @@ mod daemon_path_tests {
     fn socket_path_lives_under_data_dir_and_is_short() {
         let data = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test; RUSTAIN_DATA_DIR override is the documented
-        // test seam consistent with data_dir().
-        unsafe {
-            std::env::set_var("RUSTAIN_DATA_DIR", data.path());
-        }
-        let sock = daemon_socket_path(ws.path()).unwrap();
-        unsafe {
-            std::env::remove_var("RUSTAIN_DATA_DIR");
-        }
+        // Call the inner helper directly — no env-var mutation needed, so this
+        // test is safe under concurrent multi-threaded test execution.
+        let sock = daemon_socket_path_inner(data.path(), ws.path()).unwrap();
         assert!(sock.starts_with(data.path().join("daemons")));
         assert!(sock.extension().unwrap() == "sock");
         // AF_UNIX sun_path limit guard (Linux 108) — the whole point of the hash.

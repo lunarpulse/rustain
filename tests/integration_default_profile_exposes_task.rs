@@ -27,7 +27,7 @@ use rustain::adapters::subagent::SubagentProvider;
 use rustain::domain::models::PortDimension;
 use rustain::domain::ports::{ProfileResolver, ProviderInfoPort, SubagentRunner};
 use rustain::infrastructure::composition::{ComposeContext, build_tools};
-use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 
 // ───────────────────────── helpers (mirror conformance_subagent_provider_protocol.rs) ─────────────────────────
 
@@ -149,7 +149,7 @@ async fn coding_resolved_tool_names() -> Vec<String> {
 
     // Wire a real SubagentProvider (real startup does this in startup.rs Block A).
     let runner = Arc::new(StubRunner) as Arc<dyn SubagentRunner>;
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let agent_registry = Arc::new(tokio::sync::RwLock::new(AgentRegistry::new()));
     let model_router = Arc::new(StubInfo) as Arc<dyn ProviderInfoPort>;
     let tmp = tempfile::tempdir().unwrap();

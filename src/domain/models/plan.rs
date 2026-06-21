@@ -124,7 +124,7 @@ impl PlanTask {
 pub struct DelegationInfo {
     /// Agent definition name (e.g., "code-reviewer"). Matches `AgentDef.name`.
     pub agent_name: String,
-    /// AgentId of the spawned subagent (matches `SubagentRegistry`).
+    /// AgentId of the spawned subagent (matches the unified `NodeTree`).
     /// `None` while the spawn is pending; set as soon as `launch()` returns Ok.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,

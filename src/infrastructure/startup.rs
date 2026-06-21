@@ -1403,12 +1403,11 @@ pub async fn run() -> Result<()> {
             ));
 
             // Construct subagent infrastructure
-            let subagent_registry = Arc::new(
-                crate::infrastructure::subagent::SubagentRegistry::with_event_tx(
+            let subagent_registry =
+                Arc::new(crate::infrastructure::subagent::NodeTree::with_event_tx(
                     domain_tx.clone(),
                     Arc::new(|| chrono::Utc::now().timestamp_millis()),
-                ),
-            );
+                ));
             let spool = Arc::new(
                 crate::infrastructure::subagent::SubagentSpool::new(
                     paths::data_dir()

@@ -115,7 +115,7 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         1024,
     );
     let (event_bus, _rx) = rustain::infrastructure::runtime::event_bus::EventBus::new(1024);
-    let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
+    let registry = Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive));
     let spool = Arc::new(
         rustain::infrastructure::subagent::SubagentSpool::new(tmp.path().join("spool"))

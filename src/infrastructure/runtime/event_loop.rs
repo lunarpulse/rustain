@@ -1000,7 +1000,7 @@ pub async fn run(
                                             'p' => {
                                                 if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id).cloned() {
                                                     let op = match entry.current_status {
-                                                        crate::domain::models::SubagentRunStatus::RunningFg | crate::domain::models::SubagentRunStatus::RunningBg => crate::domain::models::Op::Pause,
+                                                        crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
                                                         _ => crate::domain::models::Op::Resume,
                                                     };
                                                     let _ = refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;

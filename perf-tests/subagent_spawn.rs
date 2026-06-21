@@ -17,7 +17,7 @@ use rustain::domain::ports::SubagentRunner;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
-use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -58,7 +58,7 @@ async fn make_runner(tmp: &std::path::Path) -> InProcessSubagentRunner {
     let approval = ApprovalRuntime::new(1024, Arc::new(NoOpApprovalPersistence));
     let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
     let (event_bus, _rx) = EventBus::new(1024);
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive));
     let spool = Arc::new(SubagentSpool::new(tmp.join("spool")).await.unwrap());
 

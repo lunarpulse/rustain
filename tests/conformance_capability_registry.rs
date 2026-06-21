@@ -1076,7 +1076,7 @@ async fn test_subagent_provider_discover_round_trip() {
         }
     }
     let runner = Arc::new(StubRunner) as Arc<dyn rustain::domain::ports::SubagentRunner>;
-    let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
+    let registry = Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let agent_reg = AgentRegistry::from_agents(vec![
         AgentDef {
             name: "code-reviewer".into(),

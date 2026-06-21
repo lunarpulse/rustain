@@ -10,7 +10,7 @@ use rustain::domain::ports::{CapabilityProvider, StreamingProvider};
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
-use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -95,7 +95,7 @@ async fn make_provider() -> (
     let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
     let (event_bus, _event_rx) = EventBus::new(1024);
     let event_bus = Arc::new(event_bus);
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(
         rustain::domain::models::SandboxPolicy::Permissive,
     ));

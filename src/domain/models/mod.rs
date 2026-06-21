@@ -1,6 +1,7 @@
 pub mod adapter_health;
 pub mod agent;
 pub mod agent_id;
+pub mod agent_node;
 pub mod approval;
 pub mod assembled_context;
 pub mod autocomplete;
@@ -31,6 +32,7 @@ pub mod mcp_server_state;
 pub mod memory_entry;
 pub mod memory_fact;
 mod message;
+pub mod node_state;
 mod notice;
 pub mod palette;
 mod permission;
@@ -55,7 +57,7 @@ pub mod skill_catalog_delta;
 pub mod skill_metadata;
 mod stream;
 pub mod subagent_error;
-pub mod subagent_status;
+mod subagent_status;
 pub mod subagent_view;
 pub mod tab;
 pub mod task_handle;
@@ -78,6 +80,10 @@ pub mod visual;
 pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
     validate_agent_frontmatter,
+};
+#[allow(unused_imports)]
+pub use agent_node::{
+    AbandonmentAction, AgentMetrics, AgentNode, NodeCheckpoint, NodeOrigin, abandonment_action,
 };
 #[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope};
@@ -113,6 +119,8 @@ pub use focus::FocusState;
 pub use message::{
     ImageAttachment, Message, MessageRole, ToolResultMessage, ToolUseMessage, UserMessage,
 };
+#[allow(unused_imports)]
+pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
     FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
 };
@@ -150,8 +158,6 @@ pub use skill_metadata::SkillMetadata;
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};
-pub use subagent_status::SubagentStatus;
-pub use subagent_status::SubagentStatus as SubagentRunStatus;
 pub use subagent_view::{AgentRowView, OwnershipKind};
 pub use task_handle::{Op, TaskHandle};
 pub use tool_policy::ToolPolicy;

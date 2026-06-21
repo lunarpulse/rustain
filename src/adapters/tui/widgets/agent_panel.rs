@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem},
 };
 
-use crate::domain::models::SubagentRunStatus;
+use crate::domain::models::NodeState;
 use crate::domain::models::subagent_view::{AgentRowView, OwnershipKind};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
@@ -165,21 +165,23 @@ pub fn render(
 }
 
 fn subagent_icon_for(
-    status: SubagentRunStatus,
+    status: NodeState,
     theme: &crate::adapters::tui::theme::Theme,
 ) -> (&'static str, Color) {
     match status {
-        SubagentRunStatus::RunningFg => ("\u{25CF}", theme.colors.tool_status_executing),
-        SubagentRunStatus::Idle => ("\u{23F8}", theme.colors.tool_status_awaiting),
-        SubagentRunStatus::Completed => ("\u{2713}", theme.colors.tool_status_success),
-        SubagentRunStatus::Failed => ("\u{2717}", theme.colors.tool_status_error),
-        SubagentRunStatus::Killed => ("\u{2298}", theme.colors.tool_status_cancelled),
-        SubagentRunStatus::RunningBg => ("\u{25D0}", theme.colors.tool_status_awaiting),
+        NodeState::Running => ("\u{25CF}", theme.colors.tool_status_executing),
+        NodeState::Created => ("\u{23F8}", theme.colors.tool_status_awaiting),
+        NodeState::Waiting => ("\u{25D4}", theme.colors.tool_status_awaiting),
+        NodeState::Suspended => ("\u{25D0}", theme.colors.tool_status_awaiting),
+        NodeState::Completed => ("\u{2713}", theme.colors.tool_status_success),
+        NodeState::Failed => ("\u{2717}", theme.colors.tool_status_error),
+        NodeState::Cancelled => ("\u{2298}", theme.colors.tool_status_cancelled),
     }
 }
 
 fn ownership_glyph(kind: OwnershipKind) -> &'static str {
     match kind {
+        OwnershipKind::Self_ => "\u{2605}",
         OwnershipKind::Owned => "\u{2666}",
         OwnershipKind::Peer => "\u{25C7}",
     }
@@ -198,7 +200,7 @@ mod tests {
     use super::*;
     use crate::domain::models::AgentId;
 
-    fn make_entry(name: &str, depth: usize, status: SubagentRunStatus) -> AgentRowView {
+    fn make_entry(name: &str, depth: usize, status: NodeState) -> AgentRowView {
         AgentRowView {
             agent_id: AgentId::new(),
             parent_id: AgentId::root(),
@@ -207,6 +209,11 @@ mod tests {
             depth,
             current_status: status,
             ownership: OwnershipKind::Owned,
+            effective_model: String::new(),
+            tools_summary: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
         }
     }
 
@@ -245,7 +252,7 @@ mod tests {
 
     #[test]
     fn snapshot_agent_panel_single() {
-        let entries = vec![make_entry("code-reviewer", 1, SubagentRunStatus::Idle)];
+        let entries = vec![make_entry("code-reviewer", 1, NodeState::Created)];
         let text = render_to_text(&entries, 0, true, 60, 5);
         insta::assert_snapshot!(text);
     }
@@ -253,9 +260,9 @@ mod tests {
     #[test]
     fn snapshot_agent_panel_three_level() {
         let entries = vec![
-            make_entry("orchestrator", 1, SubagentRunStatus::RunningFg),
-            make_entry("coder", 2, SubagentRunStatus::Idle),
-            make_entry("reviewer", 3, SubagentRunStatus::Idle),
+            make_entry("orchestrator", 1, NodeState::Running),
+            make_entry("coder", 2, NodeState::Created),
+            make_entry("reviewer", 3, NodeState::Created),
         ];
         let text = render_to_text(&entries, 0, true, 60, 5);
         insta::assert_snapshot!(text);
@@ -264,9 +271,9 @@ mod tests {
     #[test]
     fn snapshot_agent_panel_terminal_states() {
         let entries = vec![
-            make_entry("agent-ok", 1, SubagentRunStatus::Completed),
-            make_entry("agent-fail", 1, SubagentRunStatus::Failed),
-            make_entry("agent-killed", 1, SubagentRunStatus::Killed),
+            make_entry("agent-ok", 1, NodeState::Completed),
+            make_entry("agent-fail", 1, NodeState::Failed),
+            make_entry("agent-killed", 1, NodeState::Cancelled),
         ];
         let text = render_to_text(&entries, 1, true, 60, 5);
         insta::assert_snapshot!(text);
@@ -275,8 +282,8 @@ mod tests {
     #[test]
     fn test_focused_row_has_reversed_modifier() {
         let entries = vec![
-            make_entry("alpha", 1, SubagentRunStatus::Idle),
-            make_entry("beta", 1, SubagentRunStatus::RunningFg),
+            make_entry("alpha", 1, NodeState::Created),
+            make_entry("beta", 1, NodeState::Running),
         ];
         let theme = crate::adapters::tui::theme::Theme::dark();
         let area = Rect::new(0, 0, 60, 5);

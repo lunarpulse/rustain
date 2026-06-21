@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
 use rustain::adapters::subagent::InProcessSubagentRunner;
 use rustain::domain::models::{
-    AgentId, AgentLaunchSpec, Op, SandboxPolicy, StreamChunk, SubagentRunStatus, ToolPolicy,
+    AgentId, AgentLaunchSpec, NodeState, Op, SandboxPolicy, StreamChunk, ToolPolicy,
 };
 use rustain::domain::ports::{StreamingProvider, SubagentRunner};
-use rustain::infrastructure::subagent::{AgentHandle, CascadeKillError, SubagentRegistry};
+use rustain::infrastructure::subagent::{AgentHandle, CascadeKillError, NodeTree};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -87,7 +87,7 @@ async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
     );
     let (event_bus, _event_rx) = rustain::infrastructure::runtime::event_bus::EventBus::new(1024);
     let event_bus = Arc::new(event_bus);
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive));
     let spool = Arc::new(
         rustain::infrastructure::subagent::SubagentSpool::new(tmp.path().join("spool"))
@@ -112,7 +112,7 @@ async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
 
 #[tokio::test]
 async fn cascade_kill_three_level_subtree() {
-    let reg = SubagentRegistry::new();
+    let reg = NodeTree::new();
     let root = AgentId::root();
     let agent_a = AgentId::new();
     let agent_b = AgentId::new();
@@ -125,14 +125,18 @@ async fn cascade_kill_three_level_subtree() {
         (agent_c.clone(), agent_b.clone()),
     ] {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
-        let (status_tx, _status_rx) = watch::channel(SubagentRunStatus::Idle);
+        let (status_tx, _status_rx) = watch::channel(NodeState::Created);
+        let (_metrics_tx, metrics_rx) =
+            watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = AgentHandle {
             agent_id: agent.clone(),
             command_tx: cmd_tx,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 0,
             subagent_type: "test".into(),
             spawned_at: 0,
             status: status_tx,
+            metrics: metrics_rx,
         };
         reg.register(agent.clone(), parent, handle).await.unwrap();
 
@@ -143,8 +147,8 @@ async fn cascade_kill_three_level_subtree() {
             while let Some(op) = cmd_rx.recv().await {
                 if matches!(op, Op::Kill) {
                     if let Some(tx) = reg_clone.status_sender(&agent_clone).await {
-                        let _: Result<(), watch::error::SendError<SubagentRunStatus>> =
-                            tx.send(SubagentRunStatus::Killed);
+                        let _: Result<(), watch::error::SendError<NodeState>> =
+                            tx.send(NodeState::Cancelled);
                     }
                     break;
                 }
@@ -171,18 +175,22 @@ async fn cascade_kill_three_level_subtree() {
 
 #[tokio::test]
 async fn cascade_kill_timeout_returns_partial() {
-    let reg = SubagentRegistry::new();
+    let reg = NodeTree::new();
     let root = AgentId::root();
     let a = AgentId::new();
     let (cmd_tx, mut _cmd_rx) = mpsc::channel(1);
-    let (status_tx, _status_rx) = watch::channel(SubagentRunStatus::Idle);
+    let (status_tx, _status_rx) = watch::channel(NodeState::Created);
+    let (_metrics_tx, metrics_rx) =
+        watch::channel(rustain::domain::models::AgentMetrics::default());
     let handle = AgentHandle {
         agent_id: a.clone(),
         command_tx: cmd_tx,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
         depth: 1,
         subagent_type: "test".into(),
         spawned_at: 0,
         status: status_tx,
+        metrics: metrics_rx,
     };
     reg.register(a.clone(), root.clone(), handle).await.unwrap();
 
@@ -215,7 +223,7 @@ async fn status_bridge_registry_list_reflects_child_status() {
     let cancel = CancellationToken::new();
     let handle = runner.launch(spec, cancel.clone()).await.unwrap();
 
-    // Wait for child to emit RunningFg and bridge to mirror it
+    // Wait for child to emit Running and bridge to mirror it
     let reg = runner.registry();
     let agent_id = handle.agent_id.clone();
 
@@ -224,13 +232,13 @@ async fn status_bridge_registry_list_reflects_child_status() {
         tokio::time::sleep(Duration::from_millis(10)).await;
         let entries: Vec<_> = reg.list().await;
         if let Some(entry) = entries.iter().find(|e| e.agent_id == agent_id) {
-            if entry.current_status == SubagentRunStatus::RunningFg {
+            if entry.current_status == NodeState::Running {
                 found_running = true;
                 break;
             }
         }
     }
-    assert!(found_running, "Registry should show RunningFg within 500ms");
+    assert!(found_running, "Registry should show Running within 500ms");
 
     // Cancel the child
     handle.cancel.cancel();

@@ -154,6 +154,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tokio = { version = "1.50", features = ["test-util", "rt", "macros", "time", "sync"] }  # deterministic time (pause/advance) for abandonment timing tests
 tempfile = "3.0"
 pretty_assertions = "1"
 mockito = "1"

@@ -19,7 +19,7 @@ pub struct TaskToolContext {
 
 pub struct SubagentProvider {
     runner: Arc<dyn crate::domain::ports::SubagentRunner>,
-    registry: Arc<crate::infrastructure::subagent::SubagentRegistry>,
+    registry: Arc<crate::infrastructure::subagent::NodeTree>,
     agent_registry: Arc<tokio::sync::RwLock<crate::adapters::agent_registry::AgentRegistry>>,
     model_router: Arc<dyn crate::domain::ports::ProviderInfoPort>,
     spool: Arc<crate::infrastructure::subagent::SubagentSpool>,
@@ -35,7 +35,7 @@ struct RunningTask {
 }
 
 impl SubagentProvider {
-    pub fn registry(&self) -> &Arc<crate::infrastructure::subagent::SubagentRegistry> {
+    pub fn registry(&self) -> &Arc<crate::infrastructure::subagent::NodeTree> {
         &self.registry
     }
 
@@ -55,7 +55,7 @@ impl SubagentProvider {
 
     pub fn new(
         runner: Arc<dyn crate::domain::ports::SubagentRunner>,
-        registry: Arc<crate::infrastructure::subagent::SubagentRegistry>,
+        registry: Arc<crate::infrastructure::subagent::NodeTree>,
         agent_registry: Arc<tokio::sync::RwLock<crate::adapters::agent_registry::AgentRegistry>>,
         model_router: Arc<dyn crate::domain::ports::ProviderInfoPort>,
         spool: Arc<crate::infrastructure::subagent::SubagentSpool>,
@@ -295,23 +295,20 @@ impl SubagentProvider {
 
                 let last_status = loop {
                     if rx.changed().await.is_err() {
-                        break crate::domain::models::SubagentRunStatus::Failed;
+                        break crate::domain::models::NodeState::Failed;
                     }
                     let status = *rx.borrow();
                     if matches!(
                         status,
-                        crate::domain::models::SubagentRunStatus::Completed
-                            | crate::domain::models::SubagentRunStatus::Failed
-                            | crate::domain::models::SubagentRunStatus::Killed
+                        crate::domain::models::NodeState::Completed
+                            | crate::domain::models::NodeState::Failed
+                            | crate::domain::models::NodeState::Cancelled
                     ) {
                         break status;
                     }
                 };
 
-                let is_error = !matches!(
-                    last_status,
-                    crate::domain::models::SubagentRunStatus::Completed
-                );
+                let is_error = !matches!(last_status, crate::domain::models::NodeState::Completed);
                 let content = match self.spool.read_tail(&generated_task_id, 8192).await {
                     Ok(text) if !text.is_empty() => text,
                     Ok(_) => {
@@ -372,9 +369,9 @@ impl SubagentProvider {
         let mut last_status;
         loop {
             match rx.recv().await {
-                Some(s @ crate::domain::models::SubagentRunStatus::Completed)
-                | Some(s @ crate::domain::models::SubagentRunStatus::Failed)
-                | Some(s @ crate::domain::models::SubagentRunStatus::Killed) => {
+                Some(s @ crate::domain::models::NodeState::Completed)
+                | Some(s @ crate::domain::models::NodeState::Failed)
+                | Some(s @ crate::domain::models::NodeState::Cancelled) => {
                     last_status = Some(s);
                     break;
                 }
@@ -395,8 +392,8 @@ impl SubagentProvider {
 
         let is_error = matches!(
             last_status,
-            Some(crate::domain::models::SubagentRunStatus::Failed)
-                | Some(crate::domain::models::SubagentRunStatus::Killed)
+            Some(crate::domain::models::NodeState::Failed)
+                | Some(crate::domain::models::NodeState::Cancelled)
         );
 
         // 9. Read spool tail
@@ -406,7 +403,7 @@ impl SubagentProvider {
                 if is_error {
                     format!(
                         "Subagent terminated with status: {:?}",
-                        last_status.unwrap_or(crate::domain::models::SubagentRunStatus::Failed)
+                        last_status.unwrap_or(crate::domain::models::NodeState::Failed)
                     )
                 } else {
                     "(subagent completed with no output)".into()

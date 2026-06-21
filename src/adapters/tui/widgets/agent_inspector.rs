@@ -41,11 +41,25 @@ pub fn render(
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "Model: (unknown \u{2014} Story 10.7)",
+        format!(
+            "Model: {}",
+            if entry.effective_model.is_empty() {
+                "(unresolved)"
+            } else {
+                &entry.effective_model
+            }
+        ),
         Style::default().fg(theme.colors.fg_muted),
     )));
     lines.push(Line::from(Span::styled(
-        "Tools: (pending \u{2014} Story 10.7)",
+        format!(
+            "Tools: {}",
+            if entry.tools_summary.is_empty() {
+                "(unresolved)"
+            } else {
+                &entry.tools_summary
+            }
+        ),
         Style::default().fg(theme.colors.fg_muted),
     )));
     let spawned_elapsed = crate::domain::services::plan_runtime::format_elapsed_ms(
@@ -98,15 +112,35 @@ pub fn render(
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
-        "  Tokens: (pending \u{2014} Story 10.7)",
+        format!(
+            "  Tokens: {} in / {} out",
+            entry.tokens_in, entry.tokens_out
+        ),
+        Style::default().fg(theme.colors.fg_muted),
+    )));
+    static PRICING: std::sync::OnceLock<
+        std::collections::HashMap<String, crate::domain::models::pricing::PricingConfig>,
+    > = std::sync::OnceLock::new();
+    let pricing = PRICING.get_or_init(crate::domain::models::AppConfig::default_pricing_catalog);
+    let cost = if entry.effective_model.is_empty() {
+        None
+    } else {
+        crate::domain::services::cost_calculator::cost_for_model_tokens(
+            &entry.effective_model,
+            entry.tokens_in,
+            entry.tokens_out,
+            pricing,
+        )
+    };
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  Cost: {}",
+            crate::adapters::tui::widgets::usage_panel::cost_or_na(cost)
+        ),
         Style::default().fg(theme.colors.fg_muted),
     )));
     lines.push(Line::from(Span::styled(
-        "  Cost: (pending \u{2014} Story 10.7)",
-        Style::default().fg(theme.colors.fg_muted),
-    )));
-    lines.push(Line::from(Span::styled(
-        "  Turns: (pending \u{2014} Story 10.7)",
+        format!("  Turns: {}", entry.turns),
         Style::default().fg(theme.colors.fg_muted),
     )));
     lines.push(Line::from(Span::styled(
@@ -220,9 +254,9 @@ pub fn render(
 mod tests {
     use super::*;
     use crate::domain::models::subagent_view::OwnershipKind;
-    use crate::domain::models::{AgentId, SubagentRunStatus};
+    use crate::domain::models::{AgentId, NodeState};
 
-    fn make_entry(name: &str, status: SubagentRunStatus) -> AgentRowView {
+    fn make_entry(name: &str, status: NodeState) -> AgentRowView {
         AgentRowView {
             agent_id: AgentId::new(),
             parent_id: AgentId::root(),
@@ -231,6 +265,11 @@ mod tests {
             depth: 1,
             current_status: status,
             ownership: OwnershipKind::Owned,
+            effective_model: String::new(),
+            tools_summary: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
         }
     }
 
@@ -273,7 +312,7 @@ mod tests {
 
     #[test]
     fn snapshot_inspector_idle() {
-        let entry = make_entry("code-reviewer", SubagentRunStatus::Idle);
+        let entry = make_entry("code-reviewer", NodeState::Created);
         let cache = HashMap::new();
         let text = render_to_text(&entry, None, &cache, 60, 20);
         insta::assert_snapshot!(text);
@@ -281,7 +320,7 @@ mod tests {
 
     #[test]
     fn snapshot_inspector_running_with_tail() {
-        let entry = make_entry("coder", SubagentRunStatus::RunningFg);
+        let entry = make_entry("coder", NodeState::Running);
         let mut cache = HashMap::new();
         cache.insert(
             entry.agent_id.clone(),
@@ -293,7 +332,7 @@ mod tests {
 
     #[test]
     fn snapshot_inspector_kill_confirm() {
-        let entry = make_entry("reviewer", SubagentRunStatus::RunningFg);
+        let entry = make_entry("reviewer", NodeState::Running);
         let cache = HashMap::new();
         let text = render_to_text(&entry, Some(&entry.agent_id), &cache, 60, 20);
         insta::assert_snapshot!(text);

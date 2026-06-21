@@ -66,7 +66,7 @@ impl rustain::domain::ports::ProviderInfoPort for StubInfo {
 #[tokio::test]
 async fn test_subagent_provider_protocol_returns_subagent() {
     let runner = Arc::new(StubRunner) as Arc<dyn rustain::domain::ports::SubagentRunner>;
-    let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
+    let registry = Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let agent_registry = Arc::new(tokio::sync::RwLock::new(
         rustain::adapters::agent_registry::AgentRegistry::new(),
     ));
