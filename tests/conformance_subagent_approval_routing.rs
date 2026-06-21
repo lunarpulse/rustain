@@ -122,6 +122,14 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
             .await
             .unwrap(),
     );
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     let runner = rustain::adapters::subagent::InProcessSubagentRunner::new(
         provider,
@@ -134,6 +142,8 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         registry,
         parent_sandbox,
         spool,
+        authority,
+        root_authority,
     );
 
     let spec = AgentLaunchSpec {

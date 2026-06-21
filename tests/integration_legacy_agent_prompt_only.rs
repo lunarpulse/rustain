@@ -88,6 +88,17 @@ async fn legacy_agent_prompt_only_invoke_succeeds() {
     let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
 
     let provider = SubagentProvider::new(runner, registry, agent_registry, model_router, spool);
+    // P6 fail-closed gate: bind authority so the point-of-use validate() passes.
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = std::sync::Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority: std::sync::Arc<dyn rustain::domain::ports::AuthorityProvider> =
+        std::sync::Arc::new(
+            rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger),
+        );
+    provider.set_authority(authority, root_authority).await;
 
     // Discover the code-reviewer capability, then invoke with its advertised schema.
     let caps = provider.discover().await.unwrap();

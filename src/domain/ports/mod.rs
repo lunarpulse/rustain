@@ -5,6 +5,8 @@ mod approval_persistence;
 #[allow(unused_imports)]
 mod auth_store;
 #[allow(unused_imports)]
+mod authority_provider;
+#[allow(unused_imports)]
 mod capability_provider;
 #[allow(unused_imports)]
 mod catalog_observer;
@@ -61,6 +63,7 @@ pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
 pub use approval_persistence::ApprovalPersistencePort;
 pub use auth_store::AuthStorePort;
+pub use authority_provider::{AuthorityError, AuthorityProvider};
 pub use capability_provider::CapabilityProvider;
 pub use catalog_observer::CatalogObserver;
 pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};

@@ -1402,12 +1402,34 @@ pub async fn run() -> Result<()> {
                 crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),
             ));
 
-            // Construct subagent infrastructure
-            let subagent_registry =
-                Arc::new(crate::infrastructure::subagent::NodeTree::with_event_tx(
+            let root_authority = crate::domain::models::CapabilityToken::r1_root(
+                crate::domain::models::AgentId::root(),
+            );
+            let authority_ledger = Arc::new(
+                crate::domain::services::authority_ledger::AuthorityLedger::new(
+                    root_authority.clone(),
+                ),
+            );
+            // Construct subagent infrastructure first so trust-drop revoke can
+            // route into cascade_kill (AC5): the provider holds an Arc<NodeTree>.
+            let subagent_registry = Arc::new(
+                crate::infrastructure::subagent::NodeTree::with_event_tx(
                     domain_tx.clone(),
                     Arc::new(|| chrono::Utc::now().timestamp_millis()),
-                ));
+                )
+                .with_on_cascade_kill({
+                    let authority_ledger = authority_ledger.clone();
+                    Arc::new(move |id| {
+                        let _ = authority_ledger.revoke_scope(id);
+                    })
+                }),
+            );
+            let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
+                crate::adapters::authority::InProcessAuthorityProvider::new(
+                    authority_ledger.clone(),
+                )
+                .with_node_tree(subagent_registry.clone()),
+            );
             let spool = Arc::new(
                 crate::infrastructure::subagent::SubagentSpool::new(
                     paths::data_dir()
@@ -1498,6 +1520,8 @@ pub async fn run() -> Result<()> {
                     subagent_registry.clone(),
                     sandbox_policy_ref.clone(),
                     spool.clone(),
+                    authority_provider.clone(),
+                    root_authority.clone(),
                 ));
 
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
@@ -1507,6 +1531,9 @@ pub async fn run() -> Result<()> {
                 model_router,
                 spool.clone(),
             ));
+            subagent_provider
+                .set_authority(authority_provider.clone(), root_authority.clone())
+                .await;
 
             composite.set_subagent_provider(subagent_provider);
         }

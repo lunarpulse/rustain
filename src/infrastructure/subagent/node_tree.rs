@@ -10,7 +10,9 @@ use crate::domain::models::agent_node::{AgentMetrics, AgentNode, NodeOrigin};
 use crate::domain::models::capability_id::CapabilityId;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::subagent_view::OwnershipKind;
-use crate::domain::models::{AgentId, Op, RegisteredCapability, SpawnLimitKind, SubagentError};
+use crate::domain::models::{
+    AgentId, CapabilityTokenId, Op, RegisteredCapability, SpawnLimitKind, SubagentError,
+};
 use crate::infrastructure::subagent::node_handle::{NodeHandle, NodeHandleError};
 
 pub const MAX_DEPTH: usize = 3;
@@ -58,6 +60,7 @@ struct NodeTreeInner {
 #[derive(Clone)]
 pub struct AgentHandle {
     pub agent_id: AgentId,
+    pub token: CapabilityTokenId,
     pub command_tx: mpsc::Sender<Op>,
     /// The node's REAL cancellation token — the same token the child task
     /// selects on. Passed from `launch()` and stored here (not minted fresh)
@@ -258,6 +261,7 @@ impl NodeTree {
         // Build AgentNode from legacy AgentHandle
         let node = AgentNode {
             id: agent_id.clone(),
+            token: handle.token,
             parent: if parent == AgentId::root() {
                 None
             } else {
@@ -804,6 +808,7 @@ mod tests {
         let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
         AgentHandle {
             agent_id,
+            token: CapabilityTokenId::nil(),
             command_tx: tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth,
@@ -1078,6 +1083,7 @@ mod tests {
         let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
         let handle = AgentHandle {
             agent_id: a.clone(),
+            token: CapabilityTokenId::nil(),
             command_tx: cmd_tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 1,
@@ -1127,6 +1133,7 @@ mod tests {
         let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
         let handle = AgentHandle {
             agent_id: a.clone(),
+            token: CapabilityTokenId::nil(),
             command_tx: cmd_tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 1,

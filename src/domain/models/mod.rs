@@ -10,6 +10,7 @@ pub mod capability;
 pub mod capability_id;
 pub mod capability_kind;
 pub mod capability_registry;
+pub mod capability_token;
 pub mod catalog_delta;
 pub mod channel_kind;
 pub mod channel_turn_request;
@@ -35,6 +36,7 @@ mod message;
 pub mod node_state;
 mod notice;
 pub mod palette;
+pub mod peer_identity;
 mod permission;
 pub mod plan;
 pub mod pricing;
@@ -88,6 +90,10 @@ pub use agent_node::{
 #[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope};
 #[allow(unused_imports)]
+pub use capability_token::{
+    Budget, CapabilityFlag, CapabilitySet, CapabilityToken, CapabilityTokenId, DelegateConstraint,
+    DelegateRequest,
+};
 pub use channel_kind::ChannelKind;
 pub use channel_turn_request::ChannelTurnRequest;
 pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
@@ -126,6 +132,8 @@ pub use notice::{
 };
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
+#[allow(unused_imports)]
+pub use peer_identity::{Ed25519Sig, PeerId};
 #[allow(unused_imports)]
 pub use permission::{
     FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,

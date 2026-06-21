@@ -100,6 +100,14 @@ async fn make_provider() -> (
         rustain::domain::models::SandboxPolicy::Permissive,
     ));
     let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     let runner = Arc::new(rustain::adapters::subagent::InProcessSubagentRunner::new(
         provider.clone(),
@@ -112,6 +120,8 @@ async fn make_provider() -> (
         registry.clone(),
         parent_sandbox,
         spool.clone(),
+        authority.clone(),
+        root_authority.clone(),
     ));
 
     let agent_registry = Arc::new(tokio::sync::RwLock::new(
@@ -172,6 +182,10 @@ async fn make_provider() -> (
         spool.clone(),
     ));
 
+    subagent_provider
+        .set_authority(authority, root_authority)
+        .await;
+    let _ = subagent_provider.clone();
     (subagent_provider, runner, tmp)
 }
 

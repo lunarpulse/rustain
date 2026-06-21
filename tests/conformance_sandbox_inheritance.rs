@@ -202,6 +202,14 @@ async fn make_runner_with_parent(
     let registry = Arc::new(NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(parent));
     let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     let runner = InProcessSubagentRunner::new(
         provider,
@@ -214,6 +222,8 @@ async fn make_runner_with_parent(
         registry,
         parent_sandbox,
         spool,
+        authority,
+        root_authority,
     );
     (runner, tmp)
 }

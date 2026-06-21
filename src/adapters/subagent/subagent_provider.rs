@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{
-    AgentLaunchSpec, Capability, CapabilityError, CapabilityId, ProviderCapabilities, ToolResult,
-    TraceContext, TransportKind,
+    AgentId, AgentLaunchSpec, Capability, CapabilityError, CapabilityFlag, CapabilityId,
+    CapabilityToken, ProviderCapabilities, ToolResult, TraceContext, TransportKind,
 };
-use crate::domain::ports::CapabilityProvider;
+use crate::domain::ports::{AuthorityProvider, CapabilityProvider};
 use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
 
 /// Story 10.7 — per-turn context for subagent dispatch.
@@ -27,6 +27,7 @@ pub struct SubagentProvider {
     running_tasks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, RunningTask>>>,
     /// Story 10.7 — optional usage ledger for per-call TokenUsage recording (AC-10-7-12).
     ledger: Arc<tokio::sync::RwLock<Option<Arc<dyn crate::domain::ports::UsageLedgerPort>>>>,
+    authority: Arc<tokio::sync::RwLock<Option<(Arc<dyn AuthorityProvider>, CapabilityToken)>>>,
 }
 
 struct RunningTask {
@@ -68,12 +69,21 @@ impl SubagentProvider {
             spool,
             running_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             ledger: Arc::new(tokio::sync::RwLock::new(None)),
+            authority: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
     /// Story 10.7 — wire the usage ledger for per-call TokenUsage recording (AC-10-7-12).
     pub async fn set_ledger(&self, ledger: Arc<dyn crate::domain::ports::UsageLedgerPort>) {
         *self.ledger.write().await = Some(ledger);
+    }
+
+    pub async fn set_authority(
+        &self,
+        authority: Arc<dyn AuthorityProvider>,
+        root_authority: CapabilityToken,
+    ) {
+        *self.authority.write().await = Some((authority, root_authority));
     }
 }
 
@@ -184,6 +194,16 @@ impl SubagentProvider {
         mut input: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<ToolResult, CapabilityError> {
+        if let Err(err) = self
+            .validate_authority(CapabilityFlag::Spawn, &AgentId::root())
+            .await
+        {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Subagent launch rejected by authority: {err}"),
+                is_error: true,
+            });
+        }
         // D1 fix: extract per-turn context from input JSON (injected by CompositeToolsetAdapter)
         let parent_ctx_tokens = input
             .get("__parent_ctx_tokens")
@@ -478,6 +498,16 @@ impl SubagentProvider {
             .ok_or_else(|| {
                 CapabilityError::InvocationFailed("subagent".into(), "Missing 'task_id'".into())
             })?;
+        if let Err(err) = self
+            .validate_authority(CapabilityFlag::ReadFs, &AgentId::root())
+            .await
+        {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Task output read rejected by authority: {err}"),
+                is_error: true,
+            });
+        }
 
         let range = input.get("range").and_then(|v| v.as_str());
 
@@ -540,6 +570,21 @@ impl SubagentProvider {
             content,
             is_error: false,
         })
+    }
+
+    async fn validate_authority(
+        &self,
+        want: CapabilityFlag,
+        scope: &AgentId,
+    ) -> Result<(), crate::domain::ports::AuthorityError> {
+        let authority = self.authority.read().await.clone();
+        if let Some((authority, token)) = authority {
+            authority.validate(&token, &want, scope).await
+        } else {
+            // Fail-closed (P6): admitting when unconfigured is a security hole.
+            // Production always binds authority via set_authority at startup.
+            Err(crate::domain::ports::AuthorityError::Denied { flag: want })
+        }
     }
 
     async fn invoke_legacy_agent(

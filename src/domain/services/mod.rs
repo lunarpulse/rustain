@@ -1,6 +1,7 @@
 pub mod adapter_catalog;
 pub mod adapter_overlay;
 pub mod approval_runtime;
+pub mod authority_ledger;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;
 pub mod command_normalize;

@@ -6,9 +6,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{
-    AgentId, AgentLaunchSpec, NodeState, Op, OwnershipKind, SubagentError, TaskHandle,
+    AgentId, AgentLaunchSpec, CapabilityFlag, CapabilityToken, NodeState, Op, OwnershipKind,
+    SubagentError, TaskHandle,
 };
-use crate::domain::ports::SubagentRunner;
+use crate::domain::ports::{AuthorityProvider, SubagentRunner};
 use crate::domain::services::sandbox_narrowing::validate_narrowing;
 use crate::infrastructure::subagent::{NodeTree, SpoolMeta, SubagentSpool};
 
@@ -23,6 +24,8 @@ pub struct InProcessSubagentRunner {
     registry: Arc<NodeTree>,
     parent_sandbox: Arc<tokio::sync::RwLock<crate::domain::models::SandboxPolicy>>,
     spool: Arc<SubagentSpool>,
+    authority: Arc<dyn AuthorityProvider>,
+    root_authority: CapabilityToken,
 }
 
 impl InProcessSubagentRunner {
@@ -37,6 +40,8 @@ impl InProcessSubagentRunner {
         registry: Arc<NodeTree>,
         parent_sandbox: Arc<tokio::sync::RwLock<crate::domain::models::SandboxPolicy>>,
         spool: Arc<SubagentSpool>,
+        authority: Arc<dyn AuthorityProvider>,
+        root_authority: CapabilityToken,
     ) -> Self {
         Self {
             provider,
@@ -49,6 +54,8 @@ impl InProcessSubagentRunner {
             registry,
             parent_sandbox,
             spool,
+            authority,
+            root_authority,
         }
     }
 
@@ -89,6 +96,16 @@ impl SubagentRunner for InProcessSubagentRunner {
         let agent_id = AgentId::new();
         let task_id = nanoid::nanoid!(12);
         let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let child_token = self
+            .authority
+            .delegate(
+                &self.root_authority,
+                CapabilityToken::r1_child_request(agent_id.clone()),
+            )
+            .await
+            .map_err(|err| {
+                SubagentError::Internal(format!("authority delegation failed: {err}"))
+            })?;
 
         // 5. Construct ChildState (before spawn so it can be cloned into closure)
         let child_state = Arc::new(crate::adapters::subagent::ChildState::new(
@@ -116,6 +133,8 @@ impl SubagentRunner for InProcessSubagentRunner {
 
         let tools = self.tools.clone();
         let security = self.security.clone();
+        let authority_for_spawn = self.authority.clone();
+        let child_token_for_spawn = child_token.clone();
         let _handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(run_child(
                 spec,
@@ -137,6 +156,8 @@ impl SubagentRunner for InProcessSubagentRunner {
                 subagent_type_for_spawn.clone(),
                 started_at_ms,
                 child_state_for_spawn,
+                child_token_for_spawn,
+                authority_for_spawn,
             ))
             .catch_unwind()
             .await;
@@ -154,6 +175,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         let (watch_tx, _watch_rx) = tokio::sync::watch::channel(NodeState::Created);
         let reg_handle = crate::infrastructure::subagent::registry::AgentHandle {
             agent_id: agent_id.clone(),
+            token: child_token.id,
             command_tx: command_tx.clone(),
             // The child task's REAL cancellation token — stored so cascade_kill
             // can interrupt the task at any await point (not an orphan token).
@@ -181,6 +203,8 @@ impl SubagentRunner for InProcessSubagentRunner {
         // 8. Spawn status bridge task (mirrors mpsc → registry watch)
         let registry = self.registry.clone();
         let agent_id_for_bridge = agent_id.clone();
+        let authority_for_bridge = self.authority.clone();
+        let child_token_id_for_bridge = child_token.id;
         tokio::spawn(async move {
             let mut rx = bridge_rx;
             while let Some(s) = rx.recv().await {
@@ -191,6 +215,13 @@ impl SubagentRunner for InProcessSubagentRunner {
                     s,
                     NodeState::Completed | NodeState::Failed | NodeState::Cancelled
                 ) {
+                    // AC4: settle the child's reservation on ANY terminal (idempotent)
+                    // so the parent reclaims reserved − consumed. Cancelled-via-cascade
+                    // also settles via revoke_scope; the `settled` latch collapses the
+                    // double-fire to a single credit.
+                    let _ = authority_for_bridge
+                        .settle(&child_token_id_for_bridge)
+                        .await;
                     registry.deregister(&agent_id_for_bridge).await;
                     break;
                 }
@@ -255,6 +286,8 @@ async fn run_child(
     subagent_type: String,
     started_at_ms: i64,
     child_state: Arc<crate::adapters::subagent::ChildState>,
+    child_token: CapabilityToken,
+    authority: Arc<dyn AuthorityProvider>,
 ) {
     use crate::domain::models::tool_call::ApprovalSource;
     use crate::domain::models::{
@@ -762,6 +795,54 @@ async fn run_child(
                     })
                     .collect();
 
+                // AC9 point-of-use authority gate (the security keystone): validate the
+                // child's delegated token before dispatching its tool calls. A revoked /
+                // expired / use-exhausted / budget-exhausted token is denied its next
+                // gated action. R1 children carry all flags so this is decisive on
+                // revocation/TTL/use-count/budget; per-tool flag classification is an
+                // R2 refinement (the validate() check itself enforces the held flag set).
+                let gate = authority
+                    .validate(&child_token, &CapabilityFlag::ReadFs, &agent_id)
+                    .await;
+                // AC4/AC9 budget-spend: charge one use at the point of use
+                // (uses consumed at invoke are not refunded). validate() is the
+                // check; spend_use() is the commit.
+                let gate = match gate {
+                    Ok(()) => authority.spend_use(&child_token.id).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(err) = gate {
+                    let blocked: Vec<ToolResultMessage> = requests
+                        .iter()
+                        .map(|r| ToolResultMessage {
+                            tool_use_id: r.id.clone(),
+                            content: format!("Blocked by authority: {err}"),
+                            is_error: true,
+                        })
+                        .collect();
+                    for tr in &blocked {
+                        if let Err(e) = spool
+                            .append(
+                                &task_id,
+                                format!("\n[tool result]: {}\n", tr.content).as_bytes(),
+                            )
+                            .await
+                        {
+                            tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for authority denial");
+                        }
+                    }
+                    messages.push(Message {
+                        role: MessageRole::User,
+                        content: String::new(),
+                        images: vec![],
+                        tool_results: blocked,
+                        tool_uses: vec![],
+                        context_prefix: None,
+                        reasoning_content: None,
+                    });
+                    accumulated_text.clear();
+                    continue;
+                }
                 let source = ApprovalSource::ForegroundSubagent {
                     conversation_id: agent_id.0.clone(),
                     parent_tool_call_id: task_id.clone(),
@@ -985,6 +1066,21 @@ mod tests {
         }
     }
 
+    fn authority_pair() -> (
+        Arc<dyn crate::domain::ports::AuthorityProvider>,
+        crate::domain::models::CapabilityToken,
+    ) {
+        let root = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
+        let ledger =
+            Arc::new(crate::domain::services::authority_ledger::AuthorityLedger::new(root.clone()));
+        (
+            Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+                ledger,
+            )) as Arc<dyn crate::domain::ports::AuthorityProvider>,
+            root,
+        )
+    }
+
     async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let provider = Arc::new(NoOpProvider) as Arc<dyn StreamingProvider>;
@@ -1012,6 +1108,7 @@ mod tests {
             crate::domain::models::SandboxPolicy::Permissive,
         ));
         let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
 
         let runner = InProcessSubagentRunner::new(
             provider,
@@ -1024,6 +1121,8 @@ mod tests {
             registry,
             parent_sandbox,
             spool,
+            authority,
+            root_authority,
         );
         (runner, tmp)
     }
@@ -1055,6 +1154,7 @@ mod tests {
             crate::domain::models::SandboxPolicy::Permissive,
         ));
         let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
 
         let runner = InProcessSubagentRunner::new(
             provider,
@@ -1067,6 +1167,8 @@ mod tests {
             registry,
             parent_sandbox,
             spool,
+            authority,
+            root_authority,
         );
         (runner, tmp)
     }
@@ -1098,6 +1200,7 @@ mod tests {
             crate::domain::models::SandboxPolicy::Permissive,
         ));
         let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
 
         let runner = InProcessSubagentRunner::new(
             provider,
@@ -1110,6 +1213,8 @@ mod tests {
             registry,
             parent_sandbox,
             spool,
+            authority,
+            root_authority,
         );
         (runner, tmp)
     }
@@ -1449,5 +1554,172 @@ mod tests {
         assert!(status.is_some());
 
         handle.cancel.cancel();
+    }
+
+    /// AC9 keystone probe: blocks the first stream until the test revokes the
+    /// child token, then emits a tool call so `run_child` reaches its authority
+    /// gate; ends cleanly on the second stream.
+    struct GateProbeProvider {
+        fire: std::sync::Arc<tokio::sync::Notify>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for GateProbeProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let chunks: Vec<StreamChunk> = if n == 0 {
+                // First turn: block until the test has revoked the child token,
+                // then emit a tool call so run_child reaches its authority gate.
+                self.fire.notified().await;
+                vec![
+                    StreamChunk::ToolUse {
+                        id: "probe".into(),
+                        name: "probe_tool".into(),
+                        input: serde_json::json!({}),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    StreamChunk::Text {
+                        content: "done".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "gate-probe".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    /// AC9 keystone, end-to-end (post-review party-mode closure): a child whose
+    /// delegated token is revoked is DENIED its next tool dispatch by the
+    /// `run_child` gate. The defeat the review found lived in the *caller*
+    /// (validated root, not the child), so a ledger unit test cannot catch it —
+    /// this drives the real gate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ac9_revoked_child_token_denies_next_tool_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fire = std::sync::Arc::new(tokio::sync::Notify::new());
+        let provider = std::sync::Arc::new(GateProbeProvider {
+            fire: fire.clone(),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        }) as std::sync::Arc<dyn StreamingProvider>;
+
+        // Shared ledger (test revokes) + shared spool (test reads the denial).
+        let root = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
+        let ledger = std::sync::Arc::new(
+            crate::domain::services::authority_ledger::AuthorityLedger::new(root.clone()),
+        );
+        let registry = std::sync::Arc::new(NodeTree::new());
+        let authority: std::sync::Arc<dyn AuthorityProvider> = std::sync::Arc::new(
+            crate::adapters::authority::InProcessAuthorityProvider::new(ledger.clone()),
+        );
+        let storage = std::sync::Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as std::sync::Arc<dyn crate::domain::ports::StoragePort>;
+        let security = std::sync::Arc::new(SecurityAdapter::new(PathBuf::from(".")))
+            as std::sync::Arc<dyn crate::domain::ports::SecurityPort>;
+        let sandbox = std::sync::Arc::new(ArcSwap::from_pointee(std::sync::Arc::new(NoOpSandbox)
+            as std::sync::Arc<dyn crate::domain::ports::SandboxManager>));
+        let tools = std::sync::Arc::new(ToolSetAdapter::new(
+            PathBuf::from("."),
+            storage.clone(),
+            sandbox,
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+        )) as std::sync::Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = ApprovalRuntime::new(1024, std::sync::Arc::new(NoOpApprovalPersistence));
+        let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
+        let (event_bus, _event_rx) = EventBus::new(1024);
+        let event_bus = std::sync::Arc::new(event_bus);
+        let parent_sandbox = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let spool =
+            std::sync::Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage,
+            security,
+            tools,
+            approval,
+            scheduler,
+            event_bus,
+            registry.clone(),
+            parent_sandbox,
+            spool.clone(),
+            authority,
+            root,
+        );
+
+        let spec = AgentLaunchSpec {
+            prompt: String::from("probe"),
+            effective_model: String::from("test-model"),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+        };
+        let handle = runner.launch(spec, CancellationToken::new()).await.unwrap();
+        let task_id = handle.task_id.clone();
+
+        // Revoke the child's delegated token BEFORE unblocking the provider, so
+        // the run_child gate observes a revoked token on its first tool dispatch.
+        ledger.revoke_scope(&handle.agent_id).unwrap();
+        fire.notify_one();
+
+        // Wait for terminal status.
+        let mut rx = handle.status_rx;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_millis(2000), async {
+            loop {
+                match rx.recv().await {
+                    Some(s @ (NodeState::Completed | NodeState::Failed | NodeState::Cancelled)) => {
+                        break s;
+                    }
+                    Some(_) => continue,
+                    None => break NodeState::Failed,
+                }
+            }
+        })
+        .await;
+
+        // The keystone proof: the denied dispatch wrote "Blocked by authority"
+        // to the spool, and the tool itself was never dispatched.
+        let content = spool.read_full(&task_id).await.unwrap_or_default();
+        assert!(
+            content.contains("Blocked by authority"),
+            "AC9 keystone: a revoked child must be denied its next tool dispatch; spool was: {content}"
+        );
     }
 }

@@ -522,7 +522,7 @@ fn test_remote_handle_not_used_in_r1() {
 fn test_import_site_count_pinned() {
     /// Update this constant ONLY when intentionally adding/removing a
     /// legitimate `NodeTree` import site in `src/`.
-    const EXPECTED: usize = 8;
+    const EXPECTED: usize = 9;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());
@@ -672,6 +672,7 @@ async fn nfr69_spawn_latency() {
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = rustain::infrastructure::subagent::AgentHandle {
             agent_id: agent_id.clone(),
+            token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 0,
@@ -739,6 +740,7 @@ async fn nfr69_cancel_latency() {
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = rustain::infrastructure::subagent::AgentHandle {
             agent_id: agent_id.clone(),
+            token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: cmd_tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 0,

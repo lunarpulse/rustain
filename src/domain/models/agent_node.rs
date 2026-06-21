@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::models::agent_id::AgentId;
+use crate::domain::models::capability_token::CapabilityTokenId;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::subagent_view::OwnershipKind;
 
@@ -52,6 +53,8 @@ pub enum NodeOrigin {
 pub struct AgentNode {
     /// Stable identity of this node.
     pub id: AgentId,
+    /// Authority token backing this node's delegated capabilities.
+    pub token: CapabilityTokenId,
     /// Parent node, `None` for the root.
     pub parent: Option<AgentId>,
     /// Ownership relationship to the parent.
@@ -102,6 +105,8 @@ pub struct AgentMetrics {
 pub struct NodeCheckpoint {
     /// Stable identity of this node.
     pub id: AgentId,
+    /// Authority token backing this node's delegated capabilities.
+    pub token: CapabilityTokenId,
     /// Parent node, `None` for the root.
     pub parent: Option<AgentId>,
     /// Ownership relationship to the parent.
@@ -136,6 +141,7 @@ impl AgentNode {
     pub fn checkpoint(&self) -> NodeCheckpoint {
         NodeCheckpoint {
             id: self.id.clone(),
+            token: self.token,
             parent: self.parent.clone(),
             ownership: self.ownership,
             state: self.state,
@@ -238,6 +244,7 @@ mod tests {
         AgentNode {
             id: AgentId("child123".into()),
             parent: Some(AgentId("parentabc".into())),
+            token: CapabilityTokenId::root(),
             ownership: OwnershipKind::Peer,
             state: NodeState::Running,
             origin: NodeOrigin::Subagent,
@@ -268,7 +275,7 @@ mod tests {
         // Schema pin: adding/removing/renaming a field on NodeCheckpoint breaks
         // this test, which is the point — the persisted shape is a contract.
         let node = sample_node();
-        let value = serde_json::to_value(&node.checkpoint()).expect("serialize to Value");
+        let value = serde_json::to_value(node.checkpoint()).expect("serialize to Value");
 
         let object = value
             .as_object()
@@ -279,6 +286,7 @@ mod tests {
         let expected: std::collections::BTreeSet<&str> = [
             "id",
             "parent",
+            "token",
             "ownership",
             "state",
             "origin",
@@ -336,6 +344,7 @@ mod tests {
 
         // Identity / lineage.
         assert_eq!(cp.id, node.id);
+        assert_eq!(cp.token, node.token);
         assert_eq!(cp.parent, node.parent);
         assert_eq!(cp.ownership, node.ownership);
 

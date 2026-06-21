@@ -94,6 +94,14 @@ async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
             .await
             .unwrap(),
     );
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     let runner = InProcessSubagentRunner::new(
         provider,
@@ -106,6 +114,8 @@ async fn make_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {
         registry,
         parent_sandbox,
         spool,
+        authority,
+        root_authority,
     );
     (runner, tmp)
 }
@@ -130,6 +140,7 @@ async fn cascade_kill_three_level_subtree() {
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = AgentHandle {
             agent_id: agent.clone(),
+            token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: cmd_tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 0,
@@ -184,6 +195,7 @@ async fn cascade_kill_timeout_returns_partial() {
         watch::channel(rustain::domain::models::AgentMetrics::default());
     let handle = AgentHandle {
         agent_id: a.clone(),
+        token: rustain::domain::models::CapabilityTokenId::nil(),
         command_tx: cmd_tx,
         cancel_token: tokio_util::sync::CancellationToken::new(),
         depth: 1,

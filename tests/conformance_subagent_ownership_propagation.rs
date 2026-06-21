@@ -32,6 +32,7 @@ async fn test_subagent_ownership_events_flow_through_app_event_bus() {
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = rustain::infrastructure::subagent::AgentHandle {
             agent_id: agent.clone(),
+            token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: cmd_tx,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             depth: 0,
