@@ -35,6 +35,7 @@ pub mod memory_fact;
 mod message;
 pub mod node_state;
 mod notice;
+pub mod orchestration;
 pub mod palette;
 pub mod peer_identity;
 mod permission;
@@ -129,6 +130,11 @@ pub use message::{
 pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
     FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
+};
+#[allow(unused_imports)]
+pub use orchestration::{
+    CoverageLine, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, ForkJoinSpec, OrchestrationError,
+    SpokeCitation, SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
 };
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};

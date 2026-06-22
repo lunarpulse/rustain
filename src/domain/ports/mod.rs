@@ -23,6 +23,8 @@ mod event_emitter;
 #[allow(unused_imports)]
 mod memory;
 #[allow(unused_imports)]
+mod node_orchestrator;
+#[allow(unused_imports)]
 mod persona;
 #[allow(unused_imports)]
 mod profile_resolver;
@@ -74,6 +76,7 @@ pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
+pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};

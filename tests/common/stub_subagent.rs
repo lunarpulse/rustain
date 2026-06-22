@@ -45,6 +45,7 @@ impl SubagentRunner for StubSubagentRunner {
             subagent_type: "stub".to_string(),
             spawned_at: chrono::Utc::now().timestamp_millis(),
             parent_disconnect,
+            yield_rx: None,
         })
     }
 }

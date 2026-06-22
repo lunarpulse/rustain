@@ -338,6 +338,27 @@ pub enum AppEvent {
     /// nested enum to keep the top-level surface lean and group related events
     /// for the event_loop dispatcher.
     CapabilityEvent(CapabilityEvent),
+    /// Story 14.3 — a fork-join wave started fanning out (14.3a seam).
+    ForkJoinStarted {
+        coordinator: crate::domain::models::AgentId,
+        spoke_count: usize,
+    },
+    /// Story 14.3 — one spoke reached a terminal state.
+    SpokeCompleted {
+        agent_id: crate::domain::models::AgentId,
+        label: String,
+    },
+    /// Story 14.3 — the grounded synthesis floor is ready (honest_empty set
+    /// when zero spokes contributed signal — the cruelest-lie guard, AC7).
+    SynthesisReady {
+        coordinator: crate::domain::models::AgentId,
+        honest_empty: bool,
+    },
+    /// Story 14.3 — a wave was cancelled (cancel-all wired; 14.3a surfaces it).
+    WaveCancelled {
+        coordinator: crate::domain::models::AgentId,
+        killed: usize,
+    },
 }
 
 /// User decision for a delegation suggestion (AC-10-5-3).

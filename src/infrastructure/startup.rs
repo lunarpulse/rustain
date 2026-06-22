@@ -1524,6 +1524,24 @@ pub async fn run() -> Result<()> {
                     root_authority.clone(),
                 ));
 
+            // Story 14.3 — fork-join orchestrator, bound to the SAME ports as
+            // the runner (AC8: drives children through the SubagentRunner port,
+            // never a concrete impl). The executor is the multi-node
+            // generalization of the single-turn driver; the coordinator's turn
+            // loop invokes `run_fork_join` when it fans out (the trigger — a
+            // model fan-out intent — is the connection point wired with the
+            // turn-loop integration).
+            let _orchestrator: Arc<dyn crate::domain::ports::Orchestrator> =
+                Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                    runner.clone(),
+                    authority_provider.clone(),
+                    authority_ledger.clone(),
+                    event_bus.clone(),
+                    Arc::new(crate::domain::clock::SystemClock::default())
+                        as Arc<dyn crate::domain::clock::Clock>,
+                    root_authority.clone(),
+                ));
+
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
                 runner,
                 subagent_registry.clone(),

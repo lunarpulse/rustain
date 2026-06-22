@@ -169,13 +169,34 @@ fn subagent_icon_for(
     theme: &crate::adapters::tui::theme::Theme,
 ) -> (&'static str, Color) {
     match status {
-        NodeState::Running => ("\u{25CF}", theme.colors.tool_status_executing),
-        NodeState::Created => ("\u{23F8}", theme.colors.tool_status_awaiting),
-        NodeState::Waiting => ("\u{25D4}", theme.colors.tool_status_awaiting),
-        NodeState::Suspended => ("\u{25D0}", theme.colors.tool_status_awaiting),
-        NodeState::Completed => ("\u{2713}", theme.colors.tool_status_success),
-        NodeState::Failed => ("\u{2717}", theme.colors.tool_status_error),
-        NodeState::Cancelled => ("\u{2298}", theme.colors.tool_status_cancelled),
+        NodeState::Running => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Running),
+            theme.colors.tool_status_executing,
+        ),
+        NodeState::Created => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Created),
+            theme.colors.tool_status_awaiting,
+        ),
+        NodeState::Waiting => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Waiting),
+            theme.colors.tool_status_awaiting,
+        ),
+        NodeState::Suspended => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Suspended),
+            theme.colors.tool_status_awaiting,
+        ),
+        NodeState::Completed => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Completed),
+            theme.colors.tool_status_success,
+        ),
+        NodeState::Failed => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Failed),
+            theme.colors.tool_status_error,
+        ),
+        NodeState::Cancelled => (
+            super::orchestration_glyph::node_state_glyph(NodeState::Cancelled),
+            theme.colors.tool_status_cancelled,
+        ),
     }
 }
 

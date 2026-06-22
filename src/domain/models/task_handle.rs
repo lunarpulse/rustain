@@ -20,6 +20,14 @@ pub struct TaskHandle {
     pub subagent_type: String,                // threaded through from SubagentProvider
     pub spawned_at: i64,                      // epoch millis from registry::register
     pub parent_disconnect: mpsc::UnboundedSender<()>, // drop of this sender = owner connection lost
+    /// Optional structured-yield channel (Story 14.3 AC6). When `Some`, the
+    /// child emits its final assistant text as a JSON `SpokeYield` here, which
+    /// the fork-join collector drains to drive the structured result contract
+    /// (validate / retry / salvage). `None` in R1 production runners that
+    /// surface the assistant text through the conversation store instead — the
+    /// collector then records an honest `Empty` for a "completed" spoke that
+    /// produced no capturable yield.
+    pub yield_rx: Option<mpsc::Receiver<String>>,
 }
 
 /// Owner-issued operations on a running subagent. Story 10.4 consumes this; Story 10.2 wires panel keybinds.

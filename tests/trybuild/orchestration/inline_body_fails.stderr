@@ -1,0 +1,7 @@
+error[E0609]: no field `body` on type `SpokeHandle`
+  --> tests/trybuild/orchestration/inline_body_fails.rs:20:38
+   |
+20 |     let _inlined_body: &str = handle.body;
+   |                                      ^^^^ unknown field
+   |
+   = note: available fields are: `agent_id`, `label`, `status`, `salience`

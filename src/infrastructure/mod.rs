@@ -3,6 +3,7 @@ pub mod composition;
 pub mod config;
 pub mod context;
 pub mod logging;
+pub mod orchestrator;
 pub mod paths;
 pub mod permission_rules;
 pub mod profile_install;

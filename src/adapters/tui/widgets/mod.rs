@@ -15,8 +15,11 @@ pub mod forget_card;
 pub mod fork_confirm;
 pub mod inline_card;
 pub mod model_selector;
+pub mod orchestration_glyph;
 pub mod rewind_confirm;
 pub mod sidebar;
+pub mod synthesis_block;
+pub mod wave_strip;
 pub use sidebar::truncate_to_width as truncate_sidebar_text;
 
 pub mod empty_state;

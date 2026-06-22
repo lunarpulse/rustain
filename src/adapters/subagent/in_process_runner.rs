@@ -261,6 +261,25 @@ impl SubagentRunner for InProcessSubagentRunner {
             subagent_type,
             spawned_at,
             parent_disconnect: parent_disconnect_tx,
+            // TODO(DF-310, AC6/14.3a): populate `yield_rx` from the child's
+            // terminal assistant text so the fork-join structured-result
+            // contract (validate / retry / salvage) is LIVE in production, not
+            // just in the executor's test harness (where `FakeRunner` sets it).
+            // `None` here means every real Completed child degrades to an
+            // honest `SpokeResult::Empty` (the contract's documented fallback).
+            // Wiring is a HARD dependency of the AC1/14.3a turn-loop fan-out
+            // integration (the executor is not invoked from any production
+            // turn loop in R1 — see DF-309), so this channel has no reader
+            // until 14.3a. The wiring is non-trivial: the child's raw assistant
+            // text must be wrapped as a schema-valid `SpokeYield { summary,
+            // detail }` (the summary/detail split is a synthesis-integration
+            // product decision, and `summary` enters the prompt window so it
+            // must stay compact — AC5 byte-bound), and the yield must be
+            // emitted before the terminal `NodeState` on the EndTurn/Cancelled
+            // completion paths (`run_child` has 8+ `emit_status` call sites).
+            // Until then: `None` is the honest R1 production value. See
+            // `deferred-work.md` DF-310.
+            yield_rx: None,
         })
     }
 }
