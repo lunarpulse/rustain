@@ -1393,6 +1393,13 @@ pub async fn run() -> Result<()> {
     let persona: Arc<dyn PersonaPort> = Arc::clone(&*agent_core_inner.persona.load());
     let tools: Arc<dyn ToolSetPort> = Arc::clone(&*agent_core_inner.tools.load());
 
+    // Story 14.3b — hoist the orchestrator out of the composite-tools block so
+    // AppState can hold it. The orchestrator is bound to the SAME ports as the
+    // runner (AC8); those ports only exist when the toolset is the
+    // CompositeToolsetAdapter (the app default). A non-composite toolset opts
+    // out of the subagent subsystem entirely, so `/fanout` is unavailable there
+    // by construction.
+    let mut orchestrator: Option<Arc<dyn crate::domain::ports::Orchestrator>> = None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -1531,7 +1538,7 @@ pub async fn run() -> Result<()> {
             // loop invokes `run_fork_join` when it fans out (the trigger — a
             // model fan-out intent — is the connection point wired with the
             // turn-loop integration).
-            let _orchestrator: Arc<dyn crate::domain::ports::Orchestrator> =
+            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
                 Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
                     authority_provider.clone(),
@@ -1541,6 +1548,7 @@ pub async fn run() -> Result<()> {
                         as Arc<dyn crate::domain::clock::Clock>,
                     root_authority.clone(),
                 ));
+            orchestrator = Some(orchestrator_inner);
 
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
                 runner,
@@ -1556,6 +1564,12 @@ pub async fn run() -> Result<()> {
             composite.set_subagent_provider(subagent_provider);
         }
     }
+    // PATCH-6 (review): the orchestrator stays an `Option`. A non-composite
+    // toolset override legitimately has no subagent subsystem (no runner), so
+    // `/fanout` surfaces a SystemNotice ("fan-out unavailable with the current
+    // toolset") instead of the process panicking at startup. The normal
+    // (composite-toolset) path sets it. `orchestrator` (the Option from above)
+    // flows to AppState::new unchanged.
 
     // Deferred AppState::new — now that AgentCore is composed, create the runtime state
     // Story 9.5 — telemetry aggregator (7-day rolling window for active-ratio metrics).
@@ -1586,6 +1600,7 @@ pub async fn run() -> Result<()> {
         budget_state_store,
         app_config_swap.clone(),
         agent_core_inner,
+        orchestrator,
         compose_snapshot,
         profile_resolver_swap,
         cli_snapshot,

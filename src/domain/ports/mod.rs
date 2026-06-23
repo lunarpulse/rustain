@@ -76,7 +76,7 @@ pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
-pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
+pub use node_orchestrator::{ForkJoinRequest, Orchestrator, RerunOutcome};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};

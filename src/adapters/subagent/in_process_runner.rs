@@ -87,6 +87,10 @@ impl SubagentRunner for InProcessSubagentRunner {
         let (command_tx, command_rx) = mpsc::channel::<Op>(512);
         let (status_tx, status_rx) = mpsc::channel::<NodeState>(512);
         let (bridge_tx, bridge_rx) = mpsc::channel::<NodeState>(64);
+        // DF-310: Structured yield channel for fork-join result contract.
+        // The child emits a JSON-serialized SpokeYield{summary,detail} before
+        // its terminal NodeState so the executor's collect_terminal can drain it.
+        let (yield_tx, yield_rx) = mpsc::channel::<String>(4);
 
         // 3. Derive child cancellation token
         let child_cancel = cancel.child_token();
@@ -158,6 +162,7 @@ impl SubagentRunner for InProcessSubagentRunner {
                 child_state_for_spawn,
                 child_token_for_spawn,
                 authority_for_spawn,
+                yield_tx,
             ))
             .catch_unwind()
             .await;
@@ -261,26 +266,51 @@ impl SubagentRunner for InProcessSubagentRunner {
             subagent_type,
             spawned_at,
             parent_disconnect: parent_disconnect_tx,
-            // TODO(DF-310, AC6/14.3a): populate `yield_rx` from the child's
-            // terminal assistant text so the fork-join structured-result
-            // contract (validate / retry / salvage) is LIVE in production, not
-            // just in the executor's test harness (where `FakeRunner` sets it).
-            // `None` here means every real Completed child degrades to an
-            // honest `SpokeResult::Empty` (the contract's documented fallback).
-            // Wiring is a HARD dependency of the AC1/14.3a turn-loop fan-out
-            // integration (the executor is not invoked from any production
-            // turn loop in R1 — see DF-309), so this channel has no reader
-            // until 14.3a. The wiring is non-trivial: the child's raw assistant
-            // text must be wrapped as a schema-valid `SpokeYield { summary,
-            // detail }` (the summary/detail split is a synthesis-integration
-            // product decision, and `summary` enters the prompt window so it
-            // must stay compact — AC5 byte-bound), and the yield must be
-            // emitted before the terminal `NodeState` on the EndTurn/Cancelled
-            // completion paths (`run_child` has 8+ `emit_status` call sites).
-            // Until then: `None` is the honest R1 production value. See
-            // `deferred-work.md` DF-310.
-            yield_rx: None,
+            // DF-310 (Story 14.3b): yield_rx is now LIVE — run_child emits a
+            // JSON-serialized SpokeYield{summary,detail} before the terminal
+            // NodeState on Completed/cancel-salvage paths. The executor's
+            // collect_terminal drains this channel to populate the ResultStore.
+            yield_rx: Some(yield_rx),
         })
+    }
+}
+
+/// DF-310: Build and emit a structured `SpokeYield` through the yield channel
+/// BEFORE the terminal `emit_status`. The executor's `collect_terminal` drains
+/// `yield_rx` to populate the `ResultStore`.
+///
+/// `terminal` selects the path:
+/// - `Completed` → summary from `spoke_summary(accumulated_text)`, detail = full text
+/// - `Cancelled` → salvage partial output via `salvage_on_cancel`
+/// - `Failed` / other → no yield (contract does not validate failed outcomes)
+async fn emit_yield(terminal: NodeState, accumulated_text: &str, yield_tx: &mpsc::Sender<String>) {
+    use crate::infrastructure::orchestrator::{SPOKE_SUMMARY_MAX_BYTES, SpokeYield, spoke_summary};
+
+    match terminal {
+        NodeState::Completed => {
+            let summary = spoke_summary(accumulated_text, SPOKE_SUMMARY_MAX_BYTES).to_string();
+            let detail = accumulated_text.to_string();
+            let sy = SpokeYield { summary, detail };
+            if let Ok(json) = serde_json::to_string(&sy) {
+                let _ = yield_tx.send(json).await;
+            }
+        }
+        NodeState::Cancelled => {
+            // Salvage whatever partial output exists — the outcome stays Cancelled.
+            // We emit the raw text so the executor's salvage_on_cancel can extract it.
+            if !accumulated_text.is_empty() {
+                let sy = SpokeYield {
+                    summary: spoke_summary(accumulated_text, SPOKE_SUMMARY_MAX_BYTES).to_string(),
+                    detail: accumulated_text.to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&sy) {
+                    let _ = yield_tx.send(json).await;
+                }
+            }
+        }
+        _ => {
+            // Failed / other terminals: contract does not validate failed outcomes.
+        }
     }
 }
 
@@ -307,6 +337,7 @@ async fn run_child(
     child_state: Arc<crate::adapters::subagent::ChildState>,
     child_token: CapabilityToken,
     authority: Arc<dyn AuthorityProvider>,
+    yield_tx: mpsc::Sender<String>,
 ) {
     use crate::domain::models::tool_call::ApprovalSource;
     use crate::domain::models::{
@@ -685,6 +716,7 @@ async fn run_child(
             let chunk = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
+                    emit_yield(NodeState::Cancelled, &accumulated_text, &yield_tx).await;
                     emit_status(NodeState::Cancelled, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
                     return;
                 }
@@ -770,6 +802,7 @@ async fn run_child(
         match stop_reason {
             StopReason::ToolUse => {
                 if tool_calls.is_empty() {
+                    emit_yield(NodeState::Completed, &accumulated_text, &yield_tx).await;
                     emit_status(
                         NodeState::Completed,
                         &status_tx,
@@ -919,6 +952,7 @@ async fn run_child(
             }
             StopReason::EndTurn | StopReason::MaxTokens => {
                 // P1 fix: text was already appended per-chunk during streaming; no redundant write
+                emit_yield(NodeState::Completed, &accumulated_text, &yield_tx).await;
                 emit_status(
                     NodeState::Completed,
                     &status_tx,
@@ -934,6 +968,7 @@ async fn run_child(
                 return;
             }
             StopReason::Cancelled => {
+                emit_yield(NodeState::Cancelled, &accumulated_text, &yield_tx).await;
                 emit_status(
                     NodeState::Cancelled,
                     &status_tx,
@@ -1425,15 +1460,31 @@ mod tests {
         .expect("terminal status within timeout");
         assert_eq!(terminal, NodeState::Completed);
 
+        // The spool persists the meta sidecar async (write-temp + rename,
+        // `spool.rs:107`) on the terminal status; under parallel test load the
+        // rename can lag the status-rx observation, so a single read races.
+        // Poll until the sidecar reflects the terminal `Completed` status
+        // (deterministic — no wall-clock flake; a real missing-write bug still
+        // fails via the timeout).
         let meta_path = tmp
             .path()
             .join("spool")
             .join(format!("{}.meta", handle.task_id));
-        let meta_json = tokio::fs::read_to_string(meta_path)
+        let meta: SpoolMeta =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), async {
+                loop {
+                    if let Ok(meta_json) = tokio::fs::read_to_string(&meta_path).await {
+                        if let Ok(parsed) = serde_json::from_str::<SpoolMeta>(&meta_json) {
+                            if parsed.status == NodeState::Completed {
+                                return parsed;
+                            }
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .expect("meta sidecar written");
-        let meta: SpoolMeta = serde_json::from_str(&meta_json).expect("parse meta sidecar");
-        assert_eq!(meta.status, NodeState::Completed);
+            .expect("meta sidecar written with Completed status within timeout");
         assert_eq!(meta.tokens_in, 12);
         assert_eq!(meta.tokens_out, 34);
         assert_eq!(meta.subagent_type, "in-process");
@@ -1739,6 +1790,123 @@ mod tests {
         assert!(
             content.contains("Blocked by authority"),
             "AC9 keystone: a revoked child must be denied its next tool dispatch; spool was: {content}"
+        );
+    }
+
+    /// AC2 keystone [K] (DF-310): a real in-process Completed child driven through
+    /// the **production `InProcessSubagentRunner`** (NOT `FakeRunner`) produces a
+    /// non-Empty structured yield. Kill-criterion: reverting `yield_rx: Some(yield_rx)`
+    /// back to `yield_rx: None` MUST turn this test RED (the recv returns None).
+    #[tokio::test]
+    async fn ac2_production_runner_completed_child_yields_non_empty() {
+        use crate::infrastructure::orchestrator::SpokeYield;
+
+        // UsageOnceProvider emits: Usage{} → Text{"done"} → TurnComplete{EndTurn}
+        // This hits the PRIMARY Completed path (EndTurn/MaxTokens → line 959 in
+        // run_child). accumulated_text will be "done".
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(UsageOnceProvider) as Arc<dyn StreamingProvider>;
+        let storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let security = Arc::new(SecurityAdapter::new(PathBuf::from(".")))
+            as Arc<dyn crate::domain::ports::SecurityPort>;
+        let sandbox = Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
+        ));
+        let tools = Arc::new(ToolSetAdapter::new(
+            PathBuf::from("."),
+            storage.clone(),
+            sandbox,
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+        )) as Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = ApprovalRuntime::new(1024, Arc::new(NoOpApprovalPersistence));
+        let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
+        let (event_bus, _event_rx) = EventBus::new(1024);
+        let event_bus = Arc::new(event_bus);
+        let registry = Arc::new(NodeTree::new());
+        let parent_sandbox = Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
+
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage,
+            security,
+            tools,
+            approval,
+            scheduler,
+            event_bus,
+            registry,
+            parent_sandbox,
+            spool,
+            authority,
+            root_authority,
+        );
+        let spec = AgentLaunchSpec {
+            prompt: "test child".to_string(),
+            effective_model: "test-model".to_string(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+        };
+        let cancel = CancellationToken::new();
+        let mut handle = runner
+            .launch(spec, cancel)
+            .await
+            .expect("launch should succeed");
+
+        // Wait for the child to reach a terminal state.
+        let mut status_rx = handle.status_rx;
+        let terminal = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            loop {
+                match status_rx.recv().await {
+                    Some(s @ (NodeState::Completed | NodeState::Failed | NodeState::Cancelled)) => {
+                        break s;
+                    }
+                    Some(_) => continue,
+                    None => break NodeState::Failed,
+                }
+            }
+        })
+        .await
+        .expect("child must reach terminal within 5s");
+
+        assert_eq!(
+            terminal,
+            NodeState::Completed,
+            "child must complete (EndTurn)"
+        );
+
+        // DF-310 keystone: yield_rx must contain a valid, non-empty SpokeYield.
+        // If yield_rx were still None (the old code), this unwrap fails.
+        let mut yield_rx = handle
+            .yield_rx
+            .take()
+            .expect("AC2 kill-criterion: yield_rx must be Some — reverting to None breaks this");
+        let raw = yield_rx.recv().await.expect(
+            "AC2 kill-criterion: yield channel must contain a message — emit_yield was not called",
+        );
+
+        let parsed: SpokeYield = serde_json::from_str(&raw).expect("yield must be valid JSON");
+        assert!(
+            !parsed.summary.is_empty(),
+            "AC2: summary must not be empty; got empty from production runner"
+        );
+        // UsageOnceProvider emits "done" as its text content
+        assert!(
+            parsed.summary.contains("done"),
+            "AC2: summary should contain the child's output text 'done'; got: {}",
+            parsed.summary
+        );
+        assert!(
+            !parsed.detail.is_empty(),
+            "AC2: detail must not be empty for a Completed child"
         );
     }
 }

@@ -30,7 +30,9 @@ use rustain::domain::models::orchestration::{
 use rustain::domain::models::subagent_error::SubagentError;
 use rustain::domain::models::task_handle::TaskHandle;
 use rustain::domain::models::{ModelTier, Op, ToolPolicy};
-use rustain::domain::ports::{AuthorityProvider, ForkJoinRequest, Orchestrator, SubagentRunner};
+use rustain::domain::ports::{
+    AuthorityProvider, ForkJoinRequest, Orchestrator, RerunOutcome, SubagentRunner,
+};
 use rustain::domain::services::authority_ledger::AuthorityLedger;
 use rustain::infrastructure::orchestrator::{
     ForkJoinExecutor, SYNTHESIS_RESERVE, WAIT_ESCALATE_THRESHOLD_MS, dispatch_launch, elapsed_ms,
@@ -71,6 +73,11 @@ fn request(coordinator: AgentId, spokes: Vec<SpokeSpec>) -> ForkJoinRequest {
 struct FakeRunner {
     /// Queue of terminal states, one per launch.
     terminals: Arc<Mutex<VecDeque<NodeState>>>,
+    /// Optional per-launch yields. When present, each Completed child emits the
+    /// next yield body from this queue (enabling distinguishable spoke results
+    /// for the rerun keystone test). When absent, the default hardcoded yield
+    /// is used (preserving existing test behaviour).
+    yields: Option<Arc<Mutex<VecDeque<String>>>>,
     /// Launch call counter — read by `ac10_cancel_all_inflight_emits_once_no_new_dispatch`
     /// to prove cancel-all does NOT trigger any new dispatch after the wave is
     /// cancelled. A `tokio::sync::Mutex`-guarded `u32` (no `std::sync` lock —
@@ -88,6 +95,22 @@ impl FakeRunner {
     fn new(terminals: Vec<NodeState>) -> Self {
         Self {
             terminals: Arc::new(Mutex::new(terminals.into_iter().collect())),
+            yields: None,
+            launch_count: Arc::new(Mutex::new(0)),
+            never_emits: false,
+        }
+    }
+
+    /// Like [`new`](Self::new) but each Completed child emits a DISTINCT yield
+    /// body popped from `yields`, enabling distinguishable spoke results. Used
+    /// by the rerun keystone test to verify a rerun slot's result CHANGES while
+    /// siblings stay byte-identical. The `terminals` and `yields` queues are
+    /// consumed in lockstep (one pop per launch), so the caller must supply
+    /// enough entries for every launch (wave + rerun).
+    fn with_yields(terminals: Vec<NodeState>, yields: Vec<String>) -> Self {
+        Self {
+            terminals: Arc::new(Mutex::new(terminals.into_iter().collect())),
+            yields: Some(Arc::new(Mutex::new(yields.into_iter().collect()))),
             launch_count: Arc::new(Mutex::new(0)),
             never_emits: false,
         }
@@ -101,6 +124,7 @@ impl FakeRunner {
     fn never_emits() -> Self {
         Self {
             terminals: Arc::new(Mutex::new(VecDeque::new())),
+            yields: None,
             launch_count: Arc::new(Mutex::new(0)),
             never_emits: true,
         }
@@ -169,6 +193,13 @@ impl SubagentRunner for FakeRunner {
             .await
             .pop_front()
             .unwrap_or(NodeState::Completed);
+        // Pop a custom yield body if configured (for distinguishable results).
+        let custom_yield: Option<String> = if let Some(yields) = &self.yields {
+            let mut yq = yields.lock().await;
+            yq.pop_front()
+        } else {
+            None
+        };
         let (status_tx, status_rx) = tokio::sync::mpsc::channel::<NodeState>(8);
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<Op>(8);
         let (parent_disc_tx, _parent_disc_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -194,10 +225,12 @@ impl SubagentRunner for FakeRunner {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
                     let _ = status_tx.send(terminal).await;
                     if terminal == NodeState::Completed {
-                        // Emit a valid JSON yield (drives validate_yield live).
-                        let _ = yield_tx.send(
-                            r#"{"summary":"completed","detail":"completed detail"}"#.to_string(),
-                        ).await;
+                        // Emit a valid JSON yield — use the custom body when
+                        // configured (distinguishable results), else the default.
+                        let body = custom_yield.unwrap_or_else(||
+                            r#"{"summary":"completed","detail":"completed detail"}"#.to_string()
+                        );
+                        let _ = yield_tx.send(body).await;
                     }
                 }
                 _ = command_rx.recv() => {
@@ -216,6 +249,24 @@ impl SubagentRunner for FakeRunner {
             parent_disconnect: parent_disc_tx,
             yield_rx: Some(yield_rx),
         })
+    }
+}
+
+/// `SubagentRunner` whose `launch()` always returns `Err`. Used by the PATCH-12
+/// launch-Err settle test: drives the `dispatch_launch` launch-Err arm that
+/// FakeRunner (infallible launch) cannot reach.
+struct FailingLaunchRunner;
+
+#[async_trait]
+impl SubagentRunner for FailingLaunchRunner {
+    async fn launch(
+        &self,
+        _spec: AgentLaunchSpec,
+        _cancel: CancellationToken,
+    ) -> Result<TaskHandle, SubagentError> {
+        Err(SubagentError::Internal(
+            "injected launch failure (PATCH-12 settle coverage)".into(),
+        ))
     }
 }
 
@@ -1243,6 +1294,92 @@ async fn n1_synthesis_reserve_not_leaked_on_gate_token_mint_failure() {
     );
 }
 
+/// PATCH-12 / R5 launch-Err settle coverage (AI-12.3). `dispatch_launch`'s
+/// launch-Err arm MUST settle the child's gate-token reservation — otherwise
+/// the reservation strands in `live_reservations`, eroding `available` by one
+/// gate-token budget per refused launch (conservation holds, but the gate
+/// surface degrades toward a spurious `BudgetPaused`). FakeRunner cannot
+/// trigger this (its `launch` is infallible); `FailingLaunchRunner` does.
+///
+/// Kill-criterion: reverting the launch-Err `authority.settle(&gate_token.id)`
+/// (`mod.rs:281`) back to a bare `?` MUST turn this test RED —
+/// `live_reservations` stays elevated and `available` does not recover.
+#[tokio::test]
+async fn patch12_launch_err_settles_gate_token_reservation() {
+    use rustain::adapters::authority::in_process::InProcessAuthorityProvider;
+
+    let root = root_token();
+    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let authority: Arc<dyn AuthorityProvider> =
+        Arc::new(InProcessAuthorityProvider::new(ledger.clone()));
+
+    // Mint a per-spoke gate token (mirrors the private `mint_gate_token`). The
+    // delegate reserves one gate-token budget in `live_reservations`.
+    let gate_caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+    let gate_token = ledger
+        .delegate(
+            &root,
+            DelegateRequest {
+                scope: AgentId::new(),
+                capabilities: gate_caps,
+                constraint: DelegateConstraint {
+                    allowed: gate_caps,
+                    max_depth: 1,
+                    max_subset: gate_caps,
+                },
+                budget: Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                }, // == GATE_TOKEN_BUDGET
+                not_after: None,
+                uses_limit: Some(1),
+            },
+        )
+        .expect("gate-token mint");
+
+    // Positive control: the mint reserved budget (live_reservations > 0).
+    let snap_after_mint = ledger.conservation(&root.id).unwrap();
+    assert!(
+        snap_after_mint.live_reservations.requests > 0
+            && snap_after_mint.live_reservations.cost_micros > 0,
+        "positive control: the gate-token mint reserved budget — snap={snap_after_mint:?}"
+    );
+
+    // Drive the launch-Err arm directly through the sealed chokepoint.
+    let runner = Arc::new(FailingLaunchRunner) as Arc<dyn SubagentRunner>;
+    let err = dispatch_launch(
+        &runner,
+        &authority,
+        &spoke("a"),
+        gate_token,
+        CancellationToken::new(),
+    )
+    .await
+    .err()
+    .expect("failing runner → launch-Err arm");
+    assert!(
+        matches!(err, OrchestrationError::Runner(_)),
+        "expected Runner error from the failed launch, got {err:?}"
+    );
+
+    // PATCH-12: the launch-Err arm settled the gate-token reservation. Under
+    // the bare-`?` mutant, `live_reservations` would stay elevated.
+    let snap_after = ledger.conservation(&root.id).unwrap();
+    assert_eq!(
+        snap_after.live_reservations,
+        Budget::ZERO,
+        "PATCH-12: gate-token reservation settled on launch-Err (not stranded). snap={snap_after:?}"
+    );
+    // Conservation identity holds regardless of the settle (the accounting is
+    // intact — the leak was a live_reservations→available stranding, not a
+    // destruction; this pins no breakage).
+    assert_eq!(
+        snap_after.available + snap_after.live_reservations + snap_after.consumed,
+        snap_after.total,
+        "conservation holds across the failed launch"
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
@@ -1318,6 +1455,108 @@ proptest! {
                 snap.available + snap.live_reservations + snap.consumed,
                 snap.total,
                 "conservation holds across real cancel-all + partial-failure"
+            );
+            Ok::<(), proptest::test_runner::TestCaseError>(())
+        });
+    }
+    /// AC10-rerun (DD-B6): a single-spoke rerun mints a fresh gate token
+    /// (debit) that ALWAYS settles inside `dispatch_launch` (refund) on every
+    /// exit path — Completed → `Replaced`, Cancelled/Failed → `Reverted`. The
+    /// net ledger effect of one rerun dispatch is exactly one gate-token
+    /// debit+settle round-trip, identical to one wave spoke (the synthesis
+    /// reserve is NOT re-debited on rerun — it was `consume`d, irreversible,
+    /// during the wave and stays in `consumed`). So the canonical conservation
+    /// invariant (`available + live_reservations + consumed == total`) holds
+    /// after the rerun regardless of its terminal.
+    ///
+    /// NON-VACUOUS — the assertion would fail under two real mutant classes:
+    ///   (a) a rerun that debits a gate token but skips the settle on some
+    ///       exit path (budget LEAK → the equality breaks);
+    ///   (b) a rerun that fails to re-dispatch through the chokepoint or maps
+    ///       its terminal to the wrong outcome. Guarded by asserting
+    ///       `launch_count == n + 1` (rerun really re-dispatched one spoke)
+    ///       and that the outcome matches the rerun's terminal.
+    #[test]
+    fn ac10_conservation_holds_after_rerun_spoke(
+        n in 1usize..=FORK_JOIN_SPAWN_CAP,
+        slot_raw in 0u8..FORK_JOIN_SPAWN_CAP as u8,
+        rerun_outcome_idx in 0u8..=2,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let _ = rt.block_on(async move {
+            let root = root_token();
+            let n = n.max(1);
+            let slot = (slot_raw as usize) % n;
+            // All wave spokes Complete → a clean baseline; the rerun consumes
+            // the extra (n-th) queued terminal, so the rerun's terminal is the
+            // ONLY varied axis (keeps the Replaced/Reverted oracle deterministic).
+            let rerun_terminal = match rerun_outcome_idx {
+                0 => NodeState::Completed,
+                1 => NodeState::Failed,
+                _ => NodeState::Cancelled,
+            };
+            let mut terminals = vec![NodeState::Completed; n];
+            terminals.push(rerun_terminal); // +1 for the rerun launch.
+            let spokes: Vec<SpokeSpec> = (0..n).map(|i| spoke(&format!("s{i}"))).collect();
+            let runner = Arc::new(FakeRunner::new(terminals));
+            let (exe, ledger) =
+                build_executor(runner.clone() as Arc<dyn SubagentRunner>, root.clone());
+            // Obtain the infra handle (pub ForkJoinRun) — rerun borrows it
+            // (DD-B6: compiler-enforced non-destructiveness).
+            let run = exe
+                .run_fork_join_run(request(AgentId::root(), spokes), CancellationToken::new())
+                .await
+                .expect("wave runs to completion");
+            // Baseline: conservation holds after the wave (gate tokens
+            // settled inside dispatch_launch, synthesis reserve consumed).
+            let snap_before = ledger.conservation(&root.id).unwrap();
+            prop_assert_eq!(
+                snap_before.available + snap_before.live_reservations + snap_before.consumed,
+                snap_before.total,
+                "conservation holds after the initial wave"
+            );
+            // Rerun ONE spoke; the rerun mints + settles exactly one gate
+            // token through the sealed chokepoint.
+            let outcome = exe
+                .rerun_spoke(&run, slot)
+                .await
+                .expect("rerun dispatches through the chokepoint");
+            // Non-vacuous (a): the rerun re-dispatched ONE spoke — exactly
+            // n wave launches + 1 rerun launch.
+            prop_assert_eq!(
+                runner.launch_count().await,
+                (n + 1) as u32,
+                "rerun re-dispatched one spoke through the sealed chokepoint"
+            );
+            // Non-vacuous (b): the rerun terminal determines the outcome
+            // (Completed → Replaced; Failed/Cancelled → Reverted).
+            prop_assert!(
+                matches!(rerun_terminal, NodeState::Completed)
+                    == matches!(outcome, RerunOutcome::Replaced(_)),
+                "rerun outcome must match its terminal (Completed→Replaced, else Reverted)"
+            );
+            // KEY ASSERTION: conservation STILL holds after the rerun dispatch
+            // (the gate-token debit+settle is a balanced round-trip — no leak).
+            let snap_after = ledger.conservation(&root.id).unwrap();
+            prop_assert_eq!(
+                snap_after.available + snap_after.live_reservations + snap_after.consumed,
+                snap_after.total,
+                "conservation holds after rerun-spoke (gate-token debit+settle balanced)"
+            );
+            // Non-vacuous (c): the rerun's gate token was FULLY settled — no
+            // lingering reservation. This catches a missing-settle mutant that
+            // conservation alone CANNOT detect: an unsettled reservation stays
+            // in `live_reservations`, so `available + live_reservations` still
+            // balances. Asserting `live_reservations` is unchanged proves the
+            // debit+settle round-trip is complete (the Part-C `outstanding()`
+            // intent — satisfied via the existing snapshot, no new accessor).
+            prop_assert_eq!(
+                snap_after.live_reservations,
+                snap_before.live_reservations,
+                "no lingering gate-token reservation after rerun settle"
             );
             Ok::<(), proptest::test_runner::TestCaseError>(())
         });
@@ -1411,5 +1650,405 @@ async fn n3_stuck_child_never_emitting_escalates_to_stuckwaiting_failure() {
     assert!(
         outcome.synthesis.honest_empty,
         "a wave whose only spoke is stuck → honest-empty synthesis"
+    );
+}
+
+// ─── DD-B5/DD-B6 — single-spoke rerun (keystone) ──────────────────────────
+
+/// KEYSTONE (DD-B5/DD-B6): rerun ONE spoke through the sealed chokepoint.
+/// A 3-spoke wave completes with DISTINGUISHABLE results (per-spoke yields);
+/// rerunning the MIDDLE slot (slot 1) produces a fresh AgentId at a stable
+/// slot, with a CHANGED result, while siblings 0 and 2 are byte-identical.
+/// Exactly 1 new dispatch (not N) proves rerun targets a single spoke.
+#[tokio::test]
+async fn rerun_one_spoke_leaves_others_untouched() {
+    let runner = Arc::new(FakeRunner::with_yields(
+        vec![
+            NodeState::Completed,
+            NodeState::Completed,
+            NodeState::Completed,
+            // 4th terminal: the rerun of slot 1.
+            NodeState::Completed,
+        ],
+        vec![
+            r#"{"summary":"result-0","detail":"detail-0"}"#.to_string(),
+            r#"{"summary":"result-1","detail":"detail-1"}"#.to_string(),
+            r#"{"summary":"result-2","detail":"detail-2"}"#.to_string(),
+            r#"{"summary":"result-1-rerun","detail":"detail-1-rerun"}"#.to_string(),
+        ],
+    ));
+    let runner_for_count = runner.clone();
+    let (exe, _ledger) = build_executor(runner as Arc<dyn SubagentRunner>, root_token());
+
+    // Run the wave via run_fork_join_run (returns the infra handle for rerun).
+    let prev = exe
+        .run_fork_join_run(
+            request(
+                AgentId::root(),
+                vec![spoke("SPOKE-0"), spoke("SPOKE-1"), spoke("SPOKE-2")],
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("wave completes");
+
+    // All 3 spokes completed with distinguishable summaries.
+    assert_eq!(prev.outcome.spokes.len(), 3);
+    assert_eq!(
+        runner_for_count.launch_count().await,
+        3,
+        "wave dispatched exactly 3 spokes"
+    );
+
+    // Capture prior state for non-destructive assertions.
+    let prev_slot0_id = prev.slots()[0].clone();
+    let prev_slot1_id = prev.slots()[1].clone();
+    let prev_slot2_id = prev.slots()[2].clone();
+    let prev_slot0_result = prev.outcome.spokes[0].1.clone();
+    let prev_slot1_result = prev.outcome.spokes[1].1.clone();
+    let prev_slot2_result = prev.outcome.spokes[2].1.clone();
+    // Drill the sibling bodies (the full payload — AC5 type-wall).
+    let prev_body_0 = prev
+        .drill_body(&prev.drill_source(&prev_slot0_id).unwrap())
+        .unwrap()
+        .as_render_str()
+        .to_string();
+    let prev_body_2 = prev
+        .drill_body(&prev.drill_source(&prev_slot2_id).unwrap())
+        .unwrap()
+        .as_render_str()
+        .to_string();
+
+    // ── Rerun the MIDDLE slot (slot 1) ──
+    let outcome = exe
+        .rerun_spoke(&prev, 1)
+        .await
+        .expect("rerun dispatches without infrastructure error");
+
+    let new_run = match outcome {
+        RerunOutcome::Replaced(r) => r,
+        RerunOutcome::Reverted => panic!("rerun of a Completed spoke must Replaced, not Reverted"),
+    };
+
+    // TARGET witness 1: exactly ONE new dispatch (not N).
+    assert_eq!(
+        runner_for_count.launch_count().await,
+        4,
+        "rerun dispatched exactly 1 spoke (not N); total launches == 4"
+    );
+
+    // TARGET witness 2: fresh AgentId at the rerun slot.
+    assert_ne!(
+        new_run.slots()[1],
+        prev_slot1_id,
+        "rerun slot 1 has a FRESH AgentId (≠ prior)"
+    );
+
+    // TARGET witness 3: the result CHANGED.
+    assert_ne!(
+        new_run.outcome.spokes[1].1, prev_slot1_result,
+        "rerun slot 1 result CHANGED (different summary)"
+    );
+    match &new_run.outcome.spokes[1].1 {
+        SpokeResult::Completed { summary } => {
+            assert_eq!(
+                summary, "result-1-rerun",
+                "rerun slot 1 carries the rerun yield summary"
+            );
+        }
+        other => panic!("rerun slot 1 should be Completed, got {other:?}"),
+    }
+
+    // SIBLING witness: slots 0 and 2 are byte-identical (AgentId + result).
+    assert_eq!(
+        new_run.slots()[0],
+        prev_slot0_id,
+        "sibling slot 0 AgentId unchanged"
+    );
+    assert_eq!(
+        new_run.slots()[2],
+        prev_slot2_id,
+        "sibling slot 2 AgentId unchanged"
+    );
+    assert_eq!(
+        new_run.outcome.spokes[0].1, prev_slot0_result,
+        "sibling slot 0 result unchanged"
+    );
+    assert_eq!(
+        new_run.outcome.spokes[2].1, prev_slot2_result,
+        "sibling slot 2 result unchanged"
+    );
+
+    // SIBLING body witness: drill the sibling bodies in the NEW run.
+    let new_body_0 = new_run
+        .drill_body(&new_run.drill_source(&new_run.slots()[0]).unwrap())
+        .unwrap()
+        .as_render_str()
+        .to_string();
+    let new_body_2 = new_run
+        .drill_body(&new_run.drill_source(&new_run.slots()[2]).unwrap())
+        .unwrap()
+        .as_render_str()
+        .to_string();
+    assert_eq!(
+        new_body_0, prev_body_0,
+        "sibling slot 0 body byte-identical after rerun"
+    );
+    assert_eq!(
+        new_body_2, prev_body_2,
+        "sibling slot 2 body byte-identical after rerun"
+    );
+
+    // Non-destructive: the borrow was shared (&prev), so prev is untouched.
+    assert_eq!(
+        prev.slots()[1],
+        prev_slot1_id,
+        "prior slot 1 untouched (non-destructive borrow)"
+    );
+}
+
+/// NON-DESTRUCTIVE (DD-B6): a rerun whose spoke FAILS produces Reverted — the
+/// prior is untouched. Compiler-enforced: `rerun_spoke` borrows `&ForkJoinRun`,
+/// so mutation through the shared ref is impossible. This test captures prior
+/// state before the rerun and verifies it is byte-identical after.
+#[tokio::test]
+async fn rerun_failure_reverts_to_prior_result_nondestructively() {
+    let runner = Arc::new(FakeRunner::new(vec![
+        NodeState::Completed,
+        NodeState::Completed,
+        NodeState::Completed,
+        // 4th terminal: the rerun of slot 1 FAILS.
+        NodeState::Failed,
+    ]));
+    let (exe, _ledger) = build_executor(runner as Arc<dyn SubagentRunner>, root_token());
+
+    let prev = exe
+        .run_fork_join_run(
+            request(AgentId::root(), vec![spoke("a"), spoke("b"), spoke("c")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("wave completes");
+
+    // Capture prior state (non-destructive proof).
+    let prev_spokes = prev.outcome.spokes.clone();
+    let prev_slots = prev.slots().to_vec();
+
+    // Rerun slot 1 — the 4th terminal is Failed.
+    let outcome = exe
+        .rerun_spoke(&prev, 1)
+        .await
+        .expect("rerun dispatches without infrastructure error");
+
+    assert!(
+        matches!(outcome, RerunOutcome::Reverted),
+        "rerun of a Failed spoke → Reverted (prior untouched)"
+    );
+
+    // Non-destructive: prior is byte-identical (shared borrow — no mutation).
+    assert_eq!(
+        prev.outcome.spokes, prev_spokes,
+        "prior spokes untouched after Reverted rerun"
+    );
+    assert_eq!(
+        prev.slots(),
+        prev_slots,
+        "prior slots untouched after Reverted rerun"
+    );
+}
+
+/// POSITIVE CONTROL (anti-vacuity pair for `rerun_failure_reverts`): proves a
+/// Completed rerun DOES produce Replaced — so the Reverted assertion above is
+/// not vacuously true (rerun does not ALWAYS return Reverted). A mutant that
+/// unconditionally returns Reverted would fail here.
+#[tokio::test]
+async fn rerun_success_replaces_prior() {
+    let runner = Arc::new(FakeRunner::new(vec![
+        NodeState::Completed,
+        NodeState::Completed,
+        // 3rd terminal: the rerun of slot 0.
+        NodeState::Completed,
+    ]));
+    let (exe, _ledger) = build_executor(runner as Arc<dyn SubagentRunner>, root_token());
+
+    let prev = exe
+        .run_fork_join_run(
+            request(AgentId::root(), vec![spoke("x"), spoke("y")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("wave completes");
+
+    let prev_slot0 = prev.slots()[0].clone();
+
+    let outcome = exe
+        .rerun_spoke(&prev, 0)
+        .await
+        .expect("rerun dispatches without infrastructure error");
+
+    match outcome {
+        RerunOutcome::Replaced(new_run) => {
+            assert_ne!(
+                new_run.slots()[0],
+                prev_slot0,
+                "replaced run has a fresh AgentId at slot 0"
+            );
+        }
+        RerunOutcome::Reverted => {
+            panic!("Completed rerun must produce Replaced, not Reverted (anti-vacuity)")
+        }
+    }
+}
+
+// ─── PATCH-4 (review) — AC5 lazy-drill discriminator ─────────────────────
+
+/// AC5 keystone: `drill_body` is LAZY — `resolve_count` is 0 until the first
+/// drill, then 1 per open. An eager mutant that materialized all bodies at
+/// outcome construction would show `resolve_count == N` at start → killed by
+/// the `== 0` assertion. Murat vacuity ledger #4.
+#[tokio::test]
+async fn patch4_drill_body_is_lazy_resolve_count_advances_per_open() {
+    let runner = Arc::new(FakeRunner::with_yields(
+        vec![NodeState::Completed, NodeState::Completed],
+        vec![
+            r#"{"summary":"result-0","detail":"detail-0"}"#.to_string(),
+            r#"{"summary":"result-1","detail":"detail-1"}"#.to_string(),
+        ],
+    ));
+    let (exe, _ledger) = build_executor(runner as Arc<dyn SubagentRunner>, root_token());
+    let run = exe
+        .run_fork_join_run(
+            request(AgentId::root(), vec![spoke("SPOKE-0"), spoke("SPOKE-1")]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("wave completes");
+
+    // (a) No drills yet → 0. Kills an eager-materialization mutant (== N).
+    assert_eq!(
+        run.resolve_count(),
+        0,
+        "resolve_count starts at 0 (lazy — bodies not materialized at construction)"
+    );
+
+    // (b) One drill → 1 (per-open increment).
+    let id0 = run.slots()[0].clone();
+    let _body = run
+        .drill_body(&run.drill_source(&id0).unwrap())
+        .expect("drill_body resolves a valid DrillId")
+        .as_render_str()
+        .to_string();
+    assert_eq!(
+        run.resolve_count(),
+        1,
+        "resolve_count == 1 after one drill (per-open, not per-outcome)"
+    );
+
+    // (c) A second drill of the SAME id → 2 (each open increments).
+    let _body2 = run
+        .drill_body(&run.drill_source(&id0).unwrap())
+        .unwrap()
+        .as_render_str()
+        .to_string();
+    assert_eq!(run.resolve_count(), 2, "second drill → 2");
+}
+
+// ─── DN-3 (review) — AC4 storm-cap refuse path ───────────────────────────
+
+/// DN-3 keystone: a slot rerun past `RERUN_SPOKE_CAP` (3) is REFUSED —
+/// `Reverted` (prior untouched, no dispatch, no debit) on a Completed
+/// terminal. Murat/Amelia: refuse, not queue. The visible "stop or extend?"
+/// dial lands in 14.3a; R1 ships the refuse path.
+#[tokio::test]
+async fn dn3_storm_cap_refuses_rerun_past_cap() {
+    // 3 wave launches + 3 successful reruns of slot 1 = 6 terminals. The 4th
+    // rerun is cap-refused BEFORE dispatch (consumes no terminal).
+    let runner = Arc::new(FakeRunner::with_yields(
+        vec![
+            NodeState::Completed,
+            NodeState::Completed,
+            NodeState::Completed,
+            NodeState::Completed, // rerun 1
+            NodeState::Completed, // rerun 2
+            NodeState::Completed, // rerun 3
+        ],
+        vec![
+            r#"{"summary":"result-0","detail":"d0"}"#.to_string(),
+            r#"{"summary":"result-1","detail":"d1"}"#.to_string(),
+            r#"{"summary":"result-2","detail":"d2"}"#.to_string(),
+            r#"{"summary":"rerun-1","detail":"dr1"}"#.to_string(),
+            r#"{"summary":"rerun-2","detail":"dr2"}"#.to_string(),
+            r#"{"summary":"rerun-3","detail":"dr3"}"#.to_string(),
+        ],
+    ));
+    let runner_for_count = runner.clone();
+    let (exe, _ledger) = build_executor(runner as Arc<dyn SubagentRunner>, root_token());
+    let mut run = exe
+        .run_fork_join_run(
+            request(
+                AgentId::root(),
+                vec![spoke("SPOKE-0"), spoke("SPOKE-1"), spoke("SPOKE-2")],
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("wave completes");
+    assert_eq!(runner_for_count.launch_count().await, 3);
+    assert_eq!(
+        run.rerun_count_for_slot(1),
+        0,
+        "slot 1 rerun count starts at 0"
+    );
+
+    // Rerun slot 1 three times — each succeeds (Replaced), count climbs 1..3.
+    for expected in 1..=3 {
+        let outcome = exe
+            .rerun_spoke(&run, 1)
+            .await
+            .expect("rerun under cap dispatches");
+        match outcome {
+            RerunOutcome::Replaced(r) => {
+                run = r;
+                assert_eq!(
+                    run.rerun_count_for_slot(1),
+                    expected,
+                    "slot 1 rerun count climbed to {expected}"
+                );
+            }
+            RerunOutcome::Reverted => {
+                panic!("rerun {expected} under cap must Replaced, not Reverted")
+            }
+        }
+    }
+    assert_eq!(
+        runner_for_count.launch_count().await,
+        6,
+        "3 reruns dispatched 3 spokes"
+    );
+
+    // 4th rerun of slot 1 → cap REFUSED: Reverted, NO new dispatch, count stays 3.
+    let pre_slots = run.slots().to_vec();
+    let outcome = exe
+        .rerun_spoke(&run, 1)
+        .await
+        .expect("cap-refuse returns Reverted, not Err");
+    assert!(
+        matches!(outcome, RerunOutcome::Reverted),
+        "rerun past cap (4th) must be refused → Reverted (prior untouched)"
+    );
+    assert_eq!(
+        runner_for_count.launch_count().await,
+        6,
+        "cap-refuse dispatches NOTHING (no debit — conservation preserved)"
+    );
+    assert_eq!(
+        run.rerun_count_for_slot(1),
+        3,
+        "cap-refuse does not increment the counter"
+    );
+    assert_eq!(
+        run.slots(),
+        pre_slots.as_slice(),
+        "prior slots untouched after cap-refuse"
     );
 }

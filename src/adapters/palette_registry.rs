@@ -475,7 +475,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 34); // 20 base + 7 port slash commands + 7 adapter palette entries (Story 8.5)
+        assert_eq!(reg.all_entries().len(), 35); // 20 base + 7 port slash + 7 adapter palette + 1 /fanout (Story 14.3b)
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/deactivate"));
@@ -492,7 +492,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 34); // 20 base + 7 port slash + 7 adapter palette
+        assert_eq!(reg.all_entries().len(), 35); // 20 base + 7 port slash + 7 adapter palette + 1 /fanout (Story 14.3b)
     }
 
     #[test]
@@ -508,19 +508,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 34); // 20 base + 7 port slash + 7 adapter palette
+        assert_eq!(reg.slash_entries.len(), 35); // 20 base + 7 port slash + 7 adapter palette + 1 /fanout (Story 14.3b)
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 35);
+        assert_eq!(reg.all_entries().len(), 36);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 35);
+        assert_eq!(reg.all_entries().len(), 36);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 36);
+        assert_eq!(reg.all_entries().len(), 37);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 36);
+        assert_eq!(reg.all_entries().len(), 37);
     }
 }

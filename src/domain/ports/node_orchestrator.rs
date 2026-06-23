@@ -56,4 +56,24 @@ pub trait Orchestrator: Send + Sync {
         &self,
         request: ForkJoinRequest,
     ) -> Result<ForkJoinOutcome, OrchestrationError>;
+
+    /// Re-fork exactly one spoke through the sealed chokepoint (DD6/DD-B5/DD-B6).
+    /// Added here (not just on the concrete executor) so a RemoteSubagentRunner
+    /// can rerun — no LSP trap. Borrows the prior [`ForkJoinRun`] (compiler-
+    /// enforced non-destructiveness per DD-B6): a cancel/fail leaves the prior
+    /// untouched; only a terminal-SUCCESS produces a new [`ForkJoinRun`].
+    async fn rerun_spoke(
+        &self,
+        prev: &crate::infrastructure::orchestrator::ForkJoinRun,
+        slot: usize,
+    ) -> Result<RerunOutcome, OrchestrationError>;
+}
+
+/// Result of a single-spoke rerun (DD-B6).
+pub enum RerunOutcome {
+    /// The target spoke succeeded; here is the new ForkJoinRun (deep-clone CoW
+    /// of the store, fresh AgentId at a stable slot — DD-B4/DD-B5).
+    Replaced(crate::infrastructure::orchestrator::ForkJoinRun),
+    /// The target spoke failed or was cancelled; the prior is untouched.
+    Reverted,
 }

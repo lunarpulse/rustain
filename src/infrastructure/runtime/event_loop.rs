@@ -2189,6 +2189,105 @@ pub async fn run(
                                         ) {
                                             app_state.event_bus.emit_domain(ev);
                                         }
+                                    } else if cmd_name == "fanout" {
+                                        // Story 14.3b — `/fanout <N> <prompt>`: fan out N identical
+                                        // spokes (DD-B1). FanOutSpec is parsed here (turn-seam DTO)
+                                        // and translated to a ForkJoinRequest at the boundary.
+                                        // Intercepted BEFORE the adapter-override path. The
+                                        // orchestrator emits the 14.3a wave lifecycle events
+                                        // (ForkJoinStarted/SpokeCompleted/SynthesisReady/
+                                        // WaveCancelled) via the event bus; the handlers below
+                                        // render them.
+                                        if streaming.is_streaming {
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: "/fanout unavailable while a turn is in progress — try again after it finishes.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                        } else if state.wave_state.is_some() {
+                                            // DN-1 (review): in-flight guard — reject a 2nd `/fanout` while a
+                                            // wave is active (prevents `wave_state` cross-pollution). The
+                                            // wave-id correlation + abort-on-cancel land in 14.3a (the UX
+                                            // consumer + cancel trigger).
+                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: "A fan-out wave is already in flight — wait for it to finish.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                        } else {
+                                            match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
+                                                Ok(spec) => {
+                                                    let request = crate::adapters::tui::fanout_spec::to_request(&spec);
+                                                    // PATCH-6 (review): `None` when the active toolset is not
+                                                    // the CompositeToolsetAdapter (non-composite opts out of
+                                                    // the subagent subsystem) — graceful notice, no panic.
+                                                    match app_state.orchestrator.clone() {
+                                                        Some(orchestrator) => {
+                                                            let event_bus = app_state.event_bus.clone();
+                                                            let conv_id = conversation.id.clone();
+                                                            // DN-1 (review): a supervisor OWNS the wave JoinHandle
+                                                            // (not dropped) so a panic surfaces as a SystemNotice
+                                                            // instead of silently hanging wave_state.
+                                                            let wave = tokio::spawn(async move {
+                                                                use crate::domain::ports::Orchestrator;
+                                                                orchestrator.run_fork_join(request).await
+                                                            });
+                                                            tokio::spawn(async move {
+                                                                match wave.await {
+                                                                    Ok(Ok(outcome)) => {
+                                                                        event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                            conversation_id: Some(conv_id),
+                                                                            level: crate::domain::models::NoticeLevel::Info,
+                                                                            message: format!("Fan-out complete: {}", outcome.synthesis.summary),
+                                                                        });
+                                                                    }
+                                                                    Ok(Err(e)) => {
+                                                                        event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                            conversation_id: Some(conv_id),
+                                                                            level: crate::domain::models::NoticeLevel::Warning,
+                                                                            message: format!("Fan-out failed: {e}"),
+                                                                        });
+                                                                    }
+                                                                    Err(join_err) if join_err.is_panic() => {
+                                                                        event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                            conversation_id: Some(conv_id),
+                                                                            level: crate::domain::models::NoticeLevel::Warning,
+                                                                            message: "Fan-out task panicked — see logs.".to_string(),
+                                                                        });
+                                                                    }
+                                                                    Err(_) => {
+                                                                        event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                            conversation_id: Some(conv_id),
+                                                                            level: crate::domain::models::NoticeLevel::Info,
+                                                                            message: "Fan-out task was cancelled.".to_string(),
+                                                                        });
+                                                                    }
+                                                                }
+                                                            });
+                                                            state.needs_redraw = true;
+                                                        }
+                                                        None => {
+                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: crate::domain::models::NoticeLevel::Warning,
+                                                                message: "Fan-out unavailable with the current toolset.".to_string(),
+                                                            });
+                                                            state.needs_redraw = true;
+                                                        }
+                                                    }
+                                                }
+                                                Err(msg) => {
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: msg,
+                                                    });
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
+                                        }
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
                                         match cmd_arg.map(str::trim).filter(|s: &&str| !s.is_empty()) {
@@ -7598,6 +7697,35 @@ pub async fn run(
                             actions: vec![],
                         };
                         state.feedback_blocks.insert(fb.id.clone(), fb);
+                        state.needs_redraw = true;
+                    }
+                    // Story 14.3b — fork-join wave lifecycle handlers. The
+                    // orchestrator emits these via the event bus; each updates
+                    // the live wave snapshot on TuiState and flags a redraw.
+                    // The render path (14.3a) paints the WaveStrip/SynthesisBlock
+                    // from `state.wave_state`.
+                    AppEvent::ForkJoinStarted { coordinator, spoke_count } => {
+                        state.wave_state = Some(
+                            crate::adapters::tui::state::WaveViewState::started(coordinator, spoke_count),
+                        );
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SpokeCompleted { .. } => {
+                        if let Some(wave) = state.wave_state.as_mut() {
+                            wave.record_spoke_completed();
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SynthesisReady { honest_empty, .. } => {
+                        if let Some(wave) = state.wave_state.as_mut() {
+                            wave.record_synthesis_ready(honest_empty);
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::WaveCancelled { .. } => {
+                        if let Some(wave) = state.wave_state.as_mut() {
+                            wave.record_wave_cancelled();
+                        }
                         state.needs_redraw = true;
                     }
                     _ => {

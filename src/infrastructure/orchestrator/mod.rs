@@ -27,12 +27,14 @@ mod result_store;
 mod window;
 
 pub use result_contract::{
-    SpokeYield, YieldError, retry_on_schema_failure, salvage_on_cancel, validate_yield,
+    SPOKE_SUMMARY_MAX_BYTES, SpokeYield, YieldError, first_paragraph, retry_on_schema_failure,
+    salvage_on_cancel, spoke_summary, validate_yield,
 };
 pub(crate) use result_store::{NodeResult, ResultStore};
 pub use window::{SpokeHandle, Window};
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -46,12 +48,14 @@ use crate::domain::models::capability_token::{
 use crate::domain::models::launch_spec::AgentLaunchSpec;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::orchestration::{
-    CoverageLine, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, OrchestrationError, SpokeCitation,
-    SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
+    CoverageLine, DrillBody, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, OrchestrationError,
+    SpokeCitation, SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
 };
 use crate::domain::models::{ModelTier, SubagentError};
 use crate::domain::ports::SubagentRunner;
-use crate::domain::ports::{AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator};
+use crate::domain::ports::{
+    AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator, RerunOutcome,
+};
 use crate::domain::services::authority_ledger::AuthorityLedger;
 use crate::infrastructure::runtime::event_bus::EventBus;
 
@@ -263,10 +267,21 @@ pub async fn dispatch_launch(
 
     let launch_spec = launch_spec_for(spec);
     let cancel = wave_cancel.child_token();
-    let handle = runner
-        .launch(launch_spec, cancel)
-        .await
-        .map_err(|e| OrchestrationError::Runner(e.to_string()))?;
+    let handle = match runner.launch(launch_spec, cancel).await {
+        Ok(h) => h,
+        Err(e) => {
+            // Refund the gate-token reservation on launch failure — the doc
+            // promise is "settled on every exit path" and launch-Err is one.
+            // AI-12.3 party-mode finding (Amelia + Murat, independently): the
+            // prior `?` stranded the reservation in `live_reservations` (slow
+            // budget leak — conservation invariant held, but `available`
+            // eroded by one GATE_TOKEN_BUDGET per refused launch, risking a
+            // spurious BudgetPaused). FakeRunner could not trigger this (its
+            // launch is infallible); only a real runner launch-Err reaches it.
+            let _ = authority.settle(&gate_token.id).await;
+            return Err(OrchestrationError::Runner(e.to_string()));
+        }
+    };
 
     // Register-before-spawn is satisfied inside `launch` (RR-8 ordering):
     // `register` runs before the child task can be observed by cancel.
@@ -274,6 +289,19 @@ pub async fn dispatch_launch(
     // tool-dispatch authority is launch's own delegated token).
     let _ = authority.settle(&gate_token.id).await;
     Ok(handle)
+}
+
+/// Per-spoke dispatch through the sealed `dispatch_launch` chokepoint.
+/// Both the wave loop and `rerun_spoke` reach the launch through this
+/// single intermediary — keeping the `.launch(` site count at exactly 1.
+async fn dispatch_one(
+    runner: &Arc<dyn SubagentRunner>,
+    authority: &Arc<dyn AuthorityProvider>,
+    spec: &SpokeSpec,
+    gate_token: CapabilityToken,
+    wave_cancel: CancellationToken,
+) -> Result<crate::domain::models::TaskHandle, OrchestrationError> {
+    dispatch_launch(runner, authority, spec, gate_token, wave_cancel).await
 }
 
 #[async_trait::async_trait]
@@ -288,6 +316,14 @@ impl Orchestrator for ForkJoinExecutor {
         self.run_fork_join_with_cancel(request, CancellationToken::new())
             .await
     }
+
+    async fn rerun_spoke(
+        &self,
+        prev: &ForkJoinRun,
+        slot: usize,
+    ) -> Result<RerunOutcome, OrchestrationError> {
+        self.rerun_spoke_run(prev, slot).await
+    }
 }
 
 impl ForkJoinExecutor {
@@ -295,12 +331,28 @@ impl ForkJoinExecutor {
     /// Cancelling `wave_cancel` is cancel-all: it propagates to every child's
     /// token (the CancellationToken tree) — committed-exact (N = dispatched
     /// spoke count). Exposed `pub` so tests + the WaveStrip's `cancel all` key
-    /// inject a token they control (AC10).
+    /// inject a token they control (AC10). Delegates to `run_fork_join_run`
+    /// and projects `.outcome` (DD-B3: the domain port returns the pure
+    /// `ForkJoinOutcome`; the infra handle stays here).
     pub async fn run_fork_join_with_cancel(
         &self,
         request: ForkJoinRequest,
         wave_cancel: CancellationToken,
     ) -> Result<ForkJoinOutcome, OrchestrationError> {
+        let run = self.run_fork_join_run(request, wave_cancel).await?;
+        Ok(run.outcome)
+    }
+
+    /// The wave body — returns the infra-side [`ForkJoinRun`] handle (DD-B3).
+    /// `ForkJoinOutcome` (pure domain) is extracted by
+    /// [`run_fork_join_with_cancel`] / [`Orchestrator::run_fork_join`]. The
+    /// handle carries the drill-source (`Arc<ResultStore>`) and spec map for
+    /// rerun/drill.
+    pub async fn run_fork_join_run(
+        &self,
+        request: ForkJoinRequest,
+        wave_cancel: CancellationToken,
+    ) -> Result<ForkJoinRun, OrchestrationError> {
         self.validate_request(&request)?;
 
         // P13: the coordinator that owns this wave must own the authority the
@@ -408,8 +460,7 @@ impl ForkJoinExecutor {
                 };
                 let dispatched_at_ms = clock.wall_now_ms();
                 let launched =
-                    dispatch_launch(&runner, &authority, &spoke, gate_token, wave_cancel_child)
-                        .await;
+                    dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child).await;
                 let (agent_id, label, result, body) = match launched {
                     Ok(mut handle) => {
                         let agent_id = handle.agent_id.clone();
@@ -444,6 +495,8 @@ impl ForkJoinExecutor {
         drop(result_tx); // close after all spawns so recv() terminates.
 
         let mut store = ResultStore::new();
+        let mut spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec> =
+            std::collections::HashMap::new();
         let mut outcomes: Vec<Option<(AgentId, SpokeResult)>> = (0..n).map(|_| None).collect();
         while let Some(outcome) = result_rx.recv().await {
             let SpokeOutcome {
@@ -460,6 +513,7 @@ impl ForkJoinExecutor {
                 body,
             ));
             outcomes[idx] = Some((agent_id.clone(), result.clone()));
+            spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
             self.emit(AppEvent::SpokeCompleted { agent_id, label });
         }
         // P3 fallback: a task that panicked/aborted before sending still gets a
@@ -476,6 +530,7 @@ impl ForkJoinExecutor {
                     result.clone(),
                     String::new(),
                 ));
+                spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
                 *slot = Some((agent_id, result));
             }
         }
@@ -494,20 +549,8 @@ impl ForkJoinExecutor {
             });
         }
 
-        // Build the grounded synthesis floor (AC7).
-        let ordered: Vec<&NodeResult> = store.ordered();
-        let spoke_results: Vec<SpokeResult> = ordered.iter().map(|r| r.to_spoke_result()).collect();
-        let coverage = CoverageLine::from_results(&spoke_results);
-        let citations: Vec<SpokeCitation> = ordered
-            .iter()
-            .filter(|r| matches!(r.outcome, SpokeResult::Completed { .. }))
-            .map(|r| SpokeCitation {
-                agent_id: r.agent_id.clone(),
-                label: r.label.clone(),
-                summary: r.compact_summary().to_string(),
-            })
-            .collect();
-        let synthesis = SynthesisView::build(citations, coverage);
+        // Build the grounded synthesis floor (AC7) via the shared helper.
+        let synthesis = build_synthesis_floor(&store);
 
         self.emit(AppEvent::SynthesisReady {
             coordinator: coordinator.clone(),
@@ -516,11 +559,238 @@ impl ForkJoinExecutor {
 
         let final_outcomes: Vec<(AgentId, SpokeResult)> = outcomes.into_iter().flatten().collect();
 
-        Ok(ForkJoinOutcome {
-            spokes: final_outcomes,
-            synthesis,
+        // Slots: AgentIds in dispatch order (positional — DD-B5 rerun uses
+        // replace_at_slot with a stable slot index, NOT remove+append).
+        let slots: Vec<AgentId> = final_outcomes.iter().map(|(id, _)| id.clone()).collect();
+        // PATCH-1 (review): finalize `store.order` to true dispatch order now
+        // that every spoke has terminated (insert above ran in completion
+        // order). Without this, `replace_at_slot`'s positional assert fires on
+        // any out-of-order completion — the production norm under concurrency.
+        store.reorder(slots.clone());
+
+        Ok(ForkJoinRun {
+            outcome: ForkJoinOutcome {
+                spokes: final_outcomes,
+                synthesis,
+            },
+            store: Arc::new(store),
+            spec_by_agent,
+            slots,
+            resolve_count: AtomicUsize::new(0),
+            // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
+            rerun_counts: vec![0u8; n],
         })
     }
+
+    /// Concrete single-spoke rerun (DD-B6). Borrows the prior [`ForkJoinRun`]
+    /// (compiler-enforced non-destructiveness), deep-clones CoW the store,
+    /// re-dispatches ONE spoke through `dispatch_one` → `dispatch_launch`, and
+    /// builds the new [`ForkJoinRun`] ONLY on terminal-SUCCESS. Cancel/fail/
+    /// dispatch-error → [`RerunOutcome::Reverted`] (prior untouched). Fresh
+    /// AgentId + stable SLOT (DD-B5); deep-clone CoW (DD-B4).
+    pub async fn rerun_spoke_run(
+        &self,
+        prev: &ForkJoinRun,
+        slot: usize,
+    ) -> Result<RerunOutcome, OrchestrationError> {
+        // DN-3 (AC4) storm-cap. The per-spoke "stop or extend?" dial lands in
+        // 14.3a (the `r` keybind); R1 ships the refuse path (Murat/Amelia:
+        // refuse, NOT queue — no queue structure exist). Prior untouched.
+        const RERUN_SPOKE_CAP: u8 = 3;
+        // Validate slot (DD-B5: stable positional index).
+        if slot >= prev.slots.len() {
+            return Err(OrchestrationError::InvalidSlot(slot));
+        }
+        // DN-3 storm-cap: a slot past the cap is refused (Reverted — prior
+        // untouched, no dispatch, no debit). Testable now: rerun CAP+1 times
+        // with a Completed terminal; the (CAP+1)th returns Reverted.
+        if prev.rerun_count_for_slot(slot) >= RERUN_SPOKE_CAP {
+            return Ok(RerunOutcome::Reverted);
+        }
+        let old_id = &prev.slots[slot];
+        let spec = prev
+            .spec_by_agent
+            .get(old_id)
+            .ok_or_else(|| OrchestrationError::SpecNotFound(old_id.clone()))?
+            .clone();
+
+        // Mint a fresh gate token for the rerun spoke (same path as the wave;
+        // settled inside dispatch_launch on every exit path — conservation).
+        let fresh_scope = AgentId::new();
+        let gate_caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+        let gate_token = self.mint_gate_token(fresh_scope, gate_caps)?;
+
+        // Dispatch through the sealed chokepoint (AC3 — no new `.launch(` site).
+        let wave_cancel = CancellationToken::new();
+        let launched = dispatch_one(
+            &self.runner,
+            &self.authority,
+            &spec,
+            gate_token,
+            wave_cancel,
+        )
+        .await;
+
+        let mut handle = match launched {
+            Ok(h) => h,
+            // Dispatch failed → Reverted (prior untouched — DD-B6).
+            Err(_) => return Ok(RerunOutcome::Reverted),
+        };
+
+        let new_agent_id = handle.agent_id.clone();
+        let dispatched_at_ms = self.clock.wall_now_ms();
+        let (terminal, raw) =
+            collect_terminal(&mut handle, self.clock.as_ref(), dispatched_at_ms).await;
+        let (result, body) = structured_result(&terminal, raw.as_deref(), &spec.label);
+
+        match &result {
+            SpokeResult::Completed { .. } => {
+                // SUCCESS: deep-clone CoW the store (DD-B4).
+                // ⚠️ (*prev.store).clone() — NOT prev.store.clone() (that is Arc::clone).
+                let mut next_store = (*prev.store).clone();
+                let new_node = NodeResult::ingest(
+                    new_agent_id.clone(),
+                    spec.label.clone(),
+                    result.clone(),
+                    body,
+                );
+                next_store.replace_at_slot(slot, old_id, new_agent_id.clone(), new_node);
+
+                // Rebuild spec_by_agent: remove old id, insert fresh.
+                let mut next_spec = prev.spec_by_agent.clone();
+                next_spec.remove(old_id);
+                next_spec.insert(new_agent_id.clone(), spec);
+
+                // Rebuild slots: positional replace (DD-B5).
+                let mut next_slots = prev.slots.clone();
+                next_slots[slot] = new_agent_id.clone();
+
+                // Rebuild outcome spokes: positional replace.
+                let mut next_spokes = prev.outcome.spokes.clone();
+                next_spokes[slot] = (new_agent_id, result);
+
+                // Recompute synthesis from the updated store.
+                let next_synthesis = build_synthesis_floor(&next_store);
+
+                Ok(RerunOutcome::Replaced(ForkJoinRun {
+                    outcome: ForkJoinOutcome {
+                        spokes: next_spokes,
+                        synthesis: next_synthesis,
+                    },
+                    store: Arc::new(next_store),
+                    spec_by_agent: next_spec,
+                    slots: next_slots,
+                    resolve_count: AtomicUsize::new(0),
+                    // DN-3: increment this slot's re-run count (stable slot
+                    // index — DD-B5); siblings' counts carry over unchanged.
+                    rerun_counts: {
+                        let mut counts = prev.rerun_counts.clone();
+                        if counts.len() > slot {
+                            counts[slot] += 1;
+                        }
+                        counts
+                    },
+                }))
+            }
+            // CANCELLED / FAILED / EMPTY: Reverted (prior untouched — DD-B6).
+            _ => Ok(RerunOutcome::Reverted),
+        }
+    }
+}
+
+/// Infrastructure-side handle for a completed fork-join wave (DD-B3).
+/// `ForkJoinOutcome` stays pure domain; this handle carries the infra-side
+/// drill-source (`Arc<ResultStore>`) and spec map for rerun/drill.
+pub struct ForkJoinRun {
+    pub outcome: ForkJoinOutcome,
+    /// Crate-private — `ResultStore` is `pub(crate)`, so the field is too.
+    /// External code uses `drill_source`/`drill_body` instead.
+    pub(crate) store: Arc<ResultStore>,
+    /// Per-port spec map — `pub(crate)` (PATCH-11): external code mutates via
+    /// rerun, not by hand (protects the slot↔spec↔store invariants).
+    pub(crate) spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec>,
+    /// Dispatch-ordered slot AgentIds — `pub(crate)` (PATCH-11); read via
+    /// [`slots`](Self::slots). Carries no body.
+    pub(crate) slots: Vec<AgentId>,
+    resolve_count: AtomicUsize,
+    /// Per-slot re-run counter (DN-3 storm-cap). Indexed by dispatch slot.
+    pub(crate) rerun_counts: Vec<u8>,
+}
+
+impl ForkJoinRun {
+    /// Cheap id lookup — validates the agent_id belongs to this wave.
+    /// Does NOT resolve the body (resolve_count unchanged).
+    ///
+    /// **DN-2 (review) — AC6 visibility wall (adapted to a Rust constraint).**
+    /// The party-mode ruling (B) intended `pub(in crate::adapters::tui)` so an
+    /// in-crate synthesis module could not call `drill_body()` (Murat's anti-
+    /// vacuity point: `DrillBody.0` is `pub(crate)`, so E0616 field-privacy
+    /// blocks only EXTERNAL crates; an in-crate synthesis could reach the body).
+    /// That visibility is **E0742-impossible here** — `pub(in X)` requires `X`
+    /// to be an *ancestor* module, and `crate::adapters::tui` is not an ancestor
+    /// of `infrastructure::orchestrator` (where `ForkJoinRun` lives per DD-B3).
+    /// `pub(crate)` would add NO protection over `pub` against the in-crate
+    /// threat (synthesis is in-crate either way) while forcing the external
+    /// conformance tests onto feature-gated mirrors. The wall is therefore
+    /// **architectural**: synthesis builds its floor from `ResultStore` via
+    /// `build_synthesis_floor` and NEVER holds a `ForkJoinRun`, so it cannot
+    /// call `drill_body` at all; the opaque `DrillBody` (E0616, external) seals
+    /// the payload. A capability-token seal (only-TUI-constructs) is the R2
+    /// type-enforcement path when an LLM synthesis turn actually lands.
+    pub fn drill_source(&self, id: &AgentId) -> Option<DrillId> {
+        if self.store.get(id).is_some() {
+            Some(DrillId(id.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Lazy body resolution — increments resolve_count. Returns `None` for a
+    /// stale `DrillId` (e.g. one minted before a rerun replaced its slot) rather
+    /// than panicking (PATCH-7). TUI-scoped (AC6 visibility wall — see
+    /// [`drill_source`](Self::drill_source)).
+    pub fn drill_body(&self, d: &DrillId) -> Option<DrillBody> {
+        let node = self.store.get(&d.0)?;
+        self.resolve_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(DrillBody(node.body.clone()))
+    }
+
+    /// Number of drill-body resolutions performed through this handle.
+    pub fn resolve_count(&self) -> usize {
+        self.resolve_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Read-only view of the dispatch-ordered slot AgentIds (PATCH-11 — `slots`
+    /// is `pub(crate)`; this is the public read accessor). Carries no body.
+    pub fn slots(&self) -> &[AgentId] {
+        &self.slots
+    }
+
+    /// Re-run count for a slot (DN-3 storm-cap observability). 0 for OOR.
+    pub fn rerun_count_for_slot(&self, slot: usize) -> u8 {
+        self.rerun_counts.get(slot).copied().unwrap_or(0)
+    }
+}
+
+/// Build the grounded synthesis floor from a result store (AC7).
+/// Shared between wave completion and single-spoke rerun so the synthesis
+/// invariant (one citation per completed spoke) holds identically.
+fn build_synthesis_floor(store: &ResultStore) -> SynthesisView {
+    let ordered: Vec<&NodeResult> = store.ordered();
+    let spoke_results: Vec<SpokeResult> = ordered.iter().map(|r| r.to_spoke_result()).collect();
+    let coverage = CoverageLine::from_results(&spoke_results);
+    let citations: Vec<SpokeCitation> = ordered
+        .iter()
+        .filter(|r| matches!(r.outcome, SpokeResult::Completed { .. }))
+        .map(|r| SpokeCitation {
+            agent_id: r.agent_id.clone(),
+            label: r.label.clone(),
+            summary: r.compact_summary().to_string(),
+        })
+        .collect();
+    SynthesisView::build(citations, coverage)
 }
 
 /// Per-spoke terminal outcome sent through the collection mpsc (P3).
@@ -825,7 +1095,7 @@ mod tests {
     /// body into the window would make these byte counts differ by ~9MB.
     #[test]
     fn ac5_runtime_size_differential_window_byte_bound_is_body_invariant() {
-        let one_mb = "x".repeat(1 * 1024 * 1024);
+        let one_mb = "x".repeat(1024 * 1024);
         let ten_mb = "y".repeat(10 * 1024 * 1024);
         // Two stores with identical spoke handles but bodies that differ by
         // 9MB. The window's handles carry NO body (the type-wall).

@@ -1,0 +1,5 @@
+error[E0616]: field `0` of struct `DrillBody` is private
+  --> tests/trybuild/orchestration/drill_body_domain_fails.rs:16:26
+   |
+16 |         let _raw = &body.0;
+   |                          ^ private field

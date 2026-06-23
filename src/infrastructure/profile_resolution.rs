@@ -28,6 +28,13 @@ pub fn effective_profile_name(cli: &Cli, bootstrap_config: &AppConfig) -> String
 mod tests {
     use super::*;
 
+    /// Serializes the env-manipulating tests — `RUSTAIN_PROFILE` is process-
+    /// global, so concurrent set/remove across parallel test threads raced
+    /// (pre-existing flake: `test_env_var_used_when_cli_absent` intermittently
+    /// read "coding" instead of "env-profile"). Test-only; never held across
+    /// `.await` (these are sync `#[test]`s).
+    static PROFILE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()); // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: test-only env-var serialization (profile_resolution tests), never across .await
+
     fn make_cli(profile: Option<&str>) -> Cli {
         Cli {
             log_level: None,
@@ -69,6 +76,7 @@ mod tests {
     fn test_env_var_used_when_cli_absent() {
         let cli = make_cli(None);
         let config = make_config("coding");
+        let _guard = PROFILE_ENV_LOCK.lock().unwrap();
         // Save original
         let orig = std::env::var("RUSTAIN_PROFILE").ok();
         // CONFORMANCE_EXCEPTION: test env manipulation
@@ -87,6 +95,7 @@ mod tests {
     fn test_config_active_profile_used_when_cli_and_env_absent() {
         let cli = make_cli(None);
         let config = make_config("coding");
+        let _guard = PROFILE_ENV_LOCK.lock().unwrap();
         // Remove env var if set
         let orig = std::env::var("RUSTAIN_PROFILE").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
         unsafe { std::env::remove_var("RUSTAIN_PROFILE") };
@@ -101,6 +110,7 @@ mod tests {
     fn test_empty_cli_string_falls_through_to_env() {
         let cli = make_cli(Some(""));
         let config = make_config("coding");
+        let _guard = PROFILE_ENV_LOCK.lock().unwrap();
         // Remove env var if set
         let orig = std::env::var("RUSTAIN_PROFILE").ok(); // CONFORMANCE_EXCEPTION: test env save/restore
         unsafe { std::env::remove_var("RUSTAIN_PROFILE") };

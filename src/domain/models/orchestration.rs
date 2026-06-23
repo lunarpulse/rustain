@@ -300,6 +300,23 @@ pub struct ForkJoinOutcome {
     pub synthesis: SynthesisView,
 }
 
+/// Opaque drill identifier (cheap — validates the id without resolving the body).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DrillId(pub(crate) AgentId);
+
+/// Sealed opaque newtype for drill body content (DD-B3/DD4).
+/// NO Deref/AsRef/Borrow/From/Into/Serialize — exactly one accessor.
+/// The handle leaks no Arc<ResultStore>/&ResultStore/&NodeResult/raw body.
+pub struct DrillBody(pub(crate) String);
+
+impl DrillBody {
+    /// Render the drill body for display. Hidden to discourage casual use.
+    #[doc(hidden)]
+    pub fn as_render_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A typed reason a waiting/in-flight spoke may carry (AC10). Lives in executor
 /// side-state — NOT a payload on `NodeState::Waiting`, which would break the
 /// 14.1 FSM const-table + serde + field pins. Escalation to a hazard after a
@@ -363,6 +380,12 @@ pub enum OrchestrationError {
     /// Internal invariant violation.
     #[error("orchestration internal error: {0}")]
     Internal(String),
+    /// Rerun target slot index out of bounds (DD-B5/DD-B6).
+    #[error("rerun slot {0} out of bounds")]
+    InvalidSlot(usize),
+    /// Rerun target agent id not found in the spec map (DD-B5/DD-B6).
+    #[error("rerun spec not found for agent {0:?}")]
+    SpecNotFound(AgentId),
 }
 
 #[cfg(test)]

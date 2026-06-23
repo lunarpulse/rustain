@@ -1459,6 +1459,59 @@ impl Default for WhichKeyState {
     }
 }
 
+/// Story 14.3b — live snapshot of an in-flight fork-join wave, tracked so the
+/// render path (14.3a SynthesisBlock/WaveStrip) can paint progress. Updated by
+/// the 14.3 orchestration `AppEvent` handlers; `None` when no wave is active.
+#[derive(Clone, Debug, Default)]
+pub struct WaveViewState {
+    /// The coordinator (root) agent that owns the wave.
+    pub coordinator: crate::domain::models::AgentId,
+    /// Total spokes dispatched in the wave.
+    pub spoke_count: usize,
+    /// Spokes that have reached a terminal state so far.
+    pub completed_count: usize,
+    /// `Some(true)` when the synthesis surfaced an honest-empty floor (AC7).
+    pub honest_empty: Option<bool>,
+    /// `true` once the wave was cancelled (WaveCancelled).
+    pub cancelled: bool,
+}
+
+impl WaveViewState {
+    /// PATCH-2 (14-3b review): the 4 fork-join wave-lifecycle handlers,
+    /// extracted from the `event_loop.rs` match arms into pure, unit-testable
+    /// methods. Each applies a DISTINCT delta (the render path paints the
+    /// WaveStrip from this state). The event loop delegates to these; the
+    /// per-handler unit tests + the 4 mutants (a handler whose body is dropped
+    /// → its delta vanishes → its test goes red) prove non-vacuity (Murat
+    /// vacuity ledger #3 — DF-309 four mutants, one per AppEvent arm).
+
+    /// `AppEvent::ForkJoinStarted`: open the wave view (`None → Some`).
+    pub fn started(coordinator: crate::domain::models::AgentId, spoke_count: usize) -> Self {
+        Self {
+            coordinator,
+            spoke_count,
+            completed_count: 0,
+            honest_empty: None,
+            cancelled: false,
+        }
+    }
+
+    /// `AppEvent::SpokeCompleted`: bump the completed spoke count.
+    pub fn record_spoke_completed(&mut self) {
+        self.completed_count = self.completed_count.saturating_add(1);
+    }
+
+    /// `AppEvent::SynthesisReady`: record the honest-empty flag (AC7).
+    pub fn record_synthesis_ready(&mut self, honest_empty: bool) {
+        self.honest_empty = Some(honest_empty);
+    }
+
+    /// `AppEvent::WaveCancelled`: mark the wave cancelled.
+    pub fn record_wave_cancelled(&mut self) {
+        self.cancelled = true;
+    }
+}
+
 /// TUI-specific state for rendering.
 pub struct TuiState {
     pub active_tab_id: TabId,
@@ -1764,6 +1817,10 @@ pub struct TuiState {
     pub context_warn_level: ContextWarnLevel,
     /// Story 7.4: pending context carryover for fresh tab + summary injection.
     pub pending_context_carryover: Option<String>,
+    /// Story 14.3b — live snapshot of the current fork-join wave (set by the
+    /// 14.3 `AppEvent` handlers). `None` when no wave is active. The render
+    /// path (14.3a) reads this to paint the WaveStrip/SynthesisBlock.
+    pub wave_state: Option<WaveViewState>,
 }
 
 impl TuiState {
@@ -1883,6 +1940,7 @@ impl TuiState {
             compacting: false,
             context_warn_level: ContextWarnLevel::None,
             pending_context_carryover: None,
+            wave_state: None,
         }
     }
 
@@ -2651,5 +2709,86 @@ mod tests {
             action,
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents)
         ));
+    }
+
+    // ─── PATCH-2 (14-3b review): wave-lifecycle handler keystones ──────────
+    // Each test drives ONE extracted handler directly and asserts its DISTINCT
+    // delta. A mutant that drops a handler's body → its delta vanishes → its
+    // test goes red (non-vacuous — the post-`started` defaults are
+    // completed_count=0 / honest_empty=None / cancelled=false, so the
+    // non-default values prove the handler fired; the `_ => needs_redraw`
+    // catch-all cannot produce them).
+
+    #[test]
+    fn patch2_fork_join_started_opens_wave_view() {
+        let coord = crate::domain::models::AgentId::root();
+        let wave = WaveViewState::started(coord.clone(), 3);
+        assert_eq!(wave.coordinator, coord);
+        assert_eq!(wave.spoke_count, 3);
+        assert_eq!(wave.completed_count, 0);
+        assert_eq!(wave.honest_empty, None);
+        assert!(!wave.cancelled);
+    }
+
+    #[test]
+    fn patch2_spoke_completed_bumps_completed_count() {
+        let mut wave = WaveViewState::started(crate::domain::models::AgentId::root(), 2);
+        assert_eq!(wave.completed_count, 0);
+        wave.record_spoke_completed();
+        assert_eq!(wave.completed_count, 1);
+        wave.record_spoke_completed();
+        assert_eq!(wave.completed_count, 2);
+    }
+
+    #[test]
+    fn patch2_synthesis_ready_records_honest_empty() {
+        let mut wave = WaveViewState::started(crate::domain::models::AgentId::root(), 1);
+        assert_eq!(wave.honest_empty, None);
+        wave.record_synthesis_ready(true);
+        assert_eq!(wave.honest_empty, Some(true));
+        wave.record_synthesis_ready(false);
+        assert_eq!(wave.honest_empty, Some(false));
+    }
+
+    #[test]
+    fn patch2_wave_cancelled_marks_cancelled() {
+        let mut wave = WaveViewState::started(crate::domain::models::AgentId::root(), 1);
+        assert!(!wave.cancelled);
+        wave.record_wave_cancelled();
+        assert!(wave.cancelled);
+    }
+
+    /// AC1 turn-loop smoke: apply the 4 handlers in a full-wave sequence
+    /// (Started → 2× SpokeCompleted → SynthesisReady → WaveCancelled) and
+    /// assert each handler's DISTINCT delta survives into the final state.
+    /// The non-default final values (completed_count=2, honest_empty=Some,
+    /// cancelled=true) are ONLY producible by their own handler — the
+    /// `_ => needs_redraw` catch-all leaves them at the `started` defaults.
+    #[test]
+    fn patch2_turn_loop_smoke_four_handlers_distinct_deltas() {
+        let coord = crate::domain::models::AgentId::root();
+        let mut wave = WaveViewState::started(coord.clone(), 2);
+        assert_eq!(wave.spoke_count, 2);
+        assert_eq!(wave.completed_count, 0);
+
+        // Two spokes complete.
+        wave.record_spoke_completed();
+        wave.record_spoke_completed();
+        assert_eq!(wave.completed_count, 2);
+
+        // Synthesis lands (non-empty floor).
+        wave.record_synthesis_ready(false);
+        assert_eq!(wave.honest_empty, Some(false));
+
+        // Wave cancelled mid/after.
+        wave.record_wave_cancelled();
+        assert!(wave.cancelled);
+
+        // DISTINCTNESS: the final state carries every handler's signature.
+        assert_eq!(wave.coordinator, coord);
+        assert_eq!(wave.spoke_count, 2);
+        assert_eq!(wave.completed_count, 2);
+        assert_eq!(wave.honest_empty, Some(false));
+        assert!(wave.cancelled);
     }
 }

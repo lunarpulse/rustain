@@ -133,8 +133,9 @@ pub use notice::{
 };
 #[allow(unused_imports)]
 pub use orchestration::{
-    CoverageLine, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, ForkJoinSpec, OrchestrationError,
-    SpokeCitation, SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
+    CoverageLine, DrillBody, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, ForkJoinSpec,
+    OrchestrationError, SpokeCitation, SpokeResult, SpokeSpec, SynthesisView, WaitPolicy,
+    WaitReason,
 };
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
