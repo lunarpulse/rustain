@@ -4,6 +4,7 @@
 //! workspaces, offline-safe, with injected `SessionHolderPort` fakes for the
 //! in-use guard.
 
+#![cfg(feature = "test-instrumentation")]
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -79,6 +80,7 @@ async fn write_dir_session(sessions_dir: &Path, id: &str, m: &SessionMeta) {
     .unwrap();
 }
 
+#[allow(dead_code)]
 async fn write_flat_session(sessions_dir: &Path, id: &str, m: &SessionMeta) {
     tokio::fs::write(
         sessions_dir.join(format!("{}.session.json", id)),

@@ -33,6 +33,7 @@ use crate::domain::models::pricing::PricingConfig;
 use crate::domain::services::pricing_resolver::bare_model_id;
 use crate::domain::services::pricing_resolver::resolve_effective_pricing;
 use crate::infrastructure::paths;
+use crate::infrastructure::utils::env_var_trimmed;
 
 /// Default source URL. Overridable via `RUSTAIN_MODELS_DEV_URL` for tests/CI.
 pub const DEFAULT_SOURCE: &str = "https://models.dev";
@@ -201,7 +202,7 @@ pub fn merge_into_config(config: &mut AppConfig) {
 /// fall back to the existing cache / bundled pricing.
 pub async fn refresh() -> Result<PricingCache> {
     let source =
-        std::env::var("RUSTAIN_MODELS_DEV_URL").unwrap_or_else(|_| DEFAULT_SOURCE.to_string());
+        env_var_trimmed("RUSTAIN_MODELS_DEV_URL").unwrap_or_else(|| DEFAULT_SOURCE.to_string());
     let url = format!("{}/api.json", source.trim_end_matches('/'));
 
     let client = reqwest::Client::builder()

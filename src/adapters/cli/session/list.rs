@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(first["message_count"].as_u64().unwrap(), 5);
         assert_eq!(first["created_at"].as_i64().unwrap(), 100);
         assert_eq!(first["updated_at"].as_i64().unwrap(), 100);
-        assert!(first["has_fork_source"].as_bool().unwrap() == false);
+        assert!(!first["has_fork_source"].as_bool().unwrap());
         assert!(first["is_default_resume"].as_bool().unwrap());
         assert_eq!(first["workspace"].as_str().unwrap(), "/workspace/one");
 

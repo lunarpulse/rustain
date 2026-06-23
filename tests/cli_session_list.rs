@@ -4,6 +4,7 @@
 //! workspace `--all`, and the shared `build_session_rows` core over real
 //! `FileSystemStorage`.
 
+#![cfg(feature = "test-instrumentation")]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
