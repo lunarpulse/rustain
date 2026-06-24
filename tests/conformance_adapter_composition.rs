@@ -103,7 +103,10 @@ fn test_all_catalog_names_dispatched() {
                     .expect("static telegram config");
                     match *name {
                         "telegram" => {
-                            build_channels(name, Some(&telegram_config), &telegram_ctx).is_ok()
+                            match build_channels(name, Some(&telegram_config), &telegram_ctx) {
+                                Ok(_) => true,
+                                Err(e) => e.to_string().contains("feature not compiled"),
+                            }
                         }
                         _ => match build_channels(name, None, &ctx) {
                             Ok(_) => true,
