@@ -17,11 +17,20 @@
 //! `Arc<dyn Orchestrator>` (ADR-06-09 shared-port binding) and so R2 can swap
 //! the implementation. Synthesis stays INSIDE the orchestrator (DD1): the
 //! coordinator schedules no synthesizer node (AC1).
+//!
+//! **Story 14.3a (Preflight Party-Mode #2):** `run_wave` added as the retained-
+//! handle entry — returns `Arc<dyn WaveHandle>` so the TUI can drill/diverge/
+//! rerun/cancel through a domain trait, never the infra `ForkJoinRun`. The old
+//! `run_fork_join` is kept as a convenience (delegates `run_wave(..).snapshot().
+//! outcome`). `RerunOutcome` moved to `wave_handle.rs` typed off the trait.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
-use crate::domain::models::AgentId;
 use crate::domain::models::orchestration::{ForkJoinOutcome, OrchestrationError};
+use crate::domain::ports::wave_handle::{RerunOutcome, WaveHandle};
 
 /// The per-wave input the coordinator hands the orchestrator. Carried as a
 /// concrete struct (not on the trait method signature) so R2 can extend it
@@ -32,7 +41,7 @@ use crate::domain::models::orchestration::{ForkJoinOutcome, OrchestrationError};
 #[derive(Clone, Debug)]
 pub struct ForkJoinRequest {
     /// The owning coordinator agent (mint point for child tokens).
-    pub coordinator: AgentId,
+    pub coordinator: crate::domain::models::AgentId,
     /// One [`SpokeSpec`] per child. The executor asserts each is single-level
     /// (`waits_for` empty) and bounds the fan-out at the static spawn cap.
     pub spokes: Vec<crate::domain::models::orchestration::SpokeSpec>,
@@ -49,31 +58,34 @@ pub struct ForkJoinRequest {
 #[async_trait]
 pub trait Orchestrator: Send + Sync {
     /// Fan out one level of children, collect AgentId-keyed results, and return
-    /// the grounded synthesis floor. The coordinator's turn loop consumes the
-    /// [`ForkJoinOutcome`] (it may enrich via its own `run_turn`, but the
-    /// orchestrator schedules NO synthesizer node — AC1).
+    /// the grounded synthesis floor. **Convenience method** — delegates to
+    /// `run_wave` and projects `.snapshot().outcome`. Kept for callers that
+    /// don't need the retained handle.
     async fn run_fork_join(
         &self,
         request: ForkJoinRequest,
     ) -> Result<ForkJoinOutcome, OrchestrationError>;
 
+    /// Fan out one level of children and return the retained wave handle.
+    /// The caller passes a `CancellationToken` that becomes the wave's cancel
+    /// root — `WaveHandle::cancel()` fires it (AC8). The token tree propagates
+    /// to every child via `dispatch_launch`'s `wave_cancel.child_token()`.
+    async fn run_wave(
+        &self,
+        request: ForkJoinRequest,
+        cancel: CancellationToken,
+    ) -> Result<Arc<dyn WaveHandle>, OrchestrationError>;
+
     /// Re-fork exactly one spoke through the sealed chokepoint (DD6/DD-B5/DD-B6).
     /// Added here (not just on the concrete executor) so a RemoteSubagentRunner
-    /// can rerun — no LSP trap. Borrows the prior [`ForkJoinRun`] (compiler-
-    /// enforced non-destructiveness per DD-B6): a cancel/fail leaves the prior
-    /// untouched; only a terminal-SUCCESS produces a new [`ForkJoinRun`].
+    /// can rerun — no LSP trap.
+    ///
+    /// The executor retains the current wave internally; this method operates on
+    /// that retained state (R1: single-wave, DN-1 in-flight guard). The cancel
+    /// token should be a `child_token()` of the wave root (F3 resolution).
     async fn rerun_spoke(
         &self,
-        prev: &crate::infrastructure::orchestrator::ForkJoinRun,
         slot: usize,
+        cancel: CancellationToken,
     ) -> Result<RerunOutcome, OrchestrationError>;
-}
-
-/// Result of a single-spoke rerun (DD-B6).
-pub enum RerunOutcome {
-    /// The target spoke succeeded; here is the new ForkJoinRun (deep-clone CoW
-    /// of the store, fresh AgentId at a stable slot — DD-B4/DD-B5).
-    Replaced(crate::infrastructure::orchestrator::ForkJoinRun),
-    /// The target spoke failed or was cancelled; the prior is untouched.
-    Reverted,
 }

@@ -31,7 +31,7 @@ use rustain::domain::models::subagent_error::SubagentError;
 use rustain::domain::models::task_handle::TaskHandle;
 use rustain::domain::models::{ModelTier, Op, ToolPolicy};
 use rustain::domain::ports::{
-    AuthorityProvider, ForkJoinRequest, Orchestrator, RerunOutcome, SubagentRunner,
+    AuthorityProvider, ForkJoinRequest, Orchestrator, RerunOutcome, SubagentRunner, WaveHandle,
 };
 use rustain::domain::services::authority_ledger::AuthorityLedger;
 use rustain::infrastructure::orchestrator::{
@@ -1521,7 +1521,7 @@ proptest! {
             // Rerun ONE spoke; the rerun mints + settles exactly one gate
             // token through the sealed chokepoint.
             let outcome = exe
-                .rerun_spoke(&run, slot)
+                .rerun_spoke_run(&run, slot, CancellationToken::new())
                 .await
                 .expect("rerun dispatches through the chokepoint");
             // Non-vacuous (a): the rerun re-dispatched ONE spoke — exactly
@@ -1721,13 +1721,15 @@ async fn rerun_one_spoke_leaves_others_untouched() {
 
     // ── Rerun the MIDDLE slot (slot 1) ──
     let outcome = exe
-        .rerun_spoke(&prev, 1)
+        .rerun_spoke_run(&prev, 1, CancellationToken::new())
         .await
         .expect("rerun dispatches without infrastructure error");
 
     let new_run = match outcome {
         RerunOutcome::Replaced(r) => r,
-        RerunOutcome::Reverted => panic!("rerun of a Completed spoke must Replaced, not Reverted"),
+        RerunOutcome::Reverted { .. } => {
+            panic!("rerun of a Completed spoke must Replaced, not Reverted")
+        }
     };
 
     // TARGET witness 1: exactly ONE new dispatch (not N).
@@ -1746,10 +1748,11 @@ async fn rerun_one_spoke_leaves_others_untouched() {
 
     // TARGET witness 3: the result CHANGED.
     assert_ne!(
-        new_run.outcome.spokes[1].1, prev_slot1_result,
+        new_run.snapshot().outcome.spokes[1].1,
+        prev_slot1_result,
         "rerun slot 1 result CHANGED (different summary)"
     );
-    match &new_run.outcome.spokes[1].1 {
+    match &new_run.snapshot().outcome.spokes[1].1 {
         SpokeResult::Completed { summary } => {
             assert_eq!(
                 summary, "result-1-rerun",
@@ -1771,25 +1774,19 @@ async fn rerun_one_spoke_leaves_others_untouched() {
         "sibling slot 2 AgentId unchanged"
     );
     assert_eq!(
-        new_run.outcome.spokes[0].1, prev_slot0_result,
+        new_run.snapshot().outcome.spokes[0].1,
+        prev_slot0_result,
         "sibling slot 0 result unchanged"
     );
     assert_eq!(
-        new_run.outcome.spokes[2].1, prev_slot2_result,
+        new_run.snapshot().outcome.spokes[2].1,
+        prev_slot2_result,
         "sibling slot 2 result unchanged"
     );
 
     // SIBLING body witness: drill the sibling bodies in the NEW run.
-    let new_body_0 = new_run
-        .drill_body(&new_run.drill_source(&new_run.slots()[0]).unwrap())
-        .unwrap()
-        .as_render_str()
-        .to_string();
-    let new_body_2 = new_run
-        .drill_body(&new_run.drill_source(&new_run.slots()[2]).unwrap())
-        .unwrap()
-        .as_render_str()
-        .to_string();
+    let new_body_0 = new_run.drill(0).unwrap().as_render_str().to_string();
+    let new_body_2 = new_run.drill(2).unwrap().as_render_str().to_string();
     assert_eq!(
         new_body_0, prev_body_0,
         "sibling slot 0 body byte-identical after rerun"
@@ -1808,7 +1805,7 @@ async fn rerun_one_spoke_leaves_others_untouched() {
 }
 
 /// NON-DESTRUCTIVE (DD-B6): a rerun whose spoke FAILS produces Reverted — the
-/// prior is untouched. Compiler-enforced: `rerun_spoke` borrows `&ForkJoinRun`,
+/// prior is untouched. Compiler-enforced: `rerun_spoke_run` borrows `&ForkJoinRun`,
 /// so mutation through the shared ref is impossible. This test captures prior
 /// state before the rerun and verifies it is byte-identical after.
 #[tokio::test]
@@ -1836,12 +1833,12 @@ async fn rerun_failure_reverts_to_prior_result_nondestructively() {
 
     // Rerun slot 1 — the 4th terminal is Failed.
     let outcome = exe
-        .rerun_spoke(&prev, 1)
+        .rerun_spoke_run(&prev, 1, CancellationToken::new())
         .await
         .expect("rerun dispatches without infrastructure error");
 
     assert!(
-        matches!(outcome, RerunOutcome::Reverted),
+        matches!(outcome, RerunOutcome::Reverted { .. }),
         "rerun of a Failed spoke → Reverted (prior untouched)"
     );
 
@@ -1882,7 +1879,7 @@ async fn rerun_success_replaces_prior() {
     let prev_slot0 = prev.slots()[0].clone();
 
     let outcome = exe
-        .rerun_spoke(&prev, 0)
+        .rerun_spoke_run(&prev, 0, CancellationToken::new())
         .await
         .expect("rerun dispatches without infrastructure error");
 
@@ -1894,7 +1891,7 @@ async fn rerun_success_replaces_prior() {
                 "replaced run has a fresh AgentId at slot 0"
             );
         }
-        RerunOutcome::Reverted => {
+        RerunOutcome::Reverted { .. } => {
             panic!("Completed rerun must produce Replaced, not Reverted (anti-vacuity)")
         }
     }
@@ -1984,7 +1981,7 @@ async fn dn3_storm_cap_refuses_rerun_past_cap() {
     let runner_for_count = runner.clone();
     let (exe, _ledger) = build_executor(runner as Arc<dyn SubagentRunner>, root_token());
     let mut run = exe
-        .run_fork_join_run(
+        .run_wave(
             request(
                 AgentId::root(),
                 vec![spoke("SPOKE-0"), spoke("SPOKE-1"), spoke("SPOKE-2")],
@@ -2003,7 +2000,7 @@ async fn dn3_storm_cap_refuses_rerun_past_cap() {
     // Rerun slot 1 three times — each succeeds (Replaced), count climbs 1..3.
     for expected in 1..=3 {
         let outcome = exe
-            .rerun_spoke(&run, 1)
+            .rerun_spoke(1, CancellationToken::new())
             .await
             .expect("rerun under cap dispatches");
         match outcome {
@@ -2015,7 +2012,7 @@ async fn dn3_storm_cap_refuses_rerun_past_cap() {
                     "slot 1 rerun count climbed to {expected}"
                 );
             }
-            RerunOutcome::Reverted => {
+            RerunOutcome::Reverted { .. } => {
                 panic!("rerun {expected} under cap must Replaced, not Reverted")
             }
         }
@@ -2029,11 +2026,11 @@ async fn dn3_storm_cap_refuses_rerun_past_cap() {
     // 4th rerun of slot 1 → cap REFUSED: Reverted, NO new dispatch, count stays 3.
     let pre_slots = run.slots().to_vec();
     let outcome = exe
-        .rerun_spoke(&run, 1)
+        .rerun_spoke(1, CancellationToken::new())
         .await
         .expect("cap-refuse returns Reverted, not Err");
     assert!(
-        matches!(outcome, RerunOutcome::Reverted),
+        matches!(outcome, RerunOutcome::Reverted { .. }),
         "rerun past cap (4th) must be refused → Reverted (prior untouched)"
     );
     assert_eq!(

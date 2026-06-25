@@ -394,6 +394,26 @@ pub enum InputAction {
     FeedbackBudgetSwitchCheaper,
     /// Daily-budget warning — user picked "Pause until tomorrow" (Story 7.5 AC5/AC7).
     FeedbackBudgetPause,
+    /// Story 14.3a: rerun the spoke at this slot.
+    WaveRerunSpoke(usize),
+    /// Story 14.3a: drill into spoke body at this slot.
+    WaveDrillSpoke(usize),
+    /// Story 14.3a: open wave overlay (expand wave strip).
+    OpenWaveOverlay,
+    /// Story 14.3a: close wave overlay.
+    CloseWaveOverlay,
+    /// Story 14.3a: open diverge view (d key).
+    OpenDivergeView,
+    /// Story 14.3a: close diverge view (s key, back to wave overlay).
+    CloseDivergeView,
+    /// Story 14.3a: confirm spawn gate (Enter in gate card).
+    SpawnGateConfirm,
+    /// Story 14.3a: cap spawn gate at threshold (c key).
+    SpawnGateCap,
+    /// Story 14.3a: adjust spawn gate N left.
+    SpawnGateAdjustLeft,
+    /// Story 14.3a: adjust spawn gate N right.
+    SpawnGateAdjustRight,
 }
 
 impl InputAction {
@@ -1502,6 +1522,29 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'u' => InputAction::UndoBookmarkDelete,
             _ => InputAction::Consumed,
         },
+        // Story 14.3a: WaveOverlay char handling — intercept BEFORE the
+        // generic `Overlay(_) => Ignored` catch-all so j/k/r/d/s own these
+        // keys instead of falling through to chat/input handlers.
+        FocusState::Overlay(OverlayType::WaveOverlay) => match c {
+            'j' => {
+                if let Some(ref handle) = state.wave_run {
+                    let snap = handle.snapshot();
+                    let max = snap.spoke_count.saturating_sub(1);
+                    state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            'k' => {
+                state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            'r' => InputAction::WaveRerunSpoke(state.wave_overlay_selected),
+            'd' => InputAction::OpenDivergeView,
+            's' => InputAction::CloseDivergeView,
+            _ => InputAction::Consumed,
+        },
         FocusState::Overlay(_) => InputAction::Ignored,
     }
 }
@@ -1806,6 +1849,30 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 let last = state.bookmark_list_count.saturating_sub(1);
                 state.bookmark_list_selected =
                     state.bookmark_list_selected.saturating_add(1).min(last);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        };
+    }
+    // Story 14.3a: WaveOverlay special-key handling — intercept BEFORE the
+    // generic `match key {}` dispatch (Esc/Enter/Up/Down) so the overlay owns
+    // them instead of the chat/input handlers.
+    if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {
+        return match key {
+            DomainKey::Esc => InputAction::CloseWaveOverlay,
+            DomainKey::Enter => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
+            DomainKey::Down => {
+                if let Some(ref handle) = state.wave_run {
+                    let snap = handle.snapshot();
+                    let max = snap.spoke_count.saturating_sub(1);
+                    state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            DomainKey::Up => {
+                state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
                 state.needs_redraw = true;
                 InputAction::Consumed
             }

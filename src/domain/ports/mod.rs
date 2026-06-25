@@ -59,6 +59,8 @@ mod toolset;
 #[allow(unused_imports)]
 mod usage_ledger;
 #[allow(unused_imports)]
+pub mod wave_handle;
+#[allow(unused_imports)]
 mod workspace_registry;
 #[cfg(feature = "self-update")]
 pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
@@ -76,7 +78,7 @@ pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use memory::MemoryPort;
-pub use node_orchestrator::{ForkJoinRequest, Orchestrator, RerunOutcome};
+pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};
@@ -88,6 +90,7 @@ pub use security::SecurityPort;
 pub use session_holder::{HeldSession, HolderState, SessionHolderPort};
 pub use session_port::SessionPort;
 pub use subagent_runner::SubagentRunner;
+pub use wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};
 pub use skill_exposure::SkillExposurePort;

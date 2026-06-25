@@ -1821,6 +1821,64 @@ pub struct TuiState {
     /// 14.3 `AppEvent` handlers). `None` when no wave is active. The render
     /// path (14.3a) reads this to paint the WaveStrip/SynthesisBlock.
     pub wave_state: Option<WaveViewState>,
+    /// Story 14.3a (F1+F2+F5) — the retained wave handle for drill/diverge/
+    /// rerun/cancel. Domain trait object → adapters→domain only (the
+    /// adapters→infra crossing from F5 is gone). NOT a field of WaveViewState
+    /// (which is Clone/Default for the push-counter regime).
+    pub wave_run: Option<std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle>>,
+    /// Story 14.3a — wave-overlay scroll state. The selected row in the
+    /// virtual-scrolled WaveOverlay (j/k to scroll, 0-indexed).
+    pub wave_overlay_selected: usize,
+    /// Story 14.3a — slot currently being rerun (in-progress lamp for AC11).
+    /// Set on SpokeRerunStarted, cleared on Replaced/Reverted terminal.
+    pub rerunning_slot: Option<usize>,
+    /// Story 14.3a — the wave-cancel root token. Held by the event loop so
+    /// Ctrl-C / `/fanout cancel` can fire it (AC8). `None` when no wave is
+    /// live. The token is also threaded into `run_wave` and rerun child tokens.
+    pub wave_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// D-B (AI-12.3): the identity of the currently-fanning-out `/fanout`
+    /// spawn — the SINGLE SOURCE OF TRUTH for "a wave is in flight". Stamped
+    /// at spawn (`begin_wave_fanout`), cleared at WaveRunReady /
+    /// WaveCancelled / WaveTerminated. Identity-coupled (monotonic per spawn)
+    /// so a stale bool can never survive: `is_wave_in_flight()` is derived,
+    /// never shadowed. Replaces the old free-standing `wave_in_flight: bool`
+    /// whose only defect was that it could desync from the spawn outcome.
+    pub active_wave_id: Option<u64>,
+    /// D-B (AI-12.3): monotonic wave-id source backing `active_wave_id`.
+    /// Stays private — `begin_wave_fanout` is the only writer.
+    wave_id_counter: u64,
+}
+
+impl TuiState {
+    /// D-B (AI-12.3): true while a `/fanout` wave is in flight (spawned but not
+    /// yet delivered or cancelled). DERIVED from `active_wave_id` — never a
+    /// shadow boolean. Gates the Ctrl-C wave-cancel branch so a completed
+    /// wave's stale `wave_cancel` token can't intercept the next Ctrl-C.
+    pub fn is_wave_in_flight(&self) -> bool {
+        self.active_wave_id.is_some()
+    }
+    /// D-B (AI-12.3): stamp a fresh monotonic wave id + arm the lifecycle
+    /// marker. Called at `/fanout` spawn. Returns the id so the spawn closure
+    /// can correlate terminal events (defended against a stale late delivery).
+    pub fn begin_wave_fanout(&mut self) -> u64 {
+        // Derive the next id from the struct's own counter so it is unique per
+        // TuiState (no global). Reads the stored counter, bumps it.
+        let id = self.wave_id_counter.wrapping_add(1);
+        self.wave_id_counter = id;
+        self.active_wave_id = Some(id);
+        id
+    }
+    /// D-B (AI-12.3): retire the in-flight marker. Called by WaveRunReady /
+    /// WaveCancelled / WaveTerminated. `Some(id)` matches the stamp; any stale
+    /// late delivery (id mismatch) is a no-op so a NEWER wave's marker can't be
+    /// clobbered by an OLDER terminal.
+    pub fn retire_wave_fanout(&mut self, id: Option<u64>) {
+        match (self.active_wave_id, id) {
+            (Some(live), Some(evt)) if live == evt => self.active_wave_id = None,
+            (Some(_), None) => self.active_wave_id = None, // uncorrelated retire (Ctrl-C self-heal)
+            _ => {} // stale or already-retired — leave the live marker alone
+        }
+    }
 }
 
 impl TuiState {
@@ -1941,6 +1999,12 @@ impl TuiState {
             context_warn_level: ContextWarnLevel::None,
             pending_context_carryover: None,
             wave_state: None,
+            wave_run: None,
+            wave_overlay_selected: 0,
+            rerunning_slot: None,
+            wave_cancel: None,
+            active_wave_id: None,
+            wave_id_counter: 0,
         }
     }
 
@@ -2790,5 +2854,64 @@ mod tests {
         assert_eq!(wave.completed_count, 2);
         assert_eq!(wave.honest_empty, Some(false));
         assert!(wave.cancelled);
+    }
+
+    // ─── D-B (AI-12.3) poisoned mutants — wave-lifecycle registry ─────────
+
+    /// `is_wave_in_flight()` is DERIVED from `active_wave_id` (no shadow bool).
+    /// `begin_wave_fanout` arms the marker; the accessor flips true. Kills a
+    /// mutant that leaves `active_wave_id` unset (accessor always false).
+    #[test]
+    fn db_begin_fanout_arms_in_flight_marker() {
+        let mut s = TuiState::new(80, 24);
+        assert!(!s.is_wave_in_flight(), "no wave in flight at start");
+        let id = s.begin_wave_fanout();
+        assert!(id > 0, "wave id is monotonic from a nonzero seed");
+        assert!(
+            s.is_wave_in_flight(),
+            "marker armed after begin_wave_fanout"
+        );
+    }
+
+    /// `retire_wave_fanout(Some(id))` with the MATCHING id clears the marker
+    /// (the normal WaveTerminated/WaveRunReady path). Kills a mutant where the
+    /// retire is a no-op (marker stuck → next Ctrl-C swallowed).
+    #[test]
+    fn db_retire_matching_id_clears_marker() {
+        let mut s = TuiState::new(80, 24);
+        let id = s.begin_wave_fanout();
+        assert!(s.is_wave_in_flight());
+        s.retire_wave_fanout(Some(id));
+        assert!(
+            !s.is_wave_in_flight(),
+            "matching-id retire MUST clear the marker (else a stale Ctrl-C swallow)"
+        );
+    }
+
+    /// POISONED — the identity-coupling core: a STALE terminal (older wave's id)
+    /// MUST NOT retire a NEWER live marker. Kills the "always clear" mutant
+    /// (`active_wave_id = None` unconditionally) — under that mutant, a
+    /// superseded wave's late terminal would retire the live wave's marker.
+    #[test]
+    fn db_stale_id_does_not_clobber_live_marker() {
+        let mut s = TuiState::new(80, 24);
+        let old_id = s.begin_wave_fanout(); // wave A
+        let new_id = s.begin_wave_fanout(); // wave B (supersedes A)
+        assert_ne!(old_id, new_id, "ids are monotonic + distinct");
+        assert!(s.is_wave_in_flight());
+        // A's STALE late terminal arrives after B is live.
+        s.retire_wave_fanout(Some(old_id));
+        assert!(
+            s.is_wave_in_flight(),
+            "a stale (older-wave) terminal MUST NOT retire the live marker"
+        );
+        assert_eq!(
+            s.active_wave_id,
+            Some(new_id),
+            "the live marker is still wave B"
+        );
+        // B's OWN terminal clears it.
+        s.retire_wave_fanout(Some(new_id));
+        assert!(!s.is_wave_in_flight());
     }
 }

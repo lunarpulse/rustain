@@ -67,10 +67,24 @@ impl rustain::domain::ports::Orchestrator for NoOpOrchestrator {
             ),
         )
     }
+    async fn run_wave(
+        &self,
+        _request: rustain::domain::ports::ForkJoinRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        Arc<dyn rustain::domain::ports::WaveHandle>,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
+    }
     async fn rerun_spoke(
         &self,
-        _prev: &rustain::infrastructure::orchestrator::ForkJoinRun,
         _slot: usize,
+        _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<
         rustain::domain::ports::RerunOutcome,
         rustain::domain::models::orchestration::OrchestrationError,

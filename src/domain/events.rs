@@ -359,6 +359,41 @@ pub enum AppEvent {
         coordinator: crate::domain::models::AgentId,
         killed: usize,
     },
+    /// Story 14.3a (F1+F2+F5) — the wave handle is ready after the detached
+    /// `tokio::spawn`. The event loop stores this in `TuiState.wave_run`.
+    /// `Arc` (not `Box`) because `AppEvent` derives `Debug` and `Box<dyn _>`
+    /// is not `Clone` — both engineers conceded in Preflight #2.
+    WaveRunReady(std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle>),
+    /// Story 14.3a (AC11) — emitted SYNCHRONOUSLY in the `r` handler BEFORE
+    /// awaiting the rerun future. The cell shows "Re-running spoke {i}…" with
+    /// prior content retained + dimmed (never blank). Counter UNCHANGED.
+    SpokeRerunStarted {
+        slot: usize,
+    },
+    /// Story 14.3a (AC11) — rerun terminal (Reverted or error). Clears the
+    /// in-progress lamp for the slot. On Replaced, the lamp is cleared by
+    /// the WaveRunReady handler instead.
+    SpokeRerunReverted {
+        slot: usize,
+    },
+    /// Story 14.3a (AI-12.3 D-B) — the wave task ended WITHOUT producing a
+    /// handle (run_wave returned Err, or the spawn task panicked/was cancelled).
+    /// Carries the spawn's `wave_id` so the handler correlates retire against the
+    /// LIVE marker — a STALE late delivery (older wave's terminal after a newer
+    /// spawn) is a no-op and can't retire a live marker. The event loop uses this
+    /// to retire the in-flight marker so a stale `wave_cancel` never swallows a
+    /// later Ctrl-C.
+    WaveTerminated {
+        id: u64,
+    },
+    /// Story 14.3a (AI-12.3 — Amelia) — a rerun was REJECTED because a rerun is
+    /// already in flight for a spoke (the single-slot lamp can't represent two).
+    /// Distinct from a generic SystemNotice so AC11 orphan/starvation is
+    /// observable + testable (the cap-reject path emits THIS, not a silent drop,
+    /// so a busy-loop on `r` can't starve the rerun outcome).
+    RerunRejectedBusy {
+        slot: usize,
+    },
 }
 
 /// User decision for a delegation suggestion (AC-10-5-3).

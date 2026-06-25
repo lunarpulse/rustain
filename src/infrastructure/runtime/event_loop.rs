@@ -1298,6 +1298,28 @@ pub async fn run(
                                         }
                                         state.needs_redraw = true;
                                     }
+                                    // Story 14.3a (AC8): cancel an in-flight wave
+                                    // (primary cancel trigger = Ctrl-C). Fires the
+                                    // wave-cancel root token, propagating to every
+                                    // child via the token tree.
+                                    // D-B (AI-12.3): gate on the DERIVED
+                                    // in-flight signal (`active_wave_id`) so a
+                                    // completed wave's stale token can't swallow
+                                    // the next Ctrl-C. Single source of truth —
+                                    // no shadow boolean.
+                                    if state.is_wave_in_flight() {
+                                        if let Some(ref cancel) = state.wave_cancel {
+                                            cancel.cancel();
+                                        }
+                                        state.rerunning_slot = None;
+                                        // Self-heal retire (uncorrelated): a wave
+                                        // that ended without a terminal event won't
+                                        // leave the marker stuck.
+                                        state.retire_wave_fanout(None);
+                                        state.needs_redraw = true;
+                                        // Don't quit — wave cancel consumed the Ctrl-C.
+                                        continue;
+                                    }
                                     if streaming.is_streaming {
                                         // AC12: Finalize active tool calls with [aborted] before clearing
                                         for (_, tc) in streaming.active_tool_calls.iter_mut() {
@@ -2198,7 +2220,33 @@ pub async fn run(
                                         // (ForkJoinStarted/SpokeCompleted/SynthesisReady/
                                         // WaveCancelled) via the event bus; the handlers below
                                         // render them.
-                                        if streaming.is_streaming {
+                                        // Story 14.3a (AC8): `/fanout cancel` explicit floor.
+                                        if cmd_arg.map(|a| a.trim()) == Some("cancel") {
+                                            if let Some(ref cancel) = state.wave_cancel {
+                                                if !cancel.is_cancelled() {
+                                                    cancel.cancel();
+                                                    state.rerunning_slot = None;
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Info,
+                                                        message: "Fan-out wave cancelled.".to_string(),
+                                                    });
+                                                } else {
+                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Info,
+                                                        message: "Wave already cancelled.".to_string(),
+                                                    });
+                                                }
+                                            } else {
+                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: crate::domain::models::NoticeLevel::Info,
+                                                    message: "No active wave to cancel.".to_string(),
+                                                });
+                                            }
+                                            state.needs_redraw = true;
+                                        } else if streaming.is_streaming {
                                             app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: crate::domain::models::NoticeLevel::Info,
@@ -2227,20 +2275,40 @@ pub async fn run(
                                                         Some(orchestrator) => {
                                                             let event_bus = app_state.event_bus.clone();
                                                             let conv_id = conversation.id.clone();
+                                                            // Story 14.3a (AC8): create the wave-cancel ROOT
+                                                            // token. The event loop retains it so Ctrl-C /
+                                                            // `/fanout cancel` can fire it. Threaded into
+                                                            // run_wave; every child gets a child_token().
+                                                            let wave_cancel = tokio_util::sync::CancellationToken::new();
+                                                            state.wave_cancel = Some(wave_cancel.clone());
+                                                            // D-B (AI-12.3): stamp a fresh
+                                                            // monotonic wave id — the single
+                                                            // source of truth for "wave in
+                                                            // flight". The id is threaded into
+                                                            // the terminal watcher so a STALE
+                                                            // late delivery (older wave's event
+                                                            // after a newer spawn) can't retire a
+                                                            // live marker.
+                                                            let wave_id = state.begin_wave_fanout();
                                                             // DN-1 (review): a supervisor OWNS the wave JoinHandle
                                                             // (not dropped) so a panic surfaces as a SystemNotice
                                                             // instead of silently hanging wave_state.
                                                             let wave = tokio::spawn(async move {
                                                                 use crate::domain::ports::Orchestrator;
-                                                                orchestrator.run_fork_join(request).await
+                                                                orchestrator.run_wave(request, wave_cancel).await
                                                             });
                                                             tokio::spawn(async move {
                                                                 match wave.await {
-                                                                    Ok(Ok(outcome)) => {
+                                                                    Ok(Ok(handle)) => {
+                                                                        let snap = handle.snapshot();
+                                                                        let summary = snap.outcome.synthesis.summary.clone();
+                                                                        // Send the retained handle back to the event loop
+                                                                        // via AppEvent (Arc, not Box — Preflight #2).
+                                                                        event_bus.emit_domain(AppEvent::WaveRunReady(handle));
                                                                         event_bus.emit_domain(AppEvent::SystemNotice {
                                                                             conversation_id: Some(conv_id),
                                                                             level: crate::domain::models::NoticeLevel::Info,
-                                                                            message: format!("Fan-out complete: {}", outcome.synthesis.summary),
+                                                                            message: format!("Fan-out complete: {summary}"),
                                                                         });
                                                                     }
                                                                     Ok(Err(e)) => {
@@ -2249,6 +2317,7 @@ pub async fn run(
                                                                             level: crate::domain::models::NoticeLevel::Warning,
                                                                             message: format!("Fan-out failed: {e}"),
                                                                         });
+                                                                        event_bus.emit_domain(AppEvent::WaveTerminated { id: wave_id });
                                                                     }
                                                                     Err(join_err) if join_err.is_panic() => {
                                                                         event_bus.emit_domain(AppEvent::SystemNotice {
@@ -2256,6 +2325,7 @@ pub async fn run(
                                                                             level: crate::domain::models::NoticeLevel::Warning,
                                                                             message: "Fan-out task panicked — see logs.".to_string(),
                                                                         });
+                                                                        event_bus.emit_domain(AppEvent::WaveTerminated { id: wave_id });
                                                                     }
                                                                     Err(_) => {
                                                                         event_bus.emit_domain(AppEvent::SystemNotice {
@@ -2263,6 +2333,7 @@ pub async fn run(
                                                                             level: crate::domain::models::NoticeLevel::Info,
                                                                             message: "Fan-out task was cancelled.".to_string(),
                                                                         });
+                                                                        event_bus.emit_domain(AppEvent::WaveTerminated { id: wave_id });
                                                                     }
                                                                 }
                                                             });
@@ -5454,6 +5525,124 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
+                                // === Story 14.3a: wave overlay dispatchers ===
+                                InputAction::WaveRerunSpoke(slot) => {
+                                    // P2 (AI-12.3 — Amelia): reject a 2nd in-flight
+                                    // rerun with a DISTINCT event — the single-slot
+                                    // lamp can't represent two, and overlapping reruns
+                                    // race on `rerunning_slot`. `RerunRejectedBusy`
+                                    // (not a silent drop / generic notice) so AC11
+                                    // starvation is observable + testable.
+                                    if state.rerunning_slot.is_some() {
+                                        app_state
+                                            .event_bus
+                                            .emit_domain(AppEvent::RerunRejectedBusy { slot });
+                                        state.needs_redraw = true;
+                                    } else if let (Some(orchestrator), Some(wave_cancel)) = (
+                                        app_state.orchestrator.clone(),
+                                        state.wave_cancel.clone(),
+                                    ) {
+                                        // AC11 + P2: set the lamp synchronously AND
+                                        // only now that the rerun will actually
+                                        // dispatch (emit-before-guard left the lamp
+                                        // stuck when the guard failed).
+                                        state.rerunning_slot = Some(slot);
+                                        app_state
+                                            .event_bus
+                                            .emit_domain(AppEvent::SpokeRerunStarted { slot });
+                                        // AC8: child token of the wave root for the rerun.
+                                        let event_bus = app_state.event_bus.clone();
+                                        let cancel = wave_cancel.child_token();
+                                        let conv_id = conversation.id.clone();
+                                        tokio::spawn(async move {
+                                            use crate::domain::ports::Orchestrator;
+                                            match orchestrator.rerun_spoke(slot, cancel).await {
+                                                Ok(outcome) => {
+                                                    use crate::domain::ports::wave_handle::RerunOutcome;
+                                                    match outcome {
+                                                        RerunOutcome::Replaced(new_handle) => {
+                                                            event_bus.emit_domain(
+                                                                AppEvent::WaveRunReady(new_handle),
+                                                            );
+                                                        }
+                                                        RerunOutcome::Reverted { slot: rev_slot } => {
+                                                            // AC11 lamp-clear: emit SpokeRerunReverted
+                                                            // so the event handler clears rerunning_slot.
+                                                            event_bus.emit_domain(
+                                                                AppEvent::SpokeRerunReverted {
+                                                                    slot: rev_slot,
+                                                                },
+                                                            );
+                                                            event_bus.emit_domain(
+                                                                AppEvent::SystemNotice {
+                                                                    conversation_id: Some(
+                                                                        conv_id.clone(),
+                                                                    ),
+                                                                    level: crate::domain::models::NoticeLevel::Info,
+                                                                    message: format!(
+                                                                        "Spoke {rev_slot} unchanged"
+                                                                    ),
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    // AC11 lamp-clear on error
+                                                    event_bus.emit_domain(
+                                                        AppEvent::SpokeRerunReverted { slot },
+                                                    );
+                                                    event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conv_id),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: format!("Spoke re-run failed: {e}"),
+                                                    });
+                                                }
+                                            }
+                                        });
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::OpenWaveOverlay => {
+                                    state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+                                    state.wave_overlay_selected = 0;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CloseWaveOverlay => {
+                                    state.focus = FocusState::Chat;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::WaveDrillSpoke(slot) => {
+                                    // Lazy drill: fetch body only on open.
+                                    if let Some(ref handle) = state.wave_run {
+                                        if let Some(body) = handle.drill(slot) {
+                                            // Surface as a SystemNotice for now (full drill view
+                                            // is a follow-up).
+                                            app_state
+                                                .event_bus
+                                                .emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: crate::domain::models::NoticeLevel::Info,
+                                                    message: format!(
+                                                        "[Drill spoke {slot}] {}",
+                                                        body.as_render_str()
+                                                    ),
+                                                });
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::OpenDivergeView | InputAction::CloseDivergeView => {
+                                    // Toggle: consumed by the overlay; state managed in the render path.
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::SpawnGateConfirm
+                                | InputAction::SpawnGateCap
+                                | InputAction::SpawnGateAdjustLeft
+                                | InputAction::SpawnGateAdjustRight => {
+                                    // Gate interactions — consumed; state managed in the render path.
+                                    state.needs_redraw = true;
+                                }
                             }
                         }
                     }
@@ -7726,6 +7915,62 @@ pub async fn run(
                         if let Some(wave) = state.wave_state.as_mut() {
                             wave.record_wave_cancelled();
                         }
+                        state.retire_wave_fanout(None);
+                        state.needs_redraw = true;
+                    }
+                    // Story 14.3a (F1+F2+F5): the wave handle arrived from the
+                    // detached spawn. Store it on TuiState for drill/diverge/
+                    // rerun/cancel. This is the RETAINED handle — a domain
+                    // trait object, never the infra ForkJoinRun.
+                    AppEvent::WaveRunReady(handle) => {
+                        // AC11: if this is a rerun completion (rerunning_slot
+                        // is set), clear the in-progress lamp and surface a
+                        // transient notice. The new handle replaces the old.
+                        if let Some(slot) = state.rerunning_slot.take() {
+                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: crate::domain::models::NoticeLevel::Info,
+                                message: format!("Spoke {slot} updated"),
+                            });
+                        }
+                        state.retire_wave_fanout(None);
+                        state.wave_run = Some(handle);
+                        state.needs_redraw = true;
+                    }
+                    // Story 14.3a (AI-12.3 D-B): the wave ended WITHOUT a handle
+                    // (run_wave Err / spawn panic/cancel). Retire the in-flight
+                    // marker so a stale token/flag can't swallow a later Ctrl-C.
+                    AppEvent::WaveTerminated { id } => {
+                        // D-B (AI-12.3): correlated retire — a STALE late
+                        // delivery (id != live marker) is a no-op, so an older
+                        // wave's terminal can't retire a NEWER live marker.
+                        state.retire_wave_fanout(Some(id));
+                        state.needs_redraw = true;
+                    }
+                    // Story 14.3a (AC11): rerun in-progress lamp. Set
+                    // synchronously BEFORE the rerun future completes. Cleared
+                    // on Replaced/Reverted terminal.
+                    AppEvent::SpokeRerunStarted { slot } => {
+                        state.rerunning_slot = Some(slot);
+                        state.needs_redraw = true;
+                    }
+                    // Story 14.3a (AC11): rerun Reverted terminal — clear lamp.
+                    AppEvent::SpokeRerunReverted { slot } => {
+                        if state.rerunning_slot == Some(slot) {
+                            state.rerunning_slot = None;
+                        }
+                        state.needs_redraw = true;
+                    }
+                    // Story 14.3a (AI-12.3 — Amelia): rerun rejected — a rerun is
+                    // already in flight. Surface a transient notice (the lamp stays
+                    // on the in-flight rerun; the reject is non-destructive). The
+                    // DISTINCT event keeps AC11 starvation observable + testable.
+                    AppEvent::RerunRejectedBusy { slot } => {
+                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            conversation_id: Some(conversation.id.clone()),
+                            level: crate::domain::models::NoticeLevel::Info,
+                            message: format!("Spoke {slot} re-run busy — wait for the in-flight re-run."),
+                        });
                         state.needs_redraw = true;
                     }
                     _ => {
