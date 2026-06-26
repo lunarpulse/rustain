@@ -191,9 +191,27 @@ fn ac3_diverge_view_degrade_layout() {
     let narrow = DivergeSnapshot::new(spokes, 80);
     let narrow_lines = render_diverge_view(&narrow);
 
-    // Both must render — no disagreement dropped
-    assert!(!wide_lines.is_empty());
-    assert!(!narrow_lines.is_empty());
+    // D3 (AI-12.3): a REAL differential, not just "both non-empty". At ≥120 cols
+    // the two spokes share ONE side-by-side row; at <120 they stack one-per-line.
+    // A mutant that ignores width (always-stacked OR always-side-by-side) fails
+    // exactly one of these two assertions. (`to_string()` on a Line flattens its
+    // spans — same pattern the empty-wave assertion above uses.)
+    let wide_has_both = wide_lines.iter().any(|l| {
+        let t = l.to_string();
+        t.contains("alpha") && t.contains("beta")
+    });
+    let narrow_has_both = narrow_lines.iter().any(|l| {
+        let t = l.to_string();
+        t.contains("alpha") && t.contains("beta")
+    });
+    assert!(
+        wide_has_both,
+        "≥120 cols must place both spokes on ONE side-by-side row: {wide_lines:?}"
+    );
+    assert!(
+        !narrow_has_both,
+        "<120 cols must stack one spoke per line (no row carries both): {narrow_lines:?}"
+    );
 }
 
 // ─── AC11 push-vs-pull structural guard (14.3c AI-12.3, DF-CR-14-3c-6) ───────
@@ -235,5 +253,86 @@ fn wave_render_pulls_count_from_handle_not_push_counter() {
         !wave_block.contains("completed_count"),
         "the wave render must NOT read the push counter wave_state.completed_count — \
          counts must be pulled from the swapped handle snapshot (AC11 honesty)"
+    );
+}
+
+// ─── D4 (AI-12.3, DF-CR-14-3c-4): /fanout CONSULTS gate_decision (the wiring) ──
+// `ac2_gate_decision_boundary_threshold_2` proves the pure fn at {1,2,3}; it does
+// NOT prove `/fanout` routes through it. This guards the wiring: the handler must
+// consult `gate_decision`, open the spawn gate on Refuse, and launch on Allow. A
+// mutant that drops the gate and launches unconditionally removes `gate_decision(`
+// from the arm → RED. Requiring BOTH branches is the built-in positive control.
+#[test]
+fn fanout_consults_gate_decision_before_launch() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let fanout_arm = event_loop
+        .split("cmd_name == \"fanout\"")
+        .nth(1)
+        .expect("the /fanout ExecuteCommand arm must exist in event_loop.rs");
+    // Bound the arm at the next command branch so we don't scan the whole file.
+    let fanout_arm = fanout_arm
+        .split("port_dimension_from_command_name")
+        .next()
+        .expect("the /fanout arm must be bounded by the next command branch");
+
+    assert!(
+        fanout_arm.contains("gate_decision("),
+        "/fanout must consult gate_decision before launching the wave"
+    );
+    assert!(
+        fanout_arm.contains("GateDecision::Refuse") && fanout_arm.contains("pending_spawn_gate"),
+        "the Refuse path must open the spawn gate, not silently launch"
+    );
+    assert!(
+        fanout_arm.contains("GateDecision::Allow") && fanout_arm.contains("launch_wave_request("),
+        "the Allow path must launch the wave"
+    );
+}
+
+// ─── D5 (AI-12.3, DF-CR-14-3c-5): the diverge toggle (d/s) is zero-dispatch ────
+// `ac3_diverge_view_render_does_not_dispatch` only proves the RENDER is a pure fn
+// (it cannot dispatch — no orchestrator in scope). The real AC3 claim is that the
+// d/s INPUT arms reuse handles and never re-fork. This guards exactly that: the
+// OpenDivergeView + CloseDivergeView arms only flip `wave_diverge_open`; they must
+// contain no dispatch. Positive control: the SpawnGateConfirm arm DOES launch — so
+// the scanner provably detects a dispatch when one exists. A mutant that makes
+// opening the diverge view re-launch the wave → RED.
+#[test]
+fn diverge_toggle_arms_never_dispatch() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let toggle_arms = event_loop
+        .split("InputAction::OpenDivergeView =>")
+        .nth(1)
+        .expect("OpenDivergeView arm must exist");
+    // Covers both OpenDivergeView and CloseDivergeView, bounded by the next arm.
+    let toggle_arms = toggle_arms
+        .split("InputAction::DismissWave =>")
+        .next()
+        .expect("toggle arms must be bounded by the next InputAction arm");
+
+    for dispatch in [
+        "launch_wave_request(",
+        "orchestrator",
+        "rerun_spoke",
+        "run_wave",
+    ] {
+        assert!(
+            !toggle_arms.contains(dispatch),
+            "the diverge toggle arms must never dispatch — found `{dispatch}`"
+        );
+    }
+
+    // Positive control: a real dispatch IS detectable by this scan.
+    let confirm_arm = event_loop
+        .split("InputAction::SpawnGateConfirm =>")
+        .nth(1)
+        .expect("SpawnGateConfirm arm must exist");
+    let confirm_arm = confirm_arm
+        .split("InputAction::SpawnGateCap =>")
+        .next()
+        .expect("SpawnGateConfirm arm must be bounded");
+    assert!(
+        confirm_arm.contains("launch_wave_request("),
+        "positive control: SpawnGateConfirm must dispatch — else the scan is blind"
     );
 }
