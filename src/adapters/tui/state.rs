@@ -82,6 +82,37 @@ pub struct PendingDelegationCard {
     pub suggestion: crate::domain::services::delegation_decider::DelegationSuggestion,
 }
 
+/// Pending `/fanout` spawn gate awaiting inline confirmation.
+#[derive(Debug, Clone)]
+pub struct PendingSpawnGate {
+    pub spec: crate::adapters::tui::fanout_spec::FanOutSpec,
+    pub requested: usize,
+    pub threshold: usize,
+    pub adjusted: Option<usize>,
+}
+
+impl PendingSpawnGate {
+    pub fn effective_n(&self) -> usize {
+        self.adjusted.unwrap_or(self.requested)
+    }
+
+    pub fn adjust_left(&mut self) {
+        self.adjusted = Some(self.effective_n().saturating_sub(1).max(1));
+    }
+
+    pub fn adjust_right(&mut self) {
+        self.adjusted = Some(
+            self.effective_n()
+                .saturating_add(1)
+                .min(crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP),
+        );
+    }
+
+    pub fn cap_at_threshold(&mut self) {
+        self.adjusted = Some(self.threshold.max(1).min(self.requested));
+    }
+}
+
 /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
 /// Reuses the plan-card / delegation-card grammar — a list of proposed durable
 /// facts, each paired with its selection flag (`true` = will be promoted on
@@ -1836,6 +1867,17 @@ pub struct TuiState {
     /// Ctrl-C / `/fanout cancel` can fire it (AC8). `None` when no wave is
     /// live. The token is also threaded into `run_wave` and rerun child tokens.
     pub wave_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Story 14.3c — `d` opens the divergent comparison pivot; `s` returns to
+    /// the synthesis surface. Separate from focus so `s` can be an involution
+    /// back to the regular chat-pane wave surface.
+    pub wave_diverge_open: bool,
+    /// Story 14.3c — pending above-threshold fan-out gate rendered in the chat
+    /// pane and controlled by ←/→/c/Enter/Esc before any wave is spawned.
+    pub pending_spawn_gate: Option<PendingSpawnGate>,
+    /// P8 (review): the last-drilled spoke body, rendered inline in the chat
+    /// pane instead of being dumped as a SystemNotice. `None` when no drill is
+    /// open. Cleared on `CloseDivergeView` / `CloseWaveOverlay`.
+    pub wave_drill_body: Option<(usize, String)>,
     /// D-B (AI-12.3): the identity of the currently-fanning-out `/fanout`
     /// spawn — the SINGLE SOURCE OF TRUTH for "a wave is in flight". Stamped
     /// at spawn (`begin_wave_fanout`), cleared at WaveRunReady /
@@ -1878,6 +1920,104 @@ impl TuiState {
             (Some(_), None) => self.active_wave_id = None, // uncorrelated retire (Ctrl-C self-heal)
             _ => {} // stale or already-retired — leave the live marker alone
         }
+    }
+
+    // ─── 14.3c AI-12.3 remediation (DF-CR-14-3c-6): wave-lifecycle handlers ──
+    //
+    // The wave-cancel + rerun `event_loop.rs` `select!` arms, extracted into
+    // sync, I/O-free methods (the 14.3b PATCH-2 pattern). The production arms
+    // CALL these; the AC8/AC11 keystones DRIVE these — neither re-implements the
+    // state transition inline. A handler whose body is mutated (wrong field /
+    // wrong slot / dropped delta) makes its keystone go red.
+
+    /// Ctrl-C / `/fanout cancel` ABORT TRIGGER (AC8). If a wave is in flight,
+    /// fire the wave-cancel root token (cancel-all → every spoke child via the
+    /// CancellationToken tree), clear the rerun lamp, and self-heal the in-flight
+    /// marker. Returns `true` when a cancel was fired (the caller consumes the
+    /// Ctrl-C instead of quitting). Gated on `is_wave_in_flight()` so a completed
+    /// wave's stale token can't swallow the next Ctrl-C.
+    pub fn request_wave_cancel(&mut self) -> bool {
+        if !self.is_wave_in_flight() {
+            return false;
+        }
+        if let Some(cancel) = self.wave_cancel.as_ref() {
+            cancel.cancel();
+        }
+        self.rerunning_slot = None;
+        self.retire_wave_fanout(None);
+        self.needs_redraw = true;
+        true
+    }
+
+    /// `AppEvent::WaveCancelled` (AC8): mark the wave view cancelled + retire the
+    /// in-flight marker.
+    pub fn handle_wave_cancelled(&mut self) {
+        if let Some(wave) = self.wave_state.as_mut() {
+            wave.record_wave_cancelled();
+        }
+        self.retire_wave_fanout(None);
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::WaveRunReady` (AC11): retain (swap in) the new wave handle. If
+    /// a rerun was in flight, clear the lamp and return `Some(slot)` so the
+    /// caller emits the "Spoke {slot} updated" notice.
+    ///
+    /// **Does NOT cancel the swapped-out handle.** In the production CoW rerun
+    /// path the prior and new handle SHARE the same `wave_cancel` token
+    /// (`orchestrator/mod.rs:754` — `wave_cancel: prev.wave_cancel.clone()`), so
+    /// a naive `old.cancel()` would also cancel the freshly-swapped-in handle.
+    /// The no-leak property holds structurally instead: WaveRunReady only fires
+    /// after the wave is terminal, and the in-flight guard blocks a concurrent
+    /// wave. The `ac11_rerun_swap_leaves_new_handle_live` keystone guards this.
+    pub fn handle_wave_run_ready(
+        &mut self,
+        handle: std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle>,
+    ) -> Option<usize> {
+        let rerun_slot = self.rerunning_slot.take();
+        self.retire_wave_fanout(None);
+        self.wave_run = Some(handle);
+        self.needs_redraw = true;
+        rerun_slot
+    }
+
+    /// `AppEvent::SpokeRerunStarted` (AC11): set the per-slot in-progress lamp.
+    /// MUST NOT touch `completed_count` (counter-inert — LF4-b).
+    pub fn handle_spoke_rerun_started(&mut self, slot: usize) {
+        self.rerunning_slot = Some(slot);
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::SpokeRerunReverted` (AC11): clear the lamp IFF it matches the
+    /// reverted slot (a stale revert for another slot must not clear a live lamp).
+    pub fn handle_spoke_rerun_reverted(&mut self, slot: usize) {
+        if self.rerunning_slot == Some(slot) {
+            self.rerunning_slot = None;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::WaveTerminated` (D-B): correlated retire — a stale late delivery
+    /// (`id` != the live marker) is a no-op so an older wave's terminal can't
+    /// retire a NEWER live marker.
+    pub fn handle_wave_terminated(&mut self, id: u64) {
+        self.retire_wave_fanout(Some(id));
+        self.needs_redraw = true;
+    }
+
+    /// Story 14.3c: dismiss the fan-out wave display — drop the retained handle
+    /// and clear all wave view state so the chat pane returns to normal. Driven
+    /// by the Esc-unwind affordance once a wave is completed/cancelled. Idempotent.
+    pub fn dismiss_wave(&mut self) {
+        self.wave_run = None;
+        self.wave_cancel = None;
+        self.wave_state = None;
+        self.rerunning_slot = None;
+        self.wave_drill_body = None;
+        self.wave_diverge_open = false;
+        self.wave_overlay_selected = 0;
+        self.active_wave_id = None;
+        self.needs_redraw = true;
     }
 }
 
@@ -2003,6 +2143,9 @@ impl TuiState {
             wave_overlay_selected: 0,
             rerunning_slot: None,
             wave_cancel: None,
+            wave_diverge_open: false,
+            pending_spawn_gate: None,
+            wave_drill_body: None,
             active_wave_id: None,
             wave_id_counter: 0,
         }

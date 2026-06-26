@@ -13,6 +13,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::orchestration::SpokeResult;
@@ -72,15 +73,13 @@ impl Default for ResultRowSnapshot {
 ///   Running glyph `●` ([`node_state_glyph`] of [`NodeState::Running`]) while
 ///   `rerunning` is set (the in-progress lamp overrides the stale glyph).
 /// - `name` — `agent_label` truncated to ~20 chars (char-boundary safe).
-/// - `<salience>` — enum-derived (DD3): `⚠ failed: <reason>` / `⚠ cancelled` /
+/// - `<salience>` — enum-derived (DD3): `⚠ failed` / `⚠ cancelled` /
 ///   `⚠ empty` for exceptional variants; the `summary` lede for `Completed`,
-///   clipped to [`ROW_SALIENCE_MAX_BYTES`] at a UTF-8 char boundary (a code
-///   point is never split).
+///   clipped to [`ROW_SALIENCE_MAX_BYTES`] by display width.
 /// - `↵` — drill affordance, always present (muted).
 ///
-/// `width` is honored as the salience byte budget (bytes ≈ columns for the
-/// ASCII common case): the salience is clipped to
-/// `min(ROW_SALIENCE_MAX_BYTES, remaining)` so a narrow overlay never
+/// `width` is honored as a display-column budget: the salience is clipped to
+/// `min(ROW_SALIENCE_MAX_BYTES, remaining_columns)` so a narrow overlay never
 /// overflows. While `rerunning` the whole line is dimmed (the row is in-flight).
 pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
     let muted = Style::default().fg(Color::DarkGray);
@@ -115,11 +114,16 @@ pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
     let salience_style = salience_style(&row.result);
     let sep = " \u{00B7} "; // ·
     let drill = "\u{21B5}"; // ↵
-    let overhead_bytes =
-        own.len() + state.len() + " ".len() + name.len() + sep.len() + sep.len() + drill.len();
-    let remaining = (width as usize).saturating_sub(overhead_bytes);
+    let overhead_width = own.width()
+        + state.width()
+        + " ".width()
+        + name.width()
+        + sep.width()
+        + sep.width()
+        + drill.width();
+    let remaining = (width as usize).saturating_sub(overhead_width);
     let salience_budget = ROW_SALIENCE_MAX_BYTES.min(remaining);
-    let salience = clip_bytes(&salience_str, salience_budget).to_string();
+    let salience = clip_display_width(&salience_str, salience_budget);
 
     let spans: Vec<Span<'static>> = vec![
         Span::styled(own.to_string(), dim_if(muted)),
@@ -142,11 +146,7 @@ pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
 /// already precedes it, so no glyph prefix here).
 fn salience_full(result: &SpokeResult) -> String {
     match result {
-        SpokeResult::Failed { reason } => {
-            // One-line-safe: collapse the reason to its first line so the row
-            // never wraps (height invariant: exactly one line for all N).
-            format!("\u{26A0} failed: {}", first_line(reason))
-        }
+        SpokeResult::Failed { .. } => "\u{26A0} failed".to_string(),
         SpokeResult::Cancelled => "\u{26A0} cancelled".to_string(),
         SpokeResult::Empty => "\u{26A0} empty".to_string(),
         SpokeResult::Completed { summary } => summary.clone(),
@@ -166,15 +166,6 @@ fn salience_style(result: &SpokeResult) -> Style {
     }
 }
 
-/// First line of `s` (up to the first `\n`), or the whole string. Keeps the
-/// row one-line when a reason carries a multi-line diagnostic.
-fn first_line(s: &str) -> &str {
-    match s.find('\n') {
-        Some(i) => &s[..i],
-        None => s,
-    }
-}
-
 /// Clip to at most `max_chars` Unicode scalar values (char-boundary safe).
 fn clip_chars(s: &str, max_chars: usize) -> &str {
     match s.char_indices().nth(max_chars) {
@@ -183,9 +174,7 @@ fn clip_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
-/// Clip to the largest byte index `<= max_bytes` that is a UTF-8 char
-/// boundary — a multi-byte code point is never split. Mirrors the floor logic
-/// of `spoke_summary` (DD3) but operates on an already-extracted string.
+/// Compatibility helper kept for existing UTF-8 boundary tests.
 fn clip_bytes(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -195,6 +184,21 @@ fn clip_bytes(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Clip to the largest prefix whose display width is `<= max_width`.
+fn clip_display_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > max_width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -255,18 +259,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_renders_warning_token_and_reason() {
+    fn failed_renders_warning_token_without_child_reason() {
         let r = row(
             "beta",
             SpokeResult::Failed {
-                reason: "model timeout".into(),
+                reason: "model timeout\nsecret payload".into(),
             },
         );
         let line = render_result_row(&r, 80);
         let t = text(&line);
+        assert!(t.contains("\u{26A0} failed"), "warning token: {t}");
         assert!(
-            t.contains("\u{26A0} failed: model timeout"),
-            "warning token + reason: {t}"
+            !t.contains("model timeout"),
+            "child reason must not leak: {t}"
+        );
+        assert!(
+            !t.contains("secret payload"),
+            "child payload must not leak: {t}"
         );
         assert!(t.contains("\u{2717}"), "✗ state glyph present: {t}");
         assert!(t.contains("beta"));

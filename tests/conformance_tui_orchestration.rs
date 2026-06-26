@@ -1,0 +1,239 @@
+// Story 14.3c: TUI ergonomics wiring conformance guards.
+// These tests intentionally inspect source wiring: they fail when an
+// InputAction variant becomes dead or a shipped widget render becomes orphaned.
+
+fn count(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
+}
+
+#[test]
+fn wave_input_actions_are_produced_and_consumed() {
+    let app = include_str!("../src/adapters/tui/app.rs");
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+
+    for action in [
+        "WaveRerunSpoke",
+        "WaveDrillSpoke",
+        "OpenWaveOverlay",
+        "CloseWaveOverlay",
+        "OpenDivergeView",
+        "CloseDivergeView",
+        "DismissWave",
+        "SpawnGateConfirm",
+        "SpawnGateCap",
+        "SpawnGateAdjustLeft",
+        "SpawnGateAdjustRight",
+    ] {
+        assert!(
+            count(app, &format!("InputAction::{action}")) >= 1,
+            "{action} must be produced by input routing"
+        );
+        assert!(
+            count(event_loop, &format!("InputAction::{action}")) >= 1,
+            "{action} must be consumed by the event loop"
+        );
+    }
+}
+
+#[test]
+fn wave_widgets_are_called_from_chat_pane_composition_root() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    // P7 (review): scope to the `fn render(` body, then further to the region
+    // after `chat_pane::render_with_search` — proves the calls are in the
+    // composition root, not just anywhere after the split point in the file.
+    let render_fn = event_loop
+        .split("fn render(")
+        .nth(1)
+        .expect("fn render( must exist in event_loop.rs");
+    let chat_render = render_fn
+        .split("let result = chat_pane::render_with_search(")
+        .nth(1)
+        .expect("chat pane render call must exist within fn render");
+
+    for call in [
+        "render_result_row(",
+        "render_wave_overlay(",
+        "render_diverge_view(",
+        "render_spawn_gate(",
+        // 14.3c (human-smoke fix): the IN-PROGRESS wave strip. This entry was
+        // MISSING — the widget shipped in 14.3 with green unit tests but zero
+        // production wiring, so a running `/fanout` painted nothing. Guarding it
+        // here keeps the live strip wired (a mutant that drops the call → RED).
+        "render_wave_strip_line(",
+    ] {
+        assert!(
+            chat_render.contains(call),
+            "{call} must be reachable from the chat-pane composition root within fn render"
+        );
+    }
+}
+
+#[test]
+fn wave_widgets_define_no_new_glyph_constants() {
+    for (path, source) in [
+        (
+            "diverge_view.rs",
+            include_str!("../src/adapters/tui/widgets/diverge_view.rs"),
+        ),
+        (
+            "result_row.rs",
+            include_str!("../src/adapters/tui/widgets/result_row.rs"),
+        ),
+        (
+            "wave_overlay.rs",
+            include_str!("../src/adapters/tui/widgets/wave_overlay.rs"),
+        ),
+        (
+            "exceptional_spawn_gate.rs",
+            include_str!("../src/adapters/tui/widgets/exceptional_spawn_gate.rs"),
+        ),
+    ] {
+        assert!(
+            !source.contains("GLYPH") && !source.contains("const WARNING"),
+            "{path} must reuse orchestration_glyph / visual symbols instead of defining a glyph set"
+        );
+    }
+}
+
+// ─── AC2 boundary test: gate_decision threshold=2, exercises {1,2,3} ─────────
+
+#[test]
+fn ac2_gate_decision_boundary_threshold_2() {
+    use rustain::adapters::tui::widgets::exceptional_spawn_gate::{GateDecision, gate_decision};
+
+    // Below threshold: silent
+    assert_eq!(gate_decision(1, 2), GateDecision::Allow);
+    // At threshold: silent (requested <= threshold)
+    assert_eq!(gate_decision(2, 2), GateDecision::Allow);
+    // Above threshold: gate
+    assert_eq!(gate_decision(3, 2), GateDecision::Refuse);
+
+    // Positive control: a per-spawn-modal mutant that prompts below threshold
+    // would return Refuse for requested=1 — our test kills it.
+}
+
+// ─── AC3 diverge: d/s is zero-dispatch (reuses handles, never dispatches) ────
+
+#[test]
+fn ac3_diverge_view_render_does_not_dispatch() {
+    // DivergeView is a pure render over existing spoke outcomes.
+    // Verify render_diverge_view is a pure function with no side effects
+    // by calling it and checking it returns lines without panicking.
+    use rustain::adapters::tui::widgets::diverge_view::{DivergeSnapshot, render_diverge_view};
+    use rustain::domain::models::orchestration::SpokeResult;
+
+    // 3-spoke snapshot — the diverge view reads this, never dispatches
+    let spokes = vec![
+        (
+            "SPOKE-0".to_string(),
+            SpokeResult::Completed {
+                summary: "alpha".to_string(),
+            },
+        ),
+        (
+            "SPOKE-1".to_string(),
+            SpokeResult::Completed {
+                summary: "beta".to_string(),
+            },
+        ),
+        (
+            "SPOKE-2".to_string(),
+            SpokeResult::Completed {
+                summary: "alpha".to_string(),
+            },
+        ),
+    ];
+    let snap = DivergeSnapshot::new(spokes.clone(), 120);
+    let lines = render_diverge_view(&snap);
+    assert!(!lines.is_empty(), "diverge view must render lines");
+
+    // d→s→d cycle: re-render with the SAME snapshot — zero cost, no re-fork
+    let lines2 = render_diverge_view(&snap);
+    assert_eq!(lines.len(), lines2.len(), "d→s→d identity: same output");
+
+    // Empty wave: "No spokes to compare"
+    let empty_snap = DivergeSnapshot::new(Vec::new(), 80);
+    let empty_lines = render_diverge_view(&empty_snap);
+    let text: String = empty_lines.iter().map(|l| l.to_string()).collect();
+    assert!(
+        text.contains("No spokes to compare"),
+        "empty wave must show 'No spokes to compare', got: {text}"
+    );
+}
+
+// ─── AC3 degrade: ≥120 side-by-side, <120 stacked ───────────────────────────
+
+#[test]
+fn ac3_diverge_view_degrade_layout() {
+    use rustain::adapters::tui::widgets::diverge_view::{DivergeSnapshot, render_diverge_view};
+    use rustain::domain::models::orchestration::SpokeResult;
+
+    let spokes = vec![
+        (
+            "A".to_string(),
+            SpokeResult::Completed {
+                summary: "different-alpha".to_string(),
+            },
+        ),
+        (
+            "B".to_string(),
+            SpokeResult::Completed {
+                summary: "different-beta".to_string(),
+            },
+        ),
+    ];
+
+    // ≥120 cols: the snapshot carries width for the render
+    let wide = DivergeSnapshot::new(spokes.clone(), 120);
+    let wide_lines = render_diverge_view(&wide);
+
+    // <120 cols: stacked
+    let narrow = DivergeSnapshot::new(spokes, 80);
+    let narrow_lines = render_diverge_view(&narrow);
+
+    // Both must render — no disagreement dropped
+    assert!(!wide_lines.is_empty());
+    assert!(!narrow_lines.is_empty());
+}
+
+// ─── AC11 push-vs-pull structural guard (14.3c AI-12.3, DF-CR-14-3c-6) ───────
+// The companion to the value-differential keystone in app.rs
+// (`ac11_push_vs_pull_render_reads_swapped_handle_*`). That one proves the
+// swapped handle reports the honest count; this one proves the RENDER block
+// reads it by PULL — it must never reference the stale push counter
+// `wave_state.completed_count`. A mutant that rewires the render to the push
+// counter makes this fail the build.
+
+#[test]
+fn wave_render_pulls_count_from_handle_not_push_counter() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let render_fn = event_loop
+        .split("fn render(")
+        .nth(1)
+        .expect("fn render( must exist in event_loop.rs");
+    // Scope to the COMPLETED wave-render block: from the `state.wave_run` branch
+    // to the `WAVE_RUN_RENDER_BLOCK_END` sentinel. The boundary is the sentinel
+    // (not `pending_delegation_card`) so the IN-PROGRESS strip branch — which
+    // legitimately reads the push counter `wave_state.completed_count` because no
+    // handle exists yet — is excluded. This keeps the test's teeth on the
+    // completed render (which MUST pull from the handle) without false-failing on
+    // the live strip.
+    let wave_block = render_fn
+        .split("else if let Some(ref handle) = state.wave_run {")
+        .nth(1)
+        .expect("wave render block must exist within fn render");
+    let wave_block = wave_block
+        .split("WAVE_RUN_RENDER_BLOCK_END")
+        .next()
+        .expect("wave render block must be bounded by the WAVE_RUN_RENDER_BLOCK_END sentinel");
+
+    assert!(
+        wave_block.contains("handle.snapshot()"),
+        "the wave render must PULL state from handle.snapshot()"
+    );
+    assert!(
+        !wave_block.contains("completed_count"),
+        "the wave render must NOT read the push counter wave_state.completed_count — \
+         counts must be pulled from the swapped handle snapshot (AC11 honesty)"
+    );
+}

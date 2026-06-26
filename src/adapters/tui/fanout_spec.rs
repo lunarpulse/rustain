@@ -62,16 +62,18 @@ pub fn parse_fanout(arg: Option<&str>) -> Result<FanOutSpec, String> {
 /// coordinator is the root agent — the executor asserts the coordinator owns
 /// its root authority (`request.coordinator == root_authority.scope`). R1 floors
 /// `wait_policy = All` and `concurrency = N`.
-pub fn to_request(spec: &FanOutSpec) -> ForkJoinRequest {
+pub fn to_request(spec: &FanOutSpec, model: &str) -> ForkJoinRequest {
     match spec {
         FanOutSpec::Identical { count, prompt } => {
             let spokes = (0..*count)
                 .map(|slot| SpokeSpec {
                     label: format!("SPOKE-{slot}"),
                     prompt: prompt.clone(),
-                    // R1 floor: model resolution is the runner's job (it holds
-                    // the provider router); leave empty and let it resolve.
-                    effective_model: String::new(),
+                    // The spoke runs on the caller's ACTIVE model. The runner
+                    // holds no model router, so an empty `effective_model` ships
+                    // `model: ""` to the provider → 400 "Empty input messages"
+                    // and every spoke fails (14.3c AI-12.3 human-smoke fix).
+                    effective_model: model.to_string(),
                     tier: ModelTier::Flagship,
                     tools_allow: ToolPolicy::InheritFromParent,
                     waits_for: Vec::new(),
@@ -115,7 +117,7 @@ mod tests {
     #[test]
     fn accepts_cap() {
         let spec = parse_fanout(Some("8 thing")).unwrap();
-        let req = to_request(&spec);
+        let req = to_request(&spec, "test-model");
         assert_eq!(req.spokes.len(), 8);
         assert_eq!(req.spokes[0].label, "SPOKE-0");
         assert_eq!(req.spokes[7].label, "SPOKE-7");
@@ -135,9 +137,26 @@ mod tests {
     #[test]
     fn to_request_coordinator_is_root() {
         let spec = parse_fanout(Some("2 hi")).unwrap();
-        let req = to_request(&spec);
+        let req = to_request(&spec, "test-model");
         assert_eq!(req.coordinator, AgentId::root());
         assert_eq!(req.wait_policy, WaitPolicy::All);
         assert_eq!(req.concurrency, 2);
+    }
+
+    #[test]
+    fn spokes_carry_the_active_model_not_empty() {
+        // 14.3c AI-12.3 human-smoke regression: an empty `effective_model` ships
+        // `model: ""` to the provider → 400 "Empty input messages" and every
+        // spoke fails. Each spoke must carry the caller's active model.
+        let spec = parse_fanout(Some("3 hello")).unwrap();
+        let req = to_request(&spec, "deepseek-v4-flash");
+        assert_eq!(req.spokes.len(), 3);
+        for spoke in &req.spokes {
+            assert_eq!(spoke.effective_model, "deepseek-v4-flash");
+            assert!(
+                !spoke.effective_model.is_empty(),
+                "empty spoke model → provider 400 'Empty input messages'"
+            );
+        }
     }
 }

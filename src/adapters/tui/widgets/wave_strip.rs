@@ -97,14 +97,34 @@ pub fn render_wave_strip_line(snap: &WaveStripSnapshot, cancel_all_wired: bool) 
     let mut spans: Vec<Span> = vec![
         Span::styled("\u{25B8} ", glyph), // ▸ wave handle
         Span::raw(format!("{} handles", snap.handle_count)),
-        Span::styled(" \u{00B7} ", muted), // ·
-        Span::styled(format!("\u{26A0}{} high", snap.high), warn),
-        Span::styled(" \u{00B7} ", muted),
-        Span::styled(
+    ];
+
+    // Live progress: completed / total. ALWAYS shown so a running wave visibly
+    // ticks 0/3 → 3/3 — the smoke fix. Without this the strip gave no "what is
+    // happening" signal during an in-flight `/fanout`.
+    spans.push(Span::styled(" \u{00B7} ", muted));
+    spans.push(Span::raw(format!(
+        "{}/{} done",
+        snap.completed, snap.handle_count
+    )));
+
+    // High-salience is an R2/R3 ranked-subset signal. Suppress the "⚠0 high"
+    // placeholder when no subset has been computed (R1 is always 0) so the strip
+    // never reads as broken/empty.
+    if snap.high > 0 {
+        spans.push(Span::styled(" \u{00B7} ", muted));
+        spans.push(Span::styled(format!("\u{26A0}{} high", snap.high), warn));
+    }
+
+    // Cost burn comes from the AuthorityLedger (R2). Suppress the "$0.00 ↑"
+    // placeholder until a ledger reading is wired (R1 is always 0).
+    if snap.burn_micros > 0 {
+        spans.push(Span::styled(" \u{00B7} ", muted));
+        spans.push(Span::styled(
             format!("{} \u{2191}", burn_micros_to_usd(snap.burn_micros)),
             burn,
-        ),
-    ];
+        ));
+    }
 
     if snap.paused {
         spans.push(Span::styled(" \u{00B7} ", muted));
@@ -250,5 +270,67 @@ mod tests {
         let not_wired_s: String = not_wired.spans.iter().map(|s| s.content.clone()).collect();
         assert!(wired_s.contains("cancel all"));
         assert!(!not_wired_s.contains("cancel all"));
+    }
+
+    #[test]
+    fn wave_strip_shows_live_completed_progress() {
+        // Smoke fix (14.3c): a running wave must tick completed/total so the
+        // user sees "what is happening". A mutant that drops the progress span
+        // makes this go RED.
+        let snap = WaveStripSnapshot {
+            handle_count: 3,
+            completed: 1,
+            ..Default::default()
+        };
+        let rendered: String = render_wave_strip_line(&snap, true)
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert!(
+            rendered.contains("1/3 done"),
+            "live completed/total progress must render, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn wave_strip_suppresses_zero_high_and_zero_burn_placeholders() {
+        // R1 has no ranked subset and no ledger reading, so the strip must NOT
+        // show the "⚠0 high" / "$0.00" placeholders that read as broken.
+        let zero = WaveStripSnapshot {
+            handle_count: 2,
+            completed: 0,
+            ..Default::default()
+        };
+        let z: String = render_wave_strip_line(&zero, true)
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert!(
+            !z.contains("high"),
+            "zero high must be suppressed, got: {z}"
+        );
+        assert!(!z.contains('$'), "zero burn must be suppressed, got: {z}");
+
+        // Positive control: non-zero values DO render — kills a mutant that
+        // unconditionally suppresses them.
+        let nonzero = WaveStripSnapshot {
+            handle_count: 2,
+            completed: 0,
+            high: 1,
+            burn_micros: 400_000,
+            ..Default::default()
+        };
+        let nz: String = render_wave_strip_line(&nonzero, true)
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+        assert!(
+            nz.contains("1 high"),
+            "non-zero high must render, got: {nz}"
+        );
+        assert!(nz.contains("$0.40"), "non-zero burn must render, got: {nz}");
     }
 }

@@ -133,6 +133,14 @@ pub fn render_diverge_view(snap: &DivergeSnapshot) -> Vec<Line<'static>> {
     let n = snap.spokes.len();
     let mut lines = Vec::new();
 
+    if n == 0 {
+        lines.push(Line::styled(
+            "No spokes to compare",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        return lines;
+    }
+
     if is_agreement(&snap.spokes) {
         // Agreement collapses to a single line — the whole view is one line.
         lines.push(Line::styled(

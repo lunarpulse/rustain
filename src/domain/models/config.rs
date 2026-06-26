@@ -713,6 +713,11 @@ pub struct AppConfig {
     /// daemon mode; the one-shot TUI ignores it. Last field, mirrors `subagents`.
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// Adaptive `/fanout` review-burden threshold. Requests above this value
+    /// surface the spawn gate; requests at-or-below proceed silently. The
+    /// executor's static `FORK_JOIN_SPAWN_CAP` still hard-bounds all requests.
+    #[serde(default = "AppConfig::default_fanout_spawn_gate_threshold")]
+    pub fanout_spawn_gate_threshold: usize,
 }
 
 impl AppConfig {
@@ -733,6 +738,9 @@ impl AppConfig {
     }
     fn default_snapshot_retention_count() -> Option<usize> {
         Some(100)
+    }
+    fn default_fanout_spawn_gate_threshold() -> usize {
+        crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP
     }
 
     /// Curated default pricing catalog (Story 7.5 AC1; Dev Notes §"Default
@@ -892,6 +900,7 @@ impl Default for AppConfig {
             search: SearchConfig::default(),
             plan: PlanConfig::default(),
             subagents: SubagentsConfig::default(),
+            fanout_spawn_gate_threshold: Self::default_fanout_spawn_gate_threshold(),
             daemon: DaemonConfig::default(),
         }
     }
