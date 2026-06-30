@@ -73,6 +73,8 @@ pub enum RawEventKind {
     },
     /// Story 9.3a — Capability lifecycle event from the CapabilityRegistry.
     Capability(crate::domain::events::CapabilityEvent),
+    /// Story 14.4 — attributed child→parent subagent event.
+    Subagent(crate::domain::models::SubagentEnvelope),
 }
 
 pub struct EventBus {
@@ -193,6 +195,11 @@ impl RawEvent {
                 conversation_id: None,
                 timestamp_ms: now,
                 kind: RawEventKind::Capability(event.clone()),
+            },
+            AppEvent::Subagent(envelope) => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::Subagent(envelope.clone()),
             },
             AppEvent::Tick
             | AppEvent::ConfigReload

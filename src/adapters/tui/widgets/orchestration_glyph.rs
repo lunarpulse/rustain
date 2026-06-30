@@ -6,9 +6,9 @@
 //! owned by the result-contract layer, prevents the two-glyph-set drift the
 //! orchestration UI would otherwise inherit.
 //!
-//! The glyph set is the currently-shipped set (agent_panel) so reconciliation is
-//! behaviour-identical; this module is the single place to migrate to the UX
-//! spec's `▶ / ‖ / ◆ / ▸` legend in a later visual pass.
+//! Migrated to the UX spec's glyph families (ux-design-specification.md :2995-2997):
+//! ▶ Running, ○ Created, ‖ Waiting, z Suspended, ✓ Completed, ✗ Failed, ⊘ Cancelled.
+//! Different metaphor families prevent the ◔/◐ monochrome collision.
 //!
 //! ## Glyph carries meaning, color decorates
 //!
@@ -22,10 +22,10 @@ use crate::domain::models::subagent_view::OwnershipKind;
 /// Status glyph for a [`NodeState`]. Monochrome-safe; the caller adds color.
 pub fn node_state_glyph(state: NodeState) -> &'static str {
     match state {
-        NodeState::Running => "\u{25CF}",   // ●
-        NodeState::Created => "\u{23F8}",   // ⏸
-        NodeState::Waiting => "\u{25D4}",   // ◔
-        NodeState::Suspended => "\u{25D0}", // ◐
+        NodeState::Running => "\u{25B6}",   // ▶
+        NodeState::Created => "\u{25CB}",   // ○
+        NodeState::Waiting => "\u{2016}",   // ‖
+        NodeState::Suspended => "z",        // z (zzz — deliberately paused)
         NodeState::Completed => "\u{2713}", // ✓
         NodeState::Failed => "\u{2717}",    // ✗
         NodeState::Cancelled => "\u{2298}", // ⊘

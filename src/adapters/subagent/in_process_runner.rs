@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -466,6 +466,8 @@ async fn run_child(
         reasoning_content: None,
     }];
     let mut abandonment_retry_count: u8 = 0;
+    let mut parked_queue: VecDeque<crate::domain::models::AgentDelivery> = VecDeque::new();
+    const PARKED_QUEUE_CAP: usize = 64;
 
     let max_iterations = 10;
 
@@ -511,10 +513,28 @@ async fn run_child(
                             Op::Resume => {
                                 child_state.paused.store(false, std::sync::atomic::Ordering::Release);
                                 emit_status(NodeState::Running, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
+                                while let Some(delivery) = parked_queue.pop_front() {
+                                    messages.push(Message {
+                                        role: MessageRole::User,
+                                        content: delivery.envelope.body.content,
+                                        images: vec![],
+                                        tool_results: vec![],
+                                        tool_uses: vec![],
+                                        context_prefix: None,
+                                        reasoning_content: None,
+                                    });
+                                }
                             }
                             Op::Kill => {
                                 emit_status(NodeState::Cancelled, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
                                 return;
+                            }
+                            Op::Deliver(delivery) => {
+                                if parked_queue.len() < PARKED_QUEUE_CAP {
+                                    parked_queue.push_back(delivery);
+                                } else {
+                                    tracing::warn!(agent_id = %agent_id.0, "parked agent message queue full; refusing message");
+                                }
                             }
                             _ => {}
                         },
@@ -527,11 +547,11 @@ async fn run_child(
             }
         }
 
-        // Poll for owner commands without blocking
+        // Drain any ready owner commands without blocking. Uses the same
+        // selectable receiver as the streaming loop; no residual try_recv path.
         loop {
-            match parent_disconnect_rx.try_recv() {
-                Ok(_) => {}
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+            match parent_disconnect_rx.recv().now_or_never() {
+                Some(None) => {
                     if handle_abandonment_disconnect(
                         &mut abandonment_retry_count,
                         &status_tx,
@@ -550,10 +570,29 @@ async fn run_child(
                     }
                     continue;
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Some(Some(_)) => {}
+                None => {}
             }
-            match command_rx.try_recv() {
-                Ok(Op::Kill) => {
+            let Some(maybe_op) = command_rx.recv().now_or_never() else {
+                break;
+            };
+            let Some(op) = maybe_op else {
+                emit_status(
+                    NodeState::Completed,
+                    &status_tx,
+                    &bridge_tx,
+                    &child_state,
+                    &spool,
+                    &task_id,
+                    &subagent_type,
+                    &agent_id,
+                    started_at_ms,
+                )
+                .await;
+                return;
+            };
+            match op {
+                Op::Kill => {
                     emit_status(
                         NodeState::Cancelled,
                         &status_tx,
@@ -568,7 +607,7 @@ async fn run_child(
                     .await;
                     return;
                 }
-                Ok(Op::Pause) => {
+                Op::Pause => {
                     child_state
                         .paused
                         .store(true, std::sync::atomic::Ordering::Release);
@@ -586,13 +625,13 @@ async fn run_child(
                     .await;
                     break;
                 }
-                Ok(Op::ChangeModel(new_model)) => {
+                Op::ChangeModel(new_model) => {
                     child_state
                         .effective_model
                         .store(Arc::new(new_model.clone()));
                     child_state.update_metrics(|m| m.effective_model = new_model);
                 }
-                Ok(Op::UpdateTools(allowlist)) => {
+                Op::UpdateTools(allowlist) => {
                     let policy = crate::domain::models::ToolPolicy::Allowlist {
                         tools: allowlist.into_iter().collect(),
                     };
@@ -601,7 +640,7 @@ async fn run_child(
                     child_state.tools_allow.store(Arc::new(policy));
                     child_state.update_metrics(|m| m.tools_summary = summary);
                 }
-                Ok(Op::ReportFull) => {
+                Op::ReportFull => {
                     let current = *child_state.status.borrow();
                     emit_status(
                         current,
@@ -616,7 +655,7 @@ async fn run_child(
                     )
                     .await;
                 }
-                Ok(Op::Resume) => {
+                Op::Resume => {
                     child_state
                         .paused
                         .store(false, std::sync::atomic::Ordering::Release);
@@ -633,22 +672,28 @@ async fn run_child(
                     )
                     .await;
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    emit_status(
-                        NodeState::Completed,
-                        &status_tx,
-                        &bridge_tx,
-                        &child_state,
-                        &spool,
-                        &task_id,
-                        &subagent_type,
-                        &agent_id,
-                        started_at_ms,
-                    )
-                    .await;
-                    return;
-                }
+                Op::Deliver(delivery) => match delivery.mode {
+                    crate::domain::models::DeliveryMode::Queue => {
+                        if parked_queue.len() < PARKED_QUEUE_CAP {
+                            parked_queue.push_back(delivery);
+                        } else {
+                            tracing::warn!(agent_id = %agent_id.0, "parked agent message queue full; refusing message");
+                        }
+                    }
+                    crate::domain::models::DeliveryMode::Aside
+                    | crate::domain::models::DeliveryMode::Wake => {
+                        messages.push(Message {
+                            role: MessageRole::User,
+                            content: delivery.envelope.body.content,
+                            images: vec![],
+                            tool_results: vec![],
+                            tool_uses: vec![],
+                            context_prefix: None,
+                            reasoning_content: None,
+                        });
+                    }
+                    crate::domain::models::DeliveryMode::Refuse => {}
+                },
             }
         }
         if child_state
@@ -728,6 +773,73 @@ async fn run_child(
                     }
                     continue;
                 }
+                maybe_op = command_rx.recv() => {
+                    match maybe_op {
+                        Some(Op::Kill) => {
+                            emit_yield(NodeState::Cancelled, &accumulated_text, &yield_tx).await;
+                            emit_status(NodeState::Cancelled, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
+                            return;
+                        }
+                        Some(Op::Pause) => {
+                            child_state.paused.store(true, std::sync::atomic::Ordering::Release);
+                            emit_status(NodeState::Suspended, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
+                            break;
+                        }
+                        Some(Op::ChangeModel(new_model)) => {
+                            child_state.effective_model.store(Arc::new(new_model.clone()));
+                            child_state.update_metrics(|m| m.effective_model = new_model);
+                            continue;
+                        }
+                        Some(Op::UpdateTools(allowlist)) => {
+                            let policy = crate::domain::models::ToolPolicy::Allowlist {
+                                tools: allowlist.into_iter().collect(),
+                            };
+                            let summary = crate::adapters::subagent::child_state::tool_policy_summary(&policy);
+                            child_state.tools_allow.store(Arc::new(policy));
+                            child_state.update_metrics(|m| m.tools_summary = summary);
+                            continue;
+                        }
+                        Some(Op::ReportFull) => {
+                            let current = *child_state.status.borrow();
+                            emit_status(current, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
+                            continue;
+                        }
+                        Some(Op::Resume) => {
+                            child_state.paused.store(false, std::sync::atomic::Ordering::Release);
+                            emit_status(NodeState::Running, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
+                            continue;
+                        }
+                        Some(Op::Deliver(delivery)) => {
+                            match delivery.mode {
+                                crate::domain::models::DeliveryMode::Queue => {
+                                    if parked_queue.len() < PARKED_QUEUE_CAP {
+                                        parked_queue.push_back(delivery);
+                                    } else {
+                                        tracing::warn!(agent_id = %agent_id.0, "parked agent message queue full; refusing message");
+                                    }
+                                }
+                                crate::domain::models::DeliveryMode::Aside
+                                | crate::domain::models::DeliveryMode::Wake => {
+                                    messages.push(Message {
+                                        role: MessageRole::User,
+                                        content: delivery.envelope.body.content,
+                                        images: vec![],
+                                        tool_results: vec![],
+                                        tool_uses: vec![],
+                                        context_prefix: None,
+                                        reasoning_content: None,
+                                    });
+                                }
+                                crate::domain::models::DeliveryMode::Refuse => {}
+                            }
+                            continue;
+                        }
+                        None => {
+                            emit_status(NodeState::Completed, &status_tx, &bridge_tx, &child_state, &spool, &task_id, &subagent_type, &agent_id, started_at_ms).await;
+                            return;
+                        }
+                    }
+                }
                 maybe_chunk = stream.next() => {
                     match maybe_chunk {
                         Some(c) => c,
@@ -779,6 +891,17 @@ async fn run_child(
                 }
                 _ => {}
             }
+        }
+
+        // If the streaming loop exited because of Op::Pause, re-enter the
+        // outer for-loop which hits the `while paused` wait block at the top.
+        // Do NOT fall through to the Failed path — the stream was intentionally
+        // interrupted, not abnormally ended.
+        if child_state
+            .paused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            continue;
         }
 
         if !received_turn_complete {
@@ -1322,10 +1445,14 @@ mod tests {
         // Should see Killed or Completed
     }
 
-    // ── AC-10-2-5: Owner-command wiring tests ───────────────────────────
+    // ── 14.4 Fix: Pause/Resume/Kill streaming-loop regression tests ────
+    // These replace the old 50ms-snapshot op_pause_sets_atomic / op_resume_clears_atomic
+    // tests with deterministic status-sequence assertions through the production
+    // run_child select path.
 
+    // T1: Pause during streaming yields Suspended, not Failed
     #[tokio::test]
-    async fn op_pause_sets_atomic() {
+    async fn t1_pause_during_streaming_yields_suspended_not_failed() {
         let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
@@ -1338,22 +1465,65 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let mut status_rx = handle.status_rx;
 
-        // Send Pause
+        // Wait for Running — child is now streaming from HangingProvider
+        let saw_running = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Running) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(saw_running, "child never reached Running");
+
+        // Let the child consume the single chunk and park on pending()
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Send Pause — hits the streaming select's command_rx arm
         let _ = handle.command_tx.send(Op::Pause).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Verify via registry that the child is paused
-        // (ChildState is not directly accessible, but we can verify status)
+        // Collect statuses until terminal or timeout
+        let mut statuses = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                let is_terminal = matches!(
+                    s,
+                    NodeState::Completed | NodeState::Failed | NodeState::Cancelled
+                );
+                statuses.push(s);
+                if is_terminal {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            statuses.contains(&NodeState::Suspended),
+            "Pause during streaming must emit Suspended; got: {statuses:?}"
+        );
+        assert!(
+            !statuses.contains(&NodeState::Failed),
+            "Pause during streaming must NOT emit Failed; got: {statuses:?}"
+        );
+
+        // Child must still be addressable (not deregistered)
         let entries = runner.registry.list().await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].current_status, NodeState::Suspended);
+        assert!(
+            entries.iter().any(|e| e.agent_id == handle.agent_id),
+            "paused child must remain in registry"
+        );
 
         handle.cancel.cancel();
     }
 
+    // T2: Resume after streaming pause re-enters Running
     #[tokio::test]
-    async fn op_resume_clears_atomic() {
+    async fn t2_resume_after_streaming_pause_reenters_running() {
         let (runner, _tmp) = make_hanging_runner().await;
         let spec = AgentLaunchSpec {
             prompt: String::from("hello"),
@@ -1366,17 +1536,342 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let mut status_rx = handle.status_rx;
 
+        // Wait for Running
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Running) {
+                    break;
+                }
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Pause
         let _ = handle.command_tx.send(Op::Pause).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let _ = handle.command_tx.send(Op::Resume).await;
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let saw_suspended = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Suspended) {
+                    return true;
+                }
+                if matches!(s, NodeState::Failed) {
+                    panic!("Pause produced Failed instead of Suspended");
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(saw_suspended, "child never reached Suspended");
 
-        let entries = runner.registry.list().await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].current_status, NodeState::Running);
+        // Resume
+        let _ = handle.command_tx.send(Op::Resume).await;
+        let saw_running_again = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Running) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            saw_running_again,
+            "child never re-entered Running after Resume"
+        );
 
         handle.cancel.cancel();
+    }
+
+    // T3: Deliver while suspended queues until resume
+    #[tokio::test]
+    async fn t3_deliver_while_suspended_queues_until_resume() {
+        let (runner, _tmp) = make_hanging_runner().await;
+        let spec = AgentLaunchSpec {
+            prompt: String::from("hello"),
+            effective_model: String::from("test-model"),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+        };
+        let cancel = CancellationToken::new();
+        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let mut status_rx = handle.status_rx;
+
+        // Wait for Running
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Running) {
+                    break;
+                }
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Pause
+        let _ = handle.command_tx.send(Op::Pause).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Suspended) {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        // Deliver two messages while suspended
+        use crate::domain::models::{
+            AgentDelivery, AgentMessage, CorrelationId, DeliveryMode, Envelope, MessageHeader,
+            MessageKind,
+        };
+        let make_delivery = |content: &str| {
+            let header = MessageHeader {
+                sender: AgentId("parent".into()),
+                recipient: AgentId("child".into()),
+                correlation_id: CorrelationId::new("corr-1"),
+                kind: MessageKind::PeerMessage,
+                sequence: None,
+            };
+            AgentDelivery::new(
+                Envelope {
+                    header,
+                    body: AgentMessage::new(content),
+                },
+                DeliveryMode::Queue,
+            )
+        };
+        let _ = handle
+            .command_tx
+            .send(Op::Deliver(make_delivery("msg1")))
+            .await;
+        let _ = handle
+            .command_tx
+            .send(Op::Deliver(make_delivery("msg2")))
+            .await;
+
+        // Resume — messages drain into context
+        let _ = handle.command_tx.send(Op::Resume).await;
+        let saw_running = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Running) {
+                    return true;
+                }
+                if matches!(s, NodeState::Failed) {
+                    panic!("Resume after queued deliveries produced Failed");
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            saw_running,
+            "child never re-entered Running after Resume with queued messages"
+        );
+
+        handle.cancel.cancel();
+    }
+
+    // T4: Pause then kill yields Cancelled, not Failed
+    #[tokio::test]
+    async fn t4_pause_then_kill_yields_cancelled_not_failed() {
+        let (runner, _tmp) = make_hanging_runner().await;
+        let spec = AgentLaunchSpec {
+            prompt: String::from("hello"),
+            effective_model: String::from("test-model"),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+        };
+        let cancel = CancellationToken::new();
+        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let mut status_rx = handle.status_rx;
+
+        // Wait for Running
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Running) {
+                    break;
+                }
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Pause
+        let _ = handle.command_tx.send(Op::Pause).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(s) = status_rx.recv().await {
+                if matches!(s, NodeState::Suspended) {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        // Kill while suspended
+        let _ = handle.command_tx.send(Op::Kill).await;
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match status_rx.recv().await {
+                    Some(s @ (NodeState::Completed | NodeState::Failed | NodeState::Cancelled)) => {
+                        break s;
+                    }
+                    Some(_) => continue,
+                    None => break NodeState::Failed,
+                }
+            }
+        })
+        .await
+        .expect("terminal state within timeout");
+
+        assert_eq!(
+            terminal,
+            NodeState::Cancelled,
+            "Kill while Suspended must yield Cancelled, not Failed"
+        );
+    }
+
+    // T5: Provider abnormal end (no Pause) still yields Failed — positive control
+    #[tokio::test]
+    async fn t5_provider_abnormal_end_without_pause_still_fails() {
+        struct AbnormalEndProvider;
+
+        #[async_trait::async_trait]
+        impl StreamingProvider for AbnormalEndProvider {
+            async fn stream_completion(
+                &self,
+                _messages: Vec<Message>,
+                _options: CompletionOptions,
+            ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError>
+            {
+                let chunks = vec![StreamChunk::Text {
+                    content: "partial...".into(),
+                    parent_tool_use_id: None,
+                }];
+                // Stream ends after one chunk — no TurnComplete
+                Ok(Box::pin(futures::stream::iter(chunks)))
+            }
+
+            async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+                Ok(())
+            }
+
+            fn provider_id(&self) -> String {
+                "abnormal-end".into()
+            }
+
+            fn list_models(&self) -> Vec<ModelDescriptor> {
+                vec![]
+            }
+
+            async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+                Ok(())
+            }
+            async fn connectivity_probe(
+                &self,
+            ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+            {
+                Ok(crate::domain::ports::ProbeOutcome {
+                    latency: std::time::Duration::ZERO,
+                })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let provider = Arc::new(AbnormalEndProvider) as Arc<dyn StreamingProvider>;
+        let storage = Arc::new(crate::adapters::filesystem::FileSystemStorage::new(
+            tmp.path().to_path_buf(),
+        )) as Arc<dyn crate::domain::ports::StoragePort>;
+        let security = Arc::new(crate::adapters::security_adapter::SecurityAdapter::new(
+            PathBuf::from("."),
+        )) as Arc<dyn crate::domain::ports::SecurityPort>;
+        let sandbox = Arc::new(ArcSwap::from_pointee(
+            Arc::new(crate::adapters::sandbox::NoOpSandbox)
+                as Arc<dyn crate::domain::ports::SandboxManager>,
+        ));
+        let tools = Arc::new(crate::adapters::toolset_adapter::ToolSetAdapter::new(
+            PathBuf::from("."),
+            storage.clone(),
+            sandbox,
+            Arc::new(tokio::sync::RwLock::new(
+                crate::domain::models::SandboxPolicy::Permissive,
+            )),
+        )) as Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
+            1024,
+            Arc::new(crate::adapters::noop::NoOpApprovalPersistence),
+        );
+        let scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+            security.clone(),
+            tools.clone(),
+            approval.clone(),
+            1024,
+        );
+        let (event_bus, _event_rx) = crate::infrastructure::runtime::event_bus::EventBus::new(1024);
+        let event_bus = Arc::new(event_bus);
+        let registry = Arc::new(NodeTree::new());
+        let parent_sandbox = Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
+
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage,
+            security,
+            tools,
+            approval,
+            scheduler,
+            event_bus,
+            registry,
+            parent_sandbox,
+            spool,
+            authority,
+            root_authority,
+        );
+
+        let spec = AgentLaunchSpec {
+            prompt: String::from("hello"),
+            effective_model: String::from("test-model"),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+        };
+        let cancel = CancellationToken::new();
+        let handle = runner.launch(spec, cancel).await.unwrap();
+        let mut status_rx = handle.status_rx;
+
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match status_rx.recv().await {
+                    Some(s @ (NodeState::Completed | NodeState::Failed | NodeState::Cancelled)) => {
+                        break s;
+                    }
+                    Some(_) => continue,
+                    None => break NodeState::Failed,
+                }
+            }
+        })
+        .await
+        .expect("terminal state within timeout");
+
+        assert_eq!(
+            terminal,
+            NodeState::Failed,
+            "Provider stream ending without TurnComplete (and no Pause) must yield Failed"
+        );
     }
 
     #[tokio::test]

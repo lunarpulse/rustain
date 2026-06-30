@@ -4,7 +4,7 @@ expression: text
 ---
 ┌ Agents ──────────────────────────────────────────────────┐
 │                                                          │
-│                    No agents running.                    │
+│                     No agents active.                    │
 │      Ask the assistant to delegate or use plan mode.     │
 │                                                          │
 │                                                          │

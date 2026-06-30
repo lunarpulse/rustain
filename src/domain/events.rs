@@ -338,6 +338,9 @@ pub enum AppEvent {
     /// nested enum to keep the top-level surface lean and group related events
     /// for the event_loop dispatcher.
     CapabilityEvent(CapabilityEvent),
+    /// Story 14.4 — child→parent subagent event wrapped with attribution.
+    /// The inner event is deliberately narrow; full AppEvent recursion is not allowed.
+    Subagent(crate::domain::models::SubagentEnvelope),
     /// Story 14.3 — a fork-join wave started fanning out (14.3a seam).
     ForkJoinStarted {
         coordinator: crate::domain::models::AgentId,

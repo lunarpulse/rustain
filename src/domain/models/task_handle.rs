@@ -40,5 +40,6 @@ pub enum Op {
     Resume,
     ChangeModel(String),
     UpdateTools(Vec<String>),
+    Deliver(crate::domain::models::AgentDelivery),
     ReportFull,
 }

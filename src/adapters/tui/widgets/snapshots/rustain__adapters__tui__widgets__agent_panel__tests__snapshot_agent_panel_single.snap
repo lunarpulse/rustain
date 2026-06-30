@@ -3,7 +3,7 @@ source: src/adapters/tui/widgets/agent_panel.rs
 expression: text
 ---
 ┌ Agents ──────────────────────────────────────────────────┐
-│⏸ ♦ code-reviewer  0s                                     │
+│○ ♦ code-reviewer queued  0s                              │
 │                                                          │
 │                                                          │
 └──────────────────────────────────────────────────────────┘

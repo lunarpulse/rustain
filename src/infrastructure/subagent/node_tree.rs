@@ -133,6 +133,13 @@ pub enum OwnerCommandError {
     Remote(AgentId),
 }
 
+#[derive(Clone)]
+pub struct DeliveryTarget {
+    pub state: NodeState,
+    pub ownership: OwnershipKind,
+    pub handle: NodeHandle,
+}
+
 // ── NodeTree implementation ─────────────────────────────────────────────────
 
 impl NodeTree {
@@ -626,6 +633,17 @@ impl NodeTree {
         }
     }
 
+    pub async fn delivery_target(&self, agent_id: &AgentId) -> Option<DeliveryTarget> {
+        let guard = self.inner.read().await;
+        let node = guard.nodes.get(agent_id)?;
+        let handle = guard.handles.get(agent_id)?.clone();
+        Some(DeliveryTarget {
+            state: node.state,
+            ownership: node.ownership,
+            handle,
+        })
+    }
+
     /// Walk the subtree of `agent_id` in reversed-BFS order (so no node is
     /// killed before its children), issuing `Op::Kill` to each handle AND
     /// cancelling its token, then awaiting the `current_status` watch channel
@@ -795,6 +813,68 @@ impl NodeTree {
 impl Default for NodeTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Local R1 implementation of the AgentMessageBus send-side port.
+///
+/// R2 plugs a transport-backed implementation into the same port. R1 only routes
+/// local handles; the Remote arm is an inert hook and returns RemoteUnsupported.
+pub struct LocalMessageBus {
+    node_tree: NodeTree,
+    policy: Arc<dyn crate::domain::ports::DeliveryPolicy>,
+}
+
+impl LocalMessageBus {
+    pub fn new(node_tree: NodeTree, policy: Arc<dyn crate::domain::ports::DeliveryPolicy>) -> Self {
+        Self { node_tree, policy }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
+    async fn deliver(
+        &self,
+        to: &AgentId,
+        env: crate::domain::models::Envelope<crate::domain::models::AgentMessage>,
+    ) -> Result<crate::domain::models::DeliveryOutcome, crate::domain::ports::DeliveryError> {
+        use crate::domain::models::{
+            AgentDelivery, DeliveryMode, DeliveryOutcome, Op, RefuseReason, delivery_decision,
+        };
+        use crate::domain::ports::DeliveryError;
+
+        let target = self
+            .node_tree
+            .delivery_target(to)
+            .await
+            .ok_or_else(|| DeliveryError::NotFound(to.clone()))?;
+
+        let _disposition = self.policy.decide(&env.header, target.ownership);
+        let mode = delivery_decision(target.state);
+        if mode == DeliveryMode::Refuse {
+            return Err(DeliveryError::Refused(RefuseReason::TerminalState));
+        }
+
+        match target.handle {
+            NodeHandle::Local { command_tx, .. } => command_tx
+                .try_send(Op::Deliver(AgentDelivery::new(env, mode)))
+                .map(|()| match mode {
+                    DeliveryMode::Queue => DeliveryOutcome::Queued,
+                    DeliveryMode::Aside | DeliveryMode::Wake => DeliveryOutcome::Delivered,
+                    DeliveryMode::Refuse => DeliveryOutcome::Refused {
+                        reason: RefuseReason::TerminalState,
+                    },
+                })
+                .map_err(|err| match err {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                        DeliveryError::Full(to.clone())
+                    }
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        DeliveryError::Closed(to.clone())
+                    }
+                }),
+            NodeHandle::Remote { .. } => Err(DeliveryError::RemoteUnsupported(to.clone())),
+        }
     }
 }
 

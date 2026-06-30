@@ -1101,6 +1101,17 @@ pub async fn run(
                                 && state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents)
                                 && state.agent_panel_state.drill_down_agent.is_some()
                             {
+                                // Esc in inspector: close inspector first (back to panel list),
+                                // don't jump straight to chat. A second Esc from the panel
+                                // list will close the sidebar via the normal handle_input path.
+                                if matches!(domain_event, crate::domain::events::DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc)) {
+                                    state.agent_panel_state.drill_down_agent = None;
+                                    state.agent_panel_state.inspector_scroll_offset = 0;
+                                    state.agent_panel_state.pending_kill_confirm = None;
+                                    state.needs_redraw = true;
+                                    continue;
+                                }
+
                                 // Block inspector owner controls when active tab is read-only
                                 if tab_manager.active_tab().read_only {
                                     state.status = StatusState::Flash {
@@ -1115,7 +1126,15 @@ pub async fn run(
                                                 if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id).cloned() {
                                                     let op = match entry.current_status {
                                                         crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
-                                                        _ => crate::domain::models::Op::Resume,
+                                                        crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
+                                                        _ => {
+                                                            state.status = StatusState::Flash {
+                                                                message: format!("Cannot pause/resume agent in {:?} state", entry.current_status),
+                                                                remaining_ms: 2000,
+                                                            };
+                                                            state.needs_redraw = true;
+                                                            continue;
+                                                        }
                                                     };
                                                     let _ = refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
                                                     if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
@@ -1233,6 +1252,11 @@ pub async fn run(
                                             }
                                             'j' => {
                                                 state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_add(1);
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'k' => {
+                                                state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_sub(1);
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
@@ -4013,6 +4037,29 @@ pub async fn run(
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                                InputAction::AgentPauseToggle => {
+                                    if let Some(entry) = state.selected_agent().cloned() {
+                                        let op = match entry.current_status {
+                                            crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
+                                            crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
+                                            _ => {
+                                                // Only Running→Pause and Suspended→Resume are valid
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Cannot pause/resume agent in {:?} state", entry.current_status),
+                                                    remaining_ms: 2000,
+                                                };
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        };
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let registry = provider.registry();
+                                            let _ = registry.send_op(&entry.agent_id, op).await;
+                                        }
+                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                        state.needs_redraw = true;
                                     }
                                 }
                                 InputAction::DeleteSidebarConversation => {
@@ -8010,6 +8057,9 @@ pub async fn run(
                         };
                         state.feedback_blocks.insert(fb.id.clone(), fb);
                         state.needs_redraw = true;
+                    }
+                    AppEvent::Subagent(envelope) => {
+                        state.handle_subagent_envelope(envelope);
                     }
                     // Story 14.3b — fork-join wave lifecycle handlers. The
                     // orchestrator emits these via the event bus; each updates

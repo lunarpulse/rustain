@@ -1,6 +1,8 @@
 // Port traits — used by adapters (noop.rs, future real adapters) and services.
 // Suppress unused warnings: traits are consumed by adapter impls, not by domain code.
 #[allow(unused_imports)]
+mod agent_message_bus;
+#[allow(unused_imports)]
 mod approval_persistence;
 #[allow(unused_imports)]
 mod auth_store;
@@ -65,6 +67,9 @@ mod workspace_registry;
 #[cfg(feature = "self-update")]
 pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
+pub use agent_message_bus::{
+    AgentMessageBus, DeliveryError, DeliveryPolicy, RelationshipDeliveryPolicy,
+};
 pub use approval_persistence::ApprovalPersistencePort;
 pub use auth_store::AuthStorePort;
 pub use authority_provider::{AuthorityError, AuthorityProvider};

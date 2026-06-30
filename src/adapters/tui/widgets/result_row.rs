@@ -70,7 +70,7 @@ impl Default for ResultRowSnapshot {
 ///
 /// - `<own>` — [`ownership_glyph`] (`★` Self_ / `♦` Owned).
 /// - `<state>` — [`spoke_result_glyph`] for the terminal outcome, OR the
-///   Running glyph `●` ([`node_state_glyph`] of [`NodeState::Running`]) while
+///   Running glyph `▶` ([`node_state_glyph`] of [`NodeState::Running`]) while
 ///   `rerunning` is set (the in-progress lamp overrides the stale glyph).
 /// - `name` — `agent_label` truncated to ~20 chars (char-boundary safe).
 /// - `<salience>` — enum-derived (DD3): `⚠ failed` / `⚠ cancelled` /
@@ -314,8 +314,8 @@ mod tests {
         let line = render_result_row(&r, 80);
         let t = text(&line);
         assert!(
-            t.contains("\u{25CF}"),
-            "● Running glyph present (override): {t}"
+            t.contains("\u{25B6}"),
+            "▶ Running glyph present (override): {t}"
         );
         assert!(
             !t.contains("\u{2713}"),

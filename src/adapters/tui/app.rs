@@ -173,6 +173,8 @@ pub enum InputAction {
     /// Open the selected conversation from sidebar.
     // Covers: FR107, AC4
     OpenSidebarConversation,
+    /// Story 14.4: Pause/Resume the selected agent from the Agents panel list.
+    AgentPauseToggle,
     /// Delete the selected conversation from sidebar (shows confirmation overlay).
     // Covers: FR113, AC5
     DeleteSidebarConversation,
@@ -1417,6 +1419,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     state.needs_redraw = true;
                     // Panel `p`: dispatch with selected_index (0-based); event_loop resolves to task number
                     InputAction::TaskPause(state.task_panel_state.selected_index as u32)
+                }
+                'p' if _panel == crate::domain::models::visual::PanelType::Agents
+                    && state.agent_panel_state.drill_down_agent.is_none() =>
+                {
+                    state.needs_redraw = true;
+                    InputAction::AgentPauseToggle
                 }
                 's' if _panel == crate::domain::models::visual::PanelType::Tasks => {
                     state.needs_redraw = true;

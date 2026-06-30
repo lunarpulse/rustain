@@ -1,6 +1,7 @@
 pub mod adapter_health;
 pub mod agent;
 pub mod agent_id;
+pub mod agent_message;
 pub mod agent_node;
 pub mod approval;
 pub mod assembled_context;
@@ -59,6 +60,7 @@ mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
 mod stream;
+pub mod subagent_envelope;
 pub mod subagent_error;
 mod subagent_status;
 pub mod subagent_view;
@@ -83,6 +85,12 @@ pub mod visual;
 pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
     validate_agent_frontmatter,
+};
+#[allow(unused_imports)]
+pub use agent_message::{
+    AgentDelivery, AgentMessage, CorrelationId, DeliveryDisposition, DeliveryMode, DeliveryOutcome,
+    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision,
+    relationship_disposition,
 };
 #[allow(unused_imports)]
 pub use agent_node::{
@@ -226,6 +234,8 @@ pub use redaction::{RedactionOp, RedactionRecord};
 #[allow(unused_imports)]
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 pub use search_hit::SearchHit;
+#[allow(unused_imports)]
+pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
 #[allow(unused_imports)]

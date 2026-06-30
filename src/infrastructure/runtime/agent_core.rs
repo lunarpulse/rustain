@@ -10,8 +10,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
-    ChannelPort, ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort, SandboxManager,
-    SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
+    AgentMessageBus, ChannelPort, ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort,
+    SandboxManager, SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -22,6 +22,8 @@ pub struct AgentCore {
     pub channels: Arc<ArcSwap<Arc<dyn ChannelPort>>>,
     pub scheduler: Arc<ArcSwap<Arc<dyn SchedulerPort>>>,
     pub context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
+    /// Story 14.4 — send-side status-aware local/remote message delivery seam.
+    pub agent_message_bus: Arc<ArcSwap<Arc<dyn AgentMessageBus>>>,
     /// Story 11.0a — per-turn Message-tier context assembler (ADR-10-4): the
     /// `Conversation -> Vec<Message>` wire-payload builder. Option-wrapped like
     /// `tool_exposure`/`skill_exposure`: `Some(StaticPassthroughAssembler)` is the
@@ -79,6 +81,12 @@ impl AgentCore {
             channels: Self::wrap(Arc::new(NoOpChannel) as Arc<dyn ChannelPort>),
             scheduler: Self::wrap(Arc::new(NoOpScheduler) as Arc<dyn SchedulerPort>),
             context: Self::wrap(Arc::new(NoOpContext) as Arc<dyn ContextPort>),
+            agent_message_bus: Self::wrap(Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    Default::default(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            ) as Arc<dyn AgentMessageBus>),
             // Asymmetry vs tool_exposure (which defaults None in noop):
             // StaticPassthroughAssembler IS the behaviour-preserving default —
             // there is no "no assembler" TUI path; None is only the eval bypass.

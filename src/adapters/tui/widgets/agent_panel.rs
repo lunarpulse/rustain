@@ -42,7 +42,7 @@ pub fn render(
     if entries.is_empty() {
         let lines = vec![
             Line::from(Span::styled(
-                "No agents running.",
+                "No agents active.",
                 Style::default()
                     .fg(theme.colors.fg_muted)
                     .add_modifier(Modifier::ITALIC),
@@ -125,6 +125,22 @@ pub fn render(
                     Style::default().fg(theme.colors.fg_primary),
                 ),
             ];
+
+            // Status suffix: trust-building cue for non-obvious states
+            let status_suffix = match entry.current_status {
+                NodeState::Suspended => Some("resumable"),
+                NodeState::Waiting => Some("waiting"),
+                NodeState::Created => Some("queued"),
+                _ => None,
+            };
+            if let Some(suffix) = status_suffix {
+                spans.push(Span::styled(
+                    format!(" {}", suffix),
+                    Style::default()
+                        .fg(theme.colors.fg_muted)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            }
 
             if !truncated_task.is_empty() {
                 spans.push(Span::styled(

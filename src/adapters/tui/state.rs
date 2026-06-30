@@ -1848,6 +1848,10 @@ pub struct TuiState {
     pub context_warn_level: ContextWarnLevel,
     /// Story 7.4: pending context carryover for fresh tab + summary injection.
     pub pending_context_carryover: Option<String>,
+    /// Story 14.4 — last attributed subagent event delivered through AppEvent::Subagent.
+    /// Minimal R1 surface: retained for handler/conformance observability; richer
+    /// live-status widgets sequence after the bus substrate.
+    pub last_subagent_envelope: Option<crate::domain::models::SubagentEnvelope>,
     /// Story 14.3b — live snapshot of the current fork-join wave (set by the
     /// 14.3 `AppEvent` handlers). `None` when no wave is active. The render
     /// path (14.3a) reads this to paint the WaveStrip/SynthesisBlock.
@@ -1947,6 +1951,13 @@ impl TuiState {
         self.retire_wave_fanout(None);
         self.needs_redraw = true;
         true
+    }
+    /// `AppEvent::Subagent` (Story 14.4): retain the attributed envelope and
+    /// request a redraw. The event loop delegates here so the wiring guard can
+    /// detect an orphaned AppEvent variant.
+    pub fn handle_subagent_envelope(&mut self, envelope: crate::domain::models::SubagentEnvelope) {
+        self.last_subagent_envelope = Some(envelope);
+        self.needs_redraw = true;
     }
 
     /// `AppEvent::WaveCancelled` (AC8): mark the wave view cancelled + retire the
@@ -2138,6 +2149,7 @@ impl TuiState {
             compacting: false,
             context_warn_level: ContextWarnLevel::None,
             pending_context_carryover: None,
+            last_subagent_envelope: None,
             wave_state: None,
             wave_run: None,
             wave_overlay_selected: 0,
@@ -2167,7 +2179,7 @@ impl TuiState {
     pub fn selected_agent(&self) -> Option<&crate::domain::models::subagent_view::AgentRowView> {
         self.agent_panel_state
             .cached_entries
-            .get(self.agent_panel_state.selected_index)
+            .get(self.sidebar_selected)
     }
 
     pub fn refresh_agent_suggestions(&mut self) {

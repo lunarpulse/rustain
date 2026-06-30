@@ -145,6 +145,13 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
+            agent_message_bus: AgentCore::wrap(Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    Default::default(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            )
+                as Arc<dyn crate::domain::ports::AgentMessageBus>),
             // Story 11.0a / 11.6 — Message-tier assembler, Option-wrapped like
             // the exposure ports (no BuiltAdapter variant — Option ports are
             // bound here, not via store_for_port). The concrete strategy is
