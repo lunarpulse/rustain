@@ -238,6 +238,10 @@ impl SubagentRunner for InProcessSubagentRunner {
         let authority_for_spawn = self.authority.clone();
         let child_token_for_spawn = child_token.clone();
         let spec_isolated = spec.isolated;
+        // Story 14.5 Task 7 (cleanup notice): a dedicated event_bus clone for the
+        // teardown block (the `event_bus` above is moved into `run_child`), so the
+        // scratch cleanup is surfaced to the user — "never silently vanished".
+        let notice_event_bus = self.event_bus.clone();
         let _handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(run_child(
                 spec,
@@ -291,6 +295,16 @@ impl SubagentRunner for InProcessSubagentRunner {
                         "isolation stop failed; TempDir Drop still cleans the scratch dir"
                     );
                 }
+                // Story 14.5 Task 7: surface the cleanup so it is never silently
+                // vanished. Event-scoped ("for THIS run"); on completion the
+                // synthesis is the keepable artifact, on cancel/fail this tells
+                // the user the scratch was reclaimed (no leak, no theft).
+                let _ =
+                    notice_event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
+                        conversation_id: None, // global → active tab (the runner lacks the parent conversation id; SystemNotice routing treats None as "show in active tab")
+                        level: crate::domain::models::NoticeLevel::Info,
+                        message: "Scratch for this isolated run was cleaned up.".to_string(),
+                    });
             }
 
             if let Err(panic_payload) = result {
