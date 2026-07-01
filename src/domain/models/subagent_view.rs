@@ -14,6 +14,8 @@ pub struct AgentRowView {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub turns: u32,
+    /// P9 (TUI): renders the ⊙ iso indicator when true.
+    pub isolated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -45,6 +47,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             turns: 0,
+            isolated: false,
         };
         let debug_str = format!("{:?}", view);
         assert!(debug_str.contains("code-reviewer"));

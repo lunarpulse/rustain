@@ -139,6 +139,7 @@ async fn cascade_kill_three_level_subtree() {
         let (_metrics_tx, metrics_rx) =
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = AgentHandle {
+            isolated: false,
             agent_id: agent.clone(),
             token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: cmd_tx,
@@ -194,6 +195,7 @@ async fn cascade_kill_timeout_returns_partial() {
     let (_metrics_tx, metrics_rx) =
         watch::channel(rustain::domain::models::AgentMetrics::default());
     let handle = AgentHandle {
+        isolated: false,
         agent_id: a.clone(),
         token: rustain::domain::models::CapabilityTokenId::nil(),
         command_tx: cmd_tx,
@@ -230,6 +232,7 @@ async fn status_bridge_registry_list_reflects_child_status() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let cancel = CancellationToken::new();

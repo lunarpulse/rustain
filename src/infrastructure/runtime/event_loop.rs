@@ -5686,10 +5686,21 @@ pub async fn run(
                                         let event_bus = app_state.event_bus.clone();
                                         let cancel = wave_cancel.child_token();
                                         let conv_id = conversation.id.clone();
-                                        tokio::spawn(async move {
+                                        // F1 (AI-12.3 post-review party-mode): OWN the rerun
+                                        // JoinHandle in a supervisor task — DN-1 parity with
+                                        // `launch_wave_request`. Without it a panic inside
+                                        // `rerun_spoke` is silently swallowed (the fire-and-
+                                        // forget match never runs), `rerunning_slot` is never
+                                        // cleared, the AC11 lamp sticks, and the busy-guard at
+                                        // the top of this arm fires `RerunRejectedBusy` for
+                                        // every later rerun until a manual Esc/Ctrl-C.
+                                        let rerun = tokio::spawn(async move {
                                             use crate::domain::ports::Orchestrator;
-                                            match orchestrator.rerun_spoke(slot, cancel).await {
-                                                Ok(outcome) => {
+                                            orchestrator.rerun_spoke(slot, cancel).await
+                                        });
+                                        tokio::spawn(async move {
+                                            match rerun.await {
+                                                Ok(Ok(outcome)) => {
                                                     use crate::domain::ports::wave_handle::RerunOutcome;
                                                     match outcome {
                                                         RerunOutcome::Replaced(new_handle) => {
@@ -5717,16 +5728,36 @@ pub async fn run(
                                                         }
                                                     }
                                                 }
-                                                Err(e) => {
+                                                Ok(Err(e)) => {
                                                     // AC11 lamp-clear on error
                                                     event_bus.emit_domain(
                                                         AppEvent::SpokeRerunReverted { slot },
                                                     );
                                                     event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conv_id),
+                                                        conversation_id: Some(conv_id.clone()),
                                                         level: crate::domain::models::NoticeLevel::Warning,
                                                         message: format!("Spoke re-run failed: {e}"),
                                                     });
+                                                }
+                                                Err(_join_err) if _join_err.is_panic() => {
+                                                    // F1: a rerun-task panic must clear the lamp —
+                                                    // mirror launch_wave_request's panic→terminal arm.
+                                                    event_bus.emit_domain(
+                                                        AppEvent::SpokeRerunReverted { slot },
+                                                    );
+                                                    event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conv_id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: format!(
+                                                            "Spoke {slot} re-run task panicked — see logs."
+                                                        ),
+                                                    });
+                                                }
+                                                Err(_) => {
+                                                    // cancelled / aborted — clear the lamp.
+                                                    event_bus.emit_domain(
+                                                        AppEvent::SpokeRerunReverted { slot },
+                                                    );
                                                 }
                                             }
                                         });

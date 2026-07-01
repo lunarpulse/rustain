@@ -287,6 +287,23 @@ fn fanout_consults_gate_decision_before_launch() {
         fanout_arm.contains("GateDecision::Allow") && fanout_arm.contains("launch_wave_request("),
         "the Allow path must launch the wave"
     );
+    // F5 (AI-12.3 post-review party-mode): the launch-on-Refuse equivalent
+    // mutant. The three asserts above prove the Refuse arm OPENS the gate (token
+    // present) — but a mutant that ALSO launches on Refuse
+    // (`state.pending_spawn_gate = Some(...); launch_wave_request(...);`) keeps
+    // every token checked above, so D4 alone stays GREEN while the bypass is
+    // live. This negative assertion kills it: the Refuse arm body must contain
+    // NO `launch_wave_request(`. (Allow precedes Refuse, so the post-Refuse
+    // region excludes the legitimate Allow launch.)
+    let refuse_arm = fanout_arm
+        .split("GateDecision::Refuse =>")
+        .nth(1)
+        .expect("the Refuse arm must exist");
+    assert!(
+        !refuse_arm.contains("launch_wave_request("),
+        "F5: the Refuse arm must NOT launch the wave — a launch-on-Refuse mutant \
+         reopens the bypass (gate consulted but its result ignored)"
+    );
 }
 
 // ─── D5 (AI-12.3, DF-CR-14-3c-5): the diverge toggle (d/s) is zero-dispatch ────
@@ -334,5 +351,55 @@ fn diverge_toggle_arms_never_dispatch() {
     assert!(
         confirm_arm.contains("launch_wave_request("),
         "positive control: SpawnGateConfirm must dispatch — else the scan is blind"
+    );
+}
+
+// ─── F1 (AI-12.3 post-review): the rerun arm is SUPERVISED (DN-1 parity) ──────
+// `launch_wave_request` owns its wave JoinHandle in a supervisor task whose
+// `is_panic()` arm converts a panic into a terminal event. The structurally-
+// parallel rerun path (WaveRerunSpoke) MUST do the same, or a `rerun_spoke`
+// panic is silently swallowed and `rerunning_slot` is never cleared → the AC11
+// lamp sticks and the busy-guard fires `RerunRejectedBusy` on every later rerun.
+// A full behavioral test needs a mock-terminal loop driver (deferred — `run()`
+// reads crossterm events, not an injectable channel); this structural keystone
+// is RED the moment the rerun spawn reverts to unsupervised fire-and-forget.
+#[test]
+fn rerun_arm_is_supervised_panics_clear_the_lamp() {
+    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
+    let rerun_arm = event_loop
+        .split("InputAction::WaveRerunSpoke(slot) =>")
+        .nth(1)
+        .expect("WaveRerunSpoke arm must exist");
+    let rerun_arm = rerun_arm
+        .split("InputAction::OpenWaveOverlay =>")
+        .next()
+        .expect("rerun arm must be bounded by the next InputAction arm");
+
+    // The rerun JoinHandle is OWNED: an inner spawn produces it and an outer
+    // supervisor `await`s it. A fire-and-forget `tokio::spawn(async move { match
+    // orchestrator.rerun_spoke(...).await { ... } })` has neither binding.
+    assert!(
+        rerun_arm.contains("let rerun = tokio::spawn("),
+        "F1: the rerun JoinHandle must be bound (supervised), not fire-and-forgotten"
+    );
+    assert!(
+        rerun_arm.contains("match rerun.await"),
+        "F1: a supervisor must await the rerun JoinHandle"
+    );
+    assert!(
+        rerun_arm.contains(".is_panic()"),
+        "F1: the supervisor needs a panic arm (DN-1 parity with launch_wave_request)"
+    );
+    // Positive control: the panic arm must clear the lamp (SpokeRerunReverted),
+    // so `rerunning_slot` doesn't strand. Scoped to the body between the panic
+    // guard and the cancel (`Err(_) =>`) arm.
+    let panic_body = rerun_arm
+        .split(".is_panic()")
+        .nth(1)
+        .expect("the panic arm must exist");
+    let panic_body = panic_body.split("Err(_) =>").next().unwrap_or(panic_body);
+    assert!(
+        panic_body.contains("SpokeRerunReverted"),
+        "F1: a rerun panic must emit SpokeRerunReverted so rerunning_slot is cleared"
     );
 }

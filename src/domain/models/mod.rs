@@ -28,6 +28,7 @@ pub mod doc_key;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
 mod focus;
+pub mod isolation;
 pub mod launch_spec;
 pub mod mcp_server_spec;
 pub mod mcp_server_state;
@@ -130,6 +131,8 @@ pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
 pub use focus::FocusState;
+#[allow(unused_imports)]
+pub use isolation::{IsolationError, IsolationHandle, ProvisioningTier, UnifiedDiff};
 #[allow(unused_imports)]
 pub use message::{
     ImageAttachment, Message, MessageRole, ToolResultMessage, ToolUseMessage, UserMessage,

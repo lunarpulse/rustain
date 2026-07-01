@@ -258,6 +258,7 @@ mod tests {
 
     fn make_entry(name: &str, status: NodeState) -> AgentRowView {
         AgentRowView {
+            isolated: false,
             agent_id: AgentId::new(),
             parent_id: AgentId::root(),
             subagent_type: name.to_string(),

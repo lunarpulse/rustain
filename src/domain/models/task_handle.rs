@@ -1,5 +1,5 @@
-use crate::domain::models::NodeState;
-use tokio::sync::mpsc;
+use crate::domain::models::{NodeState, UnifiedDiff};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Owner-side handle returned by `SubagentRunner::launch`. Owns the per-agent
@@ -28,6 +28,13 @@ pub struct TaskHandle {
     /// collector then records an honest `Empty` for a "completed" spoke that
     /// produced no capturable yield.
     pub yield_rx: Option<mpsc::Receiver<String>>,
+    /// Optional isolation-delta channel (Story 14.5 AC2 / DD3). When `Some`,
+    /// the runner captured the isolated child's `UnifiedDiff` on terminal and
+    /// sends it here; the fork-join collector drains it (bounded await) and
+    /// inserts into `ForkJoinRun::delta_store[agent_id]` — the NFR68
+    /// capturable-but-inert seam (write-only in R1; read by nobody until R2).
+    /// `None` for non-isolated children.
+    pub isolation_diff_rx: Option<oneshot::Receiver<UnifiedDiff>>,
 }
 
 /// Owner-issued operations on a running subagent. Story 10.4 consumes this; Story 10.2 wires panel keybinds.

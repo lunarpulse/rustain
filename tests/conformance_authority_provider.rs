@@ -382,6 +382,7 @@ async fn register_authorized_child(
     let (_metrics_tx, metrics_rx) =
         tokio::sync::watch::channel(rustain::domain::models::AgentMetrics::default());
     let handle = rustain::infrastructure::subagent::AgentHandle {
+        isolated: false,
         agent_id: child.scope.clone(),
         token: child.id,
         command_tx: cmd_tx,

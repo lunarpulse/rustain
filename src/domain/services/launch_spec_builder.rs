@@ -42,6 +42,7 @@ impl LaunchSpecBuilder {
             parent_ctx_tokens,
             sandbox_override: None,
             parent_trace,
+            isolated: false,
         }
     }
 
@@ -77,6 +78,7 @@ impl LaunchSpecBuilder {
             parent_ctx_tokens,
             sandbox_override: None,
             parent_trace,
+            isolated: false,
         }
     }
 
@@ -114,6 +116,7 @@ impl LaunchSpecBuilder {
             parent_ctx_tokens,
             sandbox_override: None,
             parent_trace,
+            isolated: false,
         }
     }
 }

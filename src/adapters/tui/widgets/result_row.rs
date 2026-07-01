@@ -255,7 +255,7 @@ mod tests {
             "summary clipped <= {ROW_SALIENCE_MAX_BYTES}: got {}",
             xs.len()
         );
-        assert!(xs.len() >= 1, "non-empty summary");
+        assert!(!xs.is_empty(), "non-empty summary");
     }
 
     #[test]

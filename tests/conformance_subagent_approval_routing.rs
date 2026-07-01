@@ -154,6 +154,7 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let cancel = CancellationToken::new();

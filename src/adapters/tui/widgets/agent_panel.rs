@@ -104,7 +104,15 @@ pub fn render(
                 + 1
                 + indent.chars().count()
                 + entry.subagent_type.chars().count()
-                + 2;
+                + 2
+                + if entry.isolated {
+                    super::orchestration_glyph::isolation_glyph()
+                        .chars()
+                        .count()
+                        + 1
+                } else {
+                    0
+                };
             let max_task_width = (inner_area.width as usize).saturating_sub(prefix_width + 12);
             let truncated_task = if task_summary.len() > max_task_width && max_task_width > 3 {
                 truncate_to_width(&task_summary, max_task_width)
@@ -125,6 +133,14 @@ pub fn render(
                     Style::default().fg(theme.colors.fg_primary),
                 ),
             ];
+
+            // P9 (TUI): ⊙ iso indicator for isolated children (AC3 "shown, not silent").
+            if entry.isolated {
+                spans.push(Span::styled(
+                    format!(" {}", super::orchestration_glyph::isolation_glyph()),
+                    Style::default().fg(theme.colors.fg_muted),
+                ));
+            }
 
             // Status suffix: trust-building cue for non-obvious states
             let status_suffix = match entry.current_status {
@@ -239,6 +255,7 @@ mod tests {
 
     fn make_entry(name: &str, depth: usize, status: NodeState) -> AgentRowView {
         AgentRowView {
+            isolated: false,
             agent_id: AgentId::new(),
             parent_id: AgentId::root(),
             subagent_type: name.to_string(),
@@ -338,6 +355,26 @@ mod tests {
         assert!(
             !unselected_cell.modifier.contains(Modifier::REVERSED),
             "unselected row should NOT have REVERSED modifier"
+        );
+    }
+    // P9 keystone (AC3 "shown, not silent"): an isolated node renders the ⊙ iso
+    // indicator; a non-isolated node does not. Kill-criterion: dropping the
+    // `isolation_glyph()` render call-site makes the positive assertion RED.
+    #[test]
+    fn p9_isolated_node_renders_iso_glyph() {
+        let mut entry = make_entry("isolated-coder", 1, NodeState::Running);
+        entry.isolated = true;
+        let text = render_to_text(&[entry], 0, true, 60, 5);
+        assert!(
+            text.contains("\u{2299} iso"),
+            "P9: an isolated node must render the ⊙ iso indicator (AC3 shown, not silent):\n{text}"
+        );
+        // Negative control: a non-isolated node must NOT render it.
+        let plain = make_entry("plain-coder", 1, NodeState::Running);
+        let plain_text = render_to_text(&[plain], 0, true, 60, 5);
+        assert!(
+            !plain_text.contains("\u{2299} iso"),
+            "P9: a non-isolated node must not render the iso indicator:\n{plain_text}"
         );
     }
 }

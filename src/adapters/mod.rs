@@ -15,6 +15,7 @@ pub mod daily_log_memory;
 pub mod file_scanner;
 pub mod filesystem;
 pub mod importers;
+pub mod isolation;
 pub mod ledger;
 pub mod long_term_memory;
 pub mod memory_context;

@@ -2011,8 +2011,25 @@ impl TuiState {
     /// `AppEvent::WaveTerminated` (D-B): correlated retire — a stale late delivery
     /// (`id` != the live marker) is a no-op so an older wave's terminal can't
     /// retire a NEWER live marker.
+    ///
+    /// F2 (AI-12.3 post-review party-mode): a TERMINATED wave is dead, so when
+    /// this terminal matches the live wave we retire the full view — not just
+    /// the lifecycle marker. Otherwise `wave_state` lingers after failure and
+    /// the two guards diverge: the `/fanout` launch-guard (`wave_state.is_some()`,
+    /// event_loop.rs) blocks the next fan-out while the cancel-guard
+    /// (`is_wave_in_flight()` == `active_wave_id`) is already false — so Ctrl-C
+    /// no longer cancels and falls through to `should_quit`, silently quitting
+    /// the app. `WaveTerminated` is failure-only (success emits `WaveRunReady`),
+    /// so clearing the view here never touches the success/rerun display; the
+    /// id-match guard preserves the stale-late-delivery no-op.
     pub fn handle_wave_terminated(&mut self, id: u64) {
+        let was_live = matches!(self.active_wave_id, Some(live) if live == id);
         self.retire_wave_fanout(Some(id));
+        if was_live {
+            self.wave_state = None;
+            self.wave_cancel = None;
+            self.rerunning_slot = None;
+        }
         self.needs_redraw = true;
     }
 
@@ -3068,5 +3085,75 @@ mod tests {
         // B's OWN terminal clears it.
         s.retire_wave_fanout(Some(new_id));
         assert!(!s.is_wave_in_flight());
+    }
+
+    // ─── F2 (AI-12.3 post-review party-mode): terminated-wave view retire ────
+
+    /// A TERMINATED wave must retire the full VIEW, not just the lifecycle
+    /// marker — otherwise `wave_state` lingers after failure and the two guards
+    /// diverge: the `/fanout` launch-guard (`wave_state.is_some()`) blocks the
+    /// next fan-out while `is_wave_in_flight()` is already false, and Ctrl-C no
+    /// longer cancels (it falls through to `should_quit` → silent app quit).
+    /// RED on the pre-fix `handle_wave_terminated` (which cleared only the
+    /// marker): `wave_state` stays `Some`, so the launch-guard still blocks.
+    #[test]
+    fn f2_terminated_wave_retires_full_view() {
+        let mut s = TuiState::new(80, 24);
+        let id = s.begin_wave_fanout();
+        // ForkJoinStarted arms the view (the launch-guard reads this field).
+        s.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        s.wave_cancel = Some(tokio_util::sync::CancellationToken::new());
+        assert!(s.wave_state.is_some());
+        assert!(s.is_wave_in_flight());
+
+        // The wave fails → WaveTerminated.
+        s.handle_wave_terminated(id);
+
+        // Lifecycle marker retired AND the view cleared → guards agree, no wedge.
+        assert!(!s.is_wave_in_flight(), "marker retired");
+        assert!(
+            s.wave_state.is_none(),
+            "F2: a terminated wave MUST clear wave_state (else the launch-guard \
+             blocks the next /fanout while Ctrl-C no longer cancels → app quit)"
+        );
+        assert!(
+            s.wave_cancel.is_none(),
+            "F2: the dead wave's cancel token must be dropped"
+        );
+        assert!(
+            !s.request_wave_cancel(),
+            "F2: after termination request_wave_cancel must be a no-op (Ctrl-C \
+             must not be swallowed, and the stale view must not bait should_quit)"
+        );
+        // A new fan-out is unblocked (the launch-guard's precondition is gone).
+        let id2 = s.begin_wave_fanout();
+        assert_ne!(id2, id);
+        assert!(s.is_wave_in_flight());
+    }
+
+    /// POISONED — the id-correlation guard: a STALE terminal (older wave) must
+    /// NOT wipe a NEWER live wave's view. Kills a mutant that clears `wave_state`
+    /// unconditionally (a superseded wave's late terminal would destroy the live
+    /// wave's display).
+    #[test]
+    fn f2_stale_terminated_id_does_not_wipe_live_view() {
+        let mut s = TuiState::new(80, 24);
+        let old_id = s.begin_wave_fanout(); // wave A
+        let new_id = s.begin_wave_fanout(); // wave B (supersedes A)
+        s.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        // A's STALE late terminal arrives while B is live.
+        s.handle_wave_terminated(old_id);
+        assert!(
+            s.wave_state.is_some(),
+            "a stale terminal MUST NOT wipe the live wave's view"
+        );
+        assert!(s.is_wave_in_flight(), "the live marker is still wave B");
+        assert_eq!(s.active_wave_id, Some(new_id));
     }
 }

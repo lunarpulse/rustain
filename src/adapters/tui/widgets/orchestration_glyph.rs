@@ -41,6 +41,12 @@ pub fn ownership_glyph(kind: OwnershipKind) -> &'static str {
     }
 }
 
+/// Scratch-dir isolation indicator. Route all `⊙ iso` rendering through this
+/// SSOT so 14.5 does not create a second orchestration glyph vocabulary.
+pub fn isolation_glyph() -> &'static str {
+    "\u{2299} iso"
+}
+
 /// Spoke-result glyph for the WaveStrip / SynthesisBlock coverage line.
 pub fn spoke_result_glyph(result: &SpokeResult) -> &'static str {
     match result {
@@ -76,6 +82,11 @@ mod tests {
             ownership_glyph(OwnershipKind::Self_),
             ownership_glyph(OwnershipKind::Owned)
         );
+    }
+
+    #[test]
+    fn isolation_indicator_uses_ssot_copy() {
+        assert_eq!(isolation_glyph(), "\u{2299} iso");
     }
 
     #[test]

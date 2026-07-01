@@ -251,6 +251,7 @@ fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     }
 }
 
@@ -514,14 +515,14 @@ impl ForkJoinExecutor {
                 let dispatched_at_ms = clock.wall_now_ms();
                 let launched =
                     dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child).await;
-                let (agent_id, label, result, body) = match launched {
+                let (agent_id, label, result, body, isolation_diff) = match launched {
                     Ok(mut handle) => {
                         let agent_id = handle.agent_id.clone();
                         let label = spoke.label.clone();
-                        let (terminal, raw) =
+                        let (terminal, raw, isolation_diff) =
                             collect_terminal(&mut handle, clock.as_ref(), dispatched_at_ms).await;
                         let (result, body) = structured_result(&terminal, raw.as_deref(), &label);
-                        (agent_id, label, result, body)
+                        (agent_id, label, result, body, isolation_diff)
                     }
                     Err(e) => {
                         let agent_id = agent_id_for(&spoke, idx);
@@ -531,7 +532,7 @@ impl ForkJoinExecutor {
                         let result = SpokeResult::Failed {
                             reason: sanitize_failure(&e),
                         };
-                        (agent_id, label, result, String::new())
+                        (agent_id, label, result, String::new(), None)
                     }
                 };
                 let _ = tx
@@ -541,6 +542,7 @@ impl ForkJoinExecutor {
                         label,
                         result,
                         body,
+                        isolation_diff,
                     })
                     .await;
             });
@@ -551,6 +553,12 @@ impl ForkJoinExecutor {
         let mut spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec> =
             std::collections::HashMap::new();
         let mut outcomes: Vec<Option<(AgentId, SpokeResult)>> = (0..n).map(|_| None).collect();
+        // P1 (DD3 / NFR68): collect isolated children's captured deltas here,
+        // then hand the map to the `ForkJoinRun` (write-only in R1; R2 reads).
+        let mut delta_store: std::collections::HashMap<
+            AgentId,
+            crate::domain::models::UnifiedDiff,
+        > = std::collections::HashMap::new();
         while let Some(outcome) = result_rx.recv().await {
             let SpokeOutcome {
                 idx,
@@ -558,6 +566,7 @@ impl ForkJoinExecutor {
                 label,
                 result,
                 body,
+                isolation_diff,
             } = outcome;
             store.insert(NodeResult::ingest(
                 agent_id.clone(),
@@ -567,6 +576,9 @@ impl ForkJoinExecutor {
             ));
             outcomes[idx] = Some((agent_id.clone(), result.clone()));
             spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
+            if let Some(d) = isolation_diff {
+                delta_store.insert(agent_id.clone(), d);
+            }
             self.emit(AppEvent::SpokeCompleted { agent_id, label });
         }
         // P3 fallback: a task that panicked/aborted before sending still gets a
@@ -628,6 +640,7 @@ impl ForkJoinExecutor {
             },
             store: Arc::new(store),
             spec_by_agent,
+            delta_store,
             slots,
             resolve_count: AtomicUsize::new(0),
             // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
@@ -706,7 +719,7 @@ impl ForkJoinExecutor {
 
         let new_agent_id = handle.agent_id.clone();
         let dispatched_at_ms = self.clock.wall_now_ms();
-        let (terminal, raw) =
+        let (terminal, raw, isolation_diff) =
             collect_terminal(&mut handle, self.clock.as_ref(), dispatched_at_ms).await;
         let (result, body) = structured_result(&terminal, raw.as_deref(), &spec.label);
 
@@ -730,7 +743,7 @@ impl ForkJoinExecutor {
                 next_slots[slot] = new_agent_id.clone();
 
                 let mut next_spokes = prev.outcome.spokes.clone();
-                next_spokes[slot] = (new_agent_id, result);
+                next_spokes[slot] = (new_agent_id.clone(), result);
 
                 let next_synthesis = build_synthesis_floor(&next_store);
 
@@ -741,6 +754,13 @@ impl ForkJoinExecutor {
                     },
                     store: Arc::new(next_store),
                     spec_by_agent: next_spec,
+                    delta_store: {
+                        let mut m = prev.delta_store.clone();
+                        if let Some(d) = isolation_diff {
+                            m.insert(new_agent_id.clone(), d);
+                        }
+                        m
+                    },
                     slots: next_slots,
                     resolve_count: AtomicUsize::new(0),
                     rerun_counts: {
@@ -813,6 +833,9 @@ pub struct ForkJoinRun {
     pub outcome: ForkJoinOutcome,
     /// Crate-private — `ResultStore` is `pub(crate)`, so the field is too.
     pub(crate) store: Arc<ResultStore>,
+    /// Story 14.5 — durable inert isolated-child deltas, keyed by AgentId.
+    /// Lock-free: ForkJoinRun is single-owner until wrapped in Arc after construction.
+    pub(crate) delta_store: std::collections::HashMap<AgentId, crate::domain::models::UnifiedDiff>,
     /// Per-port spec map — `pub(crate)`.
     pub(crate) spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec>,
     /// Dispatch-ordered slot AgentIds — `pub(crate)`.
@@ -955,6 +978,10 @@ struct SpokeOutcome {
     label: String,
     result: SpokeResult,
     body: String,
+    /// P1 (DD3 / NFR68): the isolated child's captured `UnifiedDiff` (None for
+    /// non-isolated spokes or failed dispatches). Collected into
+    /// `ForkJoinRun::delta_store` — write-only in R1.
+    isolation_diff: Option<crate::domain::models::UnifiedDiff>,
 }
 
 /// Build a `SpokeOutcome` for a spoke that failed before producing a result.
@@ -967,6 +994,7 @@ fn failed_outcome(idx: usize, spec: &SpokeSpec, reason: &str) -> SpokeOutcome {
             reason: reason.into(),
         },
         body: String::new(),
+        isolation_diff: None,
     }
 }
 
@@ -1002,10 +1030,15 @@ async fn collect_terminal(
     handle: &mut crate::domain::models::TaskHandle,
     clock: &dyn Clock,
     dispatched_at_ms: i64,
-) -> (Terminal, Option<String>) {
+) -> (
+    Terminal,
+    Option<String>,
+    Option<crate::domain::models::UnifiedDiff>,
+) {
     use Terminal::*;
     let mut last: Terminal = Running_(NodeState::Created);
     let mut raw_yield: Option<String> = None;
+    let mut definitive: Option<Terminal> = None;
     loop {
         // Best-effort drain of any queued structured-yield frames (AC6): the
         // last frame wins (a child may emit incremental then a final yield).
@@ -1021,9 +1054,18 @@ async fn collect_terminal(
         .await
         {
             Ok(Some(s)) => match s {
-                NodeState::Completed => return (Completed, drain_yield(handle, raw_yield)),
-                NodeState::Failed => return (Failed, drain_yield(handle, raw_yield)),
-                NodeState::Cancelled => return (Cancelled, drain_yield(handle, raw_yield)),
+                NodeState::Completed => {
+                    definitive = Some(Completed);
+                    break;
+                }
+                NodeState::Failed => {
+                    definitive = Some(Failed);
+                    break;
+                }
+                NodeState::Cancelled => {
+                    definitive = Some(Cancelled);
+                    break;
+                }
                 other => last = Running_(other),
             },
             Ok(None) => break, // channel closed without a terminal → stuck/empty
@@ -1032,23 +1074,38 @@ async fn collect_terminal(
     }
     // Final drain after the loop ends.
     let raw_yield = drain_yield(handle, raw_yield);
-    // P4: a spoke that never reached a terminal state within the threshold
-    // escalates to a hazard (AC10). `should_escalate` + `elapsed_ms` (read
-    // through the injected Clock) decide it; `WaitReason::escalates` gates
-    // whether the reason is hazard-eligible. All four helpers are live here.
-    let elapsed = elapsed_ms(clock, dispatched_at_ms);
-    let escalates = WaitReason::AwaitingSpoke.escalates()
-        && should_escalate(elapsed, WAIT_ESCALATE_THRESHOLD_MS);
-    let terminal = match last {
-        Running_(NodeState::Completed) if !escalates => Completed,
-        Running_(NodeState::Failed) if !escalates => Failed,
-        Running_(NodeState::Cancelled) if !escalates => Cancelled,
-        // Stuck (escalated) or a non-terminal we couldn't fold: carry the last
-        // observed NodeState for diagnostics (Created if we never observed one).
-        Running_(ns) => Stuck(ns),
-        other => Stuck(node_state_of(&other)),
+    let terminal = match definitive {
+        Some(t) => t,
+        None => {
+            // P4: a spoke that never reached a terminal state within the
+            // threshold escalates to a hazard (AC10). `should_escalate` +
+            // `elapsed_ms` (read through the injected Clock) decide it.
+            let elapsed = elapsed_ms(clock, dispatched_at_ms);
+            let escalates = WaitReason::AwaitingSpoke.escalates()
+                && should_escalate(elapsed, WAIT_ESCALATE_THRESHOLD_MS);
+            match last {
+                Running_(NodeState::Completed) if !escalates => Completed,
+                Running_(NodeState::Failed) if !escalates => Failed,
+                Running_(NodeState::Cancelled) if !escalates => Cancelled,
+                // Stuck (escalated) or a non-terminal we couldn't fold: carry
+                // the last observed NodeState for diagnostics.
+                Running_(ns) => Stuck(ns),
+                other => Stuck(node_state_of(&other)),
+            }
+        }
     };
-    (terminal, raw_yield)
+    // P1 (DD3 / NFR68 seam): drain the isolated child's captured delta. Bounded
+    // await — by the time we observe the terminal status the runner's spawn
+    // block has just (or is about to) send the `UnifiedDiff`; 500ms is a
+    // generous bound. Absent/errored capture → None (R1 delta is write-only).
+    let isolation_diff = match handle.isolation_diff_rx.take() {
+        Some(rx) => match tokio::time::timeout(std::time::Duration::from_millis(500), rx).await {
+            Ok(Ok(d)) => Some(d),
+            _ => None,
+        },
+        None => None,
+    };
+    (terminal, raw_yield, isolation_diff)
 }
 
 /// Drain any remaining structured-yield frames after a terminal state.
@@ -1375,7 +1432,7 @@ mod tests {
         let root = CapabilityToken::r1_root(AgentId::root());
         let ledger = Arc::new(AuthorityLedger::new(root.clone()));
         ForkJoinExecutor::new(
-            Arc::new(CompletedRunner::default()) as Arc<dyn SubagentRunner>,
+            Arc::new(CompletedRunner) as Arc<dyn SubagentRunner>,
             Arc::new(
                 crate::adapters::authority::in_process::InProcessAuthorityProvider::new(
                     ledger.clone(),
@@ -1440,6 +1497,7 @@ mod tests {
                 spawned_at: 0,
                 parent_disconnect: parent_disc_tx,
                 yield_rx: Some(yield_rx),
+                isolation_diff_rx: None,
             })
         }
     }

@@ -237,6 +237,7 @@ fn spec_with_override(sandbox_override: Option<SandboxPolicy>) -> AgentLaunchSpe
         parent_ctx_tokens: 0,
         sandbox_override,
         parent_trace: None,
+        isolated: false,
     }
 }
 

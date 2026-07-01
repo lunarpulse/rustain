@@ -47,6 +47,9 @@ struct NodeTreeInner {
     status_senders: HashMap<AgentId, watch::Sender<NodeState>>,
     /// Latest per-agent runtime metrics (AC11 live inspector values).
     metrics_rx: HashMap<AgentId, watch::Receiver<AgentMetrics>>,
+    /// P9 (TUI): per-agent isolated flag — a SIDE-TABLE (not on the pinned
+    /// `AgentNode`) so the ⊙ iso indicator can render without a field-count bump.
+    isolated_agents: HashMap<AgentId, bool>,
 }
 
 // ── Legacy compatibility types ──────────────────────────────────────────────
@@ -72,6 +75,8 @@ pub struct AgentHandle {
     pub spawned_at: i64,
     pub status: watch::Sender<NodeState>,
     pub metrics: watch::Receiver<AgentMetrics>,
+    /// P9 (TUI): true when this child runs in a scratch-dir clone (renders ⊙ iso).
+    pub isolated: bool,
 }
 
 /// Snapshot DTO for the TUI panel. Deterministic sort by agent_id.
@@ -89,6 +94,8 @@ pub struct RegistryEntry {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub turns: u32,
+    /// P9 (TUI): renders the ⊙ iso indicator when true.
+    pub isolated: bool,
 }
 
 impl RegistryEntry {
@@ -106,6 +113,7 @@ impl RegistryEntry {
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
             turns: self.turns,
+            isolated: self.isolated,
         }
     }
 }
@@ -149,6 +157,7 @@ impl NodeTree {
     fn build_inner() -> tokio::sync::RwLock<NodeTreeInner> {
         tokio::sync::RwLock::new(NodeTreeInner {
             nodes: HashMap::new(),
+            isolated_agents: HashMap::new(),
             handles: HashMap::new(),
             parent_of: HashMap::new(),
             status_rx: HashMap::new(),
@@ -306,6 +315,9 @@ impl NodeTree {
         guard
             .metrics_rx
             .insert(agent_id.clone(), handle.metrics.clone());
+        guard
+            .isolated_agents
+            .insert(agent_id.clone(), handle.isolated);
 
         // Release write guard BEFORE any subsequent .await (CLAUDE.md async-lock policy)
         drop(guard);
@@ -554,6 +566,11 @@ impl NodeTree {
                     tokens_in: node.tokens_in,
                     tokens_out: node.tokens_out,
                     turns: node.turns,
+                    isolated: guard
+                        .isolated_agents
+                        .get(agent_id)
+                        .copied()
+                        .unwrap_or(false),
                 }
             })
             .collect();
@@ -887,6 +904,7 @@ mod tests {
         let (status_tx, _status_rx) = watch::channel(NodeState::Created);
         let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
         AgentHandle {
+            isolated: false,
             agent_id,
             token: CapabilityTokenId::nil(),
             command_tx: tx,
@@ -1162,6 +1180,7 @@ mod tests {
         let (status_tx, _status_rx) = watch::channel(NodeState::Created);
         let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
         let handle = AgentHandle {
+            isolated: false,
             agent_id: a.clone(),
             token: CapabilityTokenId::nil(),
             command_tx: cmd_tx,
@@ -1212,6 +1231,7 @@ mod tests {
         let (status_tx, _status_rx) = watch::channel(NodeState::Created);
         let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
         let handle = AgentHandle {
+            isolated: false,
             agent_id: a.clone(),
             token: CapabilityTokenId::nil(),
             command_tx: cmd_tx,

@@ -10,8 +10,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
-    AgentMessageBus, ChannelPort, ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort,
-    SandboxManager, SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
+    AgentMessageBus, ChannelPort, ContextAssemblerPort, ContextPort, IsolationProvider, MemoryPort,
+    PersonaPort, SandboxManager, SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort,
+    ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -50,6 +51,8 @@ pub struct AgentCore {
     /// "headless / eval" path that wants NO sandbox-binding at all; the eval
     /// harness wants `NoOpSandbox` explicitly.
     pub sandbox: Arc<ArcSwap<Arc<dyn SandboxManager>>>,
+    /// Story 14.5 — filesystem scratch-dir isolation seam.
+    pub isolation: Arc<ArcSwap<Arc<dyn IsolationProvider>>>,
     /// Story 9.7 Phase B — shared merged BM25 index for meta-search.
     /// `None` when the `meta-search` feature is compiled but no `[search]`
     /// knob is "on" per ADR-09-01 v2.1 §W1 inherited.
@@ -96,6 +99,9 @@ impl AgentCore {
             tool_exposure: Self::wrap_optional(None as Option<Arc<dyn ToolExposurePort>>),
             skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
             sandbox: Self::wrap(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>),
+            isolation: Self::wrap(Arc::new(
+                crate::adapters::isolation::CowIsolationProvider::default(),
+            ) as Arc<dyn IsolationProvider>),
             #[cfg(feature = "meta-search")]
             merged_index: ArcSwap::from_pointee(
                 None as Option<Arc<crate::infrastructure::search::MergedIndex>>,

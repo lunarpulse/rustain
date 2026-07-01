@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -9,7 +9,7 @@ use crate::domain::models::{
     AgentId, AgentLaunchSpec, CapabilityFlag, CapabilityToken, NodeState, Op, OwnershipKind,
     SubagentError, TaskHandle,
 };
-use crate::domain::ports::{AuthorityProvider, SubagentRunner};
+use crate::domain::ports::{AuthorityProvider, IsolationProvider, SubagentRunner, ToolSetPort};
 use crate::domain::services::sandbox_narrowing::validate_narrowing;
 use crate::infrastructure::subagent::{NodeTree, SpoolMeta, SubagentSpool};
 
@@ -18,6 +18,14 @@ pub struct InProcessSubagentRunner {
     storage: Arc<dyn crate::domain::ports::StoragePort>,
     security: Arc<dyn crate::domain::ports::SecurityPort>,
     tools: Arc<dyn crate::domain::ports::ToolSetPort>,
+    isolation: Arc<dyn IsolationProvider>,
+    workspace_path: PathBuf,
+    tools_factory: Arc<dyn Fn(&std::path::Path) -> Arc<dyn ToolSetPort> + Send + Sync>,
+    /// P11: true only after `with_isolation(...)` configured a real workspace
+    /// path + re-rooting factory. An `isolated: true` launch on the default
+    /// (parent-rooted) factory is refused fail-closed rather than silently
+    /// defeating isolation (the AC4 keystone mutant).
+    isolation_configured: bool,
     approval: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
     scheduler: Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
     event_bus: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
@@ -43,11 +51,20 @@ impl InProcessSubagentRunner {
         authority: Arc<dyn AuthorityProvider>,
         root_authority: CapabilityToken,
     ) -> Self {
+        let default_tools = tools.clone();
+        let tools_factory: Arc<dyn Fn(&std::path::Path) -> Arc<dyn ToolSetPort> + Send + Sync> =
+            Arc::new(move |_| default_tools.clone());
+        let isolation: Arc<dyn IsolationProvider> =
+            Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
         Self {
             provider,
             storage,
             security,
             tools,
+            isolation,
+            workspace_path: PathBuf::from("."),
+            tools_factory,
+            isolation_configured: false,
             approval,
             scheduler,
             event_bus,
@@ -57,6 +74,19 @@ impl InProcessSubagentRunner {
             authority,
             root_authority,
         }
+    }
+
+    pub fn with_isolation(
+        mut self,
+        workspace_path: PathBuf,
+        isolation: Arc<dyn IsolationProvider>,
+        tools_factory: Arc<dyn Fn(&std::path::Path) -> Arc<dyn ToolSetPort> + Send + Sync>,
+    ) -> Self {
+        self.workspace_path = workspace_path;
+        self.isolation = isolation;
+        self.tools_factory = tools_factory;
+        self.isolation_configured = true;
+        self
     }
 
     /// Deregister an agent from the registry (used by perf tests to avoid NFR15 limit).
@@ -122,7 +152,6 @@ impl SubagentRunner for InProcessSubagentRunner {
 
         // 6. Spawn child task
         let provider = self.provider.clone();
-        let scheduler = self.scheduler.clone();
         let approval = self.approval.clone();
         let event_bus = self.event_bus.clone();
         let spool = self.spool.clone();
@@ -135,10 +164,80 @@ impl SubagentRunner for InProcessSubagentRunner {
         let bridge_tx_for_spawn = bridge_tx.clone();
         let bridge_tx_for_panic = bridge_tx.clone();
 
-        let tools = self.tools.clone();
-        let security = self.security.clone();
+        let isolation_provider = self.isolation.clone();
+        let mut isolation_handle = None;
+        // P1 (DD3): the diff-capture channel — the runner sends the captured
+        // `UnifiedDiff` here on terminal; the orchestrator drains it via
+        // `TaskHandle::isolation_diff_rx` and stores it in `delta_store`.
+        let diff_deliver;
+        let isolation_diff_rx;
+        let (tools, security, scheduler) = if spec.isolated {
+            // P11: refuse fail-closed if the runner was not configured with a
+            // real re-rooting `tools_factory` via `with_isolation(...)`. The
+            // default factory is parent-rooted — launching isolated on it
+            // would hand the child tools that write the real tree while the
+            // `SecurityAdapter` is clone-rooted (roots disagree → isolation
+            // silently defeated). This is the AC4 keystone mutant; refuse it.
+            if !self.isolation_configured {
+                return Err(SubagentError::Internal(
+                    "isolated launch requires `.with_isolation(...)` (default tools_factory is parent-rooted)"
+                        .to_string(),
+                ));
+            }
+            // AC7 (DN-1 party-mode resolution A, 2026-06-30 — unanimous
+            // Winston/Amelia/Murat): entry is an AUTHORIZATION gate, not a
+            // consumption event. Validate the child's own WriteFs (refusal
+            // keystone — a child lacking WriteFs is refused at start) but do
+            // NOT `spend_use` here: the per-tool-batch ReadFs gate in
+            // `run_child` is the genuine consumption site and draws from the
+            // same single non-refunded `uses_remaining` counter. Spending at
+            // entry too would double-charge and brick isolated children
+            // (`uses_remaining == Some(1)` → no tool batch can run).
+            if let Err(err) = self
+                .authority
+                .validate(&child_token, &CapabilityFlag::WriteFs, &agent_id)
+                .await
+            {
+                return Err(SubagentError::Internal(format!(
+                    "isolated child refused by WriteFs authority gate: {err}"
+                )));
+            }
+            let handle = self.isolation.start(&self.workspace_path).await?;
+            let tools = (self.tools_factory)(handle.path());
+            let security = Arc::new(crate::adapters::security_adapter::SecurityAdapter::new(
+                handle.path().to_path_buf(),
+            )) as Arc<dyn crate::domain::ports::SecurityPort>;
+            // AC4 defect fix (uncovered by the P3 keystone, 2026-06-30): the
+            // scheduler EXECUTES tools via its OWN internal ToolSetAdapter, so
+            // re-rooting only `tools` (used just for listing) + `security` left
+            // the parent-rooted scheduler in place — isolated writes landed in
+            // the REAL tree. Build a clone-rooted scheduler (clone-rooted
+            // security + the factory's clone-rooted tools, inheriting the
+            // parent's permission mode) so execution is confined to the clone.
+            security.set_mode(self.security.current_mode());
+            let scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+                security.clone(),
+                tools.clone(),
+                self.approval.clone(),
+                1024,
+            );
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            diff_deliver = Some(tx);
+            isolation_diff_rx = Some(rx);
+            isolation_handle = Some(handle);
+            (tools, security, scheduler)
+        } else {
+            diff_deliver = None;
+            isolation_diff_rx = None;
+            (
+                self.tools.clone(),
+                self.security.clone(),
+                self.scheduler.clone(),
+            )
+        };
         let authority_for_spawn = self.authority.clone();
         let child_token_for_spawn = child_token.clone();
+        let spec_isolated = spec.isolated;
         let _handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(run_child(
                 spec,
@@ -153,7 +252,7 @@ impl SubagentRunner for InProcessSubagentRunner {
                 bridge_tx_for_spawn,
                 command_rx,
                 child_cancel_for_spawn.clone(),
-                OwnershipKind::Owned, // R1: all in-process nodes are Owned; 14.2 sources this from the agent def
+                OwnershipKind::Owned, // R1: all in-process nodes are Owned; 14-2 sources this from the agent def
                 parent_disconnect_rx,
                 child_agent_id,
                 child_task_id,
@@ -166,6 +265,33 @@ impl SubagentRunner for InProcessSubagentRunner {
             ))
             .catch_unwind()
             .await;
+
+            // P1 (DD3 teardown ordering): the child has reached a terminal
+            // state — capture its delta and tear down the scratch dir
+            // explicitly. `diff()` is read-only vs the parent tree; `stop()`
+            // runs the §3.7 #6 canonical guard then `TempDir`'s hardened
+            // `remove_dir_all`. The captured `UnifiedDiff` is delivered to the
+            // orchestrator for `delta_store` (NFR68 seam; write-only in R1).
+            // Best-effort: capture/teardown failures are logged, never fatal.
+            if let Some(handle) = isolation_handle.take() {
+                match isolation_provider.diff(&handle).await {
+                    Ok(d) => {
+                        if let Some(tx) = diff_deliver {
+                            let _ = tx.send(d);
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "isolation diff capture failed; delta not stored"
+                    ),
+                }
+                if let Err(e) = isolation_provider.stop(handle).await {
+                    tracing::warn!(
+                        error = %e,
+                        "isolation stop failed; TempDir Drop still cleans the scratch dir"
+                    );
+                }
+            }
 
             if let Err(panic_payload) = result {
                 let msg = format!("{:?}", panic_payload);
@@ -190,6 +316,7 @@ impl SubagentRunner for InProcessSubagentRunner {
             spawned_at: 0,
             status: watch_tx,
             metrics: metrics_rx_for_register,
+            isolated: spec_isolated,
         };
         self.registry
             .register(agent_id.clone(), AgentId::root(), reg_handle)
@@ -271,6 +398,7 @@ impl SubagentRunner for InProcessSubagentRunner {
             // NodeState on Completed/cancel-salvage paths. The executor's
             // collect_terminal drains this channel to populate the ResultStore.
             yield_rx: Some(yield_rx),
+            isolation_diff_rx,
         })
     }
 }
@@ -1407,6 +1535,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1434,6 +1563,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1462,6 +1592,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1533,6 +1664,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1598,6 +1730,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1690,6 +1823,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1848,6 +1982,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel).await.unwrap();
@@ -1885,6 +2020,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1910,6 +2046,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -1937,6 +2074,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -2000,6 +2138,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -2060,6 +2199,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel).await.unwrap();
@@ -2104,6 +2244,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone()).await.unwrap();
@@ -2255,6 +2396,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let handle = runner.launch(spec, CancellationToken::new()).await.unwrap();
         let task_id = handle.task_id.clone();
@@ -2349,6 +2491,7 @@ mod tests {
             parent_ctx_tokens: 0,
             sandbox_override: None,
             parent_trace: None,
+            isolated: false,
         };
         let cancel = CancellationToken::new();
         let mut handle = runner
@@ -2402,6 +2545,394 @@ mod tests {
         assert!(
             !parsed.detail.is_empty(),
             "AC2: detail must not be empty for a Completed child"
+        );
+    }
+    // P11 behavioral keystone: an `isolated: true` launch on the DEFAULT runner
+    // (no `.with_isolation(...)`) MUST be refused fail-closed — the default
+    // tools_factory is parent-rooted, so launching would hand the child tools
+    // that write the real tree while the SecurityAdapter is clone-rooted (the
+    // AC4 keystone mutant). Kill-criterion: removing the `isolation_configured`
+    // guard makes this test RED (launch would succeed with parent-rooted tools).
+    #[tokio::test]
+    async fn p11_isolated_launch_without_with_isolation_is_refused() {
+        let (runner, _tmp) = make_runner().await;
+        let spec = AgentLaunchSpec {
+            prompt: "iso".to_string(),
+            effective_model: "m".to_string(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        };
+        let result = runner.launch(spec, CancellationToken::new()).await;
+        assert!(
+            result.is_err(),
+            "P11: isolated launch on the default (parent-rooted) runner must be refused fail-closed"
+        );
+    }
+    // P5 / DN-1 keystone (ledger-level, production-reflecting): `r1_child_request`
+    // carries `uses_limit == Some(1)` + WriteFs+ReadFs (capability_token.rs:234).
+    // Under DN-1=A the entry gate VALIDATES WriteFs WITHOUT spending, so the
+    // per-tool ReadFs gate still gets its one use — the isolated child can run a
+    // tool batch (parity with a non-isolated sibling). Kill-criterion (RED under
+    // the old entry-spend mutant): if entry did `spend_use`, uses would hit 0
+    // and the per-tool `validate(ReadFs)` below would return `BudgetExhausted`.
+    #[tokio::test]
+    async fn p5_dn1_validate_only_entry_keeps_the_per_tool_use() {
+        use crate::domain::models::capability_token::CapabilityToken;
+        use crate::domain::services::authority_ledger::AuthorityLedger;
+
+        let root = CapabilityToken::r1_root(AgentId::root());
+        let ledger = AuthorityLedger::new(root.clone());
+        let scope = AgentId::new();
+        let child = ledger
+            .delegate(&root, CapabilityToken::r1_child_request(scope.clone()))
+            .expect("delegate child");
+
+        // DN-1=A entry: validate WriteFs ONLY — no spend_use.
+        ledger
+            .validate(&child, &CapabilityFlag::WriteFs, &scope)
+            .expect("entry WriteFs validate is check-only");
+
+        // Per-tool gate: ReadFs validate must STILL succeed (validate does not
+        // decrement uses_remaining). Under the old entry-spend mutant this is
+        // `BudgetExhausted` → the isolated child is bricked (0 tool batches).
+        ledger
+            .validate(&child, &CapabilityFlag::ReadFs, &scope)
+            .expect("per-tool ReadFs validate must succeed after a validate-only entry (DN-1)");
+
+        // The single use is committed by the per-tool spend (1 → 0).
+        ledger.spend_use(&child.id).expect("per-tool spend_use");
+
+        // A second tool batch is correctly denied by the use-count (the child
+        // got exactly one batch) — NOT by an entry double-charge.
+        let second = ledger.validate(&child, &CapabilityFlag::ReadFs, &scope);
+        assert!(
+            second.is_err(),
+            "second batch must be denied by the per-tool use-count, not an entry double-charge"
+        );
+    }
+    // AC3 fail-closed e2e: when the isolation backend cannot start, the runner
+    // REFUSES the launch — it never falls through to running the child against
+    // the real workspace. Complements the adapter-level
+    // `scratch_start_refuses_on_invalid_lower`. Kill-criterion: a "silent
+    // fall-through" mutant (swallowing the start error and running unisolated)
+    // makes this test RED (launch would succeed).
+    struct FailingIsolation;
+    #[async_trait::async_trait]
+    impl crate::domain::ports::IsolationProvider for FailingIsolation {
+        async fn start(
+            &self,
+            _lower: &std::path::Path,
+        ) -> Result<crate::domain::models::IsolationHandle, crate::domain::models::IsolationError>
+        {
+            Err(crate::domain::models::IsolationError::FailClosed {
+                reason: "forced failure (AC3 test)".into(),
+            })
+        }
+        async fn diff(
+            &self,
+            _: &crate::domain::models::IsolationHandle,
+        ) -> Result<crate::domain::models::UnifiedDiff, crate::domain::models::IsolationError>
+        {
+            unimplemented!("diff not reached when start fails")
+        }
+        async fn stop(
+            &self,
+            _: crate::domain::models::IsolationHandle,
+        ) -> Result<(), crate::domain::models::IsolationError> {
+            unimplemented!("stop not reached when start fails")
+        }
+    }
+
+    #[tokio::test]
+    async fn p6_ac3_isolation_failure_refuses_launch() {
+        let (runner, tmp) = make_runner().await;
+        // A real re-rooting factory (built but never called — start fails first).
+        let factory_storage = Arc::new(FileSystemStorage::new(tmp.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let factory_sandbox = Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
+        ));
+        let factory_policy = Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let tools_factory: Arc<
+            dyn Fn(&std::path::Path) -> Arc<dyn crate::domain::ports::ToolSetPort> + Send + Sync,
+        > = Arc::new(move |p| {
+            Arc::new(ToolSetAdapter::new(
+                p.to_path_buf(),
+                factory_storage.clone(),
+                factory_sandbox.clone(),
+                factory_policy.clone(),
+            )) as Arc<dyn crate::domain::ports::ToolSetPort>
+        });
+        let runner = runner.with_isolation(
+            tmp.path().to_path_buf(),
+            Arc::new(FailingIsolation) as Arc<dyn crate::domain::ports::IsolationProvider>,
+            tools_factory,
+        );
+        let spec = AgentLaunchSpec {
+            prompt: "iso".to_string(),
+            effective_model: "m".to_string(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        };
+        let result = runner.launch(spec, CancellationToken::new()).await;
+        assert!(
+            result.is_err(),
+            "AC3: isolation-start failure must refuse the launch, never fall through to the real workspace"
+        );
+    }
+    // P3 / AC4 [K] capstone provider: turn 1 emits a `Write` tool-use followed
+    // by `TurnComplete{ToolUse}` (the signal run_child needs to dispatch the
+    // tool — mirrors GateProbeProvider's shape); turn 2 (after the tool result)
+    // ends the turn. Drives the REAL `run_child` tool-execution path.
+    struct WriteOnceProvider {
+        calls: std::sync::atomic::AtomicU32,
+        file_path: String,
+    }
+    #[async_trait::async_trait]
+    impl StreamingProvider for WriteOnceProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let chunks: Vec<StreamChunk> = if n == 0 {
+                vec![
+                    StreamChunk::ToolUse {
+                        id: "p3write".into(),
+                        name: "Write".into(),
+                        input: serde_json::json!({
+                            "file_path": self.file_path,
+                            "content": "isolated-write\n",
+                        }),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::ToolUse,
+                    },
+                ]
+            } else {
+                vec![
+                    StreamChunk::Text {
+                        content: "done".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::EndTurn,
+                    },
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "write-once".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    // P3 consensus (party-mode 2026-06-30, Winston/Amelia/Murat unanimous → A):
+    // faithfully mirror the production `startup.rs` ToolSetAdapter factory so the
+    // tool-execution-to-completion leg is exercised exactly as in production.
+    // `set_event_tx(event_bus.domain_tx)` is the leading hypothesis for the
+    // prior hang (a completion signaled into a void); mirror it on BOTH the
+    // parent `tools` and the isolated factory's per-call adapters.
+    async fn make_write_runner(
+        workspace: &std::path::Path,
+        isolated: bool,
+    ) -> InProcessSubagentRunner {
+        let provider = Arc::new(WriteOnceProvider {
+            calls: std::sync::atomic::AtomicU32::new(0),
+            file_path: "p3_marker.txt".into(),
+        }) as Arc<dyn StreamingProvider>;
+        let storage = Arc::new(FileSystemStorage::new(workspace.to_path_buf()))
+            as Arc<dyn crate::domain::ports::StoragePort>;
+        let security = Arc::new(SecurityAdapter::new(workspace.to_path_buf()))
+            as Arc<dyn crate::domain::ports::SecurityPort>;
+        // P3 root-cause fix: the scheduler awaits an approval decision for any
+        // non-Yolo permission mode (tool_scheduler.rs:221-256). The test grants
+        // no approvals, so default-Normal would hang forever on the Write tool.
+        // Yolo auto-approves (mirrors the scheduler's own MockSecurity{Yolo}).
+        security.set_mode(crate::domain::models::PermissionMode::Yolo);
+        let sandbox = Arc::new(ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
+        ));
+        let parent_policy = Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::SandboxPolicy::Permissive,
+        ));
+        let (event_bus, _event_rx) = EventBus::new(1024);
+        let event_bus = Arc::new(event_bus);
+        let domain_tx = event_bus.domain_tx.clone();
+        let mut tools = ToolSetAdapter::new(
+            workspace.to_path_buf(),
+            storage.clone(),
+            sandbox.clone(),
+            parent_policy.clone(),
+        );
+        tools.set_event_tx(domain_tx.clone());
+        let tools = Arc::new(tools) as Arc<dyn crate::domain::ports::ToolSetPort>;
+        let approval = ApprovalRuntime::new(1024, Arc::new(NoOpApprovalPersistence));
+        let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
+        let registry = Arc::new(NodeTree::new());
+        let spool = Arc::new(SubagentSpool::new(workspace.join("spool")).await.unwrap());
+        let (authority, root_authority) = authority_pair();
+        let runner = InProcessSubagentRunner::new(
+            provider,
+            storage.clone(),
+            security,
+            tools,
+            approval,
+            scheduler,
+            event_bus,
+            registry,
+            parent_policy.clone(),
+            spool,
+            authority,
+            root_authority,
+        );
+        if isolated {
+            let factory_storage = storage.clone();
+            let factory_sandbox = sandbox.clone();
+            let factory_policy = parent_policy.clone();
+            let factory_domain_tx = domain_tx.clone();
+            let tools_factory: Arc<
+                dyn Fn(&std::path::Path) -> Arc<dyn crate::domain::ports::ToolSetPort>
+                    + Send
+                    + Sync,
+            > = Arc::new(move |p| {
+                let mut adapter = ToolSetAdapter::new(
+                    p.to_path_buf(),
+                    factory_storage.clone(),
+                    factory_sandbox.clone(),
+                    factory_policy.clone(),
+                );
+                adapter.set_event_tx(factory_domain_tx.clone());
+                Arc::new(adapter) as Arc<dyn crate::domain::ports::ToolSetPort>
+            });
+            runner.with_isolation(
+                workspace.to_path_buf(),
+                Arc::new(crate::adapters::isolation::CowIsolationProvider::default())
+                    as Arc<dyn crate::domain::ports::IsolationProvider>,
+                tools_factory,
+            )
+        } else {
+            runner
+        }
+    }
+
+    async fn await_terminal(handle: &mut TaskHandle) -> NodeState {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match handle.status_rx.recv().await {
+                    Some(s @ (NodeState::Completed | NodeState::Failed | NodeState::Cancelled)) => {
+                        break s;
+                    }
+                    Some(_) => continue,
+                    None => break NodeState::Failed,
+                }
+            }
+        })
+        .await
+        .unwrap_or(NodeState::Failed)
+    }
+
+    // P3 / AC4 [K] keystone — 3-way differential through the REAL `run_child`:
+    //   (1) positive control: isolated:false Write → file lands in the REAL tree;
+    //   (2) assertion:        isolated:true  Write → file lands ONLY in the clone,
+    //                         the real tree's marker is absent + seed untouched;
+    //   (3) the mutant this kills: run_child honors isolated:true but installs the
+    //       parent-rooted toolset (child writes the real tree) → (2) goes RED.
+    //   Self-checking (Winston): a mis-wired factory bypassing isolation makes
+    //   both legs hit the real tree identically → fails loudly, no false green.
+    #[tokio::test]
+    async fn p3_ac4_isolated_child_write_never_touches_the_real_tree() {
+        // (1) Positive control — non-isolated: the Write tool DOES write to the
+        // real tree. Without this leg, "isolated child didn't write the real
+        // tree" would be vacuous (nothing ever writes there).
+        let real_a = tempfile::tempdir().unwrap();
+        std::fs::write(real_a.path().join("seed.txt"), "s\n").unwrap();
+        let runner_a = make_write_runner(real_a.path(), false).await;
+        let spec = AgentLaunchSpec {
+            prompt: "p3".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: false,
+        };
+        let mut h = runner_a
+            .launch(spec, CancellationToken::new())
+            .await
+            .expect("non-isolated launch");
+        assert_eq!(
+            await_terminal(&mut h).await,
+            NodeState::Completed,
+            "positive control: non-isolated Write child must complete"
+        );
+        assert!(
+            real_a.path().join("p3_marker.txt").exists(),
+            "POSITIVE CONTROL: non-isolated Write must land p3_marker.txt in the real tree"
+        );
+
+        // (2) Assertion — isolated:true: the same Write lands ONLY in the clone;
+        // the real tree is untouched.
+        let real_b = tempfile::tempdir().unwrap();
+        std::fs::write(real_b.path().join("seed.txt"), "s\n").unwrap();
+        let runner_b = make_write_runner(real_b.path(), true).await;
+        let spec_iso = AgentLaunchSpec {
+            prompt: "p3".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        };
+        let mut h2 = runner_b
+            .launch(spec_iso, CancellationToken::new())
+            .await
+            .expect("isolated launch (with_isolation configured)");
+        let terminal2 = await_terminal(&mut h2).await;
+        assert_eq!(
+            terminal2,
+            NodeState::Completed,
+            "isolated Write child must complete (a non-Completed terminal means the Write was blocked)"
+        );
+        assert!(
+            !real_b.path().join("p3_marker.txt").exists(),
+            "AC4: the isolated child's Write must NOT touch the real tree (the mutant installs the parent-rooted toolset → this fails RED)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(real_b.path().join("seed.txt")).unwrap(),
+            "s\n",
+            "AC4: pre-existing real-tree files must be untouched by an isolated child"
         );
     }
 }

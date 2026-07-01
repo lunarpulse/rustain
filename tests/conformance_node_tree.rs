@@ -671,6 +671,7 @@ async fn nfr69_spawn_latency() {
         let (_metrics_tx, metrics_rx) =
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = rustain::infrastructure::subagent::AgentHandle {
+            isolated: false,
             agent_id: agent_id.clone(),
             token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: tx,
@@ -739,6 +740,7 @@ async fn nfr69_cancel_latency() {
         let (_metrics_tx, metrics_rx) =
             watch::channel(rustain::domain::models::AgentMetrics::default());
         let handle = rustain::infrastructure::subagent::AgentHandle {
+            isolated: false,
             agent_id: agent_id.clone(),
             token: rustain::domain::models::CapabilityTokenId::nil(),
             command_tx: cmd_tx,

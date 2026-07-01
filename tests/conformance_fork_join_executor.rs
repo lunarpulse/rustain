@@ -185,6 +185,7 @@ impl SubagentRunner for FakeRunner {
                 parent_disconnect: parent_disc_tx,
                 // No structured yield from a stuck child (it never terminates).
                 yield_rx: None,
+                isolation_diff_rx: None,
             });
         }
         let terminal = self
@@ -248,6 +249,7 @@ impl SubagentRunner for FakeRunner {
             spawned_at: 0,
             parent_disconnect: parent_disc_tx,
             yield_rx: Some(yield_rx),
+            isolation_diff_rx: None,
         })
     }
 }

@@ -23,6 +23,8 @@ mod context_assembler;
 #[allow(unused_imports)]
 mod event_emitter;
 #[allow(unused_imports)]
+mod isolation_provider;
+#[allow(unused_imports)]
 mod memory;
 #[allow(unused_imports)]
 mod node_orchestrator;
@@ -82,6 +84,7 @@ pub use config_store::ConfigStorePort;
 pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
+pub use isolation_provider::IsolationProvider;
 pub use memory::MemoryPort;
 pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use persona::PersonaPort;

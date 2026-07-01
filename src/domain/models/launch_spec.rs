@@ -27,4 +27,52 @@ pub struct AgentLaunchSpec {
     pub sandbox_override: Option<crate::domain::models::SandboxPolicy>,
     /// Optional W3C Trace Context for distributed tracing.
     pub parent_trace: Option<TraceContext>,
+    /// Run this child in an isolated scratch workspace.
+    ///
+    /// Internal launch type: `false` omits the field to preserve byte-identical
+    /// legacy serialization; consumer-facing output-schema rules do not apply.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(isolated: bool) -> AgentLaunchSpec {
+        AgentLaunchSpec {
+            prompt: "p".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::CheapAgentic,
+            tools_allow: ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated,
+        }
+    }
+
+    #[test]
+    fn isolated_false_serializes_byte_identical_without_key() {
+        let json = serde_json::to_string(&spec(false)).unwrap();
+        assert!(!json.contains("isolated"));
+    }
+
+    #[test]
+    fn isolated_true_serializes_explicit_key_and_old_payload_defaults_false() {
+        let json = serde_json::to_string(&spec(true)).unwrap();
+        assert!(json.contains("\"isolated\":true"));
+
+        let old_payload = r#"{
+            "prompt":"p",
+            "effective_model":"m",
+            "tier":"cheap_agentic",
+            "tools_allow":{"kind":"inherit_from_parent"},
+            "parent_ctx_tokens":0,
+            "sandbox_override":null,
+            "parent_trace":null
+        }"#;
+        let decoded: AgentLaunchSpec = serde_json::from_str(old_payload).unwrap();
+        assert!(!decoded.isolated);
+    }
 }

@@ -46,6 +46,7 @@ impl SubagentRunner for StubSubagentRunner {
             spawned_at: chrono::Utc::now().timestamp_millis(),
             parent_disconnect,
             yield_rx: None,
+            isolation_diff_rx: None,
         })
     }
 }

@@ -130,6 +130,8 @@ impl AgentCore {
         let tool_exposure = build_tool_exposure(selection, ctx)?;
         let skill_exposure = build_skill_exposure(selection, ctx)?;
         let sandbox = build_sandbox(selection, ctx)?;
+        let isolation: Arc<dyn crate::domain::ports::IsolationProvider> =
+            Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
 
         let elapsed = started.elapsed();
         tracing::info!(
@@ -161,6 +163,7 @@ impl AgentCore {
             tool_exposure: Self::wrap_optional(tool_exposure),
             skill_exposure: Self::wrap_optional(skill_exposure),
             sandbox: Self::wrap(sandbox),
+            isolation: Self::wrap(isolation),
             #[cfg(feature = "meta-search")]
             merged_index: arc_swap::ArcSwap::from_pointee(
                 None as Option<Arc<crate::infrastructure::search::MergedIndex>>,

@@ -1515,8 +1515,35 @@ pub async fn run() -> Result<()> {
                 1024,
             );
 
-            let runner: Arc<dyn crate::domain::ports::SubagentRunner> =
-                Arc::new(crate::adapters::subagent::InProcessSubagentRunner::new(
+            let isolation_provider: Arc<dyn crate::domain::ports::IsolationProvider> =
+                Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
+            let tools_factory_storage = tools_storage.clone();
+            let tools_factory_sandbox_slot = sandbox_slot.clone();
+            let tools_factory_sandbox_policy = sandbox_policy_ref.clone();
+            let tools_factory_skill_activator = skill_activator.clone();
+            let tools_factory_skill_cache = shared_skill_cache.clone();
+            let tools_factory_plan_manager = plan_manager.clone();
+            let tools_factory_domain_tx = domain_tx.clone();
+            let tools_factory: Arc<
+                dyn Fn(&std::path::Path) -> Arc<dyn crate::domain::ports::ToolSetPort>
+                    + Send
+                    + Sync,
+            > = Arc::new(move |workspace| {
+                let mut adapter = crate::adapters::toolset_adapter::ToolSetAdapter::new(
+                    workspace.to_path_buf(),
+                    tools_factory_storage.clone(),
+                    tools_factory_sandbox_slot.clone(),
+                    tools_factory_sandbox_policy.clone(),
+                );
+                adapter.set_activator(tools_factory_skill_activator.clone());
+                adapter.set_skill_cache(tools_factory_skill_cache.clone());
+                adapter.set_plan_manager(tools_factory_plan_manager.clone());
+                adapter.set_event_tx(tools_factory_domain_tx.clone());
+                Arc::new(adapter) as Arc<dyn crate::domain::ports::ToolSetPort>
+            });
+
+            let runner: Arc<dyn crate::domain::ports::SubagentRunner> = Arc::new(
+                crate::adapters::subagent::InProcessSubagentRunner::new(
                     router.clone() as Arc<dyn crate::domain::ports::StreamingProvider>,
                     tools_storage.clone(),
                     security.clone(),
@@ -1529,7 +1556,13 @@ pub async fn run() -> Result<()> {
                     spool.clone(),
                     authority_provider.clone(),
                     root_authority.clone(),
-                ));
+                )
+                .with_isolation(
+                    workspace_path.clone(),
+                    isolation_provider,
+                    tools_factory,
+                ),
+            );
 
             // Story 14.3 — fork-join orchestrator, bound to the SAME ports as
             // the runner (AC8: drives children through the SubagentRunner port,

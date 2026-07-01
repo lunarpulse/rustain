@@ -99,6 +99,7 @@ async fn subagent_spawn_latency() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let iterations = 1_000;
@@ -154,6 +155,7 @@ async fn cancellation_propagation_latency() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let iterations = 100;
@@ -190,6 +192,7 @@ async fn memory_rss_per_agent() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let before = procfs::process::Process::myself()

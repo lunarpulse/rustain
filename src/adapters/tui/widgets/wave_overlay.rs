@@ -149,11 +149,11 @@ mod tests {
                 agent_label: format!("agent-{i}"),
                 result: if i % 4 == 0 {
                     SpokeResult::Failed {
-                        reason: format!("boom-{i}").into(),
+                        reason: format!("boom-{i}"),
                     }
                 } else {
                     SpokeResult::Completed {
-                        summary: format!("done-{i}").into(),
+                        summary: format!("done-{i}"),
                     }
                 },
                 slot: i,
