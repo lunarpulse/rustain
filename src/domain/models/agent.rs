@@ -12,6 +12,10 @@ pub struct AgentDef {
     pub allowed_tools: Option<Vec<String>>,
     pub exclude_tools: Option<Vec<String>>,
     pub model: Option<String>,
+    /// Story 14.5 — run this agent's delegated children in an isolated scratch-dir
+    /// clone. `false` by default; set `isolated: true` in an agent file's
+    /// frontmatter to opt a specific agent into isolation (the R1 trigger).
+    pub isolated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +109,7 @@ impl AgentDef {
             allowed_tools: None,
             exclude_tools: None,
             model: None,
+            isolated: false,
         }
     }
 }

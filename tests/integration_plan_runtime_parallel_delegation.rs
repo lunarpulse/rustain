@@ -127,6 +127,7 @@ async fn diamond_delegation_requests_both_after_task1() {
             model: None,
             allowed_tools: None,
             exclude_tools: None,
+            isolated: false,
         },
         AgentDef {
             name: "test-writer".to_string(),
@@ -135,6 +136,7 @@ async fn diamond_delegation_requests_both_after_task1() {
             model: None,
             allowed_tools: None,
             exclude_tools: None,
+            isolated: false,
         },
     ];
 

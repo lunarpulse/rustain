@@ -4162,6 +4162,7 @@ mod tests {
                 allowed_tools: None,
                 exclude_tools: None,
                 model: None,
+                isolated: false,
             },
         ]);
         state.input_buffer = "@Agents/code-reviewer".to_string();
@@ -4198,6 +4199,7 @@ mod tests {
                 allowed_tools: None,
                 exclude_tools: None,
                 model: None,
+                isolated: false,
             },
         ]);
         state.input_buffer = "@Agents/code-reviewer review src/auth.rs".to_string();

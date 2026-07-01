@@ -42,7 +42,7 @@ impl LaunchSpecBuilder {
             parent_ctx_tokens,
             sandbox_override: None,
             parent_trace,
-            isolated: false,
+            isolated: agent_def.isolated,
         }
     }
 
@@ -78,7 +78,7 @@ impl LaunchSpecBuilder {
             parent_ctx_tokens,
             sandbox_override: None,
             parent_trace,
-            isolated: false,
+            isolated: agent_def.isolated,
         }
     }
 
@@ -116,7 +116,7 @@ impl LaunchSpecBuilder {
             parent_ctx_tokens,
             sandbox_override: None,
             parent_trace,
-            isolated: false,
+            isolated: agent_def.isolated,
         }
     }
 }
@@ -140,6 +140,7 @@ mod tests {
             allowed_tools: allowed.map(|v| v.iter().map(|s| s.to_string()).collect()),
             exclude_tools: excluded.map(|v| v.iter().map(|s| s.to_string()).collect()),
             model: model.map(|s| s.to_string()),
+            isolated: false,
         }
     }
 
@@ -218,5 +219,27 @@ mod tests {
         let task = make_task("Run tests", "Run all unit tests");
         let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
         assert!(spec.prompt.contains("Run tests"));
+    }
+
+    // Story 14.5 (option-A trigger): an agent definition with `isolated: true`
+    // threads through to the launch spec — the R1 production trigger for
+    // scratch-dir isolation (set `isolated: true` in an agent file's frontmatter).
+    #[test]
+    fn isolated_agent_def_propagates_to_launch_spec() {
+        let mut agent = make_agent("iso-coder", None, None, None);
+        agent.isolated = true;
+        let task = make_task("Edit files", "make a change");
+        let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "gpt-4", 0, None);
+        assert!(
+            spec.isolated,
+            "an agent def with isolated:true must produce an isolated launch spec"
+        );
+        // Negative control: a default agent def (isolated:false) stays non-isolated.
+        let plain = make_agent("plain-coder", None, None, None);
+        let plain_spec = LaunchSpecBuilder::from_plan_task(&task, &plain, "gpt-4", 0, None);
+        assert!(
+            !plain_spec.isolated,
+            "a default agent def must produce a non-isolated launch spec"
+        );
     }
 }

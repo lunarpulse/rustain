@@ -81,6 +81,7 @@ async fn legacy_agent_prompt_only_invoke_succeeds() {
             allowed_tools: Some(vec!["Read".into(), "Grep".into()]),
             exclude_tools: None,
             model: None,
+            isolated: false,
         },
     ])));
     let model_router = Arc::new(StubInfo) as Arc<dyn ProviderInfoPort>;

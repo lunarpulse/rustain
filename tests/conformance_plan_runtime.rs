@@ -1067,6 +1067,7 @@ fn ac10_5_decider_explicit_mention_beats_keyword() {
             model: None,
             allowed_tools: None,
             exclude_tools: None,
+            isolated: false,
         },
         AgentDef {
             name: "reviewer".to_string(),
@@ -1075,6 +1076,7 @@ fn ac10_5_decider_explicit_mention_beats_keyword() {
             model: None,
             allowed_tools: None,
             exclude_tools: None,
+            isolated: false,
         },
     ];
 
@@ -1125,6 +1127,7 @@ fn ac10_5_decider_yolo_auto_proceed() {
         model: None,
         allowed_tools: None,
         exclude_tools: None,
+        isolated: false,
     }];
 
     let suggestion =

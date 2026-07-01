@@ -1085,6 +1085,7 @@ async fn test_subagent_provider_discover_round_trip() {
             allowed_tools: Some(vec!["Read".into(), "Grep".into()]),
             exclude_tools: None,
             model: None,
+            isolated: false,
         },
         AgentDef {
             name: "test-writer".into(),
@@ -1093,6 +1094,7 @@ async fn test_subagent_provider_discover_round_trip() {
             allowed_tools: Some(vec!["Read".into(), "Write".into()]),
             exclude_tools: None,
             model: None,
+            isolated: false,
         },
     ]);
     let agent_registry = Arc::new(tokio::sync::RwLock::new(agent_reg));

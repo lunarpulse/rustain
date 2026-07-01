@@ -131,6 +131,7 @@ async fn integration_delegation_fallback_on_failed_launch() {
         model: None,
         allowed_tools: None,
         exclude_tools: None,
+        isolated: false,
     };
 
     let emitter = CapturedEvents::new();

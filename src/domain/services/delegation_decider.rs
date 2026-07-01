@@ -168,6 +168,7 @@ mod tests {
             allowed_tools: None,
             exclude_tools: None,
             model: None,
+            isolated: false,
         }
     }
 

@@ -136,6 +136,7 @@ async fn integration_plan_runtime_delegation_summary() {
         model: None,
         allowed_tools: None,
         exclude_tools: None,
+        isolated: false,
     };
 
     runtime
