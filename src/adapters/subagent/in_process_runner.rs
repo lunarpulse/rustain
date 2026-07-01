@@ -2614,6 +2614,56 @@ mod tests {
             "second batch must be denied by the per-tool use-count, not an entry double-charge"
         );
     }
+
+    // AC7 refusal CONDITION (authority-level, production-reflecting): the runner
+    // entry gate (in_process_runner.rs:196-204) refuses an isolated child whose
+    // token lacks WriteFs via `authority.validate(&child, WriteFs)`. This arms
+    // that predicate: a delegated child whose CapabilitySet EXCLUDES WriteFs is
+    // refused by `validate(WriteFs)`. (The runner hardcodes `r1_child_request` —
+    // always WriteFs — and a WriteFs-less root fails at delegation before the
+    // gate, so a true end-to-end refusal needs an injectable child-request seam,
+    // deferred; the gate's validate-only wiring is pinned by p5_dn1 + the entry
+    // source.) Kill-criterion: a "validate is always Ok" mutant → RED.
+    #[test]
+    fn ac7_child_lacking_writefs_is_refused_by_entry_predicate() {
+        use crate::domain::models::capability_token::{
+            Budget, CapabilityFlag, CapabilitySet, CapabilityToken, DelegateConstraint,
+            DelegateRequest,
+        };
+        use crate::domain::services::authority_ledger::AuthorityLedger;
+
+        let root = CapabilityToken::r1_root(AgentId::root());
+        let ledger = AuthorityLedger::new(root.clone());
+        let scope = AgentId::new();
+        // Delegate a child WITHOUT WriteFs (a strict subset of the root → delegation succeeds).
+        let no_write = CapabilitySet::from_flags(&[CapabilityFlag::Spawn, CapabilityFlag::ReadFs]);
+        let child = ledger
+            .delegate(
+                &root,
+                DelegateRequest {
+                    scope: scope.clone(),
+                    capabilities: no_write,
+                    constraint: DelegateConstraint {
+                        allowed: no_write,
+                        max_depth: 3,
+                        max_subset: no_write,
+                    },
+                    budget: Budget {
+                        requests: 1,
+                        cost_micros: 1_000,
+                    },
+                    not_after: None,
+                    uses_limit: Some(1),
+                },
+            )
+            .expect("delegate a WriteFs-less child (strict subset of root)");
+        // The runner entry-gate predicate: validate(WriteFs) must Err.
+        let refusal = ledger.validate(&child, &CapabilityFlag::WriteFs, &scope);
+        assert!(
+            refusal.is_err(),
+            "AC7: a child lacking WriteFs must be refused by validate(WriteFs) — the entry-gate predicate"
+        );
+    }
     // AC3 fail-closed e2e: when the isolation backend cannot start, the runner
     // REFUSES the launch — it never falls through to running the child against
     // the real workspace. Complements the adapter-level

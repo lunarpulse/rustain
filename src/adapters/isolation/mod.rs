@@ -57,6 +57,11 @@ impl IsolationProvider for CowIsolationProvider {
             Err(err) => return Err(err),
         };
 
+        // §3.7 #8 (orphan-cleanup): R1 ships NO reaper — a crashed/killed run
+        // can leak `rustain-isolation-*` dirs. Orphan hygiene (reap stale dirs
+        // by nonce/age on `start`, with a sibling NON-owned dir surviving the
+        // sweep) is deferred to R2; `TempDir`'s own `Drop` covers the normal +
+        // panic-terminal teardown paths. (DD4 #8 — accepted R1 residual.)
         let temp_dir = tempfile::Builder::new()
             .prefix("rustain-isolation-")
             .tempdir()
@@ -128,9 +133,10 @@ impl IsolationProvider for CowIsolationProvider {
         // `stop` (e.g. the tempdir was swapped to a symlink to the real tree).
         // The actual `remove_dir_all` is delegated to `TempDir`'s `Drop`, which
         // on Linux uses an openat-based hardened removal (mitigating the
-        // classic recursive-swap TOCTOU, §3.7 #5). The remaining check→drop
-        // window is a documented residual, armed by a running test (see
-        // conformance_isolation §3.7 family #5/#6). (P7)
+        // classic recursive-swap TOCTOU, §3.7 #5). §3.7 #6 (teardown-root-resolve)
+        // is armed by `stop_refuses_when_canonical_root_changed` below; the §3.7
+        // #5 check→drop TOCTOU window is an ACCEPTED residual (TempDir's
+        // openat-based removal is the mitigation; no portable armed test — R2). (P7)
         let canonical =
             h.path()
                 .canonicalize()
@@ -542,5 +548,134 @@ mod tests {
             result.is_err(),
             "start() must refuse (fail-closed) on an invalid lower, not fall through"
         );
+    }
+
+    // §3.7 #6 (teardown-root-resolve) — ARMED: if the clone's canonical root
+    // changed between `start` and `stop` (e.g. the tempdir was swapped to a
+    // symlink to the real tree), `stop()` MUST refuse (`TeardownRefused`) — a
+    // `remove_dir_all` onto the real tree is a non-undoable blast radius.
+    // Kill-criterion: deleting the canonical check in `stop()` → RED. Removal
+    // still occurs via `TempDir`'s `Drop`; this arms the *alert* the guard
+    // provides. Positive control: a consistent handle stops Ok.
+    #[tokio::test]
+    async fn stop_refuses_when_canonical_root_changed() {
+        let provider = CowIsolationProvider::new(Arc::new(MockClock::at_wall_ms(1)));
+        // A handle whose stored canonical_root deliberately mismatches its live path.
+        let temp = tempfile::TempDir::new().unwrap();
+        let live_canon = temp.path().canonicalize().unwrap();
+        let mismatched = IsolationHandle::with_canonical_root_for_test(
+            temp,
+            live_canon.join("not_the_live_root"),
+            0,
+        );
+        let err = provider.stop(mismatched).await.unwrap_err();
+        assert!(
+            matches!(err, IsolationError::TeardownRefused { .. }),
+            "§3.7 #6: stop must refuse on canonical-root change, got {err:?}"
+        );
+        // Positive control: a consistent handle (stored root == live path) stops Ok.
+        let ok_temp = tempfile::TempDir::new().unwrap();
+        let ok_canon = ok_temp.path().canonicalize().unwrap();
+        let consistent = IsolationHandle::with_canonical_root_for_test(ok_temp, ok_canon, 0);
+        provider
+            .stop(consistent)
+            .await
+            .expect("consistent handle stops Ok");
+    }
+
+    // §3.7 #4 (hardlink) — ARMED residual: a hardlink in the source is copied as
+    // a MATERIALIZED regular file (distinct inode) — `std::fs::copy` reads bytes
+    // + writes a new inode, so the clone's copy cannot mutate the original via a
+    // shared inode. Pins the incidental safety against a future `linkat`-based
+    // fast-path that would re-create the link. (Unix-only: hardlinks are posix.)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scratch_copy_hardlink_is_distinct_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let parent = tempfile::TempDir::new().unwrap();
+        let original = parent.path().join("original.txt");
+        let linked = parent.path().join("hardlink.txt");
+        std::fs::write(&original, "payload\n").unwrap();
+        std::fs::hard_link(&original, &linked).unwrap();
+        let src_ino = std::fs::metadata(&original).unwrap().ino();
+
+        let provider = CowIsolationProvider::new(Arc::new(MockClock::at_wall_ms(1)));
+        let handle = provider.start(parent.path()).await.unwrap();
+
+        let clone_original = handle.path().join("original.txt");
+        let clone_linked = handle.path().join("hardlink.txt");
+        let clone_orig_ino = std::fs::metadata(&clone_original).unwrap().ino();
+        let clone_link_ino = std::fs::metadata(&clone_linked).unwrap().ino();
+        assert_ne!(
+            clone_orig_ino, src_ino,
+            "§3.7 #4: clone file must NOT share the source's inode (no escape vector)"
+        );
+        assert_ne!(
+            clone_orig_ino, clone_link_ino,
+            "§3.7 #4: the two clone files are distinct materialized inodes (not a re-created hardlink)"
+        );
+        // Writing through the clone's copy does NOT propagate to the source.
+        std::fs::write(&clone_original, "mutated\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&original).unwrap(),
+            "payload\n",
+            "§3.7 #4: a clone write must not mutate the source via a shared inode"
+        );
+        provider.stop(handle).await.unwrap();
+    }
+
+    // §3.7 #1/#2 (traversal at the clone boundary) — the isolated runner hands
+    // the child a `SecurityAdapter` rooted at the CLONE path
+    // (in_process_runner.rs:207-209). This proves THAT object — the isolation
+    // security boundary — rejects `../` (§3.7 #1) and absolute-path-outside
+    // (§3.7 #2) escapes at the clone edge. (The clone-rooting itself is pinned
+    // by the AC4 capstone; generic traversal coverage lives in security_adapter
+    // unit tests.) Positive control: an in-clone path is accepted.
+    #[tokio::test]
+    async fn clone_rooted_security_rejects_traversal_at_clone_boundary() {
+        use crate::adapters::security_adapter::SecurityAdapter;
+        use crate::domain::ports::SecurityPort;
+
+        let parent = tempfile::TempDir::new().unwrap();
+        std::fs::write(parent.path().join("seed.txt"), "x").unwrap();
+        let provider = CowIsolationProvider::new(Arc::new(MockClock::at_wall_ms(1)));
+        let handle = provider.start(parent.path()).await.unwrap();
+        // The exact object the isolated runner constructs (clone-rooted).
+        let sec = SecurityAdapter::new(handle.path().to_path_buf());
+
+        // §3.7 #1: `../` traversal is rejected outright (ParentDir component).
+        let trav = sec.check_workspace_access(
+            std::path::Path::new("../escapee.txt"),
+            crate::domain::models::FileOperation::Write,
+        );
+        assert!(
+            trav.is_err(),
+            "§3.7 #1: ../ traversal must be rejected at the clone boundary"
+        );
+
+        // §3.7 #2: an absolute path to a file OUTSIDE the clone is rejected for Write.
+        let outside = tempfile::TempDir::new().unwrap();
+        let outside_file = outside.path().join("escape.txt");
+        std::fs::write(&outside_file, "x").unwrap();
+        let abs =
+            sec.check_workspace_access(&outside_file, crate::domain::models::FileOperation::Write);
+        assert!(
+            abs.is_err(),
+            "§3.7 #2: an absolute path outside the clone must be rejected for Write"
+        );
+
+        // Positive control: an in-clone path is accepted (the boundary is
+        // functional, not a blanket deny).
+        std::fs::write(handle.path().join("inside.txt"), "y").unwrap();
+        let inside = sec.check_workspace_access(
+            std::path::Path::new("inside.txt"),
+            crate::domain::models::FileOperation::Read,
+        );
+        assert!(
+            inside.is_ok(),
+            "positive control: an in-clone path must be accepted"
+        );
+
+        provider.stop(handle).await.unwrap();
     }
 }

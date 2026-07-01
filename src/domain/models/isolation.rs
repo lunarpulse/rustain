@@ -72,6 +72,29 @@ impl IsolationHandle {
     }
 }
 
+#[cfg(test)]
+impl IsolationHandle {
+    /// Test-only ctor that injects a `canonical_root` independent of `path`'s
+    /// live resolution, so the §3.7 #6 `stop()` canonical-guard can be armed (a
+    /// mismatched root → `TeardownRefused`). Production always canonicalizes at
+    /// `new`; this seam exists solely to simulate a post-`start` swap.
+    pub(crate) fn with_canonical_root_for_test(
+        temp_dir: tempfile::TempDir,
+        canonical_root: PathBuf,
+        created_at_ms: u64,
+    ) -> Self {
+        let path = temp_dir.path().to_path_buf();
+        Self {
+            temp_dir: Some(temp_dir),
+            path,
+            canonical_root,
+            backend: ProvisioningTier::ScratchCopy,
+            created_at_ms,
+            stopped: false,
+        }
+    }
+}
+
 impl Drop for IsolationHandle {
     fn drop(&mut self) {
         if !self.stopped && self.temp_dir.is_some() {
