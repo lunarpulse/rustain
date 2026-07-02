@@ -109,8 +109,12 @@ pub struct NodeCheckpoint {
     pub token: CapabilityTokenId,
     /// Parent node, `None` for the root.
     pub parent: Option<AgentId>,
-    /// Ownership relationship to the parent.
-    pub ownership: OwnershipKind,
+    /// Ownership relationship to the parent (wire-safe — cannot carry `Self_`).
+    ///
+    /// Story 14.6 AC4: serialized via `WireOwnershipKind` so a checkpoint
+    /// cannot forge the `Self_` trust tier. On R2 durable resume the runtime
+    /// re-establishes the root in-process and rehydrates only `Owned`/`Peer`.
+    pub ownership: crate::domain::models::subagent_view::WireOwnershipKind,
     /// Lifecycle state machine position.
     pub state: NodeState,
     /// How this node entered the tree.
@@ -143,7 +147,7 @@ impl AgentNode {
             id: self.id.clone(),
             token: self.token,
             parent: self.parent.clone(),
-            ownership: self.ownership,
+            ownership: self.ownership.wire(),
             state: self.state,
             origin: self.origin,
             foreground: self.foreground,
@@ -229,7 +233,7 @@ pub fn abandonment_action(
         // parent disconnect (independent lifetime) and the root `Self_` can
         // never be abandoned. They diverge in R2 once Peer nodes gain a
         // peer-liveness signal distinct from the ownership hierarchy.
-        OwnershipKind::Peer | OwnershipKind::Self_ => AbandonmentAction::Ignore,
+        OwnershipKind::Peer | OwnershipKind::Self_(_) => AbandonmentAction::Ignore,
     }
 }
 
@@ -346,7 +350,7 @@ mod tests {
         assert_eq!(cp.id, node.id);
         assert_eq!(cp.token, node.token);
         assert_eq!(cp.parent, node.parent);
-        assert_eq!(cp.ownership, node.ownership);
+        assert_eq!(cp.ownership, node.ownership.wire());
 
         // Lifecycle + scheduling.
         assert_eq!(cp.state, node.state);
@@ -374,7 +378,7 @@ mod tests {
         for ownership in [
             OwnershipKind::Owned,
             OwnershipKind::Peer,
-            OwnershipKind::Self_,
+            OwnershipKind::self_root(),
         ] {
             assert_eq!(
                 abandonment_action(ownership, false, 0, 3),
@@ -441,11 +445,11 @@ mod tests {
         // The root (Self_) can never be abandoned — ignore the disconnect
         // regardless of the retry budget.
         assert_eq!(
-            abandonment_action(OwnershipKind::Self_, true, 0, 3),
+            abandonment_action(OwnershipKind::self_root(), true, 0, 3),
             AbandonmentAction::Ignore,
         );
         assert_eq!(
-            abandonment_action(OwnershipKind::Self_, true, 99, 3),
+            abandonment_action(OwnershipKind::self_root(), true, 99, 3),
             AbandonmentAction::Ignore,
         );
     }
@@ -461,7 +465,7 @@ mod tests {
         // and Self_ agree on Ignore (their shared branch in the protocol).
         let owned = abandonment_action(OwnershipKind::Owned, true, 5, 3);
         let peer = abandonment_action(OwnershipKind::Peer, true, 5, 3);
-        let self_kind = abandonment_action(OwnershipKind::Self_, true, 5, 3);
+        let self_kind = abandonment_action(OwnershipKind::self_root(), true, 5, 3);
 
         assert_eq!(owned, AbandonmentAction::SelfDestruct);
         assert_eq!(peer, AbandonmentAction::Ignore);
@@ -481,7 +485,7 @@ mod tests {
             AbandonmentAction::Ignore,
         );
         assert_eq!(
-            abandonment_action(OwnershipKind::Self_, true, 1, 3),
+            abandonment_action(OwnershipKind::self_root(), true, 1, 3),
             AbandonmentAction::Ignore,
         );
     }

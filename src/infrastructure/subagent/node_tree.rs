@@ -29,8 +29,16 @@ pub struct NodeTree {
     inner: Arc<tokio::sync::RwLock<NodeTreeInner>>,
     event_tx: Option<mpsc::UnboundedSender<AppEvent>>,
     now_fn: Arc<dyn Fn() -> i64 + Send + Sync>,
-    /// Hook point where Story 14.2 will wire `AuthorityProvider::revoke` for
-    /// token invalidation during cascade_kill. No-op closure in R1.
+    /// Hook point that revokes descendant capability tokens synchronously
+    /// *before* `Op::Kill` is issued to each node in a cascade_kill. Wired at
+    /// the composition root (`startup.rs:1427-1432`) to
+    /// `AuthorityProvider::revoke` so a revoked token's descendants are
+    /// invalidated in the same extent (AC4/AC5).
+    ///
+    /// Happens-before contract: revoke's critical section (the shared
+    /// `AuthorityLedger` `Mutex`) establishes happens-before with all
+    /// subsequent `validate` calls — once revoke completes, no later validate
+    /// may observe the pre-revoke state (Story 14.6 AC5 TOCTOU probe).
     on_cascade_kill: Arc<dyn Fn(&AgentId) + Send + Sync>,
 }
 
@@ -196,11 +204,11 @@ impl NodeTree {
         }
     }
 
-    /// Install the `on_cascade_kill` hook. Story 14.2 wires
-    /// `AuthorityProvider::revoke` here for descendant token invalidation
-    /// during cascade_kill. Default is a no-op; this builder lets 14.2 inject
-    /// the callback at the composition root instead of editing this file
-    /// (forward-compat hook #4 / AC4).
+    /// Install the `on_cascade_kill` hook. It revokes descendant capability
+    /// tokens synchronously *before* `Op::Kill`, wired at the composition root
+    /// (`startup.rs:1427-1432`) to `AuthorityProvider::revoke`. The default is
+    /// an inert closure for unit tests; production injects the revoke callback
+    /// here instead of editing this file (forward-compat hook #4 / AC4/AC5).
     #[must_use]
     pub fn with_on_cascade_kill(mut self, hook: Arc<dyn Fn(&AgentId) + Send + Sync>) -> Self {
         self.on_cascade_kill = hook;
@@ -671,8 +679,13 @@ impl NodeTree {
     /// arbitrary await point (the token is derived from the parent's tree in
     /// [`Self::register`], so cancellation cascades — AC10).
     ///
-    /// The `on_cascade_kill` hook fires for each killed node — Story 14.2
-    /// wires `AuthorityProvider::revoke` here (AC4).
+    /// The `on_cascade_kill` hook fires for each killed node and revokes that
+    /// node's capability token synchronously *before* `Op::Kill` is issued —
+    /// wired at `startup.rs:1427-1432` to `AuthorityProvider::revoke` (AC4/AC5).
+    /// Because revoke runs inside the `AuthorityLedger` `Mutex` critical
+    /// section, its write establishes happens-before with every subsequent
+    /// `validate`, so a descendant racing its own revocation cannot observe a
+    /// stale valid token once revoke has returned.
     pub async fn cascade_kill(
         &self,
         agent_id: &AgentId,
@@ -696,7 +709,10 @@ impl NodeTree {
         let mut unresponsive = Vec::new();
 
         for id in &descendants {
-            // Fire the cascade hook (no-op in R1; Story 14.2 wires token revocation)
+            // Fire the cascade hook: revoke this node's capability token
+            // synchronously BEFORE issuing Op::Kill (startup.rs:1427-1432).
+            // The revoke runs inside the AuthorityLedger Mutex critical
+            // section, establishing happens-before with later validates (AC5).
             (self.on_cascade_kill)(id);
 
             let (handle_opt, status_sender_opt) = {

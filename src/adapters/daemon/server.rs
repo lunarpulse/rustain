@@ -1649,10 +1649,11 @@ mod tests {
                 None,
             )
             .await;
-        let outcome = rx.await.unwrap();
+        let resolved = rx.await.unwrap();
         assert!(
-            matches!(outcome, ApprovalOutcome::Reject { .. }),
-            "mutating tool denied unattended, got {outcome:?}"
+            matches!(resolved.outcome, ApprovalOutcome::Reject { .. }),
+            "mutating tool denied unattended, got {:?}",
+            resolved.outcome
         );
         assert_eq!(
             blocked.load(Ordering::SeqCst),
@@ -1672,7 +1673,7 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(rx2.await.unwrap(), ApprovalOutcome::Once),
+            matches!(rx2.await.unwrap().outcome, ApprovalOutcome::Once),
             "Safe tool auto-proceeds unattended"
         );
 
@@ -1770,10 +1771,14 @@ mod tests {
 
         // The original caller receives the Reject.
         let result = tokio::time::timeout(std::time::Duration::from_millis(200), recv).await;
-        assert!(
-            matches!(result, Ok(Ok(ApprovalOutcome::Reject { .. }))),
-            "silent-writer timeout should resolve to Reject, got {result:?}"
-        );
+        match &result {
+            Ok(Ok(resolved)) => assert!(
+                matches!(resolved.outcome, ApprovalOutcome::Reject { .. }),
+                "silent-writer timeout should resolve to Reject, got {:?}",
+                resolved.outcome
+            ),
+            other => panic!("silent-writer timeout should resolve to Reject, got {other:?}"),
+        }
         assert_eq!(
             blocked.load(Ordering::SeqCst),
             0,
@@ -1857,10 +1862,14 @@ mod tests {
 
         // Original caller receives the approval.
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), recv).await;
-        assert!(
-            matches!(outcome, Ok(Ok(ApprovalOutcome::Once))),
-            "round-trip should deliver Once, got {outcome:?}"
-        );
+        match &outcome {
+            Ok(Ok(resolved)) => assert_eq!(
+                resolved.outcome,
+                ApprovalOutcome::Once,
+                "round-trip should deliver Once"
+            ),
+            other => panic!("round-trip should deliver Once, got {other:?}"),
+        }
         assert_eq!(blocked.load(Ordering::SeqCst), 0, "no blocks");
 
         gate.abort();

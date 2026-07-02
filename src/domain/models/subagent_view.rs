@@ -18,14 +18,93 @@ pub struct AgentRowView {
     pub isolated: bool,
 }
 
+/// Wire/checkpoint serialization type — **structurally has no `Self_` variant**.
+///
+/// A forged `"self_"` cannot deserialize into this type (parse-don't-validate).
+/// Inbound conversion `WireOwnershipKind → OwnershipKind` is total and **never
+/// yields `Self_`**. Used by `NodeCheckpoint` for serialization so a checkpoint
+/// cannot carry `Self_` (DD2, Winston — Story 14.6 AC4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum OwnershipKind {
-    Self_,
+pub enum WireOwnershipKind {
     #[default]
     Owned,
     Peer,
+}
+
+/// In-process ownership tier. `Self_` is the privileged root tier.
+///
+/// `Self_` carries a [`SealedSelf`] proof token whose single field is
+/// private to this module — so the variant's *payload* can only be produced
+/// by [`OwnershipKind::self_root()`]. Unlike a bare unit variant (which any
+/// code with `OwnershipKind` in scope could write directly — `enum` variants
+/// always inherit the enum's own `pub` visibility in Rust, there is no way to
+/// mark one variant private), a tuple variant's field keeps its own
+/// visibility, so `OwnershipKind::Self_(SealedSelf(()))` fails to compile
+/// everywhere outside this module: the `()` field of `SealedSelf` is
+/// private, so external code cannot construct a `SealedSelf` to fill the
+/// slot, and cannot pattern-bind one out of nothing either — only match on
+/// `OwnershipKind::Self_(_)`.
+///
+/// `Serialize` / `Deserialize` are deliberately **not derived** so the domain
+/// type never rides a wire boundary that could forge `Self_`.
+///
+/// For serialization across wire/checkpoint boundaries, use [`WireOwnershipKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OwnershipKind {
+    /// Privileged root tier — only constructible via [`Self::self_root()`];
+    /// the payload proves the variant was minted by the sealed ctor.
+    Self_(SealedSelf),
+    #[default]
+    Owned,
+    Peer,
+}
+
+/// Zero-sized proof token that an `OwnershipKind::Self_` was minted by the
+/// sealed root constructor. The single field's visibility defaults to
+/// private-to-this-module, so no code outside `subagent_view` — not even a
+/// sibling module in this same crate — can construct one directly; the only
+/// path is [`OwnershipKind::self_root()`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SealedSelf(());
+
+impl OwnershipKind {
+    /// Sealed root constructor — the **only** path to `Self_`.
+    ///
+    /// `pub(crate)` ensures external crates and wire payloads cannot forge
+    /// the privileged tier; the private `SealedSelf` field additionally
+    /// ensures no other in-crate module can construct the payload by hand
+    /// (only literal `OwnershipKind::Self_` writes elsewhere fail to compile
+    /// since the tuple field is unreachable outside this module). On R2
+    /// durable resume the runtime re-establishes the root in-process and
+    /// rehydrates only `Owned`/`Peer` children.
+    pub(crate) fn self_root() -> Self {
+        Self::Self_(SealedSelf(()))
+    }
+
+    /// Convert to the wire-safe representation.
+    ///
+    /// The root serializes as `Owned` — self-authority is an in-process runtime
+    /// fact, never persisted, never transmitted. A `Self_` arriving from storage
+    /// would itself be the vulnerability (DD2, Murat).
+    pub fn wire(&self) -> WireOwnershipKind {
+        match self {
+            Self::Self_(_) | Self::Owned => WireOwnershipKind::Owned,
+            Self::Peer => WireOwnershipKind::Peer,
+        }
+    }
+}
+
+impl From<WireOwnershipKind> for OwnershipKind {
+    /// Total conversion — **never yields `Self_`**.
+    fn from(w: WireOwnershipKind) -> Self {
+        match w {
+            WireOwnershipKind::Owned => Self::Owned,
+            WireOwnershipKind::Peer => Self::Peer,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +142,7 @@ mod tests {
 
     #[test]
     fn ownership_kind_self_variant_exists() {
-        let self_kind = OwnershipKind::Self_;
+        let self_kind = OwnershipKind::self_root();
         assert_ne!(self_kind, OwnershipKind::Owned);
         assert_ne!(self_kind, OwnershipKind::Peer);
     }

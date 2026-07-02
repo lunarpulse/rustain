@@ -1054,3 +1054,102 @@ fn point_of_use_use_count_denies_after_limit() {
         .expect_err("exhausted-use token must deny at validate");
     assert!(matches!(err, AuthorityError::BudgetExhausted));
 }
+
+// AC5 TOCTOU concurrency probe (Story 14.6): a child racing its own revocation.
+// The hazard is a validate-at-T0 / revoke-at-T1 / dispatch-at-T2 window where a
+// stale Ok survives past the revoke. `validate` and `revoke` share a single
+// `Mutex`, so revoke's critical section establishes happens-before with every
+// subsequent validate: once revoke returns, no later validate may observe the
+// pre-revoke state. This probe hammers the interleaving across many threads and
+// proves the post-revoke ordering holds — it does NOT add any new ledger
+// mutation path (it reuses only `validate` / `revoke_scope`).
+#[test]
+fn revoke_happens_before_subsequent_validates_under_concurrency() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let root = root_token();
+    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let child = ledger
+        .delegate(
+            &root,
+            child_request(
+                "child-a",
+                Budget {
+                    requests: 10,
+                    cost_micros: 100_000,
+                },
+            ),
+        )
+        .expect("valid subset delegates");
+    let scope = AgentId("child-a".into());
+    let want = CapabilityFlag::ReadFs;
+
+    // Baseline: the token validates before revocation.
+    ledger
+        .validate(&child, &want, &scope)
+        .expect("pre-revoke validate succeeds");
+
+    const WORKERS: usize = 8;
+    const ITERS: usize = 4_096;
+    // Barrier 1 releases every worker into the validate storm at the same
+    // instant the main thread begins revoking (guarantees real interleaving).
+    // Barrier 2 releases workers to their definitive post-revoke validate only
+    // after the main thread has observed revoke() return.
+    let b1 = Arc::new(Barrier::new(WORKERS + 1));
+    let b2 = Arc::new(Barrier::new(WORKERS + 1));
+    let interleavings = Arc::new(AtomicUsize::new(0));
+    let post_revoke_ok = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+    for _ in 0..WORKERS {
+        let (ledger, child, scope, b1, b2, interleavings, post_revoke_ok) = (
+            ledger.clone(),
+            child.clone(),
+            scope.clone(),
+            b1.clone(),
+            b2.clone(),
+            interleavings.clone(),
+            post_revoke_ok.clone(),
+        );
+        handles.push(thread::spawn(move || {
+            // Phase 1 — spin validates concurrently with the revoke. Results
+            // are legitimately mixed (Ok before revoke linearizes, Revoked
+            // after); we only need to stress the lock interleaving.
+            b1.wait();
+            for _ in 0..ITERS {
+                let _ = ledger.validate(&child, &want, &scope);
+                interleavings.fetch_add(1, Ordering::Relaxed);
+            }
+            // Phase 2 — the main thread revoked between b1 and b2. By the
+            // barrier synchronization its revoke happens-before each worker's
+            // b2 release, and (independently) the shared Mutex orders this
+            // validate's acquire after revoke's release. So it MUST be Revoked.
+            b2.wait();
+            if ledger.validate(&child, &want, &scope).is_ok() {
+                post_revoke_ok.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    b1.wait(); // release workers + main together
+    ledger.revoke_scope(&scope).expect("scope revoke succeeds");
+    b2.wait(); // release workers to their definitive validate
+
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+
+    assert_eq!(
+        post_revoke_ok.load(Ordering::Relaxed),
+        0,
+        "a validate after revoke's critical section returned Ok — revoke did \
+         not establish happens-before with subsequent validates via the shared \
+         Mutex (AC5 TOCTOU contract broken)"
+    );
+    assert!(
+        interleavings.load(Ordering::Relaxed) > 0,
+        "probe never ran concurrent validates — no interleaving stress",
+    );
+}

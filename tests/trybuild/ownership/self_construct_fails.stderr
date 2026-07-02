@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/trybuild/ownership/self_construct_fails.rs:14:40
+   |
+14 |     let _forged = OwnershipKind::Self_(SealedSelf(()));
+   |                                        ^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/domain/models/subagent_view.rs
+   |
+   | pub struct SealedSelf(());
+   |                       ^^ private field

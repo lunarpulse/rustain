@@ -234,7 +234,7 @@ fn subagent_icon_for(
 
 fn ownership_glyph(kind: OwnershipKind) -> &'static str {
     match kind {
-        OwnershipKind::Self_ => "\u{2605}",
+        OwnershipKind::Self_(_) => "\u{2605}",
         OwnershipKind::Owned => "\u{2666}",
         OwnershipKind::Peer => "\u{25C7}",
     }

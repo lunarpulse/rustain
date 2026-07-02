@@ -52,9 +52,9 @@ async fn deny_no_subagent_tool_enters_awaiting_approval() {
         id.is_none(),
         "deny must return None (no RequestId allocated)"
     );
-    let outcome = rx.await.unwrap();
+    let resolved = rx.await.unwrap();
     assert_eq!(
-        outcome,
+        resolved.outcome,
         ApprovalOutcome::Reject {
             feedback: Some("subagent_auto_approve=deny".into()),
         }
@@ -91,7 +91,7 @@ async fn allow_returns_once_and_no_broadcast() {
         id.is_none(),
         "allow must return None (no RequestId allocated)"
     );
-    assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+    assert_eq!(rx.await.unwrap().outcome, ApprovalOutcome::Once);
     assert!(
         matches!(rx_events.try_recv(), Err(TryRecvError::Empty)),
         "allow must NOT emit Requested broadcast"
@@ -191,9 +191,9 @@ async fn background_agent_deny_no_awaiting_approval() {
         id.is_none(),
         "deny must return None for BackgroundAgent (no RequestId allocated)"
     );
-    let outcome = rx.await.unwrap();
+    let resolved = rx.await.unwrap();
     assert_eq!(
-        outcome,
+        resolved.outcome,
         ApprovalOutcome::Reject {
             feedback: Some("subagent_auto_approve=deny".into()),
         }
@@ -230,7 +230,7 @@ async fn background_agent_allow_returns_once() {
         id.is_none(),
         "allow must return None for BackgroundAgent (no RequestId allocated)"
     );
-    assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+    assert_eq!(rx.await.unwrap().outcome, ApprovalOutcome::Once);
     assert!(
         matches!(rx_events.try_recv(), Err(TryRecvError::Empty)),
         "allow must NOT emit Requested broadcast for BackgroundAgent"

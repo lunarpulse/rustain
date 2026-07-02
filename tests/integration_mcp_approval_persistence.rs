@@ -67,11 +67,11 @@ async fn r4_always_for_mcp_server_persists_to_toml_with_canonical_key() {
         .await;
 
     // The receiver should hear the AlwaysAndSave outcome.
-    let outcome = rx.await.expect("approval channel must deliver");
+    let resolved = rx.await.expect("approval channel must deliver");
     assert!(
-        matches!(outcome, ApprovalOutcome::AlwaysAndSave { .. }),
+        matches!(resolved.outcome, ApprovalOutcome::AlwaysAndSave { .. }),
         "expected AlwaysAndSave outcome, got {:?}",
-        outcome
+        resolved.outcome
     );
 
     // Persistence must have written the canonical scope key into the TOML.
@@ -154,11 +154,11 @@ async fn r4_persisted_approval_auto_approves_future_tools_on_same_server() {
         "expected fast-path (no slow-path id) after persisted Always for server; got {:?}",
         id2
     );
-    let outcome = rx2.await.expect("fast-path channel must deliver");
+    let resolved = rx2.await.expect("fast-path channel must deliver");
     assert!(
-        matches!(outcome, ApprovalOutcome::Once),
+        matches!(resolved.outcome, ApprovalOutcome::Once),
         "fast-path outcome should be Once, got {:?}",
-        outcome
+        resolved.outcome
     );
 }
 

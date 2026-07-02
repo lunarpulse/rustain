@@ -28,6 +28,7 @@ pub mod doc_key;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
 mod focus;
+pub mod invocation_fingerprint;
 pub mod isolation;
 pub mod launch_spec;
 pub mod mcp_server_spec;
@@ -66,6 +67,7 @@ pub mod subagent_error;
 mod subagent_status;
 pub mod subagent_view;
 pub mod tab;
+pub mod taint;
 pub mod task_handle;
 pub mod tool_call;
 pub mod tool_descriptor;
@@ -132,6 +134,8 @@ pub use cron_config::{CronConfig, CronJob};
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
 pub use focus::FocusState;
 #[allow(unused_imports)]
+pub use invocation_fingerprint::{FingerprintError, InvocationFingerprint};
+#[allow(unused_imports)]
 pub use isolation::{IsolationError, IsolationHandle, ProvisioningTier, UnifiedDiff};
 #[allow(unused_imports)]
 pub use message::{
@@ -184,7 +188,7 @@ pub use skill_metadata::SkillMetadata;
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};
-pub use subagent_view::{AgentRowView, OwnershipKind};
+pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};
 pub use tool_policy::ToolPolicy;
 pub use trace_context::TraceContext;
@@ -241,6 +245,8 @@ pub use search_hit::SearchHit;
 pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
 #[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
+#[allow(unused_imports)]
+pub use taint::{ProvenanceTag, TaintDecision};
 #[allow(unused_imports)]
 pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,

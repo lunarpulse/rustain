@@ -94,7 +94,7 @@ pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
     };
 
     let own = ownership_glyph(if row.is_self {
-        OwnershipKind::Self_
+        OwnershipKind::self_root()
     } else {
         OwnershipKind::Owned
     });

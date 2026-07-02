@@ -554,7 +554,7 @@ async fn test_session_allow_bypasses_second_request() {
         )
         .await;
     assert_eq!(
-        rx1.await.unwrap(),
+        rx1.await.unwrap().outcome,
         ApprovalOutcome::AlwaysTool {
             tool_name: "Bash".into()
         }
@@ -577,7 +577,7 @@ async fn test_session_allow_bypasses_second_request() {
     // Fast path: receiver resolves immediately without needing a broadcast event
     let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx2).await;
     assert!(result.is_ok(), "Session-allowed tool must fast-path");
-    assert_eq!(result.unwrap().unwrap(), ApprovalOutcome::Once);
+    assert_eq!(result.unwrap().unwrap().outcome, ApprovalOutcome::Once);
 }
 
 // ── Task 19.6 (rewritten): Session-allow does NOT write to persistence ──
@@ -667,11 +667,11 @@ async fn test_reject_propagates() {
             },
         )
         .await;
-    let outcome = rx.await.unwrap();
+    let resolved = rx.await.unwrap();
     assert!(
-        matches!(outcome, ApprovalOutcome::Reject { feedback: Some(ref s) } if s == "don't delete"),
+        matches!(&resolved.outcome, ApprovalOutcome::Reject { feedback: Some(s) } if s == "don't delete"),
         "Expected Reject with correct text, got {:?}",
-        outcome
+        resolved.outcome
     );
 }
 
@@ -949,8 +949,8 @@ async fn test_approval_runtime_cancel_by_source() {
         )
         .await;
 
-    let outcome = rx.await.unwrap();
-    assert_eq!(outcome, ApprovalOutcome::Cancel);
+    let resolved = rx.await.unwrap();
+    assert_eq!(resolved.outcome, ApprovalOutcome::Cancel);
 }
 
 #[tokio::test]

@@ -35,9 +35,9 @@ pub fn node_state_glyph(state: NodeState) -> &'static str {
 /// Ownership glyph. Peer is reserved (R1 does not render it).
 pub fn ownership_glyph(kind: OwnershipKind) -> &'static str {
     match kind {
-        OwnershipKind::Self_ => "\u{2605}", // ★ Self
-        OwnershipKind::Owned => "\u{2666}", // ♦ Owned
-        OwnershipKind::Peer => "\u{25C7}",  // ◇ Peer (RESERVED — not rendered R1)
+        OwnershipKind::Self_(_) => "\u{2605}", // ★ Self
+        OwnershipKind::Owned => "\u{2666}",    // ♦ Owned
+        OwnershipKind::Peer => "\u{25C7}",     // ◇ Peer (RESERVED — not rendered R1)
     }
 }
 
@@ -79,7 +79,7 @@ mod tests {
             ownership_glyph(OwnershipKind::Peer)
         );
         assert_ne!(
-            ownership_glyph(OwnershipKind::Self_),
+            ownership_glyph(OwnershipKind::self_root()),
             ownership_glyph(OwnershipKind::Owned)
         );
     }

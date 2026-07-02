@@ -239,7 +239,7 @@ impl ToolScheduler {
                     self.emit(&conversation_id, &call);
                 }
 
-                let outcome = tokio::select! {
+                let resolved = tokio::select! {
                     o = rx => match o {
                         Ok(o) => o,
                         Err(_) => {
@@ -256,7 +256,40 @@ impl ToolScheduler {
                     }
                 };
 
-                match outcome {
+                // Story 14.6 AC3: re-match fingerprint before executing.
+                // Guard the confluence (run_one), not the tributaries (Winston).
+                // Mismatch = hard reject, never a silent re-approve.
+                {
+                    use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
+                    let scope = source.scope_agent_id();
+                    match InvocationFingerprint::of(&req.tool_name, &req.input, &scope) {
+                        Ok(local_fp) if local_fp == resolved.fp => { /* match — proceed */ }
+                        Ok(_) => {
+                            return self.terminal(
+                                &conversation_id,
+                                ToolCall::Error {
+                                    id,
+                                    request: req,
+                                    error: "fingerprint mismatch: approval does not match current invocation".into(),
+                                },
+                            );
+                        }
+                        Err(_) => {
+                            return self.terminal(
+                                &conversation_id,
+                                ToolCall::Error {
+                                    id,
+                                    request: req,
+                                    error:
+                                        "input contains non-finite float; cannot verify fingerprint"
+                                            .into(),
+                                },
+                            );
+                        }
+                    }
+                }
+
+                match resolved.outcome {
                     crate::domain::models::ApprovalOutcome::Once
                     | crate::domain::models::ApprovalOutcome::AlwaysTool { .. }
                     | crate::domain::models::ApprovalOutcome::AlwaysServer { .. }

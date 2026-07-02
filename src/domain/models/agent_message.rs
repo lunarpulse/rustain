@@ -108,7 +108,7 @@ pub fn delivery_decision(recipient_status: NodeState) -> DeliveryMode {
 
 pub fn relationship_disposition(ownership: OwnershipKind) -> DeliveryDisposition {
     match ownership {
-        OwnershipKind::Self_ | OwnershipKind::Owned => DeliveryDisposition::MustReport,
+        OwnershipKind::Self_(_) | OwnershipKind::Owned => DeliveryDisposition::MustReport,
         OwnershipKind::Peer => DeliveryDisposition::MayRefuse,
     }
 }
@@ -140,7 +140,7 @@ mod tests {
             DeliveryDisposition::MustReport
         );
         assert_eq!(
-            relationship_disposition(OwnershipKind::Self_),
+            relationship_disposition(OwnershipKind::self_root()),
             DeliveryDisposition::MustReport
         );
         assert_eq!(
