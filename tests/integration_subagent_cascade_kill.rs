@@ -10,7 +10,7 @@ use rustain::domain::models::{
     AgentId, AgentLaunchSpec, NodeState, Op, SandboxPolicy, StreamChunk, ToolPolicy,
 };
 use rustain::domain::ports::{StreamingProvider, SubagentRunner};
-use rustain::infrastructure::subagent::{AgentHandle, CascadeKillError, NodeTree};
+use rustain::infrastructure::subagent::{AgentHandle, CascadeKillError, MailboxBudget, NodeTree};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -149,6 +149,7 @@ async fn cascade_kill_three_level_subtree() {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
         };
         reg.register(agent.clone(), parent, handle).await.unwrap();
 
@@ -205,6 +206,7 @@ async fn cascade_kill_timeout_returns_partial() {
         spawned_at: 0,
         status: status_tx,
         metrics: metrics_rx,
+        mailbox_budget: MailboxBudget::new(),
     };
     reg.register(a.clone(), root.clone(), handle).await.unwrap();
 

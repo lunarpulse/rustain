@@ -67,30 +67,58 @@ pub enum DeliveryMode {
 pub struct AgentDelivery {
     pub envelope: Envelope<AgentMessage>,
     pub mode: DeliveryMode,
+    /// Story 14-4a (AC3) — consent disposition stamped by the bus at delivery
+    /// time. The recipient's `Op::Deliver` dispatch enforces it: `MayRefuse`
+    /// may consent-refuse; `MustReport` must process.
+    pub disposition: DeliveryDisposition,
 }
 
 impl AgentDelivery {
-    pub(crate) fn new(envelope: Envelope<AgentMessage>, mode: DeliveryMode) -> Self {
-        Self { envelope, mode }
+    pub(crate) fn new(
+        envelope: Envelope<AgentMessage>,
+        mode: DeliveryMode,
+        disposition: DeliveryDisposition,
+    ) -> Self {
+        Self {
+            envelope,
+            mode,
+            disposition,
+        }
     }
 }
 
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefuseReason {
+    /// Admission-synchronous only: the recipient's mailbox budget is full.
+    /// Receipts never carry this reason because capacity failures never pass
+    /// admission (they return `DeliveryError::Full` synchronously).
     Capacity,
+    /// The recipient has entered a terminal state (Completed/Failed/Cancelled).
     TerminalState,
+    /// Consent-refusal: the recipient's delivery policy refused the message
+    /// (e.g., a Peer with a RefuseAll disposition).
     Policy,
 }
 
+/// Story 14-4a (AC4) — honest outcome enum. `Accepted` is the sole variant:
+/// "slot reserved + Op handed off; settlement is turn-injection or a receipt."
+/// `Delivered` and `Queued` were lies the bus could not truthfully assert.
+/// Synchronous failures remain `Err(DeliveryError::…)`; asynchronous facts
+/// are receipts (`MessageRefused`).
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeliveryOutcome {
-    Delivered,
-    Queued,
-    Refused { reason: RefuseReason },
+    Accepted,
 }
 
+/// Consent disposition stamped by the bus at delivery time.
+///
+/// - `MustReport`: the recipient must process (Owned nodes). The *reporting
+///   obligation* check (did the recipient actually report?) is explicitly
+///   **deferred to Epic 17.2** (requires the durable journal). The stamp
+///   exists in R1; the obligation enforcement does not.
+/// - `MayRefuse`: the recipient may consent-refuse (Peer nodes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeliveryDisposition {
     MustReport,

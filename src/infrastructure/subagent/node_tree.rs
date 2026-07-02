@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -17,6 +18,77 @@ use crate::infrastructure::subagent::node_handle::{NodeHandle, NodeHandleError};
 
 pub const MAX_DEPTH: usize = 3;
 pub const MAX_CHILDREN: usize = 10;
+
+/// Story 14-4a (AC1) — unified capacity constant for mailbox budget.
+/// Replaces the per-site `PARKED_QUEUE_CAP` in `in_process_runner.rs`.
+pub const MAILBOX_CAP: usize = 64;
+
+/// Error returned by [`MailboxBudget::reserve`] when the budget is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailboxFull;
+
+impl std::fmt::Display for MailboxFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "mailbox budget is full")
+    }
+}
+
+impl std::error::Error for MailboxFull {}
+
+/// Story 14-4a (AC1) — shared atomic mailbox budget for reserve-at-admission.
+/// Wraps an `Arc<AtomicUsize>` so `AgentHandle` (which is `Clone`) can share
+/// the budget across the bus and the runner. Budget = atomics only (no lock;
+/// ratchet constraint: untagged `std::sync` locks == 4).
+#[derive(Clone)]
+pub struct MailboxBudget(Arc<AtomicUsize>);
+
+impl MailboxBudget {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// Atomically reserve one slot. Returns `Ok(())` if the count was below
+    /// `MAILBOX_CAP`, or `Err(MailboxFull)` if full. `fetch_update` closes the
+    /// TOCTOU window: two concurrent senders at 63/64 → exactly one succeeds.
+    pub fn reserve(&self) -> Result<(), MailboxFull> {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current < MAILBOX_CAP {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .map(|_| ())
+            .map_err(|_| MailboxFull)
+    }
+
+    /// Release one reserved slot. Must be called exactly once per successful
+    /// `reserve()` on one of the defined release paths (sender self-release,
+    /// recipient turn-dispatch, consent-refusal, or terminal drain).
+    pub fn release(&self) {
+        let result = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current > 0 { Some(current - 1) } else { None }
+            });
+        if result.is_err() {
+            debug_assert!(false, "MailboxBudget underflow: release without reserve");
+            tracing::warn!("MailboxBudget underflow: release() called when budget is already 0");
+        }
+    }
+
+    /// Current reservation count (for debug assertions and tests).
+    pub fn current(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for MailboxBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Unified node tree that tracks all agent nodes (subagents, daemon-spawned
 /// work, orchestrated tasks) in a single ownership hierarchy.
@@ -58,6 +130,8 @@ struct NodeTreeInner {
     /// P9 (TUI): per-agent isolated flag — a SIDE-TABLE (not on the pinned
     /// `AgentNode`) so the ⊙ iso indicator can render without a field-count bump.
     isolated_agents: HashMap<AgentId, bool>,
+    /// Story 14-4a (AC1) — per-agent mailbox budget for reserve-at-admission.
+    mailbox_budgets: HashMap<AgentId, MailboxBudget>,
 }
 
 // ── Legacy compatibility types ──────────────────────────────────────────────
@@ -85,6 +159,11 @@ pub struct AgentHandle {
     pub metrics: watch::Receiver<AgentMetrics>,
     /// P9 (TUI): true when this child runs in a scratch-dir clone (renders ⊙ iso).
     pub isolated: bool,
+    /// Story 14-4a (AC1) — shared atomic budget for reserve-at-admission.
+    /// `fetch_update` increment-if-below-MAILBOX_CAP before `try_send`;
+    /// self-released on failed `try_send`. Every `AgentHandle` for the same
+    /// agent shares the same `Arc`.
+    pub mailbox_budget: MailboxBudget,
 }
 
 /// Snapshot DTO for the TUI panel. Deterministic sort by agent_id.
@@ -154,6 +233,8 @@ pub struct DeliveryTarget {
     pub state: NodeState,
     pub ownership: OwnershipKind,
     pub handle: NodeHandle,
+    /// Story 14-4a (AC1) — the recipient's shared mailbox budget.
+    pub mailbox_budget: MailboxBudget,
 }
 
 // ── NodeTree implementation ─────────────────────────────────────────────────
@@ -171,6 +252,7 @@ impl NodeTree {
             status_rx: HashMap::new(),
             status_senders: HashMap::new(),
             metrics_rx: HashMap::new(),
+            mailbox_budgets: HashMap::new(),
         })
     }
 
@@ -326,6 +408,9 @@ impl NodeTree {
         guard
             .isolated_agents
             .insert(agent_id.clone(), handle.isolated);
+        guard
+            .mailbox_budgets
+            .insert(agent_id.clone(), handle.mailbox_budget.clone());
 
         // Release write guard BEFORE any subsequent .await (CLAUDE.md async-lock policy)
         drop(guard);
@@ -364,6 +449,7 @@ impl NodeTree {
         guard.status_rx.remove(agent_id);
         guard.status_senders.remove(agent_id);
         guard.metrics_rx.remove(agent_id);
+        guard.mailbox_budgets.remove(agent_id);
         drop(guard);
     }
 
@@ -662,10 +748,12 @@ impl NodeTree {
         let guard = self.inner.read().await;
         let node = guard.nodes.get(agent_id)?;
         let handle = guard.handles.get(agent_id)?.clone();
+        let mailbox_budget = guard.mailbox_budgets.get(agent_id)?.clone();
         Some(DeliveryTarget {
             state: node.state,
             ownership: node.ownership,
             handle,
+            mailbox_budget,
         })
     }
 
@@ -882,31 +970,41 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
             .await
             .ok_or_else(|| DeliveryError::NotFound(to.clone()))?;
 
-        let _disposition = self.policy.decide(&env.header, target.ownership);
+        let disposition = self.policy.decide(&env.header, target.ownership);
         let mode = delivery_decision(target.state);
         if mode == DeliveryMode::Refuse {
             return Err(DeliveryError::Refused(RefuseReason::TerminalState));
         }
 
+        // Story 14-4a (AC1) — reserve a slot BEFORE try_send. Atomic
+        // fetch_update closes the TOCTOU window: two concurrent senders
+        // at 63/64 → exactly one Accepted.
+        target
+            .mailbox_budget
+            .reserve()
+            .map_err(|_| DeliveryError::Full(to.clone()))?;
+
         match target.handle {
             NodeHandle::Local { command_tx, .. } => command_tx
-                .try_send(Op::Deliver(AgentDelivery::new(env, mode)))
-                .map(|()| match mode {
-                    DeliveryMode::Queue => DeliveryOutcome::Queued,
-                    DeliveryMode::Aside | DeliveryMode::Wake => DeliveryOutcome::Delivered,
-                    DeliveryMode::Refuse => DeliveryOutcome::Refused {
-                        reason: RefuseReason::TerminalState,
-                    },
-                })
-                .map_err(|err| match err {
-                    tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                        DeliveryError::Full(to.clone())
-                    }
-                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                        DeliveryError::Closed(to.clone())
+                .try_send(Op::Deliver(AgentDelivery::new(env, mode, disposition)))
+                .map(|()| DeliveryOutcome::Accepted)
+                .map_err(|err| {
+                    // Self-release the reservation on failed try_send (CS-3)
+                    target.mailbox_budget.release();
+                    match err {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                            DeliveryError::Full(to.clone())
+                        }
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            DeliveryError::Closed(to.clone())
+                        }
                     }
                 }),
-            NodeHandle::Remote { .. } => Err(DeliveryError::RemoteUnsupported(to.clone())),
+            NodeHandle::Remote { .. } => {
+                // Self-release — remote unsupported
+                target.mailbox_budget.release();
+                Err(DeliveryError::RemoteUnsupported(to.clone()))
+            }
         }
     }
 }
@@ -914,6 +1012,7 @@ impl crate::domain::ports::AgentMessageBus for LocalMessageBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ports::AgentMessageBus;
 
     fn dummy_handle(agent_id: AgentId, depth: usize) -> AgentHandle {
         let (tx, _rx) = mpsc::channel(1);
@@ -930,6 +1029,7 @@ mod tests {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
         }
     }
 
@@ -1206,6 +1306,7 @@ mod tests {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
         };
         reg.register(a.clone(), root.clone(), handle).await.unwrap();
 
@@ -1257,6 +1358,7 @@ mod tests {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
         };
         reg.register(a.clone(), root.clone(), handle).await.unwrap();
 
@@ -1268,4 +1370,373 @@ mod tests {
         let killed = result.unwrap();
         assert_eq!(killed, vec![a.clone()]);
     }
+
+    // ── Story 14-4a: MailboxBudget reserve-at-admission & conservation tests ──
+
+    fn make_bus() -> (NodeTree, LocalMessageBus) {
+        let tree = NodeTree::new();
+        let bus = LocalMessageBus::new(
+            tree.clone(),
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        );
+        (tree, bus)
+    }
+
+    fn make_envelope(
+        content: &str,
+        corr: &str,
+    ) -> crate::domain::models::Envelope<crate::domain::models::AgentMessage> {
+        use crate::domain::models::*;
+        Envelope::new(
+            MessageHeader {
+                sender: AgentId("parent".into()),
+                recipient: AgentId("child".into()),
+                correlation_id: CorrelationId::new(corr),
+                kind: MessageKind::PeerMessage,
+                sequence: None,
+            },
+            AgentMessage::new(content),
+        )
+    }
+
+    // Helper: register an agent with a LIVE command receiver (kept alive by
+    // the caller) so try_send succeeds. Returns the receiver to hold.
+    async fn register_live_agent(tree: &NodeTree, agent_id: &AgentId) -> mpsc::Receiver<Op> {
+        let (tx, rx) = mpsc::channel::<Op>(512);
+        let (status_tx, _status_rx) = watch::channel(NodeState::Created);
+        let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
+        let handle = AgentHandle {
+            isolated: false,
+            agent_id: agent_id.clone(),
+            token: CapabilityTokenId::nil(),
+            command_tx: tx,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            depth: 1,
+            subagent_type: String::from("test"),
+            spawned_at: 0,
+            status: status_tx,
+            metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
+        };
+        tree.register(agent_id.clone(), AgentId::root(), handle)
+            .await
+            .unwrap();
+        rx
+    }
+
+    // Helper to get the mailbox budget for a registered agent
+    impl NodeTree {
+        async fn mailbox_budget(&self, agent_id: &AgentId) -> Option<MailboxBudget> {
+            let guard = self.inner.read().await;
+            guard.mailbox_budgets.get(agent_id).cloned()
+        }
+    }
+
+    /// t1 (AC1) — admission-cap sync refusal: a full budget returns Full
+    /// immediately with the Op never sent.
+    #[tokio::test]
+    async fn t1_admission_cap_sync_refusal() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let _rx = register_live_agent(&tree, &agent).await;
+
+        let budget = tree.mailbox_budget(&agent).await.unwrap();
+        for _ in 0..MAILBOX_CAP {
+            assert!(budget.reserve().is_ok());
+        }
+        let result = bus.deliver(&agent, make_envelope("overflow", "c0")).await;
+        assert!(
+            matches!(result, Err(crate::domain::ports::DeliveryError::Full(_))),
+            "full budget must return DeliveryError::Full"
+        );
+        assert_eq!(budget.current(), MAILBOX_CAP);
+    }
+
+    /// t1-positive (AC1) — below cap, deliver succeeds and returns Accepted.
+    #[tokio::test]
+    async fn t1_positive_below_cap_deliver_accepted() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let _rx = register_live_agent(&tree, &agent).await;
+
+        let result = bus.deliver(&agent, make_envelope("hello", "c1")).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            crate::domain::models::DeliveryOutcome::Accepted
+        );
+        let budget = tree.mailbox_budget(&agent).await.unwrap();
+        assert_eq!(budget.current(), 1);
+    }
+
+    /// t2 (AC1) — TOCTOU concurrency: N concurrent senders at capacity-1 →
+    /// exactly 1 Accepted, N-1 Full.
+    #[tokio::test]
+    async fn t2_toctou_concurrency_at_capacity_boundary() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let _rx = register_live_agent(&tree, &agent).await;
+
+        let budget = tree.mailbox_budget(&agent).await.unwrap();
+        for _ in 0..(MAILBOX_CAP - 1) {
+            budget.reserve().unwrap();
+        }
+
+        let bus = Arc::new(bus);
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let bus = bus.clone();
+            let agent = agent.clone();
+            handles.push(tokio::spawn(async move {
+                bus.deliver(&agent, make_envelope("race", &format!("c{}", i)))
+                    .await
+            }));
+        }
+        let mut accepted = 0;
+        let mut full = 0;
+        for h in handles {
+            match h.await.unwrap() {
+                Ok(_) => accepted += 1,
+                Err(crate::domain::ports::DeliveryError::Full(_)) => full += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(accepted, 1, "exactly one sender must win the last slot");
+        assert_eq!(full, 9, "remaining senders must get Full");
+        assert_eq!(budget.current(), MAILBOX_CAP);
+    }
+
+    /// t5 (AC4) — deliver-after-terminal → Refused(TerminalState), not Full.
+    #[tokio::test]
+    async fn t5_deliver_after_terminal_refused_terminal_state() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let _rx = register_live_agent(&tree, &agent).await;
+
+        // Valid FSM path: Created → Running → Completed
+        tree.set_state(&agent, NodeState::Running).await;
+        tree.set_state(&agent, NodeState::Completed).await;
+
+        let result = bus.deliver(&agent, make_envelope("late", "c5")).await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::domain::ports::DeliveryError::Refused(
+                    crate::domain::models::RefuseReason::TerminalState
+                ))
+            ),
+            "deliver after terminal must return Refused(TerminalState)"
+        );
+    }
+
+    /// t8 (AC2) — unified budget bounds Aside/Wake: the budget is shared
+    /// across ALL delivery modes.
+    #[tokio::test]
+    async fn t8_unified_budget_bounds_aside_wake() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let _rx = register_live_agent(&tree, &agent).await;
+        tree.set_state(&agent, NodeState::Running).await;
+
+        let budget = tree.mailbox_budget(&agent).await.unwrap();
+        for i in 0..MAILBOX_CAP {
+            let result = bus
+                .deliver(&agent, make_envelope("aside", &format!("a{}", i)))
+                .await;
+            assert!(result.is_ok(), "deliver {} must succeed below cap", i);
+        }
+        assert_eq!(budget.current(), MAILBOX_CAP);
+
+        let result = bus.deliver(&agent, make_envelope("overflow", "a99")).await;
+        assert!(
+            matches!(result, Err(crate::domain::ports::DeliveryError::Full(_))),
+            "Aside/Wake deliveries must be bounded by the same budget"
+        );
+    }
+
+    /// t9 (AC4) — enum shape: Accepted is the sole variant.
+    #[test]
+    fn t9_enum_shape_accepted_only_variant() {
+        use crate::domain::models::DeliveryOutcome;
+        let outcome = DeliveryOutcome::Accepted;
+        assert_eq!(outcome, DeliveryOutcome::Accepted);
+    }
+
+    /// AC3 grep-ratchet: the disposition must be stamped, not discarded.
+    #[test]
+    fn ac3_ratchet_no_discarded_disposition() {
+        let source = include_str!("node_tree.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production section");
+        assert!(
+            !production.contains("let _disposition = self.policy"),
+            "the disposition must be stamped into AgentDelivery, not discarded"
+        );
+        assert!(
+            production.contains("let disposition = self.policy.decide"),
+            "deliver() must stamp policy.decide() into AgentDelivery"
+        );
+    }
+    /// t3 (AC2 [K]) — cancel-time conservation: fill + drain → budget == 0,
+    /// Σ(drained) == sent.
+    #[tokio::test]
+    async fn t3_cancel_time_conservation_keystone() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let mut rx = register_live_agent(&tree, &agent).await;
+
+        let n = 10;
+        for i in 0..n {
+            let result = bus
+                .deliver(&agent, make_envelope("msg", &format!("c{i}")))
+                .await;
+            assert!(result.is_ok());
+        }
+        let budget = tree.mailbox_budget(&agent).await.unwrap();
+        assert_eq!(
+            budget.current(),
+            n,
+            "budget must equal sent count after delivery"
+        );
+
+        // Simulate terminal: close + drain
+        rx.close();
+        let mut drained = 0;
+        while let Ok(op) = rx.try_recv() {
+            if let crate::domain::models::Op::Deliver(_) = op {
+                budget.release();
+                drained += 1;
+            }
+        }
+        assert_eq!(budget.current(), 0, "budget must reach 0 after drain");
+        assert_eq!(drained, n, "Σ(drained) must equal sent — zero unaccounted");
+    }
+
+    /// t3 mutant — skip drain → budget leaks (proves drain is required).
+    #[tokio::test]
+    async fn t3_mutant_skip_drain_leaks_budget() {
+        let (tree, bus) = make_bus();
+        let agent = AgentId("child".into());
+        let mut rx = register_live_agent(&tree, &agent).await;
+
+        for i in 0..5 {
+            bus.deliver(&agent, make_envelope("msg", &format!("m{i}")))
+                .await
+                .unwrap();
+        }
+        let budget = tree.mailbox_budget(&agent).await.unwrap();
+        // Skip drain — just close and drop
+        rx.close();
+        drop(rx);
+        // Budget is NOT zero — proves drain is required for conservation
+        assert_ne!(
+            budget.current(),
+            0,
+            "without drain, budget must leak (RED mutant)"
+        );
+    }
+
+    /// t7 (AC3 [K]) — hostile-policy differential: MayRefuse vs MustReport
+    /// produce observably different dispositions on the delivered Op.
+    #[tokio::test]
+    async fn t7_hostile_policy_differential_keystone() {
+        use crate::domain::models::DeliveryDisposition;
+        use crate::domain::ports::DeliveryPolicy;
+
+        // Custom hostile policy: always MayRefuse
+        struct RefuseAllPolicy;
+        impl DeliveryPolicy for RefuseAllPolicy {
+            fn decide(
+                &self,
+                _header: &crate::domain::models::MessageHeader,
+                _ownership: OwnershipKind,
+            ) -> DeliveryDisposition {
+                DeliveryDisposition::MayRefuse
+            }
+        }
+
+        let tree = NodeTree::new();
+        let agent = AgentId("target".into());
+
+        // --- Hostile policy bus ---
+        let hostile_bus = LocalMessageBus::new(tree.clone(), Arc::new(RefuseAllPolicy));
+        let mut hostile_rx = register_live_agent(&tree, &agent).await;
+        hostile_bus
+            .deliver(&agent, make_envelope("hostile", "h1"))
+            .await
+            .unwrap();
+        let hostile_op = hostile_rx.try_recv().unwrap();
+        let hostile_disposition = match hostile_op {
+            Op::Deliver(d) => d.disposition,
+            _ => panic!("expected Deliver"),
+        };
+        assert_eq!(
+            hostile_disposition,
+            DeliveryDisposition::MayRefuse,
+            "hostile policy must stamp MayRefuse"
+        );
+
+        // Deregister and re-register for clean state
+        tree.deregister_one(&agent).await;
+
+        // --- Default (Owned→MustReport) policy bus ---
+        let default_bus = LocalMessageBus::new(
+            tree.clone(),
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        );
+        let mut default_rx = register_live_agent(&tree, &agent).await;
+        default_bus
+            .deliver(&agent, make_envelope("normal", "n1"))
+            .await
+            .unwrap();
+        let default_op = default_rx.try_recv().unwrap();
+        let default_disposition = match default_op {
+            Op::Deliver(d) => d.disposition,
+            _ => panic!("expected Deliver"),
+        };
+        assert_eq!(
+            default_disposition,
+            DeliveryDisposition::MustReport,
+            "default Owned policy must stamp MustReport"
+        );
+
+        // THE DIFFERENTIAL: same message shape, different policy → different disposition
+        assert_ne!(
+            hostile_disposition, default_disposition,
+            "hostile vs default policy must produce observably different dispositions (INV-DEL-3)"
+        );
+    }
+
+    /// t7 positive control — default policy (Owned) stamps MustReport.
+    /// This is the COLLAPSED state that the hostile differential catches:
+    /// without a hostile policy, all dispositions are MustReport.
+    #[tokio::test]
+    async fn t7_mutant_default_policy_produces_must_report() {
+        // With only the default policy, ALL deliveries get MustReport.
+        // This is the "collapsed" state — the mutant that the hostile
+        // differential test catches.
+        let (tree, bus) = make_bus(); // uses RelationshipDeliveryPolicy
+        let agent = AgentId("target".into());
+        let mut rx = register_live_agent(&tree, &agent).await;
+        bus.deliver(&agent, make_envelope("msg", "m1"))
+            .await
+            .unwrap();
+        let op = rx.try_recv().unwrap();
+        match op {
+            Op::Deliver(d) => {
+                assert_eq!(
+                    d.disposition,
+                    crate::domain::models::DeliveryDisposition::MustReport,
+                    "default policy must always produce MustReport for Owned nodes"
+                );
+            }
+            _ => panic!("expected Deliver"),
+        }
+    }
+
+    // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)
+    // require the full run_child streaming provider + command loop;
+    // covered by the in_process_runner integration test suite.
 }

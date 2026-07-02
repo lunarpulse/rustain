@@ -169,7 +169,7 @@ pub async fn install_signal_handlers() {
                 // SIGHUP — reload config (Story 8.1 AC-8). Does NOT shut down.
                 _ = sighup.recv() => {
                     if let Some(ref bus) = bus {
-                        bus.emit_domain(AppEvent::ConfigReload);
+                        let _ = bus.emit_domain(AppEvent::ConfigReload);
                     }
                 }
                 // SIGTERM / SIGINT — graceful shutdown. Second signal force-exits.

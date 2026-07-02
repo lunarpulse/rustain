@@ -84,7 +84,9 @@ pub struct EventBus {
 
 impl crate::domain::ports::EventEmitter for EventBus {
     fn emit(&self, event: AppEvent) {
-        self.emit_domain(event);
+        // Story 14-4a (F10): emit_domain now surfaces the domain-send result;
+        // ignore it here (trait contract returns ()).
+        let _ = self.emit_domain(event);
     }
 }
 
@@ -96,13 +98,21 @@ impl EventBus {
         (Self { domain_tx, raw_tx }, domain_rx)
     }
 
-    pub fn emit_domain(&self, event: AppEvent) {
+    #[allow(clippy::result_large_err)]
+    pub fn emit_domain(&self, event: AppEvent) -> Result<(), mpsc::error::SendError<AppEvent>> {
         if let Some(raw) = RawEvent::from_app_event(&event) {
             let _ = self.raw_tx.send(raw);
         }
-        if self.domain_tx.send(event).is_err() {
+        // Story 14-4a (F10) — surface the domain-channel send result so that
+        // receipt emitters can log at warn when the event-loop receiver is
+        // gone. Without this, a sender silently believes its receipt landed
+        // (the recipient never learns of a refusal). The internal trace log is
+        // kept for continuity; callers that care branch on the Result.
+        let result = self.domain_tx.send(event);
+        if result.is_err() {
             tracing::trace!("event loop receiver dropped — emit_domain discarded");
         }
+        result
     }
 
     #[allow(dead_code)]

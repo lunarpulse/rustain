@@ -203,7 +203,7 @@ impl ForkJoinExecutor {
 
     /// Emit a wave lifecycle event (the 14.3a seam — purely additive variants).
     fn emit(&self, event: AppEvent) {
-        self.event_bus.emit_domain(event);
+        let _ = self.event_bus.emit_domain(event);
     }
 
     /// Validate a fork-join request at the boundary (AC2 single-level, AC4 cap,

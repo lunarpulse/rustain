@@ -18,10 +18,14 @@ fn ac2_run_child_production_has_no_try_recv_consumption() {
         .split("#[cfg(test)]")
         .next()
         .expect("production section exists");
+    // Story 14-4a: try_recv is allowed ONLY inside drain_mailbox (the
+    // terminal drain after close()). The inbound spine must use recv().
+    let drain_section = production.split("command_rx.close()").nth(1).unwrap_or("");
+    let non_drain = &production[..production.len() - drain_section.len()];
     assert_eq!(
-        production.matches("try_recv(").count(),
+        non_drain.matches("try_recv(").count(),
         0,
-        "run_child production path must use the select-able inbound spine, not try_recv polling"
+        "run_child inbound spine must use the select-able recv(), not try_recv polling"
     );
     assert!(
         production.contains("maybe_op = command_rx.recv()"),

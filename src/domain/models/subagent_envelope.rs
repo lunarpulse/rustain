@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::models::{AgentId, CorrelationId, DeliveryOutcome, NodeState};
+use crate::domain::models::{AgentId, CorrelationId, NodeState, RefuseReason};
 
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -8,9 +8,13 @@ pub enum SubagentEvent {
     MessageDelivered {
         correlation_id: CorrelationId,
     },
+    /// Story 14-4a (CS-4) — reshaped to carry `RefuseReason` directly.
+    /// `Capacity` is admission-sync-only (documented; receipts never carry it
+    /// because capacity never passes admission). `Policy` = consent-refusal.
+    /// `TerminalState` = terminal-drain settlement.
     MessageRefused {
         correlation_id: CorrelationId,
-        outcome: DeliveryOutcome,
+        reason: RefuseReason,
     },
     StateChanged {
         state: NodeState,
@@ -54,9 +58,7 @@ mod tests {
         };
         let refused = SubagentEvent::MessageRefused {
             correlation_id: correlation_id.clone(),
-            outcome: DeliveryOutcome::Refused {
-                reason: RefuseReason::Capacity,
-            },
+            reason: RefuseReason::Capacity,
         };
         let state = SubagentEvent::StateChanged {
             state: NodeState::Running,

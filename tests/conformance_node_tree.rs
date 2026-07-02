@@ -681,6 +681,7 @@ async fn nfr69_spawn_latency() {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: rustain::infrastructure::subagent::MailboxBudget::new(),
         };
         tree.register(
             agent_id.clone(),
@@ -750,6 +751,7 @@ async fn nfr69_cancel_latency() {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: rustain::infrastructure::subagent::MailboxBudget::new(),
         };
         tree.register(
             agent_id.clone(),

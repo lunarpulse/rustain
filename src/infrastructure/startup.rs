@@ -889,7 +889,7 @@ pub async fn run() -> Result<()> {
     // (before EventBus exists); emit them now via emit_domain to preserve the
     // EventBus bypass ratchet (MAX_KNOWN_BYPASSES = 48, unchanged).
     for msg in &accumulated_notices {
-        event_bus.emit_domain(AppEvent::SystemNotice {
+        let _ = event_bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
             message: msg.clone(),
@@ -1595,6 +1595,18 @@ pub async fn run() -> Result<()> {
                 .await;
 
             composite.set_subagent_provider(subagent_provider);
+
+            // Story 14-4a (AC5, CS-1) — re-store the agent_message_bus slot with
+            // a LocalMessageBus wired to the REAL subagent_registry tree (not the
+            // phantom Default::default() empty tree composed at AgentCore::compose).
+            // This matches the 11-slot re-store pattern (sandbox, tool_exposure, etc.).
+            agent_core_inner.agent_message_bus.store(Arc::new(Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    (*subagent_registry).clone(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            )
+                as Arc<dyn crate::domain::ports::AgentMessageBus>));
         }
     }
     // PATCH-6 (review): the orchestrator stays an `Option`. A non-composite

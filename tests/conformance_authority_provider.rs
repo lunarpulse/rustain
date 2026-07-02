@@ -392,6 +392,7 @@ async fn register_authorized_child(
         spawned_at: 0,
         status: status_tx,
         metrics: metrics_rx,
+        mailbox_budget: rustain::infrastructure::subagent::MailboxBudget::new(),
     };
     tree.register(child.scope.clone(), AgentId::root(), handle)
         .await

@@ -41,6 +41,7 @@ async fn test_subagent_ownership_events_flow_through_app_event_bus() {
             spawned_at: 0,
             status: status_tx,
             metrics: metrics_rx,
+            mailbox_budget: rustain::infrastructure::subagent::MailboxBudget::new(),
         };
         registry.register(agent, parent, handle).await.unwrap();
     }
