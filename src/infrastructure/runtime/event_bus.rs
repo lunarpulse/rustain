@@ -262,7 +262,7 @@ mod tests {
         let (bus, mut domain_rx) = EventBus::new(16);
         let mut raw_rx = bus.subscribe_raw();
 
-        bus.emit_domain(AppEvent::SystemNotice {
+        let _ = bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Info,
             message: "test".to_string(),
@@ -286,7 +286,7 @@ mod tests {
         let (bus, mut domain_rx) = EventBus::new(16);
         let mut raw_rx = bus.subscribe_raw();
 
-        bus.emit_domain(AppEvent::Tick);
+        let _ = bus.emit_domain(AppEvent::Tick);
 
         let ev = tokio::time::timeout(std::time::Duration::from_millis(50), domain_rx.recv())
             .await
@@ -308,13 +308,13 @@ mod tests {
             level: NoticeLevel::Info,
             message: "a".to_string(),
         };
-        bus.emit_domain(notice);
+        let _ = bus.emit_domain(notice);
         let notice2 = AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Info,
             message: "b".to_string(),
         };
-        bus.emit_domain(notice2);
+        let _ = bus.emit_domain(notice2);
 
         let mut raw_rx = bus.subscribe_raw();
 
@@ -323,7 +323,7 @@ mod tests {
             level: NoticeLevel::Info,
             message: "c".to_string(),
         };
-        bus.emit_domain(notice3);
+        let _ = bus.emit_domain(notice3);
 
         let raw = tokio::time::timeout(std::time::Duration::from_millis(100), raw_rx.recv())
             .await

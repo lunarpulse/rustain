@@ -438,6 +438,89 @@ impl NodeTree {
         Ok(())
     }
 
+    /// Register a live ACP/editor attachment as a non-durable `Self` session root.
+    ///
+    /// This path is deliberately separate from [`Self::register`]: normal subagents
+    /// remain `Owned` children, while an editor-driven ACP session is an interactive
+    /// top-level attachment whose `Self_` ownership is minted server-side through the
+    /// sealed constructor. The node is non-durable by construction; future resumable
+    /// remote/editor sessions must add a wire ownership variant instead of serializing
+    /// `Self_`.
+    pub async fn register_self_session(
+        &self,
+        agent_id: AgentId,
+        mut handle: AgentHandle,
+    ) -> Result<(), SubagentError> {
+        let mut guard = self.inner.write().await;
+
+        if guard.nodes.contains_key(&agent_id) {
+            return Err(SubagentError::Internal(format!(
+                "duplicate agent_id: {:?}",
+                agent_id
+            )));
+        }
+
+        if agent_id == AgentId::root() {
+            return Err(SubagentError::Internal(
+                "agent_id cannot be the root sentinel".into(),
+            ));
+        }
+
+        let (status_tx, status_rx) = watch::channel(NodeState::Created);
+        handle.depth = 1;
+        if handle.spawned_at == 0 {
+            handle.spawned_at = (self.now_fn)();
+        }
+        handle.status = status_tx.clone();
+
+        let node = AgentNode {
+            id: agent_id.clone(),
+            token: handle.token,
+            parent: None,
+            ownership: OwnershipKind::self_root(),
+            state: NodeState::Created,
+            origin: NodeOrigin::Interactive,
+            foreground: true,
+            effective_model: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            subagent_type: handle.subagent_type.clone(),
+            spawned_at: handle.spawned_at,
+            depth: 1,
+        };
+
+        let node_handle = NodeHandle::Local {
+            cancel_token: handle.cancel_token.clone(),
+            command_tx: handle.command_tx.clone(),
+        };
+
+        guard.nodes.insert(agent_id.clone(), node);
+        guard.handles.insert(agent_id.clone(), node_handle);
+        guard.parent_of.insert(agent_id.clone(), AgentId::root());
+        guard.status_rx.insert(agent_id.clone(), status_rx);
+        guard.status_senders.insert(agent_id.clone(), status_tx);
+        guard
+            .metrics_rx
+            .insert(agent_id.clone(), handle.metrics.clone());
+        guard
+            .isolated_agents
+            .insert(agent_id.clone(), handle.isolated);
+        guard
+            .mailbox_budgets
+            .insert(agent_id.clone(), handle.mailbox_budget.clone());
+
+        drop(guard);
+
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub async fn origin_of(&self, agent_id: &AgentId) -> Option<NodeOrigin> {
+        let guard = self.inner.read().await;
+        guard.nodes.get(agent_id).map(|node| node.origin)
+    }
+
     /// Remove a single node from every map. No cascade, no event emission.
     /// Used internally by `cascade_kill` (which walks the subtree in kill
     /// order itself) and as the per-node primitive of [`Self::deregister`].

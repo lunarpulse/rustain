@@ -52,6 +52,10 @@ pub enum ApprovalSource {
         parent_tool_call_id: String,
         subagent_type: String,
     },
+    AcpSession {
+        session_id: String,
+        conversation_id: String,
+    },
     BackgroundAgent {
         conversation_id: String,
         task_id: String,
@@ -65,6 +69,9 @@ impl ApprovalSource {
         match self {
             ApprovalSource::ForegroundTurn { conversation_id } => conversation_id,
             ApprovalSource::ForegroundSubagent {
+                conversation_id, ..
+            } => conversation_id,
+            ApprovalSource::AcpSession {
                 conversation_id, ..
             } => conversation_id,
             ApprovalSource::BackgroundAgent {
@@ -96,6 +103,13 @@ impl ApprovalSource {
             } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
                 conversation_id,
                 parent_tool_call_id,
+            ])),
+            ApprovalSource::AcpSession {
+                conversation_id,
+                session_id,
+            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
+                conversation_id,
+                session_id,
             ])),
             ApprovalSource::BackgroundAgent {
                 conversation_id,

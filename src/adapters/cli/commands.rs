@@ -144,6 +144,8 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Run rustain as an Agent Client Protocol server over stdio (Story 14.7).
+    Acp,
     /// Run a one-shot query and print the assistant's response to stdout (Story 13.1a).
     /// Non-interactive: no TUI launched. Composable with pipes and scripts.
     Ask {

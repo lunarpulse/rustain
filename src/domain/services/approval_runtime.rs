@@ -256,7 +256,7 @@ impl ApprovalRuntime {
                     }
                 }
             }
-            ApprovalSource::ForegroundTurn { .. } => {
+            ApprovalSource::ForegroundTurn { .. } | ApprovalSource::AcpSession { .. } => {
                 // Root user: never short-circuit (AC-10-X-4)
             }
         }

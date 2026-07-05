@@ -520,9 +520,10 @@ fn test_remote_handle_not_used_in_r1() {
 /// graph.
 #[test]
 fn test_import_site_count_pinned() {
-    /// Update this constant ONLY when intentionally adding/removing a
-    /// legitimate `NodeTree` import site in `src/`.
-    const EXPECTED: usize = 9;
+    /// Story 14.7 intentionally adds two `NodeTree` consumers: the ACP stdio
+    /// server registers editor sessions as Self roots, and its conformance test
+    /// guards that contract.
+    const EXPECTED: usize = 11;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

@@ -74,7 +74,7 @@ pub fn render_permission_lines<'a>(
         ApprovalSource::BackgroundAgent { subagent_type, .. } => {
             format!("[background: {}] ", subagent_type)
         }
-        ApprovalSource::ForegroundTurn { .. } => String::new(),
+        ApprovalSource::ForegroundTurn { .. } | ApprovalSource::AcpSession { .. } => String::new(),
     };
 
     let border_style = Style::default()

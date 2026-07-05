@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod agent_activation;
 pub mod agent_registry;
 pub mod approval_persistence_toml;

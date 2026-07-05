@@ -2036,11 +2036,11 @@ mod tests {
                 MessageHeader {
                     sender: AgentId("parent".into()),
                     recipient: agent_id.clone(),
-                    correlation_id: CorrelationId::new(&format!("c{i}")),
+                    correlation_id: CorrelationId::new(format!("c{i}")),
                     kind: MessageKind::PeerMessage,
                     sequence: None,
                 },
-                AgentMessage::new(&format!("msg-{i}")),
+                AgentMessage::new(format!("msg-{i}")),
             );
             let result = bus.deliver(&agent_id, env).await;
             assert!(

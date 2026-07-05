@@ -763,6 +763,19 @@ pub async fn run() -> Result<()> {
         });
     }
 
+    // Story 14.7 — ACP server intercept. MUST run before provider construction
+    // and terminal setup: stdout is the JSON-RPC transport.
+    if let Some(Command::Acp) = cli.command.clone() {
+        let workspace = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+        return crate::adapters::acp::run_acp(app_config, workspace, cli.model.clone())
+            .await
+            .map_err(|e| {
+                tracing::error!("ACP subcommand failed: {e}");
+                SubcommandExit(SubcommandExit::GENERIC).into()
+            });
+    }
+
     // Story 13.1a — Ask subcommand intercept. MUST run before provider
     // construction + terminal setup: `ask` is headless (no TUI). Like the
     // Daemon block, `run_ask` does its own composition via `build_cli_core`.
