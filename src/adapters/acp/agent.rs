@@ -14,7 +14,7 @@ use crate::domain::models::agent_node::AgentMetrics;
 use crate::domain::models::session_meta::now_unix;
 use crate::domain::models::{
     AgentId, AppConfig, CapabilityTokenId, ChatMessage, CompletionOptions, MessageRole, NodeState,
-    Op, SkillActivationSet, StopReason as DomainStopReason, StreamChunk,
+    Op, SkillActivationSet, SkillSource, StopReason as DomainStopReason, StreamChunk,
 };
 use crate::domain::ports::{
     PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
@@ -23,16 +23,17 @@ use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::message_builder;
 use crate::domain::services::model_router::{ModelResolutionRequest, resolve_effective_model};
 use crate::domain::services::tool_scheduler::ToolScheduler;
-use crate::infrastructure::composition::CliCore;
+use crate::infrastructure::composition::{AcpCore, CliCore};
 use crate::infrastructure::runtime::turn;
 use crate::infrastructure::subagent::node_tree::{AgentHandle, MailboxBudget, NodeTree};
 
 use super::translate::{
-    approval_request_to_acp, permission_response_to_outcome, stop_reason_to_acp,
-    stream_chunk_to_session_update,
+    approval_request_to_acp, permission_response_to_outcome, skill_trust_request_to_acp,
+    skill_trust_response_allows, stop_reason_to_acp, stream_chunk_to_session_update,
 };
 
 pub type CoreFactory = Rc<dyn Fn(&Path) -> acp::Result<CliCore>>;
+pub type AcpCoreFactory = Rc<dyn Fn(&Path) -> acp::Result<AcpCore>>;
 
 pub(crate) struct SessionNotify {
     pub notification: acp::SessionNotification,
@@ -52,11 +53,14 @@ pub(crate) struct SessionCore {
     approval: Arc<ApprovalRuntime>,
     storage: Arc<dyn StoragePort>,
     ledger: Arc<dyn UsageLedgerPort>,
+    registry: Arc<crate::adapters::provider::ProviderRegistry>,
+    router: Arc<crate::adapters::provider::ProviderRouter>,
+    skill_activator: Arc<crate::adapters::skill_activation::SkillActivator>,
 }
 
-impl From<CliCore> for SessionCore {
-    fn from(core: CliCore) -> Self {
-        let CliCore {
+impl From<AcpCore> for SessionCore {
+    fn from(core: AcpCore) -> Self {
+        let AcpCore {
             provider,
             security,
             tools,
@@ -64,6 +68,9 @@ impl From<CliCore> for SessionCore {
             approval,
             storage,
             ledger,
+            registry,
+            router,
+            skill_activator,
             ..
         } = core;
         Self {
@@ -74,6 +81,9 @@ impl From<CliCore> for SessionCore {
             approval,
             storage,
             ledger,
+            registry,
+            router,
+            skill_activator,
         }
     }
 }
@@ -83,13 +93,14 @@ pub(crate) struct SessionState {
     pub conversation_id: String,
     pub cancel: CancellationToken,
     pub core: SessionCore,
+    pub selected: Option<(String, String)>,
 }
 
 pub(crate) type SharedSessions = Rc<RefCell<HashMap<String, SessionState>>>;
 
 pub(crate) struct RustainAcpAgent {
     app_config: AppConfig,
-    core_factory: CoreFactory,
+    core_factory: AcpCoreFactory,
     model_override: Option<String>,
     session_updates: mpsc::UnboundedSender<SessionNotify>,
     permission_requests: mpsc::UnboundedSender<PermissionAsk>,
@@ -101,7 +112,7 @@ pub(crate) struct RustainAcpAgent {
 impl RustainAcpAgent {
     pub(crate) fn new(
         app_config: AppConfig,
-        core_factory: CoreFactory,
+        core_factory: AcpCoreFactory,
         model_override: Option<String>,
         session_updates: mpsc::UnboundedSender<SessionNotify>,
         permission_requests: mpsc::UnboundedSender<PermissionAsk>,
@@ -168,6 +179,105 @@ impl RustainAcpAgent {
         out
     }
 
+    fn initial_model_selection(
+        provider: &Arc<dyn StreamingProvider>,
+        model_override: Option<&str>,
+    ) -> Option<(String, String)> {
+        let models = provider.list_models();
+        if models.is_empty() {
+            return None;
+        }
+
+        if let Some(override_model) = model_override {
+            if let Some(model) = models.iter().find(|model| model.model_id == override_model) {
+                return Some((model.provider_id.clone(), model.model_id.clone()));
+            }
+            return Some((provider.provider_id(), override_model.to_string()));
+        }
+
+        models
+            .first()
+            .map(|model| (model.provider_id.clone(), model.model_id.clone()))
+    }
+
+    fn model_config_options(
+        provider: &Arc<dyn StreamingProvider>,
+        selected: Option<(&str, &str)>,
+    ) -> Option<Vec<acp::SessionConfigOption>> {
+        let models = provider.list_models();
+        if models.is_empty() {
+            return None;
+        }
+
+        let mut options: Vec<acp::SessionConfigSelectOption> = models
+            .iter()
+            .map(|model| {
+                acp::SessionConfigSelectOption::new(
+                    format!("{}:{}", model.provider_id, model.model_id),
+                    model.display_name.clone(),
+                )
+            })
+            .collect();
+
+        let current_value = selected
+            .map(|(provider_id, model_id)| format!("{provider_id}:{model_id}"))
+            .unwrap_or_else(|| {
+                let model = models.first().expect("models is non-empty");
+                format!("{}:{}", model.provider_id, model.model_id)
+            });
+
+        if !options
+            .iter()
+            .any(|option| option.value.0.as_ref() == current_value)
+        {
+            options.push(acp::SessionConfigSelectOption::new(
+                current_value.clone(),
+                current_value.clone(),
+            ));
+        }
+
+        Some(vec![
+            acp::SessionConfigOption::select("model", "Model", current_value, options)
+                .category(acp::SessionConfigOptionCategory::Model),
+        ])
+    }
+
+    async fn available_skill_commands(
+        skill_activator: &crate::adapters::skill_activation::SkillActivator,
+    ) -> Vec<acp::AvailableCommand> {
+        let mut commands = Vec::new();
+        for name in skill_activator.discovered_skill_names().await {
+            if let Some(def) = skill_activator.lookup_skill(&name).await {
+                commands.push(acp::AvailableCommand::new(def.name, def.description).input(
+                    acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
+                        "Arguments for this skill",
+                    )),
+                ));
+            }
+        }
+        commands
+    }
+
+    fn parse_skill_prompt(prompt: &str) -> Option<(&str, &str)> {
+        let trimmed = prompt.trim_start();
+        let without_slash = trimmed.strip_prefix('/')?;
+        let mut split = without_slash.splitn(2, char::is_whitespace);
+        let name = split.next()?.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let args = split.next().unwrap_or("").trim();
+        if name == "skill" {
+            let mut args_split = args.splitn(2, char::is_whitespace);
+            let skill_name = args_split.next()?.trim();
+            if skill_name.is_empty() {
+                return None;
+            }
+            return Some((skill_name, args_split.next().unwrap_or("").trim()));
+        }
+        Some((name, args))
+    }
+
     fn dummy_handle(agent_id: AgentId, cancel: CancellationToken) -> AgentHandle {
         let (command_tx, _command_rx) = mpsc::channel(1);
         let (status_tx, _status_rx) = watch::channel(crate::domain::models::NodeState::Created);
@@ -190,7 +300,7 @@ impl RustainAcpAgent {
     async fn run_prompt(
         &self,
         session_id: acp::SessionId,
-        prompt: String,
+        mut prompt: String,
     ) -> acp::Result<acp::StopReason> {
         let session_key = session_id.0.to_string();
         if !self.sessions.borrow().contains_key(&session_key) {
@@ -212,6 +322,8 @@ impl RustainAcpAgent {
             approval,
             storage,
             ledger,
+            selected_model,
+            skill_activator,
         ) = {
             let sessions = self.sessions.borrow();
             let state = sessions
@@ -228,8 +340,56 @@ impl RustainAcpAgent {
                 state.core.approval.clone(),
                 state.core.storage.clone(),
                 state.core.ledger.clone(),
+                state.selected.clone().map(|(_, model_id)| model_id),
+                state.core.skill_activator.clone(),
             )
         };
+
+        if let Some((skill_name, skill_args)) = Self::parse_skill_prompt(&prompt) {
+            if let Some(def) = skill_activator.lookup_skill(skill_name).await {
+                let needs_trust = def.source != SkillSource::GlobalAgents
+                    && !skill_activator
+                        .is_trusted(&conversation_id, &def.file)
+                        .await;
+                let trusted = if needs_trust {
+                    let request = skill_trust_request_to_acp(
+                        session_id.clone(),
+                        &def.name,
+                        &format!("{:?}", def.source),
+                        &def.file,
+                    );
+                    match tokio::time::timeout(
+                        Duration::from_secs(30),
+                        self.request_permission(request),
+                    )
+                    .await
+                    {
+                        Ok(Ok(response)) => {
+                            if skill_trust_response_allows(response) {
+                                skill_activator
+                                    .mark_trusted(&conversation_id, def.file.clone())
+                                    .await;
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    }
+                } else {
+                    true
+                };
+                if trusted {
+                    if let Ok(active) = skill_activator
+                        .activate(&def, skill_args.to_string(), &conversation_id, 0)
+                        .await
+                    {
+                        security.add_active_skill_dir(active.directory.clone());
+                        prompt = format!("ARGUMENTS: {}", skill_args.trim());
+                    }
+                }
+            }
+        }
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AppEvent>();
         let now = now_unix();
@@ -238,7 +398,7 @@ impl RustainAcpAgent {
             _ => {
                 // First turn (or storage error) — start a fresh conversation.
                 crate::domain::models::Conversation {
-                    id: conversation_id,
+                    id: conversation_id.clone(),
                     title: String::new(),
                     messages: vec![],
                     turns: vec![],
@@ -272,14 +432,17 @@ impl RustainAcpAgent {
         let persona = crate::adapters::persona_adapter::PersonaAdapter::new(project_context);
         let persona_prompt = PersonaPort::system_prompt(&persona, &cwd);
         let empty_set = SkillActivationSet::new();
-        let system_prompt = crate::domain::services::skill_context::assemble_system_prompt(
-            &persona_prompt,
-            &empty_set,
-            &cwd,
-        );
+        let activation_set = skill_activator.snapshot_for_turn(&conversation_id).await;
+        let system_prompt =
+            crate::domain::services::skill_context::assemble_system_prompt_with_agent(
+                &persona_prompt,
+                None,
+                activation_set.as_ref().unwrap_or(&empty_set),
+                &cwd,
+            );
         let resolved = resolve_effective_model(
             &ModelResolutionRequest {
-                explicit_override: self.model_override.clone(),
+                explicit_override: selected_model.or_else(|| self.model_override.clone()),
                 tier_hint: None,
                 step_kind: None,
                 retry_count: 0,
@@ -308,7 +471,7 @@ impl RustainAcpAgent {
             conversation.id.clone(),
             storage,
             conversation,
-            None,
+            activation_set,
             turn_cancel.clone(),
             ledger,
             resolved,
@@ -475,6 +638,25 @@ impl acp::Agent for RustainAcpAgent {
                 return Err(e);
             }
         };
+        let selected =
+            Self::initial_model_selection(&core.provider, self.model_override.as_deref());
+        if let Some((provider_id, _)) = selected.as_ref() {
+            if core
+                .registry
+                .list_providers()
+                .iter()
+                .any(|p| p.provider_id == *provider_id)
+            {
+                let _ = core.router.set_active(provider_id);
+            }
+        }
+        let config_options = Self::model_config_options(
+            &core.provider,
+            selected
+                .as_ref()
+                .map(|(provider_id, model_id)| (provider_id.as_str(), model_id.as_str())),
+        );
+        let skill_activator = core.skill_activator.clone();
         self.sessions.borrow_mut().insert(
             session_id.clone(),
             SessionState {
@@ -482,15 +664,73 @@ impl acp::Agent for RustainAcpAgent {
                 conversation_id,
                 cancel,
                 core,
+                selected,
             },
         );
-        Ok(acp::NewSessionResponse::new(session_id))
+        let mut response = acp::NewSessionResponse::new(session_id.clone());
+        if let Some(config_options) = config_options {
+            response = response.config_options(config_options);
+        }
+        let commands = Self::available_skill_commands(&skill_activator).await;
+        if !commands.is_empty() {
+            self.send_session_update(
+                session_id.into(),
+                acp::SessionUpdate::AvailableCommandsUpdate(acp::AvailableCommandsUpdate::new(
+                    commands,
+                )),
+            )
+            .await?;
+        }
+        Ok(response)
     }
 
     async fn prompt(&self, args: acp::PromptRequest) -> Result<acp::PromptResponse, acp::Error> {
         let text = Self::prompt_text(&args.prompt);
         let stop_reason = self.run_prompt(args.session_id, text).await?;
         Ok(acp::PromptResponse::new(stop_reason))
+    }
+
+    async fn set_session_config_option(
+        &self,
+        args: acp::SetSessionConfigOptionRequest,
+    ) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
+        if args.config_id.0.as_ref() != "model" {
+            return Err(acp::Error::invalid_params());
+        }
+
+        let requested = args.value.0.as_ref();
+        let Some((provider_id, model_id)) = requested.split_once(':') else {
+            return Err(acp::Error::invalid_params());
+        };
+        if provider_id.is_empty() || model_id.is_empty() {
+            return Err(acp::Error::invalid_params());
+        }
+
+        let mut sessions = self.sessions.borrow_mut();
+        let state = sessions
+            .get_mut(args.session_id.0.as_ref())
+            .ok_or_else(acp::Error::invalid_params)?;
+
+        if state
+            .core
+            .registry
+            .get_model(provider_id, model_id)
+            .is_none()
+        {
+            return Err(acp::Error::invalid_params());
+        }
+        state
+            .core
+            .router
+            .set_active(provider_id)
+            .map_err(|_| acp::Error::invalid_params())?;
+
+        state.selected = Some((provider_id.to_string(), model_id.to_string()));
+        let config_options =
+            Self::model_config_options(&state.core.provider, Some((provider_id, model_id)))
+                .ok_or_else(acp::Error::invalid_params)?;
+
+        Ok(acp::SetSessionConfigOptionResponse::new(config_options))
     }
 
     async fn cancel(&self, args: acp::CancelNotification) -> Result<(), acp::Error> {

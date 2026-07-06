@@ -10,21 +10,33 @@ use futures::{AsyncRead, AsyncWrite, future::LocalBoxFuture};
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
+use crate::adapters::cli::commands::AcpClientProfile;
 use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::models::{AgentId, AppConfig, NodeState};
 use crate::infrastructure::subagent::node_tree::NodeTree;
 
-use super::agent::{CoreFactory, PermissionAsk, RustainAcpAgent, SessionNotify, SharedSessions};
+use super::agent::{
+    AcpCoreFactory, CoreFactory, PermissionAsk, RustainAcpAgent, SessionNotify, SharedSessions,
+};
 
 /// Run rustain as an ACP agent over process stdio.
 pub async fn run_acp(
     app_config: AppConfig,
     workspace: PathBuf,
     model_override: Option<String>,
+    client_profile: AcpClientProfile,
 ) -> Result<()> {
     let outgoing = tokio::io::stdout().compat_write();
     let incoming = tokio::io::stdin().compat();
-    serve_acp_with_io(outgoing, incoming, app_config, workspace, model_override).await
+    serve_acp_with_io(
+        outgoing,
+        incoming,
+        app_config,
+        workspace,
+        model_override,
+        client_profile,
+    )
+    .await
 }
 
 /// Serve ACP over caller-provided byte streams with production composition.
@@ -38,21 +50,23 @@ pub async fn serve_acp_with_io<W, R>(
     app_config: AppConfig,
     workspace: PathBuf,
     model_override: Option<String>,
+    client_profile: AcpClientProfile,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + 'static,
     R: AsyncRead + Unpin + 'static,
 {
+    tracing::debug!(target: "acp", ?client_profile, "ACP client profile selected; R1 profiles are behavior-identical");
     let factory_config = app_config.clone();
-    let core_factory: CoreFactory = Rc::new(move |cwd| {
-        crate::infrastructure::composition::build_cli_core(&factory_config, cwd, false).map_err(
+    let core_factory: AcpCoreFactory = Rc::new(move |cwd| {
+        crate::infrastructure::composition::build_acp_core(&factory_config, cwd, false).map_err(
             |e| {
-                tracing::error!("ACP build_cli_core failed: {e:#}");
+                tracing::error!("ACP build_acp_core failed: {e:#}");
                 acp::Error::internal_error()
             },
         )
     });
-    serve_acp_with_core_factory(
+    serve_acp_with_acp_core_factory(
         outgoing,
         incoming,
         app_config,
@@ -68,6 +82,35 @@ where
 /// This is the deterministic harness seam: tests can provide a `CliCore` backed
 /// by a scripted provider while still driving real ACP JSON-RPC dispatch and the
 /// real `turn::run_turn` call inside `RustainAcpAgent::prompt`.
+pub async fn serve_acp_with_acp_core_factory<W, R>(
+    outgoing: W,
+    incoming: R,
+    app_config: AppConfig,
+    _workspace: PathBuf,
+    model_override: Option<String>,
+    core_factory: AcpCoreFactory,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin + 'static,
+    R: AsyncRead + Unpin + 'static,
+{
+    let clock = Arc::new(SystemClock::default());
+    let now_fn = {
+        let clock = clock.clone();
+        Arc::new(move || clock.wall_now_ms())
+    };
+    let node_tree = NodeTree::with_now_fn(now_fn);
+    serve_acp_with_acp_core_factory_and_node_tree(
+        outgoing,
+        incoming,
+        app_config,
+        model_override,
+        core_factory,
+        node_tree,
+    )
+    .await
+}
+
 pub async fn serve_acp_with_core_factory<W, R>(
     outgoing: W,
     incoming: R,
@@ -86,12 +129,41 @@ where
         Arc::new(move || clock.wall_now_ms())
     };
     let node_tree = NodeTree::with_now_fn(now_fn);
-    serve_acp_with_core_factory_and_node_tree(
+    let acp_factory: AcpCoreFactory = Rc::new(move |cwd| {
+        core_factory(cwd).map(crate::infrastructure::composition::AcpCore::from)
+    });
+    serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
         app_config,
         model_override,
-        core_factory,
+        acp_factory,
+        node_tree,
+    )
+    .await
+}
+
+pub async fn serve_acp_with_core_factory_and_node_tree<W, R>(
+    outgoing: W,
+    incoming: R,
+    app_config: AppConfig,
+    model_override: Option<String>,
+    core_factory: CoreFactory,
+    node_tree: NodeTree,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin + 'static,
+    R: AsyncRead + Unpin + 'static,
+{
+    let acp_factory: AcpCoreFactory = Rc::new(move |cwd| {
+        core_factory(cwd).map(crate::infrastructure::composition::AcpCore::from)
+    });
+    serve_acp_with_acp_core_factory_and_node_tree(
+        outgoing,
+        incoming,
+        app_config,
+        model_override,
+        acp_factory,
         node_tree,
     )
     .await
@@ -101,12 +173,12 @@ where
 ///
 /// This keeps production stdio unchanged while allowing integration tests to
 /// assert that `session/new` materializes a Self node and EOF teardown removes it.
-pub async fn serve_acp_with_core_factory_and_node_tree<W, R>(
+pub async fn serve_acp_with_acp_core_factory_and_node_tree<W, R>(
     outgoing: W,
     incoming: R,
     app_config: AppConfig,
     model_override: Option<String>,
-    core_factory: CoreFactory,
+    core_factory: AcpCoreFactory,
     node_tree: NodeTree,
 ) -> Result<()>
 where

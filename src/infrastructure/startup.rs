@@ -765,10 +765,10 @@ pub async fn run() -> Result<()> {
 
     // Story 14.7 — ACP server intercept. MUST run before provider construction
     // and terminal setup: stdout is the JSON-RPC transport.
-    if let Some(Command::Acp) = cli.command.clone() {
+    if let Some(Command::Acp { client }) = cli.command.clone() {
         let workspace = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
-        return crate::adapters::acp::run_acp(app_config, workspace, cli.model.clone())
+        return crate::adapters::acp::run_acp(app_config, workspace, cli.model.clone(), client)
             .await
             .map_err(|e| {
                 tracing::error!("ACP subcommand failed: {e}");

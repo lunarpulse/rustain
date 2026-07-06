@@ -6,6 +6,8 @@ use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
 pub const PERMISSION_ALLOW_ONCE: &str = "allow_once";
 pub const PERMISSION_ALLOW_ALWAYS_TOOL: &str = "allow_always_tool";
 pub const PERMISSION_REJECT_ONCE: &str = "reject_once";
+pub const SKILL_TRUST_ALLOW: &str = "skill_trust_allow";
+pub const SKILL_TRUST_REJECT: &str = "skill_trust_reject";
 
 pub fn stop_reason_to_acp(reason: &StopReason) -> acp::StopReason {
     match reason {
@@ -94,6 +96,49 @@ pub fn approval_request_to_acp(
             ),
         ],
     ))
+}
+
+pub fn skill_trust_request_to_acp(
+    session_id: acp::SessionId,
+    skill_name: &str,
+    skill_source: &str,
+    skill_file: &std::path::Path,
+) -> acp::RequestPermissionRequest {
+    let update = acp::ToolCallUpdate::new(
+        format!("skill-trust:{skill_name}"),
+        acp::ToolCallUpdateFields::new()
+            .title(format!("Trust skill {skill_name}?"))
+            .raw_input(serde_json::json!({
+                "skill": skill_name,
+                "source": skill_source,
+                "path": skill_file.display().to_string(),
+            })),
+    );
+    acp::RequestPermissionRequest::new(
+        session_id,
+        update,
+        vec![
+            acp::PermissionOption::new(
+                SKILL_TRUST_ALLOW,
+                "Allow skill",
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            acp::PermissionOption::new(
+                SKILL_TRUST_REJECT,
+                "Reject skill",
+                acp::PermissionOptionKind::RejectOnce,
+            ),
+        ],
+    )
+}
+
+pub fn skill_trust_response_allows(response: acp::RequestPermissionResponse) -> bool {
+    match response.outcome {
+        acp::RequestPermissionOutcome::Selected(selected) => {
+            selected.option_id.0.as_ref() == SKILL_TRUST_ALLOW
+        }
+        _ => false,
+    }
 }
 
 pub fn permission_response_to_outcome(

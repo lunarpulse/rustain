@@ -101,7 +101,7 @@ fn cargo_manifest_pins_agent_client_protocol_exactly_0_10_4() {
 fn acp_subcommand_parses_to_dedicated_variant() {
     let cli = Cli::parse_from(["rustain", "acp"]);
     assert!(
-        matches!(cli.command, Some(Command::Acp)),
+        matches!(cli.command, Some(Command::Acp { .. })),
         "`rustain acp` must parse to Some(Command::Acp); got {:?}",
         cli.command
     );

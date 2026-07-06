@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::adapters::cli::session::SessionAction;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Rustain — terminal-native AI coding agent.
 #[derive(Parser, Debug)]
@@ -145,7 +145,12 @@ pub enum Command {
         action: DaemonAction,
     },
     /// Run rustain as an Agent Client Protocol server over stdio (Story 14.7).
-    Acp,
+    Acp {
+        /// Client compatibility profile. R1 profiles are behavior-identical; `auto` inspects initialize.clientInfo for future decoration hooks.
+        #[arg(long, value_enum, default_value_t = AcpClientProfile::Auto)]
+        client: AcpClientProfile,
+    },
+
     /// Run a one-shot query and print the assistant's response to stdout (Story 13.1a).
     /// Non-interactive: no TUI launched. Composable with pipes and scripts.
     Ask {
@@ -206,6 +211,13 @@ pub enum Command {
         #[command(subcommand)]
         action: SessionAction,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AcpClientProfile {
+    Auto,
+    Standard,
+    Zed,
 }
 
 /// Auth subcommand actions (Story 13.4a login; 13.4b status; 13.4c adds list).
