@@ -35,6 +35,16 @@ use super::translate::{
 pub type CoreFactory = Rc<dyn Fn(&Path) -> acp::Result<CliCore>>;
 pub type AcpCoreFactory = Rc<dyn Fn(&Path) -> acp::Result<AcpCore>>;
 
+/// Delay before emitting the post-`session/new` `available_commands_update`.
+///
+/// Zed's async session layer needs a beat after the `NewSessionResponse` to
+/// finish registering the session before it will accept the advertisement into
+/// its command list; emitting it immediately makes Zed drop the update and
+/// report "Available commands: none". Mirrors codex's proven 200 ms
+/// spawned-task deferral. Exposed so tests can pin the deferral against an
+/// immediate fire-and-forget regression (Story 14-8b).
+pub const SKILL_ADVERTISEMENT_DELAY: Duration = Duration::from_millis(200);
+
 pub(crate) struct SessionNotify {
     pub notification: acp::SessionNotification,
     pub ack: oneshot::Sender<acp::Result<()>>,
@@ -673,13 +683,33 @@ impl acp::Agent for RustainAcpAgent {
         }
         let commands = Self::available_skill_commands(&skill_activator).await;
         if !commands.is_empty() {
-            self.send_session_update(
-                session_id.into(),
+            // Story 14-8b host-smoke (2026-07-06): wire order alone is
+            // NECESSARY but NOT SUFFICIENT for real async editors. Zed
+            // receives `available_commands_update` but reports "Available
+            // commands: none" when it lands immediately after the response —
+            // Zed's session layer has not finished registering the session,
+            // so it drops the update. codex (proven in Zed) defers via a
+            // spawned task + 200 ms delay (thread.rs:2826-2833); mirror that
+            // exactly. This REVERSES DD-1 (immediate fire-and-forget) on
+            // evidence: the in-process harness modeled a synchronous client;
+            // Zed is async and needs a beat to register the session before it
+            // will accept the update into its command list. The task is
+            // bounded + fire-and-forget: a closed connection makes the send
+            // error harmlessly; the LocalSet drops it on EOF (no teardown
+            // race — there is no ack to await and the send is best-effort).
+            let tx = self.session_updates.clone();
+            let sid: acp::SessionId = session_id.into();
+            let notification = acp::SessionNotification::new(
+                sid,
                 acp::SessionUpdate::AvailableCommandsUpdate(acp::AvailableCommandsUpdate::new(
                     commands,
                 )),
-            )
-            .await?;
+            );
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(SKILL_ADVERTISEMENT_DELAY).await;
+                let (ack, _rx) = oneshot::channel();
+                let _ = tx.send(SessionNotify { notification, ack });
+            });
         }
         Ok(response)
     }

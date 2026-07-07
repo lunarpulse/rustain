@@ -791,9 +791,28 @@ impl rustain::domain::ports::StreamingProvider for SystemPromptCapturingProvider
     }
 }
 
-/// Drive `initialize → session/new` and return the session/new result plus
-/// every `session/update` notification seen before it. Lets callers assert on
-/// `available_commands_update` (a notification) without racing the result.
+/// Post-fence drain bound: comfortably exceeds the advertisement delay so a
+/// legitimately-deferred advertisement is still collected, while bounding the
+/// no-skills absence case to the fence. Under the caller's paused test clock
+/// this duration is virtual and costs no wall-clock time.
+const ADVERTISEMENT_DRAIN_BOUND: Duration = Duration::from_millis(600);
+
+/// Drive `initialize → session/new` followed by a DD-3 fence request, and
+/// return the `session/new` result plus every `available_commands_update`
+/// notification observed. Lets callers assert on the advertisement without
+/// racing the result.
+///
+/// Termination (DD-3): the follow-up `session/set_config_option` (id:3) is the
+/// fence — its response (success OR error) proves `session/new` processing ran
+/// to completion. Because the advertisement is DEFERRED past the response (and
+/// past the fence) by Story 14.8b, the loop keeps draining after the fence for
+/// one advertisement-delay window; under the caller's paused test clock that
+/// drain is virtual, so the no-skills absence branch terminates at the fence
+/// instead of idling on a real wall-clock timeout. The presence branch breaks
+/// the instant the target advertisement is collected.
+///
+/// Fail-loud: malformed JSON and an id:2 error response abort here rather than
+/// being swallowed as `Null` or stalling to a timeout.
 async fn drive_handshake_collect_notifications(
     acp_factory: AcpCoreFactory,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
@@ -826,27 +845,60 @@ async fn drive_handshake_collect_notifications(
             .write_all(line(session_new.to_string()).as_bytes())
             .await
             .expect("write session/new");
+        // DD-3 fence: a follow-up request whose response (success OR error)
+        // proves session/new processing completed. Bounds the no-skills absence
+        // case deterministically rather than a 10s idle drain.
+        let fence = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/set_config_option",
+            "params": { "sessionId": "acp-1", "configId": "model", "value": "x:y" }
+        });
+        client_write
+            .write_all(line(fence.to_string()).as_bytes())
+            .await
+            .expect("write fence");
         client_write.flush().await.expect("flush");
 
         let reader = tokio::io::BufReader::new(&mut client_read);
         let mut lines = reader.lines();
         let mut result = serde_json::Value::Null;
         let mut notifications = Vec::new();
+        let mut fence_seen = false;
         loop {
-            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
-            match next {
-                Ok(Ok(Some(raw))) => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if v["id"] == serde_json::json!(2) {
-                            result = v["result"].clone();
-                            break;
-                        }
-                        if v["method"] == serde_json::json!("session/update") {
-                            notifications.push(v);
-                        }
-                    }
+            // After the fence, the only thing left to wait for is the deferred
+            // advertisement; bound that wait by the advertisement delay so
+            // absence terminates at the fence. Under the paused test clock this
+            // bound is virtual (no wall-clock cost).
+            let line_bound = if fence_seen {
+                ADVERTISEMENT_DRAIN_BOUND
+            } else {
+                Duration::from_secs(10)
+            };
+            let next = tokio::time::timeout(line_bound, lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(raw))) => raw,
+                _ => break, // EOF, or post-fence drain found no advertisement (absence)
+            };
+            // Fail loud on malformed frames rather than swallowing as Null.
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).expect("malformed JSON-RPC frame from server");
+            if v["id"] == serde_json::json!(2) {
+                assert!(
+                    v.get("result").is_some(),
+                    "session/new (id:2) returned an error response: {v}"
+                );
+                result = v["result"].clone();
+            } else if v["id"] == serde_json::json!(3) {
+                // DD-3 fence response (success OR error). Do NOT break: the
+                // advertisement is deferred past the fence, so keep draining.
+                fence_seen = true;
+            } else if v["method"] == serde_json::json!("session/update") {
+                if v["params"]["update"]["sessionUpdate"]
+                    == serde_json::json!("available_commands_update")
+                {
+                    notifications.push(v);
+                    break; // presence: collected the target advertisement
                 }
-                _ => break,
+                // Unrelated post-response session/update: ignore, keep draining.
             }
         }
         (result, notifications)
@@ -874,7 +926,12 @@ async fn drive_handshake_collect_notifications(
 /// notification at all, so the with-skills case reddens the "≥1 advertisement"
 /// assertion. A mutant that always sends an empty update reddens the
 /// without-skills absence assertion.
-#[tokio::test(flavor = "current_thread")]
+///
+/// Determinism: the absence branch is bounded by the DD-3 fence (see
+/// `drive_handshake_collect_notifications`), not a 10s idle drain. The test
+/// runs on a paused clock so the deferred advertisement and the post-fence
+/// drain cost no wall-clock time — the no-skills case terminates at the fence.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn available_commands_update_advertised_only_when_skills_present() {
     // ── With skills: an available_commands_update carrying a skill command. ──
     let ws = tempfile::tempdir().expect("workspace tempdir");
@@ -921,6 +978,322 @@ async fn available_commands_update_advertised_only_when_skills_present() {
         !sent_empty_update,
         "session/new must NOT send an available_commands_update when there are no enabled skills; \
          got notifications = {notifications2:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 4a — `available_commands_update` WIRE ORDER (Story 14.8b AC-1)
+// ─────────────────────────────────────────────────────────────────────
+
+/// One-line summary of a raw JSON-RPC frame, for readable assertion failures.
+fn frame_summary(v: &serde_json::Value) -> String {
+    if let Some(id) = v.get("id") {
+        let kind = if v.get("result").is_some() {
+            "result"
+        } else {
+            "error"
+        };
+        return format!("id:{id} ({kind})");
+    }
+    if let Some(method) = v.get("method").and_then(serde_json::Value::as_str) {
+        let update = &v["params"]["update"]["sessionUpdate"];
+        if update.is_string() {
+            return format!("{method} [{update}]");
+        }
+        return method.to_string();
+    }
+    format!("{}", v)
+}
+
+/// The `session/new` response frame MUST appear on the wire BEFORE the
+/// `available_commands_update` notification (Story 14.8b root-cause fix).
+///
+/// Zed only registers a session once it receives the `NewSessionResponse`
+/// carrying the `sessionId`; an `available_commands_update` for a session Zed
+/// does not yet know is DROPPED, leaving the slash-command palette empty
+/// ("Available commands: none"). The pre-fix code emitted the notification
+/// from INSIDE `new_session` (with an awaited ack), forcing it into the SDK's
+/// single FIFO `outgoing_tx` BEFORE the response — so this assertion is RED on
+/// the pre-fix code and GREEN only once the emit is deferred past the response.
+///
+/// Non-vacuity (DD-2): this test PINS the SDK ordering invariant — the request
+/// handler enqueues the response synchronously, with no intervening `.await`,
+/// the instant the handler future resolves (`rpc.rs:285-290`). A future SDK
+/// bump that inserts an await there reddens this test BY DESIGN: it is the
+/// canary, replacing codex's untested 200 ms sleep with a tested guarantee.
+///
+/// Determinism (DD-3): the read is bounded by a fence — a follow-up
+/// `session/set_config_option(id:3)` request whose response (present whether
+/// the switch succeeds or errors) proves session processing ran to
+/// completion. No wall-clock sleep, no flaky idle-drain; a per-line safety
+/// timeout (matching the rest of the suite) bounds a stuck transport. Per
+/// DD-7 the assertion constrains ordering only relative to the `session/new`
+/// *response* — interleaving with later frames is legal and unchecked.
+#[tokio::test(flavor = "current_thread")]
+async fn available_commands_update_arrives_after_session_new_response() {
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+    let skills = vec![fixture_skill("zed-order-skill")];
+    let models = vec![model("zed-alpha", "Zed Alpha")];
+    let factory: AcpCoreFactory = Rc::new(move |_cwd| {
+        Ok(make_acp_core_with_skills(
+            &ws_path,
+            models.clone(),
+            skills.clone(),
+        ))
+    });
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
+
+    let server = serve_acp_with_acp_core_factory_and_node_tree(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        rustain::domain::models::AppConfig::default(),
+        None,
+        factory,
+        node_tree,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": ws.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        // DD-3 fence: a follow-up request whose response marks that session
+        // processing completed. `set_config_option` emits NO notification, so
+        // its id:3 response is a deterministic read bound — not a guess.
+        let set_opt = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/set_config_option",
+            "params": { "sessionId": "acp-1", "configId": "model", "value": "catalog:zed-alpha" }
+        });
+        client_write
+            .write_all(line(set_opt.to_string()).as_bytes())
+            .await
+            .expect("write set_config_option");
+        client_write.flush().await.expect("flush");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        // Record every frame in arrival order until we hold the three markers
+        // the assertion keys off (id:2 response, id:3 fence, the update), or
+        // the transport stalls. Indices are arrival order on the wire.
+        let mut frames: Vec<(usize, serde_json::Value)> = Vec::new();
+        let mut have_id2 = false;
+        let mut have_id3 = false;
+        let mut have_update = false;
+        for idx in 0..32usize {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(raw))) => raw,
+                _ => break,
+            };
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).expect("malformed JSON-RPC frame from server");
+            if v["id"] == serde_json::json!(2) {
+                assert!(
+                    v.get("result").is_some(),
+                    "session/new (id:2) returned an error response: {v}"
+                );
+                have_id2 = true;
+            }
+            if v["id"] == serde_json::json!(3) {
+                have_id3 = true;
+            }
+            if v["method"] == serde_json::json!("session/update")
+                && v["params"]["update"]["sessionUpdate"]
+                    == serde_json::json!("available_commands_update")
+            {
+                have_update = true;
+            }
+            frames.push((idx, v));
+            if have_id2 && have_id3 && have_update {
+                break;
+            }
+        }
+        frames
+    };
+
+    let frames = tokio::select! {
+        f = drive => f,
+        server_res = server => {
+            panic!("ACP server exited before ordering read completed: {server_res:?}");
+        }
+    };
+
+    let traced: Vec<String> = frames
+        .iter()
+        .map(|(i, v)| format!("[{i}] {}", frame_summary(v)))
+        .collect();
+
+    let id2_idx = frames
+        .iter()
+        .find(|(_, v)| v["id"] == serde_json::json!(2))
+        .map(|(i, _)| *i)
+        .unwrap_or_else(|| {
+            panic!(
+                "never saw session/new (id:2) response;\nframes:\n{}",
+                traced.join("\n")
+            )
+        });
+    let id3_idx = frames
+        .iter()
+        .find(|(_, v)| v["id"] == serde_json::json!(3))
+        .map(|(i, _)| *i);
+    assert!(
+        id3_idx.is_some(),
+        "fence response (id:3) never arrived — session processing did not complete;\nframes:\n{}",
+        traced.join("\n")
+    );
+    let update_idx = frames
+        .iter()
+        .find(|(_, v)| {
+            v["method"] == serde_json::json!("session/update")
+                && v["params"]["update"]["sessionUpdate"]
+                    == serde_json::json!("available_commands_update")
+        })
+        .map(|(i, _)| *i)
+        .unwrap_or_else(|| {
+            panic!(
+                "never saw available_commands_update for session acp-1;\nframes:\n{}",
+                traced.join("\n")
+            )
+        });
+
+    assert!(
+        id2_idx < update_idx,
+        "AC-1 WIRE-ORDER VIOLATION: the session/new (id:2) response MUST appear on the wire \
+         BEFORE the available_commands_update notification (Zed drops updates for sessions it \
+         does not yet know). got id:2 at [{id2_idx}], update at [{update_idx}];\nframes:\n{}",
+        traced.join("\n")
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 4b — `available_commands_update` DEFERRAL (Story 14.8b host-smoke)
+// ─────────────────────────────────────────────────────────────────────
+
+/// The `available_commands_update` notification is DEFERRED by the codex-style
+/// delay after the `session/new` response — the host-smoke-proven behavior the
+/// real (async) Zed client needs.
+///
+/// Wire order alone (Section 4a) is NECESSARY but NOT SUFFICIENT: Zed still
+/// reports "Available commands: none" when the update lands immediately after
+/// the response, because its session layer has not finished registering the
+/// session. codex (proven in Zed) defers via a spawned task + delay; this test
+/// pins that the deferral is actually applied.
+///
+/// Non-vacuity: this is the regression canary for "immediate fire-and-forget."
+/// A mutant that drops the `sleep` (sending the update the instant
+/// `new_session` returns) yields a measured gap of ~0 and reddens the
+/// `>= SKILL_ADVERTISEMENT_DELAY` assertion. The delayed implementation
+/// measures exactly the delay.
+///
+/// Determinism: the test runs on a paused clock, so `tokio::time::sleep`
+/// auto-advances virtual time — the gap is measured with `tokio::time::Instant`
+/// (the virtual clock), not wall-clock, and costs no real time. No `sleep`
+/// races, no flake.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn available_commands_update_deferred_after_session_new_response() {
+    use rustain::adapters::acp::agent::SKILL_ADVERTISEMENT_DELAY;
+
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+    let skills = vec![fixture_skill("zed-defer-skill")];
+    let factory: AcpCoreFactory = Rc::new(move |_cwd| {
+        Ok(make_acp_core_with_skills(&ws_path, Vec::new(), skills.clone()))
+    });
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
+
+    let server = serve_acp_with_acp_core_factory_and_node_tree(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        rustain::domain::models::AppConfig::default(),
+        None,
+        factory,
+        node_tree,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": ws.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        client_write.flush().await.expect("flush");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        let mut response_at: Option<tokio::time::Instant> = None;
+        let mut update_at: Option<tokio::time::Instant> = None;
+        for _ in 0..32usize {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(raw))) => raw,
+                _ => break,
+            };
+            let v: serde_json::Value =
+                serde_json::from_str(&raw).expect("malformed JSON-RPC frame from server");
+            if v["id"] == serde_json::json!(2) {
+                assert!(
+                    v.get("result").is_some(),
+                    "session/new (id:2) returned an error response: {v}"
+                );
+                response_at = Some(tokio::time::Instant::now());
+            } else if v["method"] == serde_json::json!("session/update")
+                && v["params"]["update"]["sessionUpdate"]
+                    == serde_json::json!("available_commands_update")
+            {
+                update_at = Some(tokio::time::Instant::now());
+                break;
+            }
+            if response_at.is_some() && update_at.is_some() {
+                break;
+            }
+        }
+        (response_at, update_at)
+    };
+
+    let (response_at, update_at) = tokio::select! {
+        r = drive => r,
+        server_res = server => {
+            panic!("ACP server exited before deferral read completed: {server_res:?}");
+        }
+    };
+
+    let response_at = response_at.expect("never saw session/new (id:2) response");
+    let update_at = update_at
+        .expect("never saw available_commands_update after the session/new response");
+    // `update_at >= response_at` holds (the advertisement lands after the
+    // response on the wire), so `duration_since` cannot underflow.
+    let elapsed = update_at.duration_since(response_at);
+    assert!(
+        elapsed >= SKILL_ADVERTISEMENT_DELAY,
+        "available_commands_update must be DEFERRED by at least {:?} after the session/new \
+         response (host-smoke-proven codex behavior the real async Zed client needs; without \
+         the deferral Zed drops the update and reports 'Available commands: none'). measured \
+         gap = {elapsed:?} — a near-zero gap means the spawn_local sleep was removed \
+         (immediate fire-and-forget regression).",
+        SKILL_ADVERTISEMENT_DELAY,
     );
 }
 
