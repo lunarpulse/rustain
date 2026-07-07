@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,7 +14,8 @@ use crate::domain::models::agent_node::AgentMetrics;
 use crate::domain::models::session_meta::now_unix;
 use crate::domain::models::{
     AgentId, AppConfig, CapabilityTokenId, ChatMessage, CompletionOptions, MessageRole, NodeState,
-    Op, SkillActivationSet, SkillSource, StopReason as DomainStopReason, StreamChunk,
+    Op, SkillActivationSet, SkillSource, StopReason as DomainStopReason, StreamChunk, ToolCallInfo,
+    ToolResultInfo,
 };
 use crate::domain::ports::{
     PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
@@ -28,8 +29,9 @@ use crate::infrastructure::runtime::turn;
 use crate::infrastructure::subagent::node_tree::{AgentHandle, MailboxBudget, NodeTree};
 
 use super::translate::{
-    approval_request_to_acp, permission_response_to_outcome, skill_trust_request_to_acp,
-    skill_trust_response_allows, stop_reason_to_acp, stream_chunk_to_session_update,
+    approval_request_to_acp, message_to_replay_updates, permission_response_to_outcome,
+    skill_trust_request_to_acp, skill_trust_response_allows, stop_reason_to_acp,
+    stream_chunk_to_session_update,
 };
 
 pub type CoreFactory = Rc<dyn Fn(&Path) -> acp::Result<CliCore>>;
@@ -44,6 +46,12 @@ pub type AcpCoreFactory = Rc<dyn Fn(&Path) -> acp::Result<AcpCore>>;
 /// spawned-task deferral. Exposed so tests can pin the deferral against an
 /// immediate fire-and-forget regression (Story 14-8b).
 pub const SKILL_ADVERTISEMENT_DELAY: Duration = Duration::from_millis(200);
+
+/// Fixed page size for `session/list` pagination (codex `SESSION_LIST_PAGE_SIZE`).
+/// An opaque cursor encodes the last-seen `(updated_at, id)` so a client can
+/// resume. Eventual consistency is accepted for R1 (a concurrent write
+/// mid-pagination may repeat/skip a row — no MVCC; the client re-lists).
+const SESSION_LIST_PAGE_SIZE: usize = 25;
 
 pub(crate) struct SessionNotify {
     pub notification: acp::SessionNotification,
@@ -112,10 +120,11 @@ pub(crate) struct RustainAcpAgent {
     app_config: AppConfig,
     core_factory: AcpCoreFactory,
     model_override: Option<String>,
+    default_workspace: PathBuf,
     session_updates: mpsc::UnboundedSender<SessionNotify>,
     permission_requests: mpsc::UnboundedSender<PermissionAsk>,
     sessions: SharedSessions,
-    next_session_id: Cell<u64>,
+    id_source: Rc<dyn Fn() -> String>,
     node_tree: NodeTree,
 }
 
@@ -124,19 +133,22 @@ impl RustainAcpAgent {
         app_config: AppConfig,
         core_factory: AcpCoreFactory,
         model_override: Option<String>,
+        default_workspace: PathBuf,
         session_updates: mpsc::UnboundedSender<SessionNotify>,
         permission_requests: mpsc::UnboundedSender<PermissionAsk>,
         sessions: SharedSessions,
         node_tree: NodeTree,
+        id_source: Rc<dyn Fn() -> String>,
     ) -> Self {
         Self {
             app_config,
             core_factory,
             model_override,
+            default_workspace,
             session_updates,
             permission_requests,
             sessions,
-            next_session_id: Cell::new(1),
+            id_source,
             node_tree,
         }
     }
@@ -304,6 +316,42 @@ impl RustainAcpAgent {
             metrics: metrics_rx,
             isolated: false,
             mailbox_budget: MailboxBudget::new(),
+        }
+    }
+
+    fn assistant_message(
+        content: String,
+        tool_calls: Vec<ToolCallInfo>,
+        stop_reason: DomainStopReason,
+    ) -> ChatMessage {
+        ChatMessage {
+            id: crate::domain::models::conversation::generate_message_id(),
+            role: MessageRole::Assistant,
+            content,
+            content_blocks: vec![],
+            tool_calls,
+            created_at: now_unix(),
+            token_count: None,
+            stop_reason: Some(stop_reason),
+            synthetic: false,
+            images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
+        }
+    }
+
+    fn tool_result_boundary_message() -> ChatMessage {
+        ChatMessage {
+            id: crate::domain::models::conversation::generate_message_id(),
+            role: MessageRole::User,
+            content: String::new(),
+            content_blocks: vec![],
+            tool_calls: vec![],
+            created_at: now_unix(),
+            token_count: None,
+            stop_reason: None,
+            synthetic: true,
+            images: vec![],
+            origin: crate::domain::models::ChannelKind::Terminal,
         }
     }
 
@@ -479,7 +527,7 @@ impl RustainAcpAgent {
             tools.clone(),
             tool_scheduler.clone(),
             conversation.id.clone(),
-            storage,
+            storage.clone(),
             conversation,
             activation_set,
             turn_cancel.clone(),
@@ -494,6 +542,15 @@ impl RustainAcpAgent {
         drop(tool_scheduler);
 
         let mut stop_reason: Option<acp::StopReason> = None;
+        // F0 (AC1/AC7): accumulate assistant output as it streams so it can be
+        // persisted AFTER the turn. Tool-use iterations are split into
+        // assistant/tool-result-boundary/final-assistant messages so reload
+        // preserves provider role ordering instead of replaying tool results
+        // after the next user prompt.
+        let mut assistant_text = String::new();
+        let mut assistant_tool_calls: Vec<ToolCallInfo> = Vec::new();
+        let mut assistant_messages: Vec<ChatMessage> = Vec::new();
+        let mut assistant_stop_reason = DomainStopReason::EndTurn;
         loop {
             tokio::select! {
                 event = event_rx.recv() => {
@@ -501,6 +558,18 @@ impl RustainAcpAgent {
                     match event {
                         AppEvent::ProviderChunk { chunk, .. } => match chunk {
                             StreamChunk::TurnComplete { stop_reason: reason } => {
+                                assistant_stop_reason = reason.clone();
+                                if matches!(reason, DomainStopReason::ToolUse)
+                                    && (!assistant_text.is_empty()
+                                        || !assistant_tool_calls.is_empty())
+                                {
+                                    assistant_messages.push(Self::assistant_message(
+                                        std::mem::take(&mut assistant_text),
+                                        std::mem::take(&mut assistant_tool_calls),
+                                        DomainStopReason::ToolUse,
+                                    ));
+                                    assistant_messages.push(Self::tool_result_boundary_message());
+                                }
                                 stop_reason = Some(stop_reason_to_acp(&reason));
                             }
                             StreamChunk::Error { content } => {
@@ -509,16 +578,75 @@ impl RustainAcpAgent {
                                 } else {
                                     content.as_str()
                                 };
+                                let rendered = format!("Error: {error_text}");
                                 self.send_session_update(
                                     session_id.clone(),
                                     acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                                        acp::ContentBlock::from(format!("Error: {error_text}")),
+                                        acp::ContentBlock::from(rendered.clone()),
                                     )),
                                 )
                                 .await?;
+                                if !assistant_text.is_empty() {
+                                    assistant_text.push('\n');
+                                }
+                                assistant_text.push_str(&rendered);
+                                assistant_stop_reason = DomainStopReason::Cancelled;
                                 stop_reason = Some(acp::StopReason::Refusal);
                             }
                             other => {
+                                // F0: capture the assistant text + tool calls for
+                                // post-turn persistence (see the commit below). The
+                                // chunk is STILL forwarded to the client unchanged.
+                                match &other {
+                                    StreamChunk::Text { content, .. } => {
+                                        assistant_text.push_str(content);
+                                    }
+                                    StreamChunk::ToolUse { id, name, input } => {
+                                        assistant_tool_calls.push(ToolCallInfo {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            input: input.clone(),
+                                            result: None,
+                                            started_at_ms: None,
+                                            completed_at_ms: None,
+                                            status: None,
+                                        });
+                                    }
+                                    StreamChunk::ToolResult {
+                                        id,
+                                        content,
+                                        is_error,
+                                    } => {
+                                        let result = ToolResultInfo {
+                                            content: content.clone(),
+                                            is_error: *is_error,
+                                        };
+                                        let status =
+                                            Some(if *is_error { "✗ Error" } else { "✓ Success" }.to_string());
+                                        if let Some(call) = assistant_tool_calls
+                                            .iter_mut()
+                                            .rev()
+                                            .find(|tc| tc.id == *id)
+                                        {
+                                            call.result = Some(result);
+                                            call.completed_at_ms = Some((now_unix().max(0) as u64) * 1000);
+                                            call.status = status;
+                                        } else {
+                                            'outer: for message in assistant_messages.iter_mut().rev() {
+                                                for call in message.tool_calls.iter_mut().rev() {
+                                                    if call.id == *id {
+                                                        call.result = Some(result);
+                                                        call.completed_at_ms =
+                                                            Some((now_unix().max(0) as u64) * 1000);
+                                                        call.status = status;
+                                                        break 'outer;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
                                 if let Some(update) = stream_chunk_to_session_update(&other) {
                                     self.send_session_update(session_id.clone(), update).await?;
                                 }
@@ -526,12 +654,18 @@ impl RustainAcpAgent {
                         },
                         AppEvent::SystemNotice { level, message, .. } => {
                             if level == crate::domain::models::NoticeLevel::Error {
+                                let rendered = format!("Error: {message}");
                                 self.send_session_update(
                                     session_id.clone(),
                                     acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                                        acp::ContentBlock::from(format!("Error: {message}")),
+                                        acp::ContentBlock::from(rendered.clone()),
                                     )),
                                 ).await?;
+                                if !assistant_text.is_empty() {
+                                    assistant_text.push('\n');
+                                }
+                                assistant_text.push_str(&rendered);
+                                assistant_stop_reason = DomainStopReason::Cancelled;
                                 stop_reason = Some(acp::StopReason::Refusal);
                             }
                         }
@@ -586,7 +720,39 @@ impl RustainAcpAgent {
         }
         if let Err(join_err) = turn_handle.await {
             tracing::error!("ACP run_turn task panicked: {join_err}");
+            if assistant_text.is_empty() {
+                assistant_text.push_str("Error: ACP turn task panicked");
+            }
+            assistant_stop_reason = DomainStopReason::Cancelled;
             stop_reason = Some(acp::StopReason::Refusal);
+        }
+
+        // F0: persist the assistant response (text + tool calls/results) now
+        // that the turn's event pump has drained. Error/cancel/refusal paths
+        // still save the timestamp advance and any client-visible error text so
+        // reload does not resurrect a dangling user-only turn.
+        if turn_cancel.is_cancelled() {
+            assistant_stop_reason = DomainStopReason::Cancelled;
+        }
+        if !assistant_text.is_empty() || !assistant_tool_calls.is_empty() {
+            assistant_messages.push(Self::assistant_message(
+                std::mem::take(&mut assistant_text),
+                std::mem::take(&mut assistant_tool_calls),
+                assistant_stop_reason.clone(),
+            ));
+        }
+        let should_save =
+            !assistant_messages.is_empty() || stop_reason.is_some() || turn_cancel.is_cancelled();
+        if should_save {
+            let now = now_unix();
+            if let Ok(Some(mut conv)) = storage.load_conversation(&conversation_id).await {
+                conv.messages.extend(assistant_messages);
+                conv.updated_at = now;
+                conv.last_response_at = Some(now);
+                if let Err(e) = storage.save_conversation(&conv).await {
+                    tracing::warn!(error = %e, "ACP: persisting assistant turn failed");
+                }
+            }
         }
 
         if turn_cancel.is_cancelled() {
@@ -594,6 +760,221 @@ impl RustainAcpAgent {
         } else {
             Ok(stop_reason.unwrap_or(acp::StopReason::EndTurn))
         }
+    }
+    /// Shared reconstruction for `session/load` and `session/resume` (Tasks 2/3).
+    ///
+    /// Both rebuild `SessionState` from the persisted conversation rooted at the
+    /// REQUEST cwd; the ONLY difference is whether history is re-streamed to the
+    /// client (`load` replays it, `resume` does not — model-side context is
+    /// restored either way via `load_conversation` populating the in-memory
+    /// `Conversation` the next `prompt` reads). Returns the session
+    /// `config_options` (best-effort model, AI-14.9-1) for the response.
+    async fn restore_session(
+        &self,
+        session_id: &acp::SessionId,
+        request_cwd: PathBuf,
+        replay_history: bool,
+    ) -> acp::Result<Option<Vec<acp::SessionConfigOption>>> {
+        let session_key = session_id.0.to_string();
+        // DD-2: resolve the durable conversation id from the wire session id
+        // (prefix strip). A non-`acp-` id is an orphan → fail-closed (AC8).
+        let conversation_id = super::conversation_id_from_acp_session_id(&session_key)
+            .ok_or_else(|| acp::Error::resource_not_found(None))?
+            .to_string();
+
+        // Rebuild the per-session core from the REQUEST cwd (NEVER disk). This
+        // roots storage at `sessions_dir(request_cwd)`, so the load below can
+        // only see conversations under the gated cwd — the store-you-read-is-
+        // the-cwd-you're-gated-on invariant (DD-1/Vex). `build_acp_core` also
+        // reconstructs SecurityAdapter/SkillRegistry/tools against request_cwd,
+        // so a loaded cwd/tool set that would not pass a fresh `new_session`
+        // trust posture is likewise not trusted resumed (AC6 fail-closed).
+        // Skill trust (SkillActivator.conversation_sets) starts empty after a
+        // restart ⇒ workspace-tier skills fail-closed by construction.
+        let core = (self.core_factory)(&request_cwd).map(SessionCore::from)?;
+
+        // Load the conversation from the request-cwd-rooted store. A miss
+        // (orphan / cross-cwd id) is fail-closed `resource_not_found` (AC8).
+        let conversation = match core.storage.load_conversation(&conversation_id).await {
+            Ok(Some(conv)) => conv,
+            _ => return Err(acp::Error::resource_not_found(None)),
+        };
+
+        // Idempotent on re-load: if the id is already live, cancel and remove
+        // the old state before replacing it. Otherwise an in-flight old prompt
+        // can keep streaming and race persistence against the restored session.
+        let agent_id = AgentId(session_key.clone());
+        if let Some(old_state) = self.sessions.borrow_mut().remove(&session_key) {
+            old_state.cancel.cancel();
+            self.node_tree
+                .set_state(&agent_id, NodeState::Cancelled)
+                .await;
+            self.node_tree.deregister(&agent_id).await;
+        } else if self
+            .node_tree
+            .list()
+            .await
+            .iter()
+            .any(|e| e.agent_id == agent_id)
+        {
+            self.node_tree
+                .set_state(&agent_id, NodeState::Cancelled)
+                .await;
+            self.node_tree.deregister(&agent_id).await;
+        }
+        let cancel = CancellationToken::new();
+        self.node_tree
+            .register_self_session(
+                agent_id.clone(),
+                Self::dummy_handle(agent_id.clone(), cancel.clone()),
+            )
+            .await
+            .map_err(|_| acp::Error::internal_error())?;
+
+        // best-effort model selection (AI-14.9-1: non-blocking). Reintroducing
+        // a binding record just to remember a dropdown is rejected; recover
+        // from the configured/first model. Set the router if registered.
+        let selected =
+            Self::initial_model_selection(&core.provider, self.model_override.as_deref());
+        if let Some((provider_id, _)) = selected.as_ref() {
+            if core
+                .registry
+                .list_providers()
+                .iter()
+                .any(|p| p.provider_id == *provider_id)
+            {
+                let _ = core.router.set_active(provider_id);
+            }
+        }
+        let config_options = Self::model_config_options(
+            &core.provider,
+            selected
+                .as_ref()
+                .map(|(provider_id, model_id)| (provider_id.as_str(), model_id.as_str())),
+        );
+
+        // Capture replay data BEFORE moving `core` into the live map.
+        let replay_messages = if replay_history {
+            conversation.messages.clone()
+        } else {
+            Vec::new()
+        };
+
+        // Replay history to the client (load only) BEFORE committing the live
+        // session map entry. If replay fails, roll back the registered node so
+        // the client does not see a failed load while the server considers the
+        // session active.
+        if replay_history {
+            for message in &replay_messages {
+                for update in message_to_replay_updates(message) {
+                    if let Err(e) = self.send_session_update(session_id.clone(), update).await {
+                        cancel.cancel();
+                        self.node_tree
+                            .set_state(&agent_id, NodeState::Cancelled)
+                            .await;
+                        self.node_tree.deregister(&agent_id).await;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Insert into the live sessions map only after replay succeeds.
+        self.sessions.borrow_mut().insert(
+            session_key.clone(),
+            SessionState {
+                cwd: request_cwd,
+                conversation_id,
+                cancel,
+                core,
+                selected,
+            },
+        );
+
+        Ok(config_options)
+    }
+
+    /// Build the `session/list` response for a target cwd (Task 4).
+    ///
+    /// The store rooted at `sessions_dir(cwd)` IS the cwd filter — every
+    /// conversation under it belongs to `cwd` (DD-1 dissolved). `SessionInfo.cwd`
+    /// is the request cwd echoed back, never read from a per-session field.
+    /// Sorted `updated_at` desc; opaque cursor = `{updated_at}:{id}` of the
+    /// last emitted row (R1 eventual consistency accepted).
+    async fn list_sessions_for_cwd(
+        &self,
+        cwd: Option<PathBuf>,
+        cursor: Option<String>,
+    ) -> acp::Result<acp::ListSessionsResponse> {
+        let cwd = cwd.unwrap_or_else(|| self.default_workspace.clone());
+        let core = (self.core_factory)(&cwd).map(SessionCore::from)?;
+        let all_summaries = core
+            .storage
+            .list_conversations()
+            .await
+            .map_err(|_| acp::Error::internal_error())?;
+        let mut summaries = Vec::with_capacity(all_summaries.len());
+        for summary in all_summaries {
+            let Ok(Some(conversation)) = core.storage.load_conversation(&summary.id).await else {
+                continue;
+            };
+            if conversation
+                .session_id
+                .as_deref()
+                .is_some_and(super::is_acp_session_id)
+            {
+                summaries.push(summary);
+            }
+        }
+        // Stable order for pagination: newest first, id as ascending tiebreak.
+        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
+
+        // Decode the opaque cursor to skip already-emitted rows. Malformed
+        // cursors are client errors; silently treating them as "no cursor"
+        // causes duplicate first pages and infinite pagination loops.
+        let after: Option<(i64, String)> = match cursor {
+            Some(c) => {
+                let (ts, id) = c.split_once(':').ok_or_else(acp::Error::invalid_params)?;
+                let ts = ts
+                    .parse::<i64>()
+                    .map_err(|_| acp::Error::invalid_params())?;
+                Some((ts, id.to_string()))
+            }
+            None => None,
+        };
+        let mut filtered: Vec<_> = summaries
+            .into_iter()
+            .filter(|s| match &after {
+                Some((ts, id)) => {
+                    s.updated_at < *ts || (s.updated_at == *ts && s.id.as_str() > id.as_str())
+                }
+                None => true,
+            })
+            .collect();
+
+        let take = filtered.len().min(SESSION_LIST_PAGE_SIZE);
+        let page: Vec<_> = filtered.drain(..take).collect();
+        let next_cursor = if filtered.is_empty() {
+            None
+        } else {
+            page.last().map(|s| format!("{}:{}", s.updated_at, s.id))
+        };
+        let sessions = page
+            .into_iter()
+            .map(|s| {
+                acp::SessionInfo::new(super::format_acp_session_id(&s.id), cwd.clone())
+                    .title(if s.title.is_empty() {
+                        None
+                    } else {
+                        Some(s.title)
+                    })
+                    .updated_at(
+                        chrono::DateTime::<chrono::Utc>::from_timestamp(s.updated_at, 0)
+                            .map(|dt| dt.to_rfc3339()),
+                    )
+            })
+            .collect();
+        Ok(acp::ListSessionsResponse::new(sessions).next_cursor(next_cursor))
     }
 }
 
@@ -604,12 +985,26 @@ impl acp::Agent for RustainAcpAgent {
         _args: acp::InitializeRequest,
     ) -> Result<acp::InitializeResponse, acp::Error> {
         let version = acp::ProtocolVersion::V1;
-        Ok(
-            acp::InitializeResponse::new(version).agent_info(acp::Implementation::new(
+        // Task 7: advertise the four lifecycle capabilities so a compliant
+        // client (Zed) actually invokes load/resume/list/close. `load_session`
+        // is top-level; list/resume/close nest under `session_capabilities`.
+        // Honest advertisement — ONLY what this story implements (14.10 owns
+        // the broader MCP/auth surface). This is the deliberate, diff-verified
+        // `initialize` re-baseline (AC9).
+        let caps = acp::AgentCapabilities::new()
+            .load_session(true)
+            .session_capabilities(
+                acp::SessionCapabilities::new()
+                    .list(Some(acp::SessionListCapabilities::default()))
+                    .resume(Some(acp::SessionResumeCapabilities::default()))
+                    .close(Some(acp::SessionCloseCapabilities::default())),
+            );
+        Ok(acp::InitializeResponse::new(version)
+            .agent_info(acp::Implementation::new(
                 "rustain",
                 env!("CARGO_PKG_VERSION"),
-            )),
-        )
+            ))
+            .agent_capabilities(caps))
     }
 
     async fn authenticate(
@@ -623,10 +1018,14 @@ impl acp::Agent for RustainAcpAgent {
         &self,
         args: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
-        let next = self.next_session_id.get();
-        self.next_session_id.set(next + 1);
-        let session_id = format!("acp-{next}");
-        let conversation_id = crate::domain::models::conversation::generate_conversation_id();
+        // DD-2: an ACP session IS a conversation. The durable conversation id
+        // (unique nanoid in production; an injectable counter in tests for
+        // deterministic goldens) is the on-disk file key, and the wire
+        // `SessionId` is `acp-{conversation_id}` — bijective by construction,
+        // no persisted index, survives restart. The old per-process `Cell<u64>`
+        // counter is deleted (it modeled a distinction that doesn't exist).
+        let conversation_id = (self.id_source)();
+        let session_id = super::format_acp_session_id(&conversation_id);
         let cancel = CancellationToken::new();
         let agent_id = AgentId(session_id.clone());
         self.node_tree
@@ -769,5 +1168,72 @@ impl acp::Agent for RustainAcpAgent {
             state.cancel.cancel();
         }
         Ok(())
+    }
+    async fn load_session(
+        &self,
+        args: acp::LoadSessionRequest,
+    ) -> Result<acp::LoadSessionResponse, acp::Error> {
+        let cwd = args.cwd.clone();
+        // load = restore + replay history to the client (AC2). The resume-trust-
+        // gate is structural (build_acp_core on request cwd) inside restore_session.
+        let config_options = self.restore_session(&args.session_id, cwd, true).await?;
+        let mut response = acp::LoadSessionResponse::new();
+        if let Some(co) = config_options {
+            response = response.config_options(co);
+        }
+        Ok(response)
+    }
+
+    async fn resume_session(
+        &self,
+        args: acp::ResumeSessionRequest,
+    ) -> Result<acp::ResumeSessionResponse, acp::Error> {
+        let cwd = args.cwd.clone();
+        // resume = restore WITHOUT client replay (AC3). Model-side context is
+        // still fully reconstructed (load_conversation populates the in-memory
+        // Conversation the next prompt reads); only the session/update
+        // re-stream is skipped.
+        let config_options = self.restore_session(&args.session_id, cwd, false).await?;
+        let mut response = acp::ResumeSessionResponse::new();
+        if let Some(co) = config_options {
+            response = response.config_options(co);
+        }
+        Ok(response)
+    }
+
+    async fn list_sessions(
+        &self,
+        args: acp::ListSessionsRequest,
+    ) -> Result<acp::ListSessionsResponse, acp::Error> {
+        self.list_sessions_for_cwd(args.cwd, args.cursor).await
+    }
+
+    async fn close_session(
+        &self,
+        args: acp::CloseSessionRequest,
+    ) -> Result<acp::CloseSessionResponse, acp::Error> {
+        let session_id = args.session_id.0.to_string();
+        let agent_id = AgentId(session_id.clone());
+        let (cancel, was_cancelled) = {
+            let sessions = self.sessions.borrow();
+            let state = sessions
+                .get(&session_id)
+                .ok_or_else(|| acp::Error::resource_not_found(None))?;
+            (state.cancel.clone(), state.cancel.is_cancelled())
+        };
+        // Teardown order (mirrors run.rs EOF cleanup 244-257): fire cancel →
+        // set terminal state → deregister → evict the map entry. The persisted
+        // conversation is RETAINED — close is teardown, not archival; the
+        // session stays listable/resumable (AC5).
+        cancel.cancel();
+        let terminal = if was_cancelled {
+            NodeState::Cancelled
+        } else {
+            NodeState::Completed
+        };
+        self.node_tree.set_state(&agent_id, terminal).await;
+        self.node_tree.deregister(&agent_id).await;
+        self.sessions.borrow_mut().remove(&session_id);
+        Ok(acp::CloseSessionResponse::new())
     }
 }

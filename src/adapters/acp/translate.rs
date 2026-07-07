@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 
-use crate::domain::models::{ApprovalOutcome, StopReason, StreamChunk};
+use crate::domain::models::{ApprovalOutcome, ChatMessage, MessageRole, StopReason, StreamChunk};
 use crate::domain::services::approval_runtime::ApprovalRuntimeEvent;
 
 pub const PERMISSION_ALLOW_ONCE: &str = "allow_once";
@@ -52,6 +52,34 @@ pub fn stream_chunk_to_session_update(chunk: &StreamChunk) -> Option<acp::Sessio
         }
         _ => None,
     }
+}
+
+/// Map a persisted conversation message to the `session/update` notifications
+/// that replay it to a reconnecting client (AC2 `session/load` history replay).
+///
+/// Pure re-emission — no provider/model calls. Emits a `UserMessageChunk` /
+/// `AgentMessageChunk` for the message text, plus one `ToolCall` (marked
+/// `Completed`) per persisted tool call so the client reconstructs the prior
+/// turn's tool invocations. Returns a `Vec` because an assistant message with
+/// tool calls yields several updates. Meta/context items are intentionally
+/// skipped (codex `replay_history` shape).
+pub fn message_to_replay_updates(message: &ChatMessage) -> Vec<acp::SessionUpdate> {
+    let mut updates = Vec::new();
+    if !message.content.is_empty() {
+        let chunk = acp::ContentChunk::new(acp::ContentBlock::from(message.content.clone()));
+        updates.push(match message.role {
+            MessageRole::User => acp::SessionUpdate::UserMessageChunk(chunk),
+            _ => acp::SessionUpdate::AgentMessageChunk(chunk),
+        });
+    }
+    for tc in &message.tool_calls {
+        updates.push(acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(tc.id.clone(), tc.name.clone())
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(tc.input.clone()),
+        ));
+    }
+    updates
 }
 
 pub fn approval_request_to_acp(

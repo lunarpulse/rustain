@@ -378,9 +378,16 @@ async fn acp_subprocess_binds_no_listen_socket() {
             panic!("no session/new response within 15s\n--- stderr ---\n{stderr}");
         }
     };
-    assert_eq!(
-        new["result"]["sessionId"], "acp-1",
-        "first session must be minted as `acp-1`"
+    let session_id = new["result"]["sessionId"]
+        .as_str()
+        .expect("session/new must return a sessionId string")
+        .to_string();
+    // DD-2: production mints `acp-{conversation_id}` (unique nanoid). The exact
+    // id is non-deterministic across the real binary — assert the ACP prefix
+    // (this test's purpose is the no-listener probe, not the id scheme).
+    assert!(
+        session_id.starts_with("acp-"),
+        "first session must be minted with the `acp-` prefix (DD-2); got `{session_id}`"
     );
     // Probe #2 — lazy binding during session creation (build_cli_core runs
     // inside new_session, so the provider/tools/storage layer is composed here).
@@ -390,7 +397,7 @@ async fn acp_subprocess_binds_no_listen_socket() {
     // ── session/prompt (best-effort; widens the detection window into the
     //    turn path: run_turn + tool scheduler + provider are built here) ──
     let _ = stdin
-        .write_all(line(prompt_req(3, "acp-1")).as_bytes())
+        .write_all(line(prompt_req(3, &session_id)).as_bytes())
         .await;
     let _ = stdin.flush().await;
     // With no provider registered the turn fast-fails (stopReason `refusal`);

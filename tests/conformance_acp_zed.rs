@@ -828,6 +828,8 @@ async fn drive_handshake_collect_notifications(
         None,
         acp_factory,
         node_tree,
+        workspace.path().to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
     );
 
     let drive = async {
@@ -1054,6 +1056,8 @@ async fn available_commands_update_arrives_after_session_new_response() {
         None,
         factory,
         node_tree,
+        ws.path().to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
     );
 
     let drive = async {
@@ -1210,7 +1214,11 @@ async fn available_commands_update_deferred_after_session_new_response() {
     let ws_path = ws.path().to_path_buf();
     let skills = vec![fixture_skill("zed-defer-skill")];
     let factory: AcpCoreFactory = Rc::new(move |_cwd| {
-        Ok(make_acp_core_with_skills(&ws_path, Vec::new(), skills.clone()))
+        Ok(make_acp_core_with_skills(
+            &ws_path,
+            Vec::new(),
+            skills.clone(),
+        ))
     });
 
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
@@ -1224,6 +1232,8 @@ async fn available_commands_update_deferred_after_session_new_response() {
         None,
         factory,
         node_tree,
+        ws.path().to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
     );
 
     let drive = async {
@@ -1281,8 +1291,8 @@ async fn available_commands_update_deferred_after_session_new_response() {
     };
 
     let response_at = response_at.expect("never saw session/new (id:2) response");
-    let update_at = update_at
-        .expect("never saw available_commands_update after the session/new response");
+    let update_at =
+        update_at.expect("never saw available_commands_update after the session/new response");
     // `update_at >= response_at` holds (the advertisement lands after the
     // response on the wire), so `duration_since` cannot underflow.
     let elapsed = update_at.duration_since(response_at);
@@ -1390,6 +1400,8 @@ async fn slash_skill_activation_injects_skill_body_into_provider_system_prompt()
         None,
         factory,
         node_tree,
+        workspace.path().to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
     );
 
     let drive = async {
@@ -1572,6 +1584,8 @@ async fn plain_prompt_does_not_auto_inject_skill_into_system_prompt() {
         None,
         factory,
         node_tree,
+        workspace.path().to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
     );
 
     let drive = async {
@@ -1747,6 +1761,8 @@ async fn drive_workspace_skill_with_trust(
         None,
         factory,
         node_tree,
+        workspace.to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
     );
 
     let trust = trust_option.to_string();
@@ -1790,7 +1806,7 @@ async fn drive_workspace_skill_with_trust(
                         continue;
                     };
                     // Server→client trust request: answer it with the chosen option.
-                    if v["method"] == serde_json::json!("session/requestPermission") {
+                    if v["method"] == serde_json::json!("session/request_permission") {
                         if let Some(id) = v["id"].as_i64() {
                             let resp = serde_json::json!({
                                 "jsonrpc": "2.0",
@@ -1871,5 +1887,289 @@ async fn workspace_skill_trust_reject_blocks_activation() {
         !prompts.iter().any(|p| p.contains("ws-skill")),
         "rejecting trust on the workspace skill must BLOCK activation — the skill body must NOT \
          reach the provider system prompt; captured = {prompts:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 8 — 14.9 resume-trust-gate load-path behavioral keystone (AC6)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Resume-trust-gate keystone (AC6) — a workspace-tier skill invoked on a
+/// session LOADED via `session/load` MUST gate behind `session/requestPermission`
+/// byte-identically to the SAME skill invoked on a fresh `session/new`.
+/// Nothing read from the on-disk conversation store may relax the gate; skill
+/// trust starts empty after a restart, so the loaded path fails closed exactly
+/// like the fresh path.
+///
+/// Non-vacuity (the load-bypass mutant this kills): a variant that read a
+/// "trusted" flag from disk and skipped the prompt would emit NO
+/// `session/requestPermission` on the loaded path. This test captures the
+/// permission frame on BOTH paths and asserts both fire with identical
+/// option ids. The fresh-path frame is the positive control (the existing
+/// `workspace_skill_trust_*` tests prove the gate fires fresh); the
+/// loaded-path frame is the net-new keystone.
+///
+/// Determinism: scripted capturing provider (no network), in-memory duplex
+/// transport (no listener), fixed clock, deterministic first session id.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_load_path_re_runs_skill_trust_gate_identical_to_fresh_session() {
+    use rustain::domain::models::AppConfig;
+
+    // On an established session, drive `/skill ws-skill` and capture the
+    // `session/requestPermission` params (answering REJECT so the turn
+    // resolves without injecting the skill). Returns None if no trust prompt
+    // fired — a None on the loaded path is exactly the mutant this kills.
+    async fn drive_skill_capture_permission(
+        client_write: &mut tokio::io::DuplexStream,
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<&mut tokio::io::DuplexStream>>,
+        prompt_id: i64,
+    ) -> Option<serde_json::Value> {
+        use rustain::adapters::acp::translate::SKILL_TRUST_REJECT;
+        let prompt = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": prompt_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "acp-1",
+                "prompt": [ { "type": "text", "text": "/skill ws-skill" } ],
+            }
+        });
+        client_write
+            .write_all(line(prompt.to_string()).as_bytes())
+            .await
+            .expect("write /skill prompt");
+        client_write.flush().await.expect("flush /skill prompt");
+
+        let mut permission_params: Option<serde_json::Value> = None;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => break,
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            if v["method"] == serde_json::json!("session/request_permission") {
+                permission_params = Some(v["params"].clone());
+                if let Some(id) = v["id"].as_i64() {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "outcome": {
+                                "type": "selected",
+                                "optionId": SKILL_TRUST_REJECT,
+                            }
+                        }
+                    });
+                    client_write
+                        .write_all(line(resp.to_string()).as_bytes())
+                        .await
+                        .expect("write reject");
+                    client_write.flush().await.expect("flush reject");
+                }
+                continue;
+            }
+            if v["id"] == serde_json::json!(prompt_id) {
+                break;
+            }
+        }
+        permission_params
+    }
+
+    // Offered permission option ids from a requestPermission params frame.
+    // Defends both the direct (`params.options`) and nested
+    // (`params.request.options`) wire shapes.
+    fn permission_option_ids(params: &serde_json::Value) -> Vec<String> {
+        let opts = params["options"]
+            .as_array()
+            .or_else(|| params["request"]["options"].as_array());
+        opts.map(|arr| {
+            arr.iter()
+                .filter_map(|o| o["optionId"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+    let skill = write_skill(workspace.path(), "ws-skill", SkillSource::WorkspaceAgents);
+    let captured: Arc<StdRwLock<Vec<String>>> = Arc::new(StdRwLock::new(Vec::new()));
+    let factory = capturing_acp_factory(ws.clone(), captured.clone(), vec![skill]);
+
+    // ── Phase A: fresh session/new + a seed prompt (persists acp-1 so Phase
+    //    B can load it) + /skill → capture the FRESH trust frame (control). ──
+    let fresh_frame = {
+        let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+        let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+        let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
+        let server = serve_acp_with_acp_core_factory_and_node_tree(
+            server_outgoing.compat_write(),
+            server_incoming.compat(),
+            AppConfig::default(),
+            None,
+            factory.clone(),
+            node_tree,
+            workspace.path().to_path_buf(),
+            rustain::adapters::acp::run::deterministic_acp_id_source(),
+        );
+
+        let phase_a = async {
+            client_write
+                .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+                .await
+                .expect("write initialize A");
+            let new = serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/new",
+                "params": { "cwd": workspace.path(), "mcpServers": [] },
+            });
+            client_write
+                .write_all(line(new.to_string()).as_bytes())
+                .await
+                .expect("write new");
+            client_write.flush().await.expect("flush new");
+            // ONE persistent reader for the whole phase — recreating a
+            // BufReader would discard buffered bytes mid-frame and stall.
+            let reader = tokio::io::BufReader::new(&mut client_read);
+            let mut lines = reader.lines();
+            // Await session/new so acp-1 is live before the seed turn.
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => panic!("session/new did not resolve (phase A)"),
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                if v["id"] == serde_json::json!(2) && v["result"]["sessionId"].is_string() {
+                    break;
+                }
+            }
+            // Seed prompt persists the conversation so Phase B can load acp-1.
+            let seed = serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+                "params": {
+                    "sessionId": "acp-1",
+                    "prompt": [ { "type": "text", "text": "seed turn" } ],
+                }
+            });
+            client_write
+                .write_all(line(seed.to_string()).as_bytes())
+                .await
+                .expect("write seed");
+            client_write.flush().await.expect("flush seed");
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => panic!("seed prompt did not resolve (phase A)"),
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                if v["id"] == serde_json::json!(3)
+                    && v["result"]["stopReason"] == serde_json::json!("end_turn")
+                {
+                    break;
+                }
+            }
+            let frame = drive_skill_capture_permission(&mut client_write, &mut lines, 4).await;
+            drop(client_write);
+            frame
+        };
+
+        tokio::select! {
+            f = phase_a => f,
+            server_res = server => panic!("ACP server (phase A) exited early: {server_res:?}"),
+        }
+    };
+
+    // ── Phase B: FRESH server, SAME workspace; session/load(acp-1) + /skill
+    //    → capture the LOADED trust frame. The keystone: a load-bypass mutant
+    //    that read "trusted" from disk and skipped the prompt yields None. ──
+    let load_frame = {
+        let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+        let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+        let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
+        let server = serve_acp_with_acp_core_factory_and_node_tree(
+            server_outgoing.compat_write(),
+            server_incoming.compat(),
+            AppConfig::default(),
+            None,
+            factory.clone(),
+            node_tree,
+            workspace.path().to_path_buf(),
+            rustain::adapters::acp::run::deterministic_acp_id_source(),
+        );
+
+        let phase_b = async {
+            client_write
+                .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+                .await
+                .expect("write initialize B");
+            let load = serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "session/load",
+                "params": {
+                    "cwd": workspace.path(),
+                    "sessionId": "acp-1",
+                    "mcpServers": [],
+                }
+            });
+            client_write
+                .write_all(line(load.to_string()).as_bytes())
+                .await
+                .expect("write load");
+            client_write.flush().await.expect("flush load");
+            let reader = tokio::io::BufReader::new(&mut client_read);
+            let mut lines = reader.lines();
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => panic!("session/load did not resolve (phase B)"),
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                if v["id"] == serde_json::json!(2) {
+                    break;
+                }
+            }
+            let frame = drive_skill_capture_permission(&mut client_write, &mut lines, 3).await;
+            drop(client_write);
+            frame
+        };
+
+        tokio::select! {
+            f = phase_b => f,
+            server_res = server => panic!("ACP server (phase B) exited early: {server_res:?}"),
+        }
+    };
+
+    let fresh = fresh_frame.expect(
+        "POSITIVE CONTROL: fresh session/new + /skill MUST fire \
+         session/requestPermission for an untrusted workspace skill -- a None \
+         here means the trust gate is broken on the fresh path, not just load",
+    );
+    let loaded = load_frame.expect(
+        "KEYSTONE: the LOADED session + /skill MUST ALSO fire \
+         session/requestPermission -- a load-bypass mutant that read a \
+         'trusted' flag from disk and skipped the prompt yields None here",
+    );
+    let fresh_opts = permission_option_ids(&fresh);
+    let load_opts = permission_option_ids(&loaded);
+    assert_eq!(
+        fresh_opts, load_opts,
+        "the loaded-path and fresh-path trust prompts must offer identical \
+         permission options (byte-identical trust gate); fresh={fresh:?} load={loaded:?}"
+    );
+    assert!(
+        fresh_opts
+            .iter()
+            .any(|o| o == rustain::adapters::acp::translate::SKILL_TRUST_ALLOW),
+        "the trust prompt must offer the allow option; got {fresh_opts:?}"
     );
 }

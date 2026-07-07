@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -18,6 +18,24 @@ use crate::infrastructure::subagent::node_tree::NodeTree;
 use super::agent::{
     AcpCoreFactory, CoreFactory, PermissionAsk, RustainAcpAgent, SessionNotify, SharedSessions,
 };
+
+/// Production id source: a unique nanoid per session (DD-2). Survives a
+/// process restart — a counter would reset and collide with persisted ids.
+pub fn default_acp_id_source() -> Rc<dyn Fn() -> String> {
+    Rc::new(crate::domain::models::conversation::generate_conversation_id)
+}
+
+/// Deterministic id source for the in-process test seam: a monotonic counter
+/// rooted at 1 so the first session is always `acp-1` (golden determinism).
+/// Mirrors the injected-`Clock` pattern — production uses [`default_acp_id_source`].
+pub fn deterministic_acp_id_source() -> Rc<dyn Fn() -> String> {
+    let counter = Rc::new(Cell::new(1u64));
+    Rc::new(move || {
+        let n = counter.get();
+        counter.set(n + 1);
+        n.to_string()
+    })
+}
 
 /// Run rustain as an ACP agent over process stdio.
 pub async fn run_acp(
@@ -86,7 +104,7 @@ pub async fn serve_acp_with_acp_core_factory<W, R>(
     outgoing: W,
     incoming: R,
     app_config: AppConfig,
-    _workspace: PathBuf,
+    workspace: PathBuf,
     model_override: Option<String>,
     core_factory: AcpCoreFactory,
 ) -> Result<()>
@@ -107,6 +125,8 @@ where
         model_override,
         core_factory,
         node_tree,
+        workspace,
+        default_acp_id_source(),
     )
     .await
 }
@@ -115,7 +135,7 @@ pub async fn serve_acp_with_core_factory<W, R>(
     outgoing: W,
     incoming: R,
     app_config: AppConfig,
-    _workspace: PathBuf,
+    workspace: PathBuf,
     model_override: Option<String>,
     core_factory: CoreFactory,
 ) -> Result<()>
@@ -139,6 +159,8 @@ where
         model_override,
         acp_factory,
         node_tree,
+        workspace,
+        deterministic_acp_id_source(),
     )
     .await
 }
@@ -165,6 +187,8 @@ where
         model_override,
         acp_factory,
         node_tree,
+        PathBuf::new(),
+        deterministic_acp_id_source(),
     )
     .await
 }
@@ -180,6 +204,8 @@ pub async fn serve_acp_with_acp_core_factory_and_node_tree<W, R>(
     model_override: Option<String>,
     core_factory: AcpCoreFactory,
     node_tree: NodeTree,
+    default_workspace: PathBuf,
+    id_source: Rc<dyn Fn() -> String>,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + 'static,
@@ -198,10 +224,12 @@ where
                 app_config,
                 core_factory,
                 model_override,
+                default_workspace,
                 session_update_tx,
                 permission_tx,
                 sessions,
                 node_tree,
+                id_source,
             );
             let (conn, handle_io) = acp::AgentSideConnection::new(
                 agent,

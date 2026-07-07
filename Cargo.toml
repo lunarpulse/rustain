@@ -44,7 +44,7 @@ tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "ti
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt", "compat"] }
 futures = "0.3"
-agent-client-protocol = "=0.10.4"
+agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_resume", "unstable_session_close"] }
 globset = "0.4"
 
 # ── TUI framework ────────────────────────────────────────────────

@@ -2141,3 +2141,1142 @@ async fn acp_approval_source_routing_matrix() {
         "AcpSession.scope_agent_id must use length_prefixed_scope, not a bare delimiter join"
     );
 }
+
+/// Count assistant-role API messages whose content contains `needle`.
+fn count_assistant_messages_containing(
+    messages: &[rustain::domain::models::Message],
+    needle: &str,
+) -> usize {
+    use rustain::domain::models::MessageRole;
+    messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Assistant && m.content.contains(needle))
+        .count()
+}
+
+/// AC7 keystone — the kill→reload contract test (the feature proof).
+///
+/// Phase A: a real ACP server over an in-memory duplex drives `initialize →
+/// session/new → 2× session/prompt`. The scripted provider answers every turn
+/// with `GOLDEN_AGENT_TEXT`. Then the client write-half is DROPPED — the server
+/// sees EOF and tears down (the "process kill"; the on-disk store survives).
+///
+/// Phase B: a FRESH server is stood up over a new duplex pointed at the SAME
+/// workspace `TempDir`. `initialize → session/load(id-from-A) → session/prompt`.
+/// The Phase-B provider input is captured and asserted to contain BOTH prior
+/// user prompts AND the prior ASSISTANT responses (`GOLDEN_AGENT_TEXT`).
+///
+/// Non-vacuity (the F0 discriminator): asserting ONLY user prompts would pass
+/// even without Task-1's post-turn save (the pre-turn save already persists
+/// those). The net-new proof is that the model's *answers* survived the kill —
+/// counted as ASSISTANT-role messages containing `GOLDEN_AGENT_TEXT` (expect 2).
+/// A mutant that drops Task-1's post-turn save reddens this count (0 assistant
+/// answers reloaded). This is why the story says "absent this test the story is
+/// NOT done".
+#[tokio::test(flavor = "current_thread")]
+async fn acp_kill_reload_preserves_assistant_turns() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+    use rustain::domain::models::MessageRole;
+
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+
+    // Read JSON-RPC lines from a BufReader until the result for `id` arrives
+    // with `stopReason == end_turn` (notifications are ignored). Sequential —
+    // the SDK dispatches each request concurrently, so a client MUST await one
+    // prompt's result before sending the next (mirrors a real editor).
+    async fn await_end_turn(
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<&mut tokio::io::DuplexStream>>,
+        id: serde_json::Value,
+    ) -> bool {
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => return false,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == id && v["result"]["stopReason"] == serde_json::json!("end_turn") {
+                return true;
+            }
+        }
+    }
+
+    // ── Phase A: create + 2 turns, then EOF-"kill" ─────────────────────
+    let session_id = {
+        let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+        let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+        let ws_for_factory = ws.clone();
+        let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+        let server = serve_acp_with_core_factory(
+            server_outgoing.compat_write(),
+            server_incoming.compat(),
+            AppConfig::default(),
+            workspace.path().to_path_buf(),
+            None,
+            core_factory,
+        );
+
+        let drive = async {
+            client_write
+                .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+                .await
+                .expect("write initialize");
+            let new = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session/new",
+                "params": { "cwd": workspace.path(), "mcpServers": [] },
+            });
+            client_write
+                .write_all(line(new.to_string()).as_bytes())
+                .await
+                .expect("write session/new");
+            client_write.flush().await.expect("flush A init/new");
+
+            let reader = tokio::io::BufReader::new(&mut client_read);
+            let mut lines = reader.lines();
+            // Capture the new session id from the id-2 result.
+            let mut session_id: Option<String> = None;
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => break,
+                };
+                let v: serde_json::Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["id"] == serde_json::json!(2) {
+                    if let Some(s) = v["result"]["sessionId"].as_str() {
+                        session_id = Some(s.to_string());
+                    }
+                    break;
+                }
+            }
+            let session_id = session_id.expect("session/new returned a sessionId");
+
+            // Prompt 1, then await its result BEFORE sending prompt 2.
+            client_write
+                .write_all(
+                    line(acp_prompt_req_with_text(
+                        serde_json::json!(3),
+                        &session_id,
+                        "alpha first turn",
+                    ))
+                    .as_bytes(),
+                )
+                .await
+                .expect("write prompt 1");
+            client_write.flush().await.expect("flush A p1");
+            let got_p3 = await_end_turn(&mut lines, serde_json::json!(3)).await;
+
+            client_write
+                .write_all(
+                    line(acp_prompt_req_with_text(
+                        serde_json::json!(4),
+                        &session_id,
+                        "bravo second turn",
+                    ))
+                    .as_bytes(),
+                )
+                .await
+                .expect("write prompt 2");
+            client_write.flush().await.expect("flush A p2");
+            let got_p4 = await_end_turn(&mut lines, serde_json::json!(4)).await;
+
+            // Drop the client write-half → the server's stdin read hits EOF →
+            // teardown. The on-disk store (with F0's assistant turns) survives.
+            drop(client_write);
+            (session_id, got_p3, got_p4)
+        };
+
+        let (session_id, p3, p4) = tokio::select! {
+            outcome = drive => outcome,
+            server_res = server => {
+                panic!("ACP server (phase A) exited before the client finished: {server_res:?}");
+            }
+        };
+        assert!(p3, "phase A turn 1 must resolve end_turn");
+        assert!(p4, "phase A turn 2 must resolve end_turn");
+        session_id
+    };
+
+    assert_eq!(session_id, "acp-1", "deterministic first session id");
+
+    // ── Phase B: FRESH server, SAME workspace; load + prompt ───────────
+    let (observed_tx, mut observed_rx) =
+        mpsc::unbounded_channel::<Vec<rustain::domain::models::Message>>();
+    {
+        let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+        let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+        let ws_for_factory = ws.clone();
+        let core_factory: CoreFactory =
+            Rc::new(move |_: &Path| Ok(make_history_core(&ws_for_factory, observed_tx.clone())));
+        let server = serve_acp_with_core_factory(
+            server_outgoing.compat_write(),
+            server_incoming.compat(),
+            AppConfig::default(),
+            workspace.path().to_path_buf(),
+            None,
+            core_factory,
+        );
+
+        let session_id_b = session_id.clone();
+        let drive = async move {
+            client_write
+                .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+                .await
+                .expect("write initialize B");
+            let load = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session/load",
+                "params": {
+                    "cwd": workspace.path(),
+                    "sessionId": session_id_b,
+                    "mcpServers": [],
+                },
+            });
+            client_write
+                .write_all(line(load.to_string()).as_bytes())
+                .await
+                .expect("write session/load");
+            client_write.flush().await.expect("flush B load");
+
+            let reader = tokio::io::BufReader::new(&mut client_read);
+            let mut lines = reader.lines();
+            // Await the load result (replay notifications have no `id`).
+            let mut got_load = false;
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => break,
+                };
+                let v: serde_json::Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["id"] == serde_json::json!(2) {
+                    got_load = true;
+                    break;
+                }
+            }
+
+            // Prompt AFTER load resolves (sequential — no concurrent dispatch).
+            client_write
+                .write_all(
+                    line(acp_prompt_req_with_text(
+                        serde_json::json!(3),
+                        &session_id,
+                        "charlie third turn",
+                    ))
+                    .as_bytes(),
+                )
+                .await
+                .expect("write prompt 3");
+            client_write.flush().await.expect("flush B p3");
+            let got_p3 = await_end_turn(&mut lines, serde_json::json!(3)).await;
+            drop(client_write);
+            (got_load, got_p3)
+        };
+
+        let (got_load, got_p3) = tokio::select! {
+            outcome = drive => outcome,
+            server_res = server => {
+                panic!("ACP server (phase B) exited before the client finished: {server_res:?}");
+            }
+        };
+        assert!(got_load, "session/load must resolve after the kill");
+        assert!(got_p3, "the post-load session/prompt must resolve end_turn");
+
+        // The Phase-B provider observed the reloaded history + the new turn.
+        let messages = observed_rx
+            .recv()
+            .await
+            .expect("the provider must observe the post-load turn's API messages");
+
+        // AC7: BOTH prior user prompts survived the kill→reload.
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == MessageRole::User && m.content.contains("alpha first turn")),
+            "reloaded history must include the turn-1 user prompt"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == MessageRole::User && m.content.contains("bravo second turn")),
+            "reloaded history must include the turn-2 user prompt"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == MessageRole::User && m.content.contains("charlie third turn")),
+            "the post-load turn's user prompt must be present"
+        );
+
+        // F0 discriminator (the net-new proof): the model's ANSWERS survived.
+        let assistant_answers = count_assistant_messages_containing(&messages, GOLDEN_AGENT_TEXT);
+        assert_eq!(
+            assistant_answers, 2,
+            "F0 keystone: BOTH prior assistant responses ({GOLDEN_AGENT_TEXT:?}) must \
+             survive the kill→reload — got {assistant_answers}. A mutant that drops Task-1's \
+             post-turn save yields 0 (only user prompts persist) and reddens this assertion."
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 11 — 14.9 lifecycle anti-vacuous gates (AC4 list, AC8 orphan)
+// ─────────────────────────────────────────────────────────────────────
+
+/// AC8 — `session/load` of an id with no persisted conversation (orphan) MUST
+/// resolve to `resource_not_found` (code -32002), never a silent empty success.
+///
+/// Non-vacuity: the assertion is on the JSON-RPC `error.code`, not merely the
+/// absence of a `result`. A mutant that returns an empty `LoadSessionResponse`
+/// (default success) on a miss reddens this — the response would carry a
+/// `result` with no `error`, failing the `-32002` check. DD-2 resolution
+/// (prefix-strip) is also exercised: a non-`acp-` id is an orphan too.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_load_unknown_session_id_is_resource_not_found() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let load = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/load",
+            "params": { "cwd": workspace.path(), "sessionId": "acp-never-existed", "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(load.to_string()).as_bytes())
+            .await
+            .expect("write session/load");
+        client_write.flush().await.expect("flush");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => panic!("no response to the orphan session/load"),
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(2) {
+                drop(client_write);
+                return v;
+            }
+        }
+    };
+
+    let response = tokio::select! {
+        v = drive => v,
+        server_res = server => panic!("server exited early: {server_res:?}"),
+    };
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32002),
+        "an orphan session/load must return resource_not_found (-32002); got {}",
+        response
+    );
+    assert!(
+        response["result"].is_null(),
+        "an orphan session/load must NOT carry a result; got {}",
+        response
+    );
+}
+
+/// AC4 — `session/list` over a cwd returns the persisted ACP conversation as
+/// `acp-{conversation_id}` with the echoed request cwd (DD-2 + DD-1).
+///
+/// After `new + prompt` persists a conversation, `session/list(cwd)` MUST
+/// surface it. The session id is the durable `acp-{conversation_id}` derive
+/// (DD-2), and `SessionInfo.cwd` is the request cwd echoed — never read from a
+/// per-session field (DD-1: cwd is implicit in the store location).
+#[tokio::test(flavor = "current_thread")]
+async fn acp_list_sessions_returns_persisted_session() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(new.to_string()).as_bytes())
+            .await
+            .expect("write new");
+        client_write.flush().await.expect("flush new");
+        // Persist the conversation via one prompt (run_turn's pre-turn save).
+        client_write
+            .write_all(
+                line(acp_prompt_req_with_text(
+                    serde_json::json!(3),
+                    "acp-1",
+                    "persist me",
+                ))
+                .as_bytes(),
+            )
+            .await
+            .expect("write prompt");
+        client_write.flush().await.expect("flush prompt");
+        // Read until the prompt resolves (so the save is durable on disk).
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        let mut persisted = false;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => break,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(3)
+                && v["result"]["stopReason"] == serde_json::json!("end_turn")
+            {
+                persisted = true;
+                break;
+            }
+        }
+        assert!(persisted, "the persisting prompt must resolve end_turn");
+        // session/list(cwd).
+        let list = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "session/list",
+            "params": { "cwd": workspace.path() },
+        });
+        client_write
+            .write_all(line(list.to_string()).as_bytes())
+            .await
+            .expect("write list");
+        client_write.flush().await.expect("flush list");
+        let mut list_resp: Option<serde_json::Value> = None;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => break,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(4) {
+                list_resp = Some(v);
+                break;
+            }
+        }
+        drop(client_write);
+        list_resp.expect("a session/list response")
+    };
+
+    let response = tokio::select! {
+        v = drive => v,
+        server_res = server => panic!("server exited early: {server_res:?}"),
+    };
+    let sessions = response["result"]["sessions"]
+        .as_array()
+        .expect("sessions array");
+    assert!(
+        sessions.iter().any(|s| s["sessionId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("acp-"))),
+        "session/list must surface the persisted conversation as acp-{{conversation_id}}; got {response}"
+    );
+    // DD-1: cwd is the request cwd echoed (the store IS the cwd filter).
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s["cwd"] == serde_json::json!(workspace.path())),
+        "every SessionInfo.cwd must equal the request cwd (DD-1 echoed, not disk-read); got {response}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 12 — 14.9 review-patch regression gates
+// (list pagination, malformed cursor, close-unknown, exact id resolution)
+// ─────────────────────────────────────────────────────────────────────
+
+/// AC4 pagination keystone — `session/list` over 26 same-`updated_at`
+/// conversations (page size 25 ⇒ forces a 2nd page) MUST page without
+/// duplicating or dropping any id.
+///
+/// Regression guard for the inverted same-timestamp cursor tiebreak: with
+/// the buggy filter `(updated_at, id) < cursor`, page 2 re-emitted the
+/// page-1 rows whose ids sort BELOW the cursor and silently dropped the
+/// 26th. The corrected filter keeps rows whose id sorts STRICTLY AFTER the
+/// cursor within the same timestamp, so every id surfaces exactly once.
+///
+/// Non-vacuity:
+/// * 26 rows share ONE `updated_at`, so the cursor timestamp is a tie —
+///   the id tiebreak is the ONLY discriminator between a correct and an
+///   inverted filter. Different-timestamp rows would page correctly even
+///   with the bug, so they cannot defend this contract.
+/// * Rows are seeded directly into the per-cwd `FileSystemStorage` the real
+///   agent lists, then paginated through the REAL ACP server over an
+///   in-memory duplex — no list mock.
+/// * `all_ids.len() >= 26` is a self-check: if `SESSION_LIST_PAGE_SIZE`
+///   ever grows past 26, this fails loudly instead of the test passing
+///   vacuously on a single page (which would not exercise the tiebreak).
+/// * Three independent assertions catch the bug: total collected, unique
+///   count, and per-id presence.
+///
+/// Determinism: identical seeded `updated_at` (no wall-clock), in-memory
+/// duplex transport (no listener), lexicographic zero-padded ids.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_list_paginates_same_second_sessions_without_duplicates_or_missing() {
+    use std::collections::HashSet;
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::domain::models::{AppConfig, Conversation};
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+
+    // Seed 26 conversations with an IDENTICAL `updated_at`. Same-second rows
+    // are exactly where the inverted-tiebreak bug duplicated/dropped ids;
+    // 26 > SESSION_LIST_PAGE_SIZE (25) forces a second page.
+    const SAME_SECOND: i64 = 1_700_000_000;
+    const SEED_COUNT: usize = 26;
+    let sessions_dir = ws.join(".rustain").join("sessions");
+    {
+        let seeding_store = FileSystemStorage::with_workspace_root(sessions_dir, ws.clone());
+        for i in 1..=SEED_COUNT {
+            let id = format!("seed-{i:02}");
+            let conv = Conversation {
+                id: id.clone(),
+                title: format!("Seed {i}"),
+                updated_at: SAME_SECOND,
+                // Mark every seed ACP-origin so the list's origin filter
+                // (conversation.session_id starts_with "acp-") keeps it.
+                session_id: Some(format!("acp-{id}")),
+                ..Default::default()
+            };
+            seeding_store
+                .save_conversation(&conv)
+                .await
+                .expect("seed save");
+        }
+    }
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let ws_for_factory = ws.clone();
+    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+
+        let mut next_cursor: Option<String> = None;
+        let mut all_ids: Vec<String> = Vec::new();
+        let mut req_id = 2i64;
+        loop {
+            let list = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "session/list",
+                "params": {
+                    "cwd": workspace.path(),
+                    "cursor": next_cursor,
+                },
+            });
+            client_write
+                .write_all(line(list.to_string()).as_bytes())
+                .await
+                .expect("write list");
+            client_write.flush().await.expect("flush list");
+
+            // Read until this page's result arrives (notifications carry no id).
+            let resp: serde_json::Value = loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => panic!("no response to session/list id {req_id}"),
+                };
+                let v: serde_json::Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["id"] == serde_json::json!(req_id) {
+                    break v;
+                }
+            };
+            assert!(
+                resp["error"].is_null(),
+                "paginated session/list on a valid cursor must not error; got {resp}"
+            );
+            if let Some(arr) = resp["result"]["sessions"].as_array() {
+                for s in arr {
+                    if let Some(id) = s["sessionId"].as_str() {
+                        all_ids.push(id.to_string());
+                    }
+                }
+            }
+            next_cursor = resp["result"]["nextCursor"].as_str().map(|s| s.to_string());
+            req_id += 1;
+            if next_cursor.is_none() {
+                break;
+            }
+        }
+        drop(client_write);
+        all_ids
+    };
+
+    let all_ids = tokio::select! {
+        ids = drive => ids,
+        server_res = server => panic!("server exited early: {server_res:?}"),
+    };
+
+    // Self-check: 26 rows at page size 25 MUST yield a second page. If the
+    // page-size constant grows past 26, fail loudly instead of passing on a
+    // single page (which would not exercise the tiebreak at all).
+    assert!(
+        all_ids.len() >= SEED_COUNT,
+        "pagination must traverse >=2 pages for {SEED_COUNT} same-second rows; \
+         collected only {} ids -- bump SEED_COUNT if SESSION_LIST_PAGE_SIZE changed. got {all_ids:?}",
+        all_ids.len()
+    );
+
+    let unique: HashSet<&String> = all_ids.iter().collect();
+    assert_eq!(
+        unique.len(),
+        SEED_COUNT,
+        "no duplicate session ids across pages -- the inverted-tiebreak bug \
+         re-emits page-1 rows on page 2; got {} unique of {} total: {all_ids:?}",
+        unique.len(),
+        all_ids.len()
+    );
+    for i in 1..=SEED_COUNT {
+        let expected = format!("acp-seed-{i:02}");
+        assert!(
+            unique.contains(&expected),
+            "paginated list must surface every same-second session exactly \
+             once; missing {expected}; got {all_ids:?}"
+        );
+    }
+}
+
+/// Malformed-cursor keystone — `session/list` with a cursor that is not a
+/// valid `{updated_at}:{id}` token MUST return a JSON-RPC error
+/// (`invalid_params`, -32602), never silently reset to page one.
+///
+/// Regression guard for the silent-reset bug: the original cursor decoder
+/// used `?` inside `and_then`, so an unparseable cursor collapsed to `None`
+/// and the server happily re-issued the FIRST page — a client stepping an
+/// opaque/malformed cursor would loop forever over page 1 and never advance.
+///
+/// Non-vacuity:
+/// * The cursor has NO colon, so it cannot be a valid `{ts}:{id}` token;
+///   the only correct response is an error.
+/// * Seeded rows make page 1 non-empty, so "returns page 1" is a real,
+///   observable wrong answer (not an empty list that looks like an error).
+/// * Asserts BOTH `error.code == -32602` AND `result` is absent — a mutant
+///   that returns page 1 carries a `result` and no `error`, reddening both.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_list_malformed_cursor_returns_error_not_page_one() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::domain::models::{AppConfig, Conversation};
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+    // Seed a couple of rows so page 1 is non-empty — a silent reset would
+    // return them; the correct behavior is an error with no result.
+    {
+        let sessions_dir = ws.join(".rustain").join("sessions");
+        let seeding_store = FileSystemStorage::with_workspace_root(sessions_dir, ws.clone());
+        for i in 1..=2 {
+            let id = format!("row-{i:02}");
+            let conv = Conversation {
+                id: id.clone(),
+                updated_at: 1_700_000_000 + i as i64,
+                session_id: Some(format!("acp-{id}")),
+                ..Default::default()
+            };
+            seeding_store
+                .save_conversation(&conv)
+                .await
+                .expect("seed save");
+        }
+    }
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let ws_for_factory = ws.clone();
+    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        // A cursor with no colon can never decode to `{ts}:{id}`.
+        let list = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/list",
+            "params": {
+                "cwd": workspace.path(),
+                "cursor": "this-is-not-a-valid-cursor",
+            },
+        });
+        client_write
+            .write_all(line(list.to_string()).as_bytes())
+            .await
+            .expect("write list");
+        client_write.flush().await.expect("flush list");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => panic!("no response to the malformed-cursor session/list"),
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(2) {
+                drop(client_write);
+                return v;
+            }
+        }
+    };
+
+    let response = tokio::select! {
+        v = drive => v,
+        server_res = server => panic!("server exited early: {server_res:?}"),
+    };
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32602),
+        "a malformed session/list cursor must return invalid_params (-32602), \
+         not silently re-issue page one; got {response}"
+    );
+    assert!(
+        response["result"].is_null(),
+        "a malformed session/list cursor must NOT carry a result (no silent \
+         page-one reset); got {response}"
+    );
+}
+
+/// Close-unknown keystone — `session/close` of an id with no live session
+/// MUST return `resource_not_found` (-32002), never a silent success.
+///
+/// Regression guard for the silent-success bug: the original `close_session`
+/// treated an unknown id as a no-op and returned `Ok(CloseSessionResponse)`,
+/// so a client could never distinguish a real close from a stale-id no-op.
+///
+/// Non-vacuity (A/B contrast in one connection):
+/// * Positive control: closing a LIVE session (`acp-1`) returns a result
+///   with no error — proves the fix did not break the happy path. A mutant
+///   that errors on ALL closes reddens this.
+/// * Keystone: closing an id that was never created returns
+///   `resource_not_found` (-32002) with no `result`. A mutant that silently
+///   succeeds on unknown ids reddens this.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_close_unknown_session_id_is_resource_not_found() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(new.to_string()).as_bytes())
+            .await
+            .expect("write new");
+        client_write.flush().await.expect("flush new");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+
+        // Await session/new so acp-1 is live before closing it.
+        let mut live = false;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => break,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(2) && v["result"]["sessionId"].is_string() {
+                live = true;
+                break;
+            }
+        }
+        assert!(live, "session/new must establish a live acp-1 session");
+
+        // Positive control: close the LIVE session -> success (result, no error).
+        let close_live = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/close",
+            "params": { "sessionId": "acp-1" },
+        });
+        client_write
+            .write_all(line(close_live.to_string()).as_bytes())
+            .await
+            .expect("write close live");
+        client_write.flush().await.expect("flush close live");
+        let mut live_close: Option<serde_json::Value> = None;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => break,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(3) {
+                live_close = Some(v);
+                break;
+            }
+        }
+        let live_close = live_close.expect("close-live response");
+        assert!(
+            live_close["result"].is_object(),
+            "closing a LIVE session must succeed (positive control); got {live_close}"
+        );
+
+        // Keystone: close an UNKNOWN id -> resource_not_found, no result.
+        let close_unknown = serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "session/close",
+            "params": { "sessionId": "acp-never-existed" },
+        });
+        client_write
+            .write_all(line(close_unknown.to_string()).as_bytes())
+            .await
+            .expect("write close unknown");
+        client_write.flush().await.expect("flush close unknown");
+        let mut unknown_close: Option<serde_json::Value> = None;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            let raw = match next {
+                Ok(Ok(Some(l))) => l,
+                _ => break,
+            };
+            let v: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v["id"] == serde_json::json!(4) {
+                unknown_close = Some(v);
+                break;
+            }
+        }
+        drop(client_write);
+        unknown_close.expect("close-unknown response")
+    };
+
+    let response = tokio::select! {
+        v = drive => v,
+        server_res = server => panic!("server exited early: {server_res:?}"),
+    };
+    assert_eq!(
+        response["error"]["code"],
+        serde_json::json!(-32002),
+        "closing an unknown session id must return resource_not_found (-32002), \
+         not a silent success; got {response}"
+    );
+    assert!(
+        response["result"].is_null(),
+        "closing an unknown session id must NOT carry a result; got {response}"
+    );
+}
+
+/// Exact-id-resolution keystone — `session/load` resolves an id by an EXACT
+/// `acp-{conversation_id}` match. Near-miss ids (truncated, extended,
+/// case-folded) MUST each fail with `resource_not_found`, never resolve to
+/// a sibling/prefix conversation.
+///
+/// Regression guard for AC8 ("no orphans/ambiguity"): the durable-id scheme
+/// is `SessionId = acp-{conversation_id}` with a prefix-strip + EXACT
+/// `load_conversation`. This pins that resolution is exact-string — a future
+/// change to prefix/substring matching (which would let `acp-abc` resolve a
+/// real `acp-abcd`) reddens the near-miss assertions. The existing orphan
+/// test only used a wholly-fake id; this adds the ambiguity discriminator:
+/// ids that are CLOSE to a real one but not equal.
+///
+/// Non-vacuity:
+/// * Positive control: the EXACT id loads successfully (result present) —
+///   proves the seeded conversation is reachable, so the near-miss failures
+///   are about exactness, not absence.
+/// * Three distinct near-miss shapes (trailing-char, dropped-char,
+///   case-fold) each fail with -32002. A prefix-match mutant resolves the
+///   truncated/extended cases and reddens them.
+///
+/// Determinism: a fixed seeded `conversation_id` (no id source involved),
+/// in-memory duplex transport (no listener).
+#[tokio::test(flavor = "current_thread")]
+async fn acp_session_id_resolution_is_exact_not_prefix_or_substring() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::domain::models::{AppConfig, Conversation};
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws = workspace.path().to_path_buf();
+
+    // A distinctive, mixed-case conversation id (sanitize-safe: [a-zA-Z0-9_-]).
+    const CONV_ID: &str = "exactKeyStone7q";
+    {
+        let sessions_dir = ws.join(".rustain").join("sessions");
+        let seeding_store = FileSystemStorage::with_workspace_root(sessions_dir, ws.clone());
+        let conv = Conversation {
+            id: CONV_ID.to_string(),
+            updated_at: 1_700_000_000,
+            session_id: Some(format!("acp-{CONV_ID}")),
+            ..Default::default()
+        };
+        seeding_store
+            .save_conversation(&conv)
+            .await
+            .expect("seed save");
+    }
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let ws_for_factory = ws.clone();
+    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    // The exact id MUST load; every near-miss MUST fail with resource_not_found.
+    let exact = format!("acp-{CONV_ID}");
+    let extended = format!("acp-{CONV_ID}X");
+    let truncated = format!("acp-{}", &CONV_ID[..CONV_ID.len() - 1]);
+    let case_folded = format!("acp-{}", CONV_ID.to_uppercase());
+    let cases: Vec<(&str, String)> = vec![
+        ("exact", exact),
+        ("extended", extended),
+        ("truncated", truncated),
+        ("case_folded", case_folded),
+    ];
+
+    let drive = async move {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        client_write.flush().await.expect("flush initialize");
+
+        // ONE persistent line reader across all loads -- recreating a
+        // BufReader per iteration would discard buffered bytes and stall.
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        let mut results: Vec<(String, bool, serde_json::Value)> = Vec::new();
+        for (i, (label, sid)) in cases.iter().enumerate() {
+            let req_id = (2 + i) as i64;
+            let load = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "session/load",
+                "params": {
+                    "cwd": workspace.path(),
+                    "sessionId": sid,
+                    "mcpServers": [],
+                },
+            });
+            client_write
+                .write_all(line(load.to_string()).as_bytes())
+                .await
+                .expect("write load");
+            client_write.flush().await.expect("flush load");
+            // Read until this load's result arrives. Replay notifications
+            // (for the exact-id load) carry no `id` and are skipped here.
+            let resp: serde_json::Value = loop {
+                let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+                let raw = match next {
+                    Ok(Ok(Some(l))) => l,
+                    _ => panic!("no response to session/load id {req_id} ({label})"),
+                };
+                let v: serde_json::Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v["id"] == serde_json::json!(req_id) {
+                    break v;
+                }
+            };
+            let ok = resp["result"].is_object();
+            results.push((label.to_string(), ok, resp));
+        }
+        drop(client_write);
+        results
+    };
+
+    let results = tokio::select! {
+        r = drive => r,
+        server_res = server => panic!("server exited early: {server_res:?}"),
+    };
+
+    for (label, ok, resp) in &results {
+        match label.as_str() {
+            "exact" => {
+                assert!(
+                    *ok,
+                    "the EXACT id must load (positive control -- proves the \
+                     seeded conversation is reachable); got {resp}"
+                );
+            }
+            "extended" | "truncated" | "case_folded" => {
+                assert!(
+                    !*ok && resp["error"]["code"] == serde_json::json!(-32002),
+                    "near-miss id `{label}` must NOT resolve -- exact resolution \
+                     only; expected resource_not_found (-32002), got {resp}"
+                );
+            }
+            _ => unreachable!("unhandled id-resolution case label {label}"),
+        }
+    }
+}
