@@ -13,6 +13,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 use crate::adapters::cli::commands::AcpClientProfile;
 use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::models::{AgentId, AppConfig, NodeState};
+use crate::domain::ports::AuthStorePort;
 use crate::infrastructure::subagent::node_tree::NodeTree;
 
 use super::agent::{
@@ -76,13 +77,12 @@ where
 {
     tracing::debug!(target: "acp", ?client_profile, "ACP client profile selected; R1 profiles are behavior-identical");
     let factory_config = app_config.clone();
-    let core_factory: AcpCoreFactory = Rc::new(move |cwd| {
-        crate::infrastructure::composition::build_acp_core(&factory_config, cwd, false).map_err(
-            |e| {
+    let core_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
+        crate::infrastructure::composition::build_acp_core(&factory_config, cwd, false, mcp_servers)
+            .map_err(|e| {
                 tracing::error!("ACP build_acp_core failed: {e:#}");
                 acp::Error::internal_error()
-            },
-        )
+            })
     });
     serve_acp_with_acp_core_factory(
         outgoing,
@@ -149,8 +149,8 @@ where
         Arc::new(move || clock.wall_now_ms())
     };
     let node_tree = NodeTree::with_now_fn(now_fn);
-    let acp_factory: AcpCoreFactory = Rc::new(move |cwd| {
-        core_factory(cwd).map(crate::infrastructure::composition::AcpCore::from)
+    let acp_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
+        core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });
     serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
@@ -177,8 +177,8 @@ where
     W: AsyncWrite + Unpin + 'static,
     R: AsyncRead + Unpin + 'static,
 {
-    let acp_factory: AcpCoreFactory = Rc::new(move |cwd| {
-        core_factory(cwd).map(crate::infrastructure::composition::AcpCore::from)
+    let acp_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
+        core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });
     serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
@@ -211,6 +211,37 @@ where
     W: AsyncWrite + Unpin + 'static,
     R: AsyncRead + Unpin + 'static,
 {
+    let auth_store: Arc<dyn AuthStorePort> =
+        Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+    serve_acp_with_acp_core_factory_and_node_tree_and_auth_store(
+        outgoing,
+        incoming,
+        app_config,
+        model_override,
+        core_factory,
+        node_tree,
+        default_workspace,
+        id_source,
+        auth_store,
+    )
+    .await
+}
+
+pub async fn serve_acp_with_acp_core_factory_and_node_tree_and_auth_store<W, R>(
+    outgoing: W,
+    incoming: R,
+    app_config: AppConfig,
+    model_override: Option<String>,
+    core_factory: AcpCoreFactory,
+    node_tree: NodeTree,
+    default_workspace: PathBuf,
+    id_source: Rc<dyn Fn() -> String>,
+    auth_store: Arc<dyn AuthStorePort>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin + 'static,
+    R: AsyncRead + Unpin + 'static,
+{
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
@@ -229,6 +260,7 @@ where
                 permission_tx,
                 sessions,
                 node_tree,
+                auth_store,
                 id_source,
             );
             let (conn, handle_io) = acp::AgentSideConnection::new(

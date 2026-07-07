@@ -13,12 +13,13 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::agent_node::AgentMetrics;
 use crate::domain::models::session_meta::now_unix;
 use crate::domain::models::{
-    AgentId, AppConfig, CapabilityTokenId, ChatMessage, CompletionOptions, MessageRole, NodeState,
-    Op, SkillActivationSet, SkillSource, StopReason as DomainStopReason, StreamChunk, ToolCallInfo,
-    ToolResultInfo,
+    AgentId, AppConfig, CapabilityTokenId, ChatMessage, CompletionOptions, ImageAttachment,
+    MessageRole, NodeState, Op, SkillActivationSet, SkillSource, StopReason as DomainStopReason,
+    StreamChunk, ToolCallInfo, ToolResultInfo,
 };
 use crate::domain::ports::{
-    PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort, UsageLedgerPort,
+    AuthStorePort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
+    UsageLedgerPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::message_builder;
@@ -29,13 +30,15 @@ use crate::infrastructure::runtime::turn;
 use crate::infrastructure::subagent::node_tree::{AgentHandle, MailboxBudget, NodeTree};
 
 use super::translate::{
-    approval_request_to_acp, message_to_replay_updates, permission_response_to_outcome,
-    skill_trust_request_to_acp, skill_trust_response_allows, stop_reason_to_acp,
-    stream_chunk_to_session_update,
+    approval_request_to_acp, mcp_servers_from_acp, message_to_replay_updates,
+    permission_response_to_outcome, skill_trust_request_to_acp, skill_trust_response_allows,
+    stop_reason_to_acp, stream_chunk_to_session_update,
 };
 
-pub type CoreFactory = Rc<dyn Fn(&Path) -> acp::Result<CliCore>>;
-pub type AcpCoreFactory = Rc<dyn Fn(&Path) -> acp::Result<AcpCore>>;
+pub type CoreFactory =
+    Rc<dyn Fn(&Path, &[crate::domain::models::McpServerSpec]) -> acp::Result<CliCore>>;
+pub type AcpCoreFactory =
+    Rc<dyn Fn(&Path, &[crate::domain::models::McpServerSpec]) -> acp::Result<AcpCore>>;
 
 /// Delay before emitting the post-`session/new` `available_commands_update`.
 ///
@@ -126,6 +129,7 @@ pub(crate) struct RustainAcpAgent {
     sessions: SharedSessions,
     id_source: Rc<dyn Fn() -> String>,
     node_tree: NodeTree,
+    auth_store: Arc<dyn AuthStorePort>,
 }
 
 impl RustainAcpAgent {
@@ -138,6 +142,7 @@ impl RustainAcpAgent {
         permission_requests: mpsc::UnboundedSender<PermissionAsk>,
         sessions: SharedSessions,
         node_tree: NodeTree,
+        auth_store: Arc<dyn AuthStorePort>,
         id_source: Rc<dyn Fn() -> String>,
     ) -> Self {
         Self {
@@ -150,6 +155,7 @@ impl RustainAcpAgent {
             sessions,
             id_source,
             node_tree,
+            auth_store,
         }
     }
 
@@ -179,8 +185,9 @@ impl RustainAcpAgent {
         rx.await.map_err(|_| acp::Error::internal_error())?
     }
 
-    fn prompt_text(blocks: &[acp::ContentBlock]) -> String {
+    fn prompt_parts(blocks: &[acp::ContentBlock]) -> (String, Vec<ImageAttachment>) {
         let mut out = String::new();
+        let mut images = Vec::new();
         for block in blocks {
             match block {
                 acp::ContentBlock::Text(text) => {
@@ -189,16 +196,66 @@ impl RustainAcpAgent {
                     }
                     out.push_str(&text.text);
                 }
+                acp::ContentBlock::Image(image) => {
+                    // Only inline base64 image data is supported (rustain
+                    // forwards bytes to the provider). A URI-only image (empty
+                    // `data`) cannot be resolved here, so warn and skip rather
+                    // than forward an empty attachment the provider would treat
+                    // as a broken image.
+                    if image.data.is_empty() {
+                        match image.uri.as_deref() {
+                            Some(uri) => tracing::warn!(
+                                uri = %uri,
+                                "ACP image block carried a URI but no inline data; \
+                                 rustain supports inline base64 images only — dropping"
+                            ),
+                            None => tracing::warn!(
+                                "ACP image block has no data and no URI; dropping"
+                            ),
+                        }
+                    } else {
+                        images.push(ImageAttachment {
+                            media_type: image.mime_type.clone(),
+                            data: image.data.clone(),
+                        });
+                    }
+                }
                 acp::ContentBlock::ResourceLink(resource) => {
                     if !out.is_empty() {
                         out.push('\n');
                     }
                     out.push_str(&resource.uri);
                 }
-                _ => {}
+                // Audio and embedded Resource blocks require capabilities
+                // rustain does NOT advertise (`audio`, `embeddedContext`), so
+                // they are dropped — but loudly, mirroring the Http/Sse MCP
+                // drop, so a spec-violating client gets a signal instead of
+                // silent data loss. (If such a block is the only block, the
+                // prompt text stays empty and `run_prompt` short-circuits to
+                // `EndTurn`.)
+                acp::ContentBlock::Audio(_) => {
+                    tracing::warn!(
+                        "ACP prompt contained an Audio content block, which \
+                         rustain does not support (no `audio` capability \
+                         advertised); dropping"
+                    );
+                }
+                acp::ContentBlock::Resource(_) => {
+                    tracing::warn!(
+                        "ACP prompt contained an embedded Resource content \
+                         block, which rustain does not support (no \
+                         `embeddedContext` capability advertised); dropping"
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        block = ?block,
+                        "ACP prompt contained an unsupported content block type; dropping"
+                    );
+                }
             }
         }
-        out
+        (out, images)
     }
 
     fn initial_model_selection(
@@ -264,6 +321,44 @@ impl RustainAcpAgent {
         ])
     }
 
+    fn builtin_commands() -> Vec<acp::AvailableCommand> {
+        vec![acp::AvailableCommand::new(
+            "init",
+            "create a context file with instructions for rustain.",
+        )]
+    }
+
+    fn builtin_init_prompt(args: &str) -> String {
+        let mut prompt = String::from(
+            "Analyze this repository and create or update a concise context file with instructions for future rustain sessions. Include repository purpose, architecture, key commands, test strategy, coding conventions, safety constraints, and any project-specific workflow rules.",
+        );
+        if !args.trim().is_empty() {
+            prompt.push_str("\n\nAdditional user instructions: ");
+            prompt.push_str(args.trim());
+        }
+        prompt
+    }
+
+    fn dispatch_builtin_prompt(prompt: &str) -> Option<String> {
+        // Only the DIRECT `/init` form is a builtin. This deliberately does NOT
+        // reuse `parse_skill_prompt`: that helper re-parses `/skill init` into
+        // `("init", "")`, which would let this builtin swallow the explicit
+        // skill-activation form — shadowing a user/workspace skill named `init`
+        // and making it advertised-but-unreachable (a 14-8b-class false
+        // surface). Parsing the bare form here leaves `/skill <name>` for the
+        // skill-lookup branch in `run_prompt`, restoring `/skill init` as the
+        // escape hatch for a colliding skill name.
+        let trimmed = prompt.trim_start();
+        let without_slash = trimmed.strip_prefix('/')?;
+        let mut split = without_slash.splitn(2, char::is_whitespace);
+        let name = split.next()?.trim();
+        if name != "init" {
+            return None;
+        }
+        let args = split.next().unwrap_or("").trim();
+        Some(Self::builtin_init_prompt(args))
+    }
+
     async fn available_skill_commands(
         skill_activator: &crate::adapters::skill_activation::SkillActivator,
     ) -> Vec<acp::AvailableCommand> {
@@ -278,6 +373,45 @@ impl RustainAcpAgent {
             }
         }
         commands
+    }
+
+    fn auth_methods() -> Vec<acp::AuthMethod> {
+        crate::adapters::cli::auth::providers::all_providers()
+            .iter()
+            .filter(|provider| provider.requires_key)
+            .map(|provider| {
+                acp::AuthMethod::Agent(
+                    acp::AuthMethodAgent::new(provider.id, provider.display_name).description(
+                        format!(
+                            "Set {} or run `rustain auth login {}`",
+                            provider.api_key_env, provider.id
+                        ),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    async fn has_credential_for(
+        &self,
+        provider: &crate::adapters::cli::auth::providers::ProviderMeta,
+    ) -> acp::Result<bool> {
+        let statuses = self
+            .auth_store
+            .list()
+            .await
+            .map_err(|err| acp::Error::internal_error().data(err.to_string()))?;
+        let auth_by_provider: HashMap<&str, &crate::domain::models::credential::ProviderStatus> =
+            statuses
+                .iter()
+                .map(|status| (status.provider.as_str(), status))
+                .collect();
+        Ok(
+            crate::adapters::cli::auth::detect_source(provider, &auth_by_provider, &|key| {
+                crate::infrastructure::utils::env_var_trimmed(key)
+            })
+            .is_some(),
+        )
     }
 
     fn parse_skill_prompt(prompt: &str) -> Option<(&str, &str)> {
@@ -359,6 +493,7 @@ impl RustainAcpAgent {
         &self,
         session_id: acp::SessionId,
         mut prompt: String,
+        images: Vec<ImageAttachment>,
     ) -> acp::Result<acp::StopReason> {
         let session_key = session_id.0.to_string();
         if !self.sessions.borrow().contains_key(&session_key) {
@@ -403,7 +538,9 @@ impl RustainAcpAgent {
             )
         };
 
-        if let Some((skill_name, skill_args)) = Self::parse_skill_prompt(&prompt) {
+        if let Some(expanded) = Self::dispatch_builtin_prompt(&prompt) {
+            prompt = expanded;
+        } else if let Some((skill_name, skill_args)) = Self::parse_skill_prompt(&prompt) {
             if let Some(def) = skill_activator.lookup_skill(skill_name).await {
                 let needs_trust = def.source != SkillSource::GlobalAgents
                     && !skill_activator
@@ -485,7 +622,16 @@ impl RustainAcpAgent {
             origin: crate::domain::models::ChannelKind::Terminal,
         });
 
-        let messages = message_builder::build_api_messages(&conversation);
+        let mut messages = message_builder::build_api_messages(&conversation);
+        if !images.is_empty() {
+            if let Some(last_user) = messages
+                .iter_mut()
+                .rev()
+                .find(|message| message.role == MessageRole::User)
+            {
+                last_user.images = images;
+            }
+        }
         let project_context = crate::domain::models::project_context::ProjectContext::empty();
         let persona = crate::adapters::persona_adapter::PersonaAdapter::new(project_context);
         let persona_prompt = PersonaPort::system_prompt(&persona, &cwd);
@@ -773,6 +919,7 @@ impl RustainAcpAgent {
         &self,
         session_id: &acp::SessionId,
         request_cwd: PathBuf,
+        mcp_servers: Vec<acp::McpServer>,
         replay_history: bool,
     ) -> acp::Result<Option<Vec<acp::SessionConfigOption>>> {
         let session_key = session_id.0.to_string();
@@ -791,7 +938,9 @@ impl RustainAcpAgent {
         // trust posture is likewise not trusted resumed (AC6 fail-closed).
         // Skill trust (SkillActivator.conversation_sets) starts empty after a
         // restart ⇒ workspace-tier skills fail-closed by construction.
-        let core = (self.core_factory)(&request_cwd).map(SessionCore::from)?;
+        let forwarded_mcp_servers = mcp_servers_from_acp(mcp_servers);
+        let core =
+            (self.core_factory)(&request_cwd, &forwarded_mcp_servers).map(SessionCore::from)?;
 
         // Load the conversation from the request-cwd-rooted store. A miss
         // (orphan / cross-cwd id) is fail-closed `resource_not_found` (AC8).
@@ -907,7 +1056,7 @@ impl RustainAcpAgent {
         cursor: Option<String>,
     ) -> acp::Result<acp::ListSessionsResponse> {
         let cwd = cwd.unwrap_or_else(|| self.default_workspace.clone());
-        let core = (self.core_factory)(&cwd).map(SessionCore::from)?;
+        let core = (self.core_factory)(&cwd, &[]).map(SessionCore::from)?;
         let all_summaries = core
             .storage
             .list_conversations()
@@ -998,20 +1147,42 @@ impl acp::Agent for RustainAcpAgent {
                     .list(Some(acp::SessionListCapabilities::default()))
                     .resume(Some(acp::SessionResumeCapabilities::default()))
                     .close(Some(acp::SessionCloseCapabilities::default())),
-            );
+            )
+            .prompt_capabilities(acp::PromptCapabilities::new().image(true));
         Ok(acp::InitializeResponse::new(version)
             .agent_info(acp::Implementation::new(
                 "rustain",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .agent_capabilities(caps))
+            .agent_capabilities(caps)
+            .auth_methods(Self::auth_methods()))
     }
 
     async fn authenticate(
         &self,
-        _args: acp::AuthenticateRequest,
+        args: acp::AuthenticateRequest,
     ) -> Result<acp::AuthenticateResponse, acp::Error> {
-        Ok(acp::AuthenticateResponse::default())
+        let provider_id = args.method_id.0.as_ref();
+        let Some(provider) = crate::adapters::cli::auth::providers::lookup(provider_id)
+            .filter(|provider| provider.requires_key)
+        else {
+            return Err(acp::Error::invalid_params().data(format!(
+                "Unknown ACP auth method `{provider_id}`. Supported methods: {}",
+                crate::adapters::cli::auth::providers::all_providers()
+                    .iter()
+                    .filter(|provider| provider.requires_key)
+                    .map(|provider| provider.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        if self.has_credential_for(provider).await? {
+            return Ok(acp::AuthenticateResponse::new());
+        }
+        Err(acp::Error::auth_required().data(format!(
+            "Missing credential for {}. Set {} or run `rustain auth login {}`.",
+            provider.display_name, provider.api_key_env, provider.id
+        )))
     }
 
     async fn new_session(
@@ -1036,7 +1207,8 @@ impl acp::Agent for RustainAcpAgent {
             .await
             .map_err(|_| acp::Error::internal_error())?;
         let cwd = args.cwd;
-        let core = match (self.core_factory)(&cwd) {
+        let forwarded_mcp_servers = mcp_servers_from_acp(args.mcp_servers);
+        let core = match (self.core_factory)(&cwd, &forwarded_mcp_servers) {
             Ok(c) => SessionCore::from(c),
             Err(e) => {
                 // Rollback: deregister the node we just registered.
@@ -1080,7 +1252,8 @@ impl acp::Agent for RustainAcpAgent {
         if let Some(config_options) = config_options {
             response = response.config_options(config_options);
         }
-        let commands = Self::available_skill_commands(&skill_activator).await;
+        let mut commands = Self::builtin_commands();
+        commands.extend(Self::available_skill_commands(&skill_activator).await);
         if !commands.is_empty() {
             // Story 14-8b host-smoke (2026-07-06): wire order alone is
             // NECESSARY but NOT SUFFICIENT for real async editors. Zed
@@ -1114,8 +1287,8 @@ impl acp::Agent for RustainAcpAgent {
     }
 
     async fn prompt(&self, args: acp::PromptRequest) -> Result<acp::PromptResponse, acp::Error> {
-        let text = Self::prompt_text(&args.prompt);
-        let stop_reason = self.run_prompt(args.session_id, text).await?;
+        let (text, images) = Self::prompt_parts(&args.prompt);
+        let stop_reason = self.run_prompt(args.session_id, text, images).await?;
         Ok(acp::PromptResponse::new(stop_reason))
     }
 
@@ -1176,7 +1349,9 @@ impl acp::Agent for RustainAcpAgent {
         let cwd = args.cwd.clone();
         // load = restore + replay history to the client (AC2). The resume-trust-
         // gate is structural (build_acp_core on request cwd) inside restore_session.
-        let config_options = self.restore_session(&args.session_id, cwd, true).await?;
+        let config_options = self
+            .restore_session(&args.session_id, cwd, args.mcp_servers, true)
+            .await?;
         let mut response = acp::LoadSessionResponse::new();
         if let Some(co) = config_options {
             response = response.config_options(co);
@@ -1193,7 +1368,9 @@ impl acp::Agent for RustainAcpAgent {
         // still fully reconstructed (load_conversation populates the in-memory
         // Conversation the next prompt reads); only the session/update
         // re-stream is skipped.
-        let config_options = self.restore_session(&args.session_id, cwd, false).await?;
+        let config_options = self
+            .restore_session(&args.session_id, cwd, args.mcp_servers, false)
+            .await?;
         let mut response = acp::ResumeSessionResponse::new();
         if let Some(co) = config_options {
             response = response.config_options(co);

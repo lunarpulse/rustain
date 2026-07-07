@@ -266,8 +266,9 @@ async fn drive_session_new_result(
 
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws_for_factory = workspace.path().to_path_buf();
-    let core_factory: CoreFactory =
-        Rc::new(move |_cwd: &Path| Ok(make_catalog_core(&ws_for_factory, models.clone())));
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        Ok(make_catalog_core(&ws_for_factory, models.clone()))
+    });
 
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
@@ -472,8 +473,9 @@ async fn drive_set_config_option_response(
 
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws_for_factory = workspace.path().to_path_buf();
-    let core_factory: CoreFactory =
-        Rc::new(move |_cwd: &Path| Ok(make_catalog_core(&ws_for_factory, models.clone())));
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        Ok(make_catalog_core(&ws_for_factory, models.clone()))
+    });
 
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
@@ -914,32 +916,26 @@ async fn drive_handshake_collect_notifications(
     }
 }
 
-/// `available_commands_update` is advertised after `session/new` ONLY when the
-/// agent has enabled skills, and is skipped entirely when there are none.
+/// `available_commands_update` is advertised after `session/new` even when no
+/// skills are enabled because Story 14.10 adds the built-in `/init` command.
 ///
-/// Defends the contract Zed's slash-command palette keys off: the agent
-/// advertises each enabled skill as an available command so the editor can
-/// surface them, and advertises NOTHING when the skill set is empty (an empty
-/// `available_commands_update` would render a broken palette). The contrast —
-/// present-with-skills vs absent-without — is what proves the advertisement is
-/// skill-driven, not unconditional.
+/// Defends the contract Zed's slash-command palette keys off: the agent always
+/// advertises the built-in command `init`, prepends it before skill commands,
+/// and still advertises enabled skills alongside it. The no-skills branch proves
+/// the update is not skill-gated anymore and that R1 advertises no extra
+/// built-ins such as `/mode`, `/model`, `/clear`, or `/compact`.
 ///
-/// Non-vacuity: today `new_session` sends NO `available_commands_update`
-/// notification at all, so the with-skills case reddens the "≥1 advertisement"
-/// assertion. A mutant that always sends an empty update reddens the
-/// without-skills absence assertion.
-///
-/// Determinism: the absence branch is bounded by the DD-3 fence (see
-/// `drive_handshake_collect_notifications`), not a 10s idle drain. The test
-/// runs on a paused clock so the deferred advertisement and the post-fence
-/// drain cost no wall-clock time — the no-skills case terminates at the fence.
+/// Non-vacuity: a mutant that removes `builtin_commands()` reddens the
+/// no-skills assertion; a mutant that keeps the old skill-gate reddens both
+/// branches; a mutant that advertises extra built-ins reddens the exact
+/// no-skills command-name assertion.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn available_commands_update_advertised_only_when_skills_present() {
+async fn available_commands_update_always_advertises_builtin_init() {
     // ── With skills: an available_commands_update carrying a skill command. ──
     let ws = tempfile::tempdir().expect("workspace tempdir");
     let ws_path = ws.path().to_path_buf();
     let skills = vec![fixture_skill("zed-skill-a")];
-    let factory: AcpCoreFactory = Rc::new(move |_cwd| {
+    let factory: AcpCoreFactory = Rc::new(move |_cwd, _mcp_servers| {
         Ok(make_acp_core_with_skills(
             &ws_path,
             Vec::new(),
@@ -962,24 +958,46 @@ async fn available_commands_update_advertised_only_when_skills_present() {
         }
     }
     assert!(
+        advertised_names.iter().any(|n| n == "init"),
+        "session/new must always advertise built-in command `init`; \
+         got advertised commands = {advertised_names:?}, notifications = {notifications:?}"
+    );
+    assert!(
         advertised_names.iter().any(|n| n == "zed-skill-a"),
-        "session/new must advertise an available command for the enabled skill `zed-skill-a`; \
+        "session/new must still advertise enabled skill `zed-skill-a`; \
          got advertised commands = {advertised_names:?}, notifications = {notifications:?}"
     );
 
-    // ── Without skills: NO available_commands_update at all. ──
+    // ── Without skills: the built-in `/init` command is still advertised. ──
     let ws2 = tempfile::tempdir().expect("workspace tempdir");
     let ws2_path = ws2.path().to_path_buf();
-    let factory_empty: AcpCoreFactory =
-        Rc::new(move |_cwd| Ok(make_acp_core_with_skills(&ws2_path, Vec::new(), Vec::new())));
-    let (_result2, notifications2) = drive_handshake_collect_notifications(factory_empty).await;
-    let sent_empty_update = notifications2.iter().any(|n| {
-        n["params"]["update"]["sessionUpdate"] == serde_json::json!("available_commands_update")
+    let factory_empty: AcpCoreFactory = Rc::new(move |_cwd, _mcp_servers| {
+        Ok(make_acp_core_with_skills(&ws2_path, Vec::new(), Vec::new()))
     });
-    assert!(
-        !sent_empty_update,
-        "session/new must NOT send an available_commands_update when there are no enabled skills; \
-         got notifications = {notifications2:?}"
+    let (_result2, notifications2) = drive_handshake_collect_notifications(factory_empty).await;
+    let mut advertised_without_skills: Vec<(String, String)> = Vec::new();
+    for n in &notifications2 {
+        let update = &n["params"]["update"];
+        if update["sessionUpdate"] == serde_json::json!("available_commands_update") {
+            if let Some(cmds) = update["availableCommands"].as_array() {
+                for c in cmds {
+                    if let Some(name) = c["name"].as_str() {
+                        advertised_without_skills.push((
+                            name.to_string(),
+                            c["description"].as_str().unwrap_or("").to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        advertised_without_skills,
+        vec![(
+            "init".to_string(),
+            "create a context file with instructions for rustain.".to_string()
+        )],
+        "no-skills sessions must advertise exactly the built-in `/init` command"
     );
 }
 
@@ -1037,7 +1055,7 @@ async fn available_commands_update_arrives_after_session_new_response() {
     let ws_path = ws.path().to_path_buf();
     let skills = vec![fixture_skill("zed-order-skill")];
     let models = vec![model("zed-alpha", "Zed Alpha")];
-    let factory: AcpCoreFactory = Rc::new(move |_cwd| {
+    let factory: AcpCoreFactory = Rc::new(move |_cwd, _mcp_servers| {
         Ok(make_acp_core_with_skills(
             &ws_path,
             models.clone(),
@@ -1213,7 +1231,7 @@ async fn available_commands_update_deferred_after_session_new_response() {
     let ws = tempfile::tempdir().expect("workspace tempdir");
     let ws_path = ws.path().to_path_buf();
     let skills = vec![fixture_skill("zed-defer-skill")];
-    let factory: AcpCoreFactory = Rc::new(move |_cwd| {
+    let factory: AcpCoreFactory = Rc::new(move |_cwd, _mcp_servers| {
         Ok(make_acp_core_with_skills(
             &ws_path,
             Vec::new(),
@@ -1344,7 +1362,7 @@ async fn slash_skill_activation_injects_skill_body_into_provider_system_prompt()
 
     // Build an AcpCore that uses the capturing provider AND has the skill.
     let captured_for_factory = captured.clone();
-    let factory: AcpCoreFactory = Rc::new(move |_cwd| {
+    let factory: AcpCoreFactory = Rc::new(move |_cwd, _mcp_servers| {
         let mut acp_core = AcpCore::from({
             // CliCore with the capturing provider.
             use rustain::adapters::filesystem::FileSystemStorage;
@@ -1493,7 +1511,7 @@ fn capturing_acp_factory(
     use rustain::domain::services::approval_runtime::ApprovalRuntime;
     use rustain::domain::services::tool_scheduler::ToolScheduler;
 
-    Rc::new(move |_cwd| {
+    Rc::new(move |_cwd, _mcp_servers| {
         let provider: Arc<dyn rustain::domain::ports::StreamingProvider> =
             Arc::new(SystemPromptCapturingProvider {
                 captured: captured.clone(),
@@ -1813,7 +1831,7 @@ async fn drive_workspace_skill_with_trust(
                                 "id": id,
                                 "result": {
                                     "outcome": {
-                                        "type": "selected",
+                                        "outcome": "selected",
                                         "optionId": trust,
                                     }
                                 }

@@ -285,6 +285,445 @@ fn make_core(workspace: &Path) -> CliCore {
 /// Determinism: the provider is scripted (no network), the transport is an
 /// in-memory duplex (no TCP listener), the session id is deterministic.
 #[tokio::test(flavor = "current_thread")]
+async fn acp_session_new_forwards_mcp_servers_to_core_factory() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::{AppConfig, McpServerSpec, McpTransport};
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws_for_factory = workspace.path().to_path_buf();
+    let observed: Rc<RefCell<Vec<Vec<McpServerSpec>>>> = Rc::new(RefCell::new(Vec::new()));
+    let observed_for_factory = observed.clone();
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let mut client_reader = tokio::io::BufReader::new(client_read);
+
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, mcp_servers| {
+        observed_for_factory.borrow_mut().push(mcp_servers.to_vec());
+        Ok(make_core(&ws_for_factory))
+    });
+
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    // P6 — give the AC3 literal-env assertion teeth. `RUSTAIN_ACP_LITERAL` is
+    // SET to a sentinel so a mutant routing the value through
+    // `expand_env_vars` would substitute the sentinel (and the literal-token
+    // assertion reddens). With the var UNSET, `expand_env_vars` leaves unknown
+    // vars literal and the bug would pass. Unique var; restored on exit.
+    const PROBE_VAR: &str = "RUSTAIN_ACP_LITERAL";
+    const SENTINEL: &str = "RUSTAIN_ACP_LITERAL_EXPANDED_SENTINEL_14_10";
+    // SAFETY: PROBE_VAR is unique to this test; the function under test
+    // (mcp_servers_from_acp) never reads the process env. Restored on exit.
+    unsafe { std::env::set_var(PROBE_VAR, SENTINEL) };
+    let _probe_guard = scopeguard::guard((), |_| unsafe { std::env::remove_var(PROBE_VAR) });
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let empty_mcp_session = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(empty_mcp_session.to_string()).as_bytes())
+            .await
+            .expect("write empty MCP session/new");
+        let stdio_mcp_session = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/new",
+            "params": {
+                "cwd": workspace.path(),
+                "mcpServers": [{
+                    "type": "stdio",
+                    "name": "fixture server",
+                    "command": "/bin/echo",
+                    "args": ["--flag"],
+                    "env": [{ "name": "TOKEN", "value": "${RUSTAIN_ACP_LITERAL}" }]
+                }]
+            },
+        });
+        client_write
+            .write_all(line(stdio_mcp_session.to_string()).as_bytes())
+            .await
+            .expect("write stdio MCP session/new");
+        client_write.flush().await.expect("flush requests");
+
+        let mut responses = Vec::new();
+        // P8 — read until the session/new id:3 result arrives, tolerating
+        // interleaved `available_commands_update` notifications (which carry no
+        // `id`) emitted by the always-on `/init` advertisement. A fixed 3-line
+        // read would break if a deferred notification lands before id:3.
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        loop {
+            if responses
+                .iter()
+                .any(|value: &serde_json::Value| value.get("id") == Some(&serde_json::json!(3)))
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for session/new id:3 result; got {responses:?}");
+            }
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(2), client_reader.read_line(&mut line))
+                .await
+                .expect("timed out waiting for ACP response")
+                .expect("read ACP response");
+            responses.push(serde_json::from_str::<serde_json::Value>(&line).expect("json line"));
+        }
+        assert!(
+            responses
+                .iter()
+                .any(|value| value.get("id") == Some(&serde_json::json!(3))),
+            "session/new with MCP server should complete successfully: {responses:?}"
+        );
+    };
+
+    tokio::select! {
+        result = server => panic!("ACP server exited before MCP forwarding assertions: {result:?}"),
+        _ = drive => {}
+    }
+
+    let observed = observed.borrow();
+    assert_eq!(
+        observed.len(),
+        2,
+        "core factory should be called once per session/new"
+    );
+    assert!(
+        observed[0].is_empty(),
+        "empty mcpServers must forward an empty slice"
+    );
+    assert_eq!(
+        observed[1].len(),
+        1,
+        "stdio mcp server must reach the core factory"
+    );
+    let spec = &observed[1][0];
+    assert_eq!(spec.id, "fixture_server");
+    assert_eq!(spec.transport, McpTransport::Stdio);
+    assert_eq!(spec.command.as_deref(), Some("/bin/echo"));
+    assert_eq!(spec.args, vec!["--flag"]);
+    assert_eq!(
+        spec.env.get("TOKEN").map(String::as_str),
+        Some("${RUSTAIN_ACP_LITERAL}"),
+        "ACP env values must be forwarded literally — the probe var \
+         `RUSTAIN_ACP_LITERAL` is SET in the process env, so an expansion \
+         mutant would substitute the sentinel here"
+    );
+}
+
+#[derive(Clone)]
+struct StaticAuthStore {
+    statuses: Vec<rustain::domain::models::credential::ProviderStatus>,
+}
+
+#[async_trait::async_trait]
+impl rustain::domain::ports::AuthStorePort for StaticAuthStore {
+    async fn get(
+        &self,
+        _provider: &str,
+    ) -> Result<
+        Option<rustain::domain::models::credential::Credential>,
+        rustain::domain::errors::AuthError,
+    > {
+        Ok(None)
+    }
+
+    async fn set(
+        &self,
+        _provider: &str,
+        _cred: rustain::domain::models::credential::Credential,
+    ) -> Result<(), rustain::domain::errors::AuthError> {
+        Ok(())
+    }
+
+    async fn remove(&self, _provider: &str) -> Result<(), rustain::domain::errors::AuthError> {
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+    ) -> Result<
+        Vec<rustain::domain::models::credential::ProviderStatus>,
+        rustain::domain::errors::AuthError,
+    > {
+        Ok(self.statuses.clone())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_initialize_advertises_auth_methods_without_secret_leaks() {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::run::serve_acp_with_acp_core_factory_and_node_tree_and_auth_store;
+    use rustain::domain::models::AppConfig;
+    use rustain::infrastructure::composition::AcpCore;
+    use rustain::infrastructure::subagent::NodeTree;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws_for_factory = workspace.path().to_path_buf();
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let secret_canary = "sk-auth-method-secret-must-not-leak";
+    unsafe { std::env::set_var("OPENAI_API_KEY", secret_canary) };
+    let _guard = scopeguard::guard((), |_| unsafe { std::env::remove_var("OPENAI_API_KEY") });
+
+    let factory: rustain::adapters::acp::agent::AcpCoreFactory =
+        Rc::new(move |_cwd, _mcp_servers| Ok(AcpCore::from(make_core(&ws_for_factory))));
+    let server = serve_acp_with_acp_core_factory_and_node_tree_and_auth_store(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        None,
+        factory,
+        NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000)),
+        workspace.path().to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
+        Arc::new(StaticAuthStore {
+            statuses: Vec::new(),
+        }),
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        client_write.flush().await.expect("flush initialize");
+
+        let mut raw = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::io::BufReader::new(&mut client_read).read_line(&mut raw),
+        )
+        .await
+        .expect("timeout waiting for initialize response")
+        .expect("read initialize response");
+        let response: serde_json::Value = serde_json::from_str(&raw).expect("initialize JSON");
+        assert_eq!(response["id"], serde_json::json!(1));
+        assert!(
+            !raw.contains(secret_canary),
+            "initialize response must never leak configured secret bytes: {raw}"
+        );
+        let methods = response["result"]["authMethods"]
+            .as_array()
+            .expect("initialize authMethods array");
+        let ids: Vec<&str> = methods
+            .iter()
+            .filter_map(|method| method["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"anthropic"),
+            "authMethods must include Anthropic: {methods:?}"
+        );
+        assert!(
+            ids.contains(&"openai"),
+            "authMethods must include OpenAI: {methods:?}"
+        );
+        assert!(
+            !ids.contains(&"ollama"),
+            "keyless Ollama must not be advertised as an auth method: {methods:?}"
+        );
+        assert!(
+            methods.iter().all(|method| method["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("rustain auth login"))),
+            "auth method descriptions must explain rustain-owned login: {methods:?}"
+        );
+        let caps = &response["result"]["agentCapabilities"];
+        assert_eq!(
+            caps["loadSession"],
+            serde_json::json!(true),
+            "initialize must preserve loadSession lifecycle capability"
+        );
+        assert!(
+            caps["sessionCapabilities"]["list"].is_object(),
+            "initialize must preserve session/list capability: {caps}"
+        );
+        assert!(
+            caps["sessionCapabilities"]["resume"].is_object(),
+            "initialize must preserve session/resume capability: {caps}"
+        );
+        assert!(
+            caps["sessionCapabilities"]["close"].is_object(),
+            "initialize must preserve session/close capability: {caps}"
+        );
+        assert_eq!(
+            caps["promptCapabilities"]["image"],
+            serde_json::json!(true),
+            "Task 5 shipped image passthrough, so initialize must honestly advertise image prompt support"
+        );
+        assert!(
+            caps["promptCapabilities"].get("embeddedContext").is_none()
+                || caps["promptCapabilities"]["embeddedContext"] == serde_json::json!(false),
+            "embeddedContext must stay false/absent because rustain does not embed resource contents: {caps}"
+        );
+        assert!(
+            caps["promptCapabilities"].get("audio").is_none()
+                || caps["promptCapabilities"]["audio"] == serde_json::json!(false),
+            "audio must stay false/absent because ACP audio passthrough is not implemented: {caps}"
+        );
+        assert!(
+            caps["mcpCapabilities"].get("http").is_none()
+                || caps["mcpCapabilities"]["http"] == serde_json::json!(false),
+            "MCP HTTP must stay false/absent because rustain forwards stdio MCP only: {caps}"
+        );
+        assert!(
+            caps["mcpCapabilities"].get("sse").is_none()
+                || caps["mcpCapabilities"]["sse"] == serde_json::json!(false),
+            "MCP SSE must stay false/absent because rustain forwards stdio MCP only: {caps}"
+        );
+    };
+
+    tokio::select! {
+        _ = drive => {}
+        server_res = server => panic!("ACP server exited before initialize auth assertion: {server_res:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_authenticate_checks_credential_presence() {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::run::serve_acp_with_acp_core_factory_and_node_tree_and_auth_store;
+    use rustain::domain::models::AppConfig;
+    use rustain::domain::models::credential::{AuthSource, AuthStatus, ProviderStatus};
+    use rustain::infrastructure::composition::AcpCore;
+    use rustain::infrastructure::subagent::NodeTree;
+
+    // P7 — hermeticity: the "missing credential" case must NOT be satisfied by
+    // an ambient `MOONSHOT_API_KEY` in the developer's shell (`detect_source`
+    // checks the process env before the auth store). Save + remove it for the
+    // duration of the test and restore the prior value on exit.
+    let prior_moonshot = std::env::var("MOONSHOT_API_KEY").ok();
+    if prior_moonshot.is_some() {
+        // SAFETY: process-global mutation; this is the only test in the binary
+        // reading `MOONSHOT_API_KEY`, the runtime is single-threaded, and the
+        // prior value is restored on scope exit.
+        unsafe { std::env::remove_var("MOONSHOT_API_KEY") };
+    }
+    let _moonshot_guard = scopeguard::guard(prior_moonshot, |prior| {
+        if let Some(v) = prior {
+            // SAFETY: same uniqueness rationale.
+            unsafe { std::env::set_var("MOONSHOT_API_KEY", v) };
+        }
+    });
+
+    let run_case = |statuses: Vec<ProviderStatus>| async move {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let ws_for_factory = workspace.path().to_path_buf();
+        let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+        let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+        let factory: rustain::adapters::acp::agent::AcpCoreFactory =
+            Rc::new(move |_cwd, _mcp_servers| Ok(AcpCore::from(make_core(&ws_for_factory))));
+        let server = serve_acp_with_acp_core_factory_and_node_tree_and_auth_store(
+            server_outgoing.compat_write(),
+            server_incoming.compat(),
+            AppConfig::default(),
+            None,
+            factory,
+            NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000)),
+            workspace.path().to_path_buf(),
+            rustain::adapters::acp::run::deterministic_acp_id_source(),
+            Arc::new(StaticAuthStore { statuses }),
+        );
+
+        let drive = async {
+            client_write
+                .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+                .await
+                .expect("write initialize");
+            let auth = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "authenticate",
+                "params": { "methodId": "moonshot" },
+            });
+            client_write
+                .write_all(line(auth.to_string()).as_bytes())
+                .await
+                .expect("write authenticate");
+            client_write.flush().await.expect("flush auth");
+
+            let reader = tokio::io::BufReader::new(&mut client_read);
+            let mut lines = reader.lines();
+            loop {
+                let raw = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                    .await
+                    .expect("timeout waiting for auth response")
+                    .expect("read auth response")
+                    .expect("ACP stream ended before auth response");
+                let response: serde_json::Value = serde_json::from_str(&raw).expect("auth JSON");
+                if response["id"] == serde_json::json!(2) {
+                    return response;
+                }
+            }
+        };
+
+        tokio::select! {
+            response = drive => response,
+            server_res = server => panic!("ACP server exited before authenticate response: {server_res:?}"),
+        }
+    };
+
+    let missing = run_case(Vec::new()).await;
+    assert!(
+        missing.get("error").is_some(),
+        "authenticate must fail honestly when no credential exists: {missing}"
+    );
+    let error_text = missing["error"].to_string();
+    assert!(
+        error_text.contains("MOONSHOT_API_KEY"),
+        "missing-auth error must name env var: {error_text}"
+    );
+    assert!(
+        error_text.contains("rustain auth login moonshot"),
+        "missing-auth error must include login hint: {error_text}"
+    );
+
+    let success = run_case(vec![ProviderStatus {
+        provider: "moonshot".to_string(),
+        status: AuthStatus::Authenticated,
+        source: AuthSource::AuthJson,
+        last_validated: None,
+    }])
+    .await;
+    assert!(
+        success.get("result").is_some() && success.get("error").is_none(),
+        "authenticate must succeed when auth store reports a credential: {success}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn acp_initialize_then_prompt_matches_golden_transcript() {
     use std::rc::Rc;
     use std::time::Duration;
@@ -309,7 +748,8 @@ async fn acp_initialize_then_prompt_matches_golden_transcript() {
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_cwd: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
     #[cfg(feature = "test-instrumentation")]
     let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
     #[cfg(feature = "test-instrumentation")]
@@ -494,7 +934,8 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
     let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
     let observer = node_tree.clone();
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_cwd: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
 
     // The server future is `!Send` (LocalSet/Rc inside the SDK); pin it and
     // poll it on this current thread across both client phases. Polled by
@@ -778,7 +1219,7 @@ async fn drive_acp_permission_case(option_id: &str) -> (usize, usize) {
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| {
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
         Ok(make_core_with_sentinel(
             &ws_for_factory,
             executions_for_factory.clone(),
@@ -924,7 +1365,8 @@ async fn acp_session_accepts_consecutive_prompt_turns_without_invalid_params() {
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_cwd: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -1182,7 +1624,7 @@ async fn acp_cancel_mid_turn_returns_stop_reason_cancelled() {
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| {
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
         Ok(make_delayed_core(
             &ws_for_factory,
             // Long enough that the cancel notification is reliably dispatched
@@ -1401,7 +1843,8 @@ async fn acp_and_ask_produce_equivalent_stream_output() {
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_cwd: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -1535,7 +1978,8 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
     let node_tree = NodeTree::with_now_fn(Arc::new(move || FIXED_NOW_MS));
     let observer = node_tree.clone();
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_cwd: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
 
     let mut server = Box::pin(serve_acp_with_core_factory_and_node_tree(
         server_outgoing.compat_write(),
@@ -1790,7 +2234,7 @@ async fn acp_consecutive_turns_accumulate_conversation_history() {
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| {
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
         Ok(make_history_core(
             &ws_for_factory,
             observed_tx_for_factory.clone(),
@@ -1943,6 +2387,257 @@ async fn acp_consecutive_turns_accumulate_conversation_history() {
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn acp_init_builtin_expands_before_provider_turn() {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws_for_factory = workspace.path().to_path_buf();
+    let (observed_tx, mut observed_rx) =
+        mpsc::unbounded_channel::<Vec<rustain::domain::models::Message>>();
+    let observed_tx_for_factory = observed_tx.clone();
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
+
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        Ok(make_history_core(
+            &ws_for_factory,
+            observed_tx_for_factory.clone(),
+        ))
+    });
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        client_write
+            .write_all(
+                line(acp_prompt_req_with_text(
+                    serde_json::json!(3),
+                    "acp-1",
+                    "/init",
+                ))
+                .as_bytes(),
+            )
+            .await
+            .expect("write /init prompt");
+        client_write.flush().await.expect("flush /init transcript");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        loop {
+            let raw = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("timeout waiting for /init ACP frame")
+                .expect("read error on ACP stream")
+                .expect("ACP stream ended before /init result");
+            let v: serde_json::Value = serde_json::from_str(&raw).expect("ACP frame JSON");
+            if v["id"] == serde_json::json!(3) {
+                assert!(
+                    v.get("error").is_none(),
+                    "/init ACP prompt returned an error: {v}"
+                );
+                assert_eq!(
+                    v["result"]["stopReason"],
+                    serde_json::json!("end_turn"),
+                    "/init ACP prompt must run a real turn and end normally"
+                );
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = drive => {}
+        server_res = server => {
+            panic!("ACP server exited before /init prompt completed: {server_res:?}");
+        }
+    }
+
+    let mut snapshots: Vec<Vec<rustain::domain::models::Message>> = Vec::new();
+    while let Ok(messages) = observed_rx.try_recv() {
+        snapshots.push(messages);
+    }
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "exactly one provider turn must be recorded for `/init`"
+    );
+    let provider_input = &snapshots[0];
+    assert_eq!(
+        count_user_messages_containing(provider_input, "/init"),
+        0,
+        "`/init` must expand before provider input; sending the literal slash command is the false-green"
+    );
+    assert_eq!(
+        count_user_messages_containing(provider_input, "create or update a concise context file"),
+        1,
+        "`/init` must expand into the repository context-file prompt before the turn"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn acp_image_content_reaches_provider_message() {
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::AppConfig;
+
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+
+    const IMAGE_DATA: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+    const IMAGE_MIME: &str = "image/png";
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws_for_factory = workspace.path().to_path_buf();
+    let (observed_tx, mut observed_rx) =
+        mpsc::unbounded_channel::<Vec<rustain::domain::models::Message>>();
+    let observed_tx_for_factory = observed_tx.clone();
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
+
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        Ok(make_history_core(
+            &ws_for_factory,
+            observed_tx_for_factory.clone(),
+        ))
+    });
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        let prompt = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "acp-1",
+                "prompt": [
+                    { "type": "text", "text": "describe this image" },
+                    { "type": "image", "data": IMAGE_DATA, "mimeType": IMAGE_MIME }
+                ]
+            }
+        });
+        client_write
+            .write_all(line(prompt.to_string()).as_bytes())
+            .await
+            .expect("write image prompt");
+        client_write.flush().await.expect("flush image transcript");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        loop {
+            let raw = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("timeout waiting for image ACP frame")
+                .expect("read error on ACP stream")
+                .expect("ACP stream ended before image result");
+            let v: serde_json::Value = serde_json::from_str(&raw).expect("ACP frame JSON");
+            if v["id"] == serde_json::json!(3) {
+                assert!(
+                    v.get("error").is_none(),
+                    "image ACP prompt returned an error: {v}"
+                );
+                assert_eq!(
+                    v["result"]["stopReason"],
+                    serde_json::json!("end_turn"),
+                    "image ACP prompt must run a real turn and end normally"
+                );
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = drive => {}
+        server_res = server => {
+            panic!("ACP server exited before image prompt completed: {server_res:?}");
+        }
+    }
+
+    let mut snapshots: Vec<Vec<rustain::domain::models::Message>> = Vec::new();
+    while let Ok(messages) = observed_rx.try_recv() {
+        snapshots.push(messages);
+    }
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "exactly one provider turn must be recorded for image prompt"
+    );
+    let user_message = snapshots[0]
+        .iter()
+        .find(|message| {
+            message.role == rustain::domain::models::MessageRole::User
+                && message.content.contains("describe this image")
+        })
+        .expect("provider input should include the image prompt user message");
+    assert_eq!(
+        user_message.images.len(),
+        1,
+        "image block must reach provider input"
+    );
+    assert_eq!(user_message.images[0].media_type, IMAGE_MIME);
+    assert_eq!(user_message.images[0].data, IMAGE_DATA);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Section 10 — P-15 approval routing-matrix regression
 // ─────────────────────────────────────────────────────────────────────
@@ -1988,7 +2683,7 @@ async fn drive_acp_capture_approval_source() -> rustain::domain::models::tool_ca
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
-    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path| {
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
         Ok(make_core_with_sentinel(
             &ws_for_factory,
             executions_for_factory.clone(),
@@ -2220,7 +2915,8 @@ async fn acp_kill_reload_preserves_assistant_turns() {
         let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
         let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
         let ws_for_factory = ws.clone();
-        let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+        let core_factory: CoreFactory =
+            Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
         let server = serve_acp_with_core_factory(
             server_outgoing.compat_write(),
             server_incoming.compat(),
@@ -2325,8 +3021,9 @@ async fn acp_kill_reload_preserves_assistant_turns() {
         let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
         let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
         let ws_for_factory = ws.clone();
-        let core_factory: CoreFactory =
-            Rc::new(move |_: &Path| Ok(make_history_core(&ws_for_factory, observed_tx.clone())));
+        let core_factory: CoreFactory = Rc::new(move |_: &Path, _mcp_servers| {
+            Ok(make_history_core(&ws_for_factory, observed_tx.clone()))
+        });
         let server = serve_acp_with_core_factory(
             server_outgoing.compat_write(),
             server_incoming.compat(),
@@ -2469,7 +3166,7 @@ async fn acp_load_unknown_session_id_is_resource_not_found() {
     let ws = workspace.path().to_path_buf();
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
-    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws)));
+    let core_factory: CoreFactory = Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -2554,7 +3251,7 @@ async fn acp_list_sessions_returns_persisted_session() {
     let ws = workspace.path().to_path_buf();
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
-    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws)));
+    let core_factory: CoreFactory = Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -2741,7 +3438,8 @@ async fn acp_list_paginates_same_second_sessions_without_duplicates_or_missing()
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
     let ws_for_factory = ws.clone();
-    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -2902,7 +3600,8 @@ async fn acp_list_malformed_cursor_returns_error_not_page_one() {
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
     let ws_for_factory = ws.clone();
-    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -2998,7 +3697,7 @@ async fn acp_close_unknown_session_id_is_resource_not_found() {
     let ws = workspace.path().to_path_buf();
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
-    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws)));
+    let core_factory: CoreFactory = Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -3181,7 +3880,8 @@ async fn acp_session_id_resolution_is_exact_not_prefix_or_substring() {
     let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
     let ws_for_factory = ws.clone();
-    let core_factory: CoreFactory = Rc::new(move |_: &Path| Ok(make_core(&ws_for_factory)));
+    let core_factory: CoreFactory =
+        Rc::new(move |_: &Path, _mcp_servers| Ok(make_core(&ws_for_factory)));
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
         server_incoming.compat(),
@@ -3279,4 +3979,217 @@ async fn acp_session_id_resolution_is_exact_not_prefix_or_substring() {
             _ => unreachable!("unhandled id-resolution case label {label}"),
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 13 — Story 14-10 Task 5: ACP `ContentBlock::Image` passthrough
+// ─────────────────────────────────────────────────────────────────────
+
+/// The prompt text sent alongside the image blocks. Distinctive so the
+/// provider-facing user message carrying the attachments is unambiguous.
+const ACP_IMAGE_PROMPT_TEXT: &str = "describe these two attached images";
+
+/// Two distinct image payloads (mime + base64 `data`) sent as
+/// `ContentBlock::Image`. Using TWO images — not one — makes the test catch a
+/// mutant that forwards only the first image; a single-image case could not.
+const IMG1_MIME: &str = "image/png";
+const IMG1_DATA: &str = "aW1hZ2Utb25lLWRhdGE="; // base64("image-one-data")
+const IMG2_MIME: &str = "image/jpeg";
+const IMG2_DATA: &str = "aW1hZ2UtdHdvLWRhdGE="; // base64("image-two-data")
+
+/// Build a `session/prompt` request body carrying a text block FOLLOWED by one
+/// or more `image` content blocks (base64 `data` + `mimeType`, per the ACP
+/// content schema). Mirrors [`acp_prompt_req_with_text`] but exercises the
+/// `ContentBlock::Image` arm the ACP seam historically dropped via `_ => {}`.
+fn acp_prompt_req_with_image(
+    id: serde_json::Value,
+    session_id: &str,
+    text: &str,
+    images: &[(&str, &str)],
+) -> String {
+    let mut prompt = vec![serde_json::json!({ "type": "text", "text": text })];
+    for (mime, data) in images {
+        prompt.push(serde_json::json!({
+            "type": "image",
+            "data": data,
+            "mimeType": mime,
+        }));
+    }
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": prompt,
+        }
+    });
+    serde_json::to_string(&body).expect("image prompt request must serialize")
+}
+
+/// Story 14-10 Task 5 keystone — an ACP `session/prompt` carrying a text block
+/// plus `ContentBlock::Image` blocks (base64 `data` + `mimeType`) drives the
+/// real ACP agent, and the EXACT mime type and bytes of every image reach the
+/// provider-facing message as an attachment.
+///
+/// The ACP seam previously dropped image blocks (`prompt_text` matched only
+/// `Text`/`ResourceLink`, falling through `_ => {}`) and hardcoded
+/// `images: vec![]`. This test reddens BOTH regressions: it captures the real
+/// `Vec<Message>` the provider receives — via the same recording-provider seam
+/// the P-14 history test uses — and asserts the user message carrying the
+/// prompt text also carries the images verbatim.
+///
+/// Non-vacuity:
+/// * A mutant that drops `ContentBlock::Image` in `prompt_parts` (`_ => {}`)
+///   forwards zero images → `images.len() == 2` reddens it.
+/// * A mutant that keeps `images: vec![]` hardcoded (i.e. removes the
+///   `last_user.images = images` attachment applied after `build_api_messages`)
+///   reddens it identically — `build_api_messages` emits no images.
+/// * Two distinct images catch a first-only forwarder; asserting each pair's
+///   exact mime AND data catches a mime/data swap or truncation.
+///
+/// Determinism: scripted recording provider (no network), in-memory duplex
+/// transport (no listener), deterministic first session id (`acp-1`).
+#[tokio::test(flavor = "current_thread")]
+async fn acp_prompt_image_block_reaches_provider_as_exact_attachment() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+
+    use rustain::adapters::acp::agent::CoreFactory;
+    use rustain::adapters::acp::run::serve_acp_with_core_factory;
+    use rustain::domain::models::{AppConfig, MessageRole};
+
+    #[cfg(feature = "test-instrumentation")]
+    let _run_turn_guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let ws_for_factory = workspace.path().to_path_buf();
+    let (observed_tx, mut observed_rx) =
+        mpsc::unbounded_channel::<Vec<rustain::domain::models::Message>>();
+    let observed_tx_for_factory = observed_tx.clone();
+
+    let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
+
+    let core_factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
+        Ok(make_history_core(
+            &ws_for_factory,
+            observed_tx_for_factory.clone(),
+        ))
+    });
+    let server = serve_acp_with_core_factory(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        workspace.path().to_path_buf(),
+        None,
+        core_factory,
+    );
+
+    let images: &[(&str, &str)] = &[(IMG1_MIME, IMG1_DATA), (IMG2_MIME, IMG2_DATA)];
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        client_write.flush().await.expect("flush handshake");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+
+        client_write
+            .write_all(
+                line(acp_prompt_req_with_image(
+                    serde_json::json!(3),
+                    "acp-1",
+                    ACP_IMAGE_PROMPT_TEXT,
+                    images,
+                ))
+                .as_bytes(),
+            )
+            .await
+            .expect("write image prompt");
+        client_write.flush().await.expect("flush image prompt");
+        loop {
+            let raw = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("timeout waiting for image-prompt ACP frame")
+                .expect("read error on ACP stream")
+                .expect("ACP stream ended before image-prompt result");
+            let v: serde_json::Value = serde_json::from_str(&raw).expect("ACP frame JSON");
+            if v["id"] == serde_json::json!(3) {
+                assert!(
+                    v.get("error").is_none(),
+                    "image-prompt ACP prompt returned an error: {v}"
+                );
+                assert_eq!(
+                    v["result"]["stopReason"],
+                    serde_json::json!("end_turn"),
+                    "image-prompt must resolve with stopReason `end_turn`, got: {v}"
+                );
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = drive => {}
+        server_res = server => {
+            panic!("ACP server exited before image prompt completed: {server_res:?}");
+        }
+    }
+
+    // The recording provider sent its input messages over the channel BEFORE
+    // the prompt result reached the client, so the snapshot is buffered now.
+    let messages = observed_rx
+        .recv()
+        .await
+        .expect("the recording provider must have observed exactly one turn");
+
+    // The user-role message carrying the prompt text is the one the ACP agent
+    // attaches the image payload to (last user message after build_api_messages).
+    let user_with_prompt = messages
+        .iter()
+        .find(|m| m.role == MessageRole::User && m.content.contains(ACP_IMAGE_PROMPT_TEXT))
+        .expect("a user message carrying the prompt text must reach the provider");
+
+    assert_eq!(
+        user_with_prompt.images.len(),
+        2,
+        "both image blocks must reach the provider as attachments; got {:?}",
+        user_with_prompt.images
+    );
+
+    // Exact mime + bytes, in order. The ACP seam copies `ImageContent.data`
+    // and `ImageContent.mime_type` verbatim into `ImageAttachment`, so a
+    // swap / truncation / mime-mismatch mutant reddens these equalities.
+    assert_eq!(
+        user_with_prompt.images[0].media_type, IMG1_MIME,
+        "first attachment media type must match the prompt exactly"
+    );
+    assert_eq!(
+        user_with_prompt.images[0].data, IMG1_DATA,
+        "first attachment data (base64) must reach the provider unchanged"
+    );
+    assert_eq!(
+        user_with_prompt.images[1].media_type, IMG2_MIME,
+        "second attachment media type must match the prompt exactly"
+    );
+    assert_eq!(
+        user_with_prompt.images[1].data, IMG2_DATA,
+        "second attachment data (base64) must reach the provider unchanged"
+    );
 }

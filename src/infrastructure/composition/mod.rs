@@ -502,6 +502,7 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_slot),
                 Arc::clone(&ctx.sandbox_policy),
             );
+            adapter.hide_activate_skill_tool();
             adapter.set_skill_cache(Arc::clone(&ctx.skill_cache));
             // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
             // can emit PlanProposed / PlanApprovalRequested. Without this the
@@ -1495,6 +1496,7 @@ pub fn build_acp_core(
     app_config: &crate::domain::models::AppConfig,
     workspace: &std::path::Path,
     yolo: bool,
+    mcp_servers: &[crate::domain::models::McpServerSpec],
 ) -> Result<AcpCore, AdapterCompositionError> {
     use crate::adapters::filesystem::FileSystemStorage;
     use crate::adapters::noop::{NoOpApprovalPersistence, NoOpUsageLedger};
@@ -1537,7 +1539,7 @@ pub fn build_acp_core(
         project_context: ProjectContext::empty(),
         storage: storage.clone(),
         skill_activator: skill_activator.clone(),
-        mcp_servers: Vec::new(),
+        mcp_servers: mcp_servers.to_vec(),
         include_builtin_tools: true,
         domain_tx: Some(event_tx.clone()),
         channel_turn_tx: None,
@@ -1566,7 +1568,63 @@ pub fn build_acp_core(
         meta_search_engine: None,
     };
 
-    let tools = build_tools("builtin-full", None, &ctx)?;
+    let tools: Arc<dyn ToolSetPort> = {
+        #[cfg(feature = "mcp")]
+        {
+            if ctx.mcp_servers.is_empty() {
+                build_tools("builtin-full", None, &ctx)?
+            } else {
+                let builtin = build_tools("builtin-full", None, &ctx)?;
+                let mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>> = ctx
+                    .mcp_servers
+                    .iter()
+                    .map(|spec| {
+                        let client = crate::adapters::mcp::client::McpClientAdapter::new(
+                            spec.clone(),
+                            ctx.domain_tx.clone(),
+                        );
+                        let arc = Arc::new(client);
+                        arc.set_self_weak(Arc::downgrade(&arc));
+                        arc
+                    })
+                    .collect();
+                let adapter =
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
+                        builtin,
+                        mcp_clients,
+                        ctx.mcp_servers.clone(),
+                        ctx.include_builtin_tools,
+                        ctx.domain_tx.clone(),
+                        Some(ctx.skill_activator.clone()),
+                        None,
+                    );
+                adapter.start_mcp_connections();
+                Arc::new(adapter) as Arc<dyn ToolSetPort>
+            }
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            if !ctx.mcp_servers.is_empty() {
+                // Fail LOUD rather than silently dropping. Accepting the
+                // session while ignoring every forwarded server would let the
+                // client (Zed) believe its MCP tools are available, then fail
+                // every tool call at prompt time — a capability lie by
+                // omission. Surface an error on session/new instead. (Only
+                // reachable on a non-default build: `mcp` is on by default.)
+                return Err(AdapterCompositionError::UnknownAdapter {
+                    port: PortDimension::Tools,
+                    name: format!(
+                        "rustain was built without the `mcp` cargo feature, but \
+                         session/new forwarded {} MCP stdio server(s); rebuild with \
+                         `--features mcp` (on by default) to forward MCP servers",
+                        ctx.mcp_servers.len()
+                    ),
+                    available: vec!["builtin-full (no mcp feature compiled)".into()],
+                });
+            }
+            build_tools("builtin-full", None, &ctx)?
+        }
+    };
     let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
         raw_capacity,
         Arc::new(NoOpApprovalPersistence),

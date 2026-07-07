@@ -78,6 +78,9 @@ pub struct ToolSetAdapter {
     /// locks; the warm-swap path takes an exclusive write lock. `None` until
     /// wired at the composition root alongside `memory`.
     memory_write_gate: Option<Arc<tokio::sync::RwLock<()>>>,
+    /// Hide `activate_skill` from static tool catalogs while preserving direct
+    /// execution for runtime skill chains that inject it dynamically.
+    expose_activate_skill: bool,
     /// Story 9.7 Phase B — optional meta-search engine for `search_skills` AND `search_tools` builtin tools.
     #[cfg(feature = "meta-search")]
     meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
@@ -213,9 +216,14 @@ impl ToolSetAdapter {
             sandbox_policy,
             memory: None,
             memory_write_gate: None,
+            expose_activate_skill: true,
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
         }
+    }
+
+    pub fn hide_activate_skill_tool(&mut self) {
+        self.expose_activate_skill = false;
     }
 
     /// Story 11.1 / 12.4 — wire the shared memory-port slot and its prevention
@@ -695,7 +703,7 @@ impl std::fmt::Debug for ToolSetAdapter {
 #[async_trait]
 impl ToolSetPort for ToolSetAdapter {
     fn available_tools(&self) -> Vec<ToolDefinition> {
-        vec![
+        let mut tools = vec![
             ToolDefinition {
                 name: "Bash".to_string(),
                 description: "Execute a bash command".to_string(),
@@ -916,7 +924,11 @@ impl ToolSetPort for ToolSetAdapter {
             crate::adapters::tool_exposure::meta_search::build_search_skills_tool_definition(),
             #[cfg(feature = "meta-search")]
             crate::adapters::tool_exposure::meta_search::build_search_tools_tool_definition(),
-        ]
+        ];
+        if !self.expose_activate_skill {
+            tools.retain(|tool| tool.name != "activate_skill");
+        }
+        tools
     }
 
     fn describe(&self) -> Vec<crate::domain::models::tool_descriptor::ToolDescriptor> {
