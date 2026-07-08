@@ -141,6 +141,12 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "fanout".to_string(),
+                description: "Fan out N identical spokes: /fanout <N> <prompt>".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

@@ -110,7 +110,22 @@ pub enum CancelReason {
 /// Internal record for a pending approval.
 struct PendingRecord {
     request: ApprovalRequest,
-    responder: oneshot::Sender<ApprovalOutcome>,
+    responder: oneshot::Sender<ResolvedApproval>,
+    /// Server-side fingerprint computed at request time.
+    /// The verifier never rides the wire on the thing it verifies (Winston).
+    fp: crate::domain::models::invocation_fingerprint::InvocationFingerprint,
+}
+
+/// In-memory wrapper carrying the approved fingerprint alongside the outcome.
+///
+/// Replaces the bare `ApprovalOutcome` on the `PendingRecord.responder` oneshot
+/// so `run_one` can re-match the fingerprint before executing. This keeps the
+/// fp off the wire and off the `Serialize`-shaped `ApprovalOutcome` enum.
+/// (DD1 compile-coupling — Amelia; REFRESH 2026-07-02 shape correction.)
+#[derive(Clone, Debug)]
+pub struct ResolvedApproval {
+    pub outcome: ApprovalOutcome,
+    pub fp: crate::domain::models::invocation_fingerprint::InvocationFingerprint,
 }
 
 /// Internal request struct.
@@ -177,6 +192,10 @@ impl ApprovalRuntime {
 
     /// Request approval for a tool call.
     /// Returns `(Some(id), rx)` for slow-path, `(None, rx)` for fast-path.
+    ///
+    /// The fingerprint is computed at request time and stored server-side in
+    /// `PendingRecord`. Fast-path returns (auto-approve / session-allow / deny)
+    /// also carry the fp so `run_one` can re-match uniformly.
     pub async fn request(
         &self,
         source: ApprovalSource,
@@ -185,7 +204,28 @@ impl ApprovalRuntime {
         risk: ToolRisk,
         server_id: Option<&str>,
         path_hint: Option<&str>,
-    ) -> (Option<RequestId>, oneshot::Receiver<ApprovalOutcome>) {
+    ) -> (Option<RequestId>, oneshot::Receiver<ResolvedApproval>) {
+        use crate::domain::models::invocation_fingerprint::InvocationFingerprint;
+
+        // Compute the fingerprint up front for all paths.
+        // Non-finite floats in the input are a hard reject (ADR-14-6-01).
+        let scope = source.scope_agent_id();
+        let fp = match InvocationFingerprint::of(&tool, &input, &scope) {
+            Ok(fp) => fp,
+            Err(_) => {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(ResolvedApproval {
+                    outcome: ApprovalOutcome::Reject {
+                        feedback: Some(
+                            "input contains non-finite float; cannot fingerprint".into(),
+                        ),
+                    },
+                    fp: InvocationFingerprint([0u8; 32]),
+                });
+                return (None, rx);
+            }
+        };
+
         // Story 10.X-AUTO: subagent auto-approve policy short-circuit.
         // Placed BEFORE the session fast-path so "deny" wins over session-allow.
         match &source {
@@ -194,15 +234,21 @@ impl ApprovalRuntime {
                     AutoApprovePolicy::Deny => {
                         tracing::info!(tool = %tool, "subagent_auto_approve=deny: rejecting subagent tool call");
                         let (tx, rx) = oneshot::channel();
-                        let _ = tx.send(ApprovalOutcome::Reject {
-                            feedback: Some("subagent_auto_approve=deny".into()),
+                        let _ = tx.send(ResolvedApproval {
+                            outcome: ApprovalOutcome::Reject {
+                                feedback: Some("subagent_auto_approve=deny".into()),
+                            },
+                            fp,
                         });
                         return (None, rx);
                     }
                     AutoApprovePolicy::Allow => {
                         tracing::debug!(tool = %tool, "subagent_auto_approve=allow: auto-approving subagent tool call");
                         let (tx, rx) = oneshot::channel();
-                        let _ = tx.send(ApprovalOutcome::Once);
+                        let _ = tx.send(ResolvedApproval {
+                            outcome: ApprovalOutcome::Once,
+                            fp,
+                        });
                         return (None, rx);
                     }
                     AutoApprovePolicy::Ask => {
@@ -210,7 +256,7 @@ impl ApprovalRuntime {
                     }
                 }
             }
-            ApprovalSource::ForegroundTurn { .. } => {
+            ApprovalSource::ForegroundTurn { .. } | ApprovalSource::AcpSession { .. } => {
                 // Root user: never short-circuit (AC-10-X-4)
             }
         }
@@ -219,7 +265,10 @@ impl ApprovalRuntime {
             let mut set = self.session.write().await;
             if set.is_auto_approved(&tool, server_id, path_hint) {
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(ApprovalOutcome::Once);
+                let _ = tx.send(ResolvedApproval {
+                    outcome: ApprovalOutcome::Once,
+                    fp,
+                });
                 return (None, rx);
             }
         }
@@ -243,6 +292,7 @@ impl ApprovalRuntime {
             PendingRecord {
                 request,
                 responder: tx,
+                fp,
             },
         );
         let _ = self.events.send(ApprovalRuntimeEvent::Requested {
@@ -311,7 +361,10 @@ impl ApprovalRuntime {
                 drop(session);
                 for pid in to_resolve {
                     if let Some(rec) = self.pending.write().await.remove(&pid) {
-                        let _ = rec.responder.send(ApprovalOutcome::Once);
+                        let _ = rec.responder.send(ResolvedApproval {
+                            outcome: ApprovalOutcome::Once,
+                            fp: rec.fp,
+                        });
                         let _ = self.events.send(ApprovalRuntimeEvent::Resolved {
                             id: pid,
                             outcome: ApprovalOutcome::Once,
@@ -320,7 +373,10 @@ impl ApprovalRuntime {
                 }
             }
 
-            let _ = record.responder.send(outcome.clone());
+            let _ = record.responder.send(ResolvedApproval {
+                outcome: outcome.clone(),
+                fp: record.fp,
+            });
             let _ = self.events.send(ApprovalRuntimeEvent::Resolved {
                 id: id.clone(),
                 outcome,
@@ -340,7 +396,10 @@ impl ApprovalRuntime {
         };
         for id in ids {
             if let Some(record) = self.pending.write().await.remove(&id) {
-                let _ = record.responder.send(ApprovalOutcome::Cancel);
+                let _ = record.responder.send(ResolvedApproval {
+                    outcome: ApprovalOutcome::Cancel,
+                    fp: record.fp,
+                });
                 let _ = self.events.send(ApprovalRuntimeEvent::Cancelled {
                     id: id.clone(),
                     reason: reason.clone(),
@@ -448,7 +507,7 @@ mod tests {
             )
             .await;
         assert!(id.is_none(), "fast-path should return None id");
-        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+        assert_eq!(rx.await.unwrap().outcome, ApprovalOutcome::Once);
     }
 
     #[tokio::test]
@@ -495,8 +554,9 @@ mod tests {
             },
         )
         .await;
+        let resolved = rx.await.unwrap();
         assert_eq!(
-            rx.await.unwrap(),
+            resolved.outcome,
             ApprovalOutcome::AlwaysTool {
                 tool_name: "Bash".into()
             }
@@ -545,7 +605,7 @@ mod tests {
             CancelReason::SourceAborted,
         )
         .await;
-        assert_eq!(rx2.await.unwrap(), ApprovalOutcome::Cancel);
+        assert_eq!(rx2.await.unwrap().outcome, ApprovalOutcome::Cancel);
         assert!(!rt.pending.read().await.is_empty());
     }
 
@@ -573,7 +633,7 @@ mod tests {
             .await;
         assert!(id.is_none(), "deny should return None id");
         assert_eq!(
-            rx.await.unwrap(),
+            rx.await.unwrap().outcome,
             ApprovalOutcome::Reject {
                 feedback: Some("subagent_auto_approve=deny".into()),
             }
@@ -610,7 +670,7 @@ mod tests {
             )
             .await;
         assert!(id.is_none(), "allow should return None id");
-        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+        assert_eq!(rx.await.unwrap().outcome, ApprovalOutcome::Once);
         assert!(
             matches!(
                 events.try_recv(),
@@ -708,7 +768,7 @@ mod tests {
             "deny should return None id for BackgroundAgent"
         );
         assert_eq!(
-            rx.await.unwrap(),
+            rx.await.unwrap().outcome,
             ApprovalOutcome::Reject {
                 feedback: Some("subagent_auto_approve=deny".into()),
             }
@@ -748,7 +808,7 @@ mod tests {
             id.is_none(),
             "allow should return None id for BackgroundAgent"
         );
-        assert_eq!(rx.await.unwrap(), ApprovalOutcome::Once);
+        assert_eq!(rx.await.unwrap().outcome, ApprovalOutcome::Once);
         assert!(
             matches!(
                 events.try_recv(),

@@ -388,13 +388,21 @@ mod tests {
         let handle = registry.register(cap.clone()).await.unwrap();
         let _reg = rx.try_recv().unwrap(); // consume Registered
 
-        // Drop the handle first so we can deregister manually
+        // Drop the handle — its Drop spawns a task that calls deregister(),
+        // which emits Deregistered. Await that event deterministically instead
+        // of sleeping (DF-14.4-AUDIT-1: fire-and-assert sleep → deterministic
+        // signal). This also strengthens the test: the prior sleep never
+        // asserted the drop-path deregistration at all.
         drop(handle);
-        // Wait for the spawned deregister task
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let event = rx.recv().await.expect("drop-path deregister event");
+        match event {
+            AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
+                assert_eq!(capability.id, cap.id);
+            }
+            _ => panic!("Expected drop-path CapabilityEvent::Deregistered, got {event:?}"),
+        }
 
-        // Capability was deregistered by the handle's spawned task
-        // Re-register and deregister properly this time
+        // Re-register and deregister explicitly to prove the direct path too.
         let (tx2, mut rx2) = mpsc::unbounded_channel();
         let registry2 = Arc::new(CapabilityRegistry::new(Some(tx2)));
         let cap2 = test_cap("echo2");
@@ -431,9 +439,10 @@ mod tests {
         let cap = test_cap("echo");
         let handle = registry.register(cap.clone()).await;
         assert!(handle.is_ok()); // should succeed without event_tx
-        // Drop the handle, which spawns deregister — give it a moment
+        // Drop is safe with no event_tx (the spawned deregister emits nothing).
+        // Nothing is asserted post-drop, so there is nothing to await — the
+        // prior 10ms sleep was vestigial (DF-14.4-AUDIT-1).
         drop(handle);
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
     }
 
     #[test]

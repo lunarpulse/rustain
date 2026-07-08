@@ -440,7 +440,7 @@ impl LocalTurnDriver {
             Some(allowed) => {
                 let mut filtered: Vec<_> = all_tool_defs
                     .into_iter()
-                    .filter(|t| allowed.contains(&t.name) || t.name == "activate_skill")
+                    .filter(|t| tool_survives_allowlist(&t.name, &allowed))
                     .collect();
                 if !filtered.iter().any(|t| t.name == "activate_skill") {
                     let act_tool = crate::domain::models::ToolDefinition {
@@ -585,5 +585,51 @@ impl TurnDriver for LocalTurnDriver {
     /// boxing/byte-identical behavior (the 12.2a snapshot suite is untouched).
     async fn submit(&self, sub: UserSubmission, view: TurnViewState<'_>) {
         self.submit(sub, view).await
+    }
+}
+
+/// Whether a tool survives an agent/skill allowlist, preserving the skill-chaining
+/// (`activate_skill`) carve-out. ADR-10-5 S3 extends this with a `task` delegation
+/// carve-out so an active agent with `allowed-tools` can still delegate to subagents.
+pub(crate) fn tool_survives_allowlist(
+    name: &str,
+    allowed: &std::collections::HashSet<String>,
+) -> bool {
+    allowed.contains(name) || name == "activate_skill" || name == "task"
+}
+
+#[cfg(test)]
+mod turn_driver_allowlist_tests {
+    use super::tool_survives_allowlist;
+    use std::collections::HashSet;
+
+    fn set(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 10.7.1-INT-006 · P1 · ADR-10-5 S3: an active agent whose `allowed-tools`
+    /// omits `task` must still be able to delegate — `task` survives via the carve-out.
+    #[test]
+    fn task_survives_agent_allowlist_that_omits_it() {
+        let allowed = set(&["Read"]);
+        assert!(tool_survives_allowlist("task", &allowed));
+    }
+
+    #[test]
+    fn activate_skill_carve_out_preserved() {
+        let allowed = set(&["Read"]);
+        assert!(tool_survives_allowlist("activate_skill", &allowed));
+    }
+
+    #[test]
+    fn non_carved_out_tool_filtered_out() {
+        let allowed = set(&["Read"]);
+        assert!(!tool_survives_allowlist("Bash", &allowed));
+    }
+
+    #[test]
+    fn explicitly_allowed_tool_survives() {
+        let allowed = set(&["Read", "Bash"]);
+        assert!(tool_survives_allowlist("Bash", &allowed));
     }
 }

@@ -11,9 +11,9 @@ panel shows a live row + the inspector renders — lives in
 ``test_story_10_x_subagent_llm_smoke.py`` (``@requires_api @slow``).
 
 Chord reference (per Story 10-4): ``Ctrl+X, S`` → ``OpenPanel(PanelType::Agents)``.
-Empty-state copy is pinned verbatim in epics.md / Story 10-4:
-    "No agents running. Spawn one with rustain spawn --agent <name>
-     or via plan delegation."
+Empty-state copy is pinned by the Rust widget snapshot:
+    "No agents active."
+    "Ask the assistant to delegate or use plan mode."
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ def test_empty_state_copy(tui_monitor: RustainTUI):
     tui = tui_monitor
     _send_chord_ctrl_x_s(tui)
     screen = tui.get_screen_text()
-    assert "No agents running" in screen, (
-        "Expected the verbatim empty-state copy fragment 'No agents running' "
+    assert "No agents active." in screen, (
+        "Expected the current empty-state copy fragment 'No agents active.' "
         f"(Story 10-4 / FR55). Screen:\n{screen}"
     )
 

@@ -6,7 +6,7 @@ use crate::infrastructure::runtime::event_bus::EventBus;
 
 pub fn handle_config_slash(state: &mut TuiState, cmd_arg: Option<&str>, event_bus: &EventBus) {
     if cmd_arg.is_some_and(|a| a.eq_ignore_ascii_case("reload")) {
-        event_bus.emit_domain(AppEvent::ConfigReload);
+        let _ = event_bus.emit_domain(AppEvent::ConfigReload);
     } else {
         if !matches!(
             state.status,

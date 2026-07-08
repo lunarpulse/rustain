@@ -28,14 +28,24 @@ mod infrastructure;
 
 #[tokio::main]
 async fn main() {
+    // Story 13.3b Task 7 — reset SIGPIPE to default Unix behavior.
+    // Rust sets SIGPIPE to SIG_IGN, which causes every stdout write to a closed
+    // pipe to return BrokenPipe instead of killing the process. This is the right
+    // behavior for libraries but wrong for CLI tools: `rustain ask ... | head`
+    // and `rustain completions bash | head` should exit silently, not error.
+    // Resetting here fixes the class for all subcommands, not just completions.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     if let Err(e) = infrastructure::startup::run().await {
-        // Subcommand errors (init, doctor) already printed their own output.
+        // Subcommand errors already printed their own output; use their exit code.
         // Only print the error for non-subcommand failures to avoid duplicate output.
-        if e.downcast_ref::<infrastructure::startup::SubcommandExit>()
-            .is_none()
-        {
-            eprintln!("{e}");
+        if let Some(se) = e.downcast_ref::<infrastructure::startup::SubcommandExit>() {
+            std::process::exit(se.0);
         }
+        eprintln!("{e}");
         std::process::exit(1);
     }
 }

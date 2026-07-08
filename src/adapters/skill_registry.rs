@@ -521,7 +521,7 @@ fn deduplicate_by_priority(candidates: Vec<SkillDef>) -> Vec<SkillDef> {
     let mut best: HashMap<String, SkillDef> = HashMap::new();
 
     let mut sorted = candidates;
-    sorted.sort_by(|a, b| a.source.priority().cmp(&b.source.priority()));
+    sorted.sort_by_key(|candidate| candidate.source.priority());
 
     for def in sorted {
         match best.entry(def.name.clone()) {

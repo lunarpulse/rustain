@@ -1459,9 +1459,9 @@ impl PlanRuntime {
             while let Some(status) = status_rx.recv().await {
                 if matches!(
                     status,
-                    crate::domain::models::SubagentRunStatus::Completed
-                        | crate::domain::models::SubagentRunStatus::Failed
-                        | crate::domain::models::SubagentRunStatus::Killed
+                    crate::domain::models::NodeState::Completed
+                        | crate::domain::models::NodeState::Failed
+                        | crate::domain::models::NodeState::Cancelled
                 ) {
                     terminal_received = true;
                     let tail = spool_clone
@@ -1469,25 +1469,21 @@ impl PlanRuntime {
                         .await
                         .unwrap_or_default();
                     let outcome = match status {
-                        crate::domain::models::SubagentRunStatus::Completed => {
-                            TaskTurnOutcome::Success {
-                                result_text: tail,
-                                tool_call_count: 0,
-                                token_count: None,
-                            }
-                        }
-                        crate::domain::models::SubagentRunStatus::Failed => {
+                        crate::domain::models::NodeState::Completed => TaskTurnOutcome::Success {
+                            result_text: tail,
+                            tool_call_count: 0,
+                            token_count: None,
+                        },
+                        crate::domain::models::NodeState::Failed => {
                             let error =
                                 tail.lines().last().unwrap_or("(no error tail)").to_string();
                             TaskTurnOutcome::Failure {
                                 error: format!("Subagent failed: {}", error),
                             }
                         }
-                        crate::domain::models::SubagentRunStatus::Killed => {
-                            TaskTurnOutcome::Cancelled {
-                                reason: "Delegated subagent killed".into(),
-                            }
-                        }
+                        crate::domain::models::NodeState::Cancelled => TaskTurnOutcome::Cancelled {
+                            reason: "Delegated subagent killed".into(),
+                        },
                         _ => unreachable!(),
                     };
 

@@ -143,7 +143,8 @@ OPENROUTER_API_KEY=sk-... cargo run --release
 ```
 
 First-run creates `~/.rustain/` for configuration, logs, and session data. No
-config files required for the basic flow — just an API key in the environment.
+config files required for the basic flow — just an API key in the environment
+or stored via `rustain auth login <provider>`.
 
 **As a daemon** (personal assistant mode):
 
@@ -156,6 +157,54 @@ rustain daemon stop        # shut down
 
 Daemon mode enables always-on channels (Telegram, scheduled tasks) that persist
 across TUI sessions. Systemd and launchd service templates are in `dist/`.
+
+**Authentication** (credential management):
+
+```sh
+rustain auth login anthropic   # store API key (masked entry + validation)
+rustain auth login openai      # store OpenAI key
+rustain auth status            # show configured providers, source, validation time
+rustain auth status --json     # scriptable status envelope
+rustain auth list              # list all providers, auth methods, signup URLs
+rustain auth list --json       # structured provider catalog
+```
+
+Env vars still win over `~/.rustain/auth.json`; `auth status` reports that
+winning source without probing the network. `auth list` shows the full provider
+catalog including unconfigured and keyless providers.
+
+**Sessions** (conversation history):
+
+```sh
+rustain session list              # show saved sessions in current workspace
+rustain session list --json       # structured output for scripts
+rustain session list --all        # merge sessions across registered workspaces
+rustain session list --all --json # same, with absolute workspace addresses
+
+rustain session delete <id>       # delete by exact id or unique prefix
+rustain session delete <id> --force --dry-run
+rustain session delete --all      # delete all sessions in this workspace
+rustain session delete --all-workspaces --force --dry-run
+```
+
+`session delete` is the first destructive CLI operation: it removes sessions
+permanently with no trash/undo. It deletes by stable `id` only; the positional
+`#` index from `list` is not accepted. The command is interactive by default;
+use `--force` for scripts and `--dry-run` to preview what would be removed. An
+in-use guard refuses to delete a session held by a running daemon (name and pid
+are shown); `--force` skips prompts but does **not** bypass a confirmed holder.
+For a guaranteed deletion, stop the daemon first with `rustain daemon stop`.
+
+Sessions are stored per workspace under `.claude/sessions/`. `session list --all`
+uses a hint registry at `~/.rustain/workspaces.json`, populated on the first
+successful save per workspace. The `*` marker in the human table indicates the
+session that a bare `rustain` command resumes by default (most recent in the
+current workspace). The `id` column is the stable address; use it with
+`rustain session delete <id>` instead of positional indexes. In JSON, every row
+carries an always-present absolute `workspace` field.
+
+For full semantics, guards, exit codes, and bulk-delete behavior see
+[`docs/sessions.md`](docs/sessions.md).
 
 ### 🛠️ Develop Rustain
 
@@ -198,6 +247,8 @@ verbose output.
   [`docs/daemon.md`](docs/daemon.md)
 - **Configuration** — layered config, provider setup:
   [`docs/configuration.md`](docs/configuration.md)
+- **Session management** — listing, deleting, in-use guard, exit codes:
+  [`docs/sessions.md`](docs/sessions.md)
 - **Testing** — strategy, conformance tests, E2E harness:
   [`TESTING.md`](TESTING.md)
 - **Planning artifacts** — PRD, architecture, epics, sprint status:
@@ -266,6 +317,10 @@ LRU trim).
 recovery (latest-only crash journal + capped logs), multi-client attach via Unix
 socket, foreground detection with boot-id veto and process nonce verification.
 
+**Session management** — list sessions per workspace or across all registered
+workspaces; delete by stable id with an in-use daemon guard, typed-count
+confirmation for bulk deletes, `--dry-run`, and a versioned `--json` envelope.
+
 ## Profile system
 
 Profiles are named TOML files that compose one adapter per port dimension:
@@ -301,6 +356,12 @@ Three built-in profiles ship with the binary:
 
 Switch at runtime via the TUI or CLI. Custom profiles are TOML files in
 `~/.rustain/profiles/` or `.rustain/profiles/`.
+
+**Subagent delegation** (`task` tool, `@Agents/<name>`, plan delegation) requires
+the `composite` tools adapter, which only **`coding`** selects by default. `base`
+and custom profiles that extend it compose a plain builtin tools adapter and will
+**not** expose the `task` tool — `rustain doctor` reports this on the `Profiles`
+line. To enable delegation in any profile, set `[tools] adapter = "composite"`.
 
 ## Four-layer extensibility
 

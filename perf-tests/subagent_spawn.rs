@@ -17,7 +17,7 @@ use rustain::domain::ports::SubagentRunner;
 use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
-use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -58,9 +58,17 @@ async fn make_runner(tmp: &std::path::Path) -> InProcessSubagentRunner {
     let approval = ApprovalRuntime::new(1024, Arc::new(NoOpApprovalPersistence));
     let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
     let (event_bus, _rx) = EventBus::new(1024);
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive));
     let spool = Arc::new(SubagentSpool::new(tmp.join("spool")).await.unwrap());
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     InProcessSubagentRunner::new(
         provider,
@@ -73,6 +81,8 @@ async fn make_runner(tmp: &std::path::Path) -> InProcessSubagentRunner {
         registry,
         parent_sandbox,
         spool,
+        authority,
+        root_authority,
     )
 }
 
@@ -89,6 +99,7 @@ async fn subagent_spawn_latency() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let iterations = 1_000;
@@ -144,6 +155,7 @@ async fn cancellation_propagation_latency() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let iterations = 100;
@@ -180,6 +192,7 @@ async fn memory_rss_per_agent() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let before = procfs::process::Process::myself()

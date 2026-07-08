@@ -141,13 +141,18 @@ fn test_subagent_panel_does_not_hold_registry() {
             "Widget {} must not import SubagentRegistry — use AgentRowView instead (dependency rule)",
             path
         );
+        assert!(
+            !content.contains("NodeTree"),
+            "Widget {} must not import NodeTree — use AgentRowView instead (dependency rule)",
+            path
+        );
     }
 }
 
 #[test]
 fn test_subagent_provider_access_only_via_composite() {
     let tui_files = collect_tui_rs_files();
-    let forbidden_tokens = ["SubagentRegistry", "SubagentProvider"];
+    let forbidden_tokens = ["SubagentRegistry", "SubagentProvider", "NodeTree"];
     for file in &tui_files {
         let fname = file.to_string_lossy();
         let content = std::fs::read_to_string(file).unwrap_or_default();

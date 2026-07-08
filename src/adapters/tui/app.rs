@@ -173,6 +173,8 @@ pub enum InputAction {
     /// Open the selected conversation from sidebar.
     // Covers: FR107, AC4
     OpenSidebarConversation,
+    /// Story 14.4: Pause/Resume the selected agent from the Agents panel list.
+    AgentPauseToggle,
     /// Delete the selected conversation from sidebar (shows confirmation overlay).
     // Covers: FR113, AC5
     DeleteSidebarConversation,
@@ -394,6 +396,29 @@ pub enum InputAction {
     FeedbackBudgetSwitchCheaper,
     /// Daily-budget warning — user picked "Pause until tomorrow" (Story 7.5 AC5/AC7).
     FeedbackBudgetPause,
+    /// Story 14.3a: rerun the spoke at this slot.
+    WaveRerunSpoke(usize),
+    /// Story 14.3a: drill into spoke body at this slot.
+    WaveDrillSpoke(usize),
+    /// Story 14.3a: open wave overlay (expand wave strip).
+    OpenWaveOverlay,
+    /// Story 14.3a: close wave overlay.
+    CloseWaveOverlay,
+    /// Story 14.3a: open diverge view (d key).
+    OpenDivergeView,
+    /// Story 14.3a: close diverge view (s key, back to wave overlay).
+    CloseDivergeView,
+    /// Story 14.3c: dismiss the completed/cancelled fan-out wave display (Esc
+    /// in Chat focus when a wave is present, no overlay/diverge open).
+    DismissWave,
+    /// Story 14.3a: confirm spawn gate (Enter in gate card).
+    SpawnGateConfirm,
+    /// Story 14.3a: cap spawn gate at threshold (c key).
+    SpawnGateCap,
+    /// Story 14.3a: adjust spawn gate N left.
+    SpawnGateAdjustLeft,
+    /// Story 14.3a: adjust spawn gate N right.
+    SpawnGateAdjustRight,
 }
 
 impl InputAction {
@@ -577,6 +602,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         }
         state.needs_redraw = true;
         return InputAction::Consumed;
+    }
+
+    if state.pending_spawn_gate.is_some() {
+        return match c {
+            'c' => InputAction::SpawnGateCap,
+            _ => InputAction::Consumed,
+        };
     }
 
     // Command palette: typing updates filter text
@@ -1052,6 +1084,23 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 state.pending_g = false;
             }
             match c {
+                'd' if state.wave_run.is_some() => {
+                    state.needs_redraw = true;
+                    InputAction::OpenDivergeView
+                }
+                's' if state.wave_run.is_some() => {
+                    state.needs_redraw = true;
+                    InputAction::CloseDivergeView
+                }
+                'r' if state.wave_run.is_some() => {
+                    // P3 (review): from Chat focus, open the wave overlay so
+                    // the user can select a slot before pressing r again.
+                    // Re-running slot 0 blindly has no selection affordance.
+                    state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+                    state.wave_overlay_selected = 0;
+                    state.needs_redraw = true;
+                    InputAction::OpenWaveOverlay
+                }
                 // --- Story 16.6: vim z-prefix chord state machine (AC10) ---
                 _z if state.pending_z => {
                     state.pending_z = false;
@@ -1371,6 +1420,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     // Panel `p`: dispatch with selected_index (0-based); event_loop resolves to task number
                     InputAction::TaskPause(state.task_panel_state.selected_index as u32)
                 }
+                'p' if _panel == crate::domain::models::visual::PanelType::Agents
+                    && state.agent_panel_state.drill_down_agent.is_none() =>
+                {
+                    state.needs_redraw = true;
+                    InputAction::AgentPauseToggle
+                }
                 's' if _panel == crate::domain::models::visual::PanelType::Tasks => {
                     state.needs_redraw = true;
                     // Panel `s`: dispatch with selected_index (0-based); event_loop resolves to task number
@@ -1500,6 +1555,29 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             }
             'd' => InputAction::DeleteBookmark,
             'u' => InputAction::UndoBookmarkDelete,
+            _ => InputAction::Consumed,
+        },
+        // Story 14.3a: WaveOverlay char handling — intercept BEFORE the
+        // generic `Overlay(_) => Ignored` catch-all so j/k/r/d/s own these
+        // keys instead of falling through to chat/input handlers.
+        FocusState::Overlay(OverlayType::WaveOverlay) => match c {
+            'j' => {
+                if let Some(ref handle) = state.wave_run {
+                    let snap = handle.snapshot();
+                    let max = snap.spoke_count.saturating_sub(1);
+                    state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            'k' => {
+                state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            'r' => InputAction::WaveRerunSpoke(state.wave_overlay_selected),
+            'd' => InputAction::OpenDivergeView,
+            's' => InputAction::CloseDivergeView,
             _ => InputAction::Consumed,
         },
         FocusState::Overlay(_) => InputAction::Ignored,
@@ -1759,6 +1837,16 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     }
 
     // Cross-search overlay special-key handling (Story 4-4 AC5, AC6).
+    if state.pending_spawn_gate.is_some() {
+        return match key {
+            DomainKey::Esc => InputAction::CloseWaveOverlay,
+            DomainKey::Enter => InputAction::SpawnGateConfirm,
+            DomainKey::Left => InputAction::SpawnGateAdjustLeft,
+            DomainKey::Right => InputAction::SpawnGateAdjustRight,
+            _ => InputAction::Consumed,
+        };
+    }
+
     if state.focus == FocusState::Overlay(OverlayType::CrossSearch) {
         return match key {
             DomainKey::Esc => InputAction::CloseCrossSearch,
@@ -1806,6 +1894,30 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                 let last = state.bookmark_list_count.saturating_sub(1);
                 state.bookmark_list_selected =
                     state.bookmark_list_selected.saturating_add(1).min(last);
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        };
+    }
+    // Story 14.3a: WaveOverlay special-key handling — intercept BEFORE the
+    // generic `match key {}` dispatch (Esc/Enter/Up/Down) so the overlay owns
+    // them instead of the chat/input handlers.
+    if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {
+        return match key {
+            DomainKey::Esc => InputAction::CloseWaveOverlay,
+            DomainKey::Enter => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
+            DomainKey::Down => {
+                if let Some(ref handle) = state.wave_run {
+                    let snap = handle.snapshot();
+                    let max = snap.spoke_count.saturating_sub(1);
+                    state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
+            DomainKey::Up => {
+                state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
                 state.needs_redraw = true;
                 InputAction::Consumed
             }
@@ -1861,6 +1973,18 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             // Story 10.5: Esc on delegation card → cancel plan at this task
             if state.pending_delegation_card.is_some() {
                 return InputAction::DelegationCardCancel;
+            }
+            // Story 14.3c: Esc unwinds the fan-out wave. With the DivergeView
+            // open, close it first (back to synthesis/rows); otherwise dismiss
+            // the whole wave display. Tightly gated on Chat focus + a present
+            // wave, AFTER every modal-card check and BEFORE the default focus
+            // toggle — so when no wave is shown, all existing Esc behavior is
+            // unchanged.
+            if state.focus == FocusState::Chat && state.wave_run.is_some() {
+                if state.wave_diverge_open {
+                    return InputAction::CloseDivergeView;
+                }
+                return InputAction::DismissWave;
             }
             state.focus = match state.focus {
                 FocusState::Input => FocusState::Chat,
@@ -2168,6 +2292,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             state.task_panel_state.detail_scroll_offset = 0;
             state.needs_redraw = true;
             InputAction::Consumed
+        }
+
+        DomainKey::Enter if state.focus == FocusState::Chat && state.wave_run.is_some() => {
+            state.needs_redraw = true;
+            InputAction::OpenWaveOverlay
         }
 
         DomainKey::Enter if state.focus == FocusState::Chat => {
@@ -2478,6 +2607,19 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             // through to the user-defined SubmitWithContext path (which treats it as
             // a missing custom command and dispatches an EMPTY turn).
             if cmd_name == "memory" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
+            // /fanout <N> <prompt> | /fanout cancel: fan out N spokes (Story
+            // 14.3b/14.3c). Route as ExecuteCommand — mirroring /memory and
+            // /context — so the event-loop `/fanout` dispatch arm sees the args.
+            // Before this, `fanout` fell through to the user-defined
+            // SubmitWithContext path, which treats it as a missing custom command
+            // and dispatches an EMPTY turn (provider 400 "Empty input messages"),
+            // so the wave never launched. Caught by the 14.3c AI-12.3 human smoke.
+            if cmd_name == "fanout" {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,
@@ -3490,6 +3632,122 @@ mod tests {
         TuiState::new(80, 24)
     }
 
+    #[derive(Debug)]
+    struct EmptyWaveHandle;
+
+    impl crate::domain::ports::wave_handle::WaveHandle for EmptyWaveHandle {
+        fn snapshot(&self) -> crate::domain::ports::wave_handle::WaveSnapshot {
+            crate::domain::ports::wave_handle::WaveSnapshot {
+                spoke_count: 0,
+                completed: 0,
+                honest_empty: Some(true),
+                cancelled: false,
+                outcome: crate::domain::models::orchestration::ForkJoinOutcome {
+                    spokes: Vec::new(),
+                    synthesis: crate::domain::models::orchestration::SynthesisView::default(),
+                },
+                resolve_count: 0,
+                slots: Vec::new(),
+                rerun_counts: Vec::new(),
+            }
+        }
+
+        fn cancel(&self) {}
+
+        fn drill(&self, _slot: usize) -> Option<crate::domain::ports::wave_handle::DrillBody> {
+            None
+        }
+
+        fn drill_id(&self, _slot: usize) -> Option<crate::domain::models::orchestration::DrillId> {
+            None
+        }
+
+        fn slots(&self) -> Vec<crate::domain::models::AgentId> {
+            Vec::new()
+        }
+
+        fn rerun_count_for_slot(&self, _slot: usize) -> u8 {
+            0
+        }
+
+        fn resolve_count(&self) -> usize {
+            0
+        }
+    }
+
+    /// 14.3c (AI-12.3): a RECORDING `WaveHandle` for the AC8/AC11 keystones —
+    /// reports a configurable `completed` and records whether `cancel()` fired.
+    /// Drives the push-vs-pull differential + the shared-token-hazard guard.
+    #[derive(Debug)]
+    struct SpyWaveHandle {
+        completed: usize,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SpyWaveHandle {
+        fn new(completed: usize) -> Self {
+            Self {
+                completed,
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+        /// Construct sharing an existing cancel flag — models the production CoW
+        /// rerun where the prior + new handle SHARE one wave_cancel token.
+        fn with_flag(
+            completed: usize,
+            cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ) -> Self {
+            Self {
+                completed,
+                cancelled,
+            }
+        }
+    }
+
+    impl crate::domain::ports::wave_handle::WaveHandle for SpyWaveHandle {
+        fn snapshot(&self) -> crate::domain::ports::wave_handle::WaveSnapshot {
+            crate::domain::ports::wave_handle::WaveSnapshot {
+                spoke_count: self.completed,
+                completed: self.completed,
+                honest_empty: Some(false),
+                cancelled: self.cancelled.load(std::sync::atomic::Ordering::SeqCst),
+                outcome: crate::domain::models::orchestration::ForkJoinOutcome {
+                    spokes: Vec::new(),
+                    synthesis: crate::domain::models::orchestration::SynthesisView::default(),
+                },
+                resolve_count: 0,
+                slots: Vec::new(),
+                rerun_counts: Vec::new(),
+            }
+        }
+        fn cancel(&self) {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn drill(&self, _slot: usize) -> Option<crate::domain::ports::wave_handle::DrillBody> {
+            None
+        }
+        fn drill_id(&self, _slot: usize) -> Option<crate::domain::models::orchestration::DrillId> {
+            None
+        }
+        fn slots(&self) -> Vec<crate::domain::models::AgentId> {
+            Vec::new()
+        }
+        fn rerun_count_for_slot(&self, _slot: usize) -> u8 {
+            0
+        }
+        fn resolve_count(&self) -> usize {
+            0
+        }
+    }
+
+    fn state_with_wave() -> TuiState {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        state.wave_run = Some(std::sync::Arc::new(EmptyWaveHandle));
+        state
+    }
+
     #[test]
     fn alt_v_maps_to_alt_v_domain_key() {
         let event = alt_key('v');
@@ -3904,6 +4162,7 @@ mod tests {
                 allowed_tools: None,
                 exclude_tools: None,
                 model: None,
+                isolated: false,
             },
         ]);
         state.input_buffer = "@Agents/code-reviewer".to_string();
@@ -3940,6 +4199,7 @@ mod tests {
                 allowed_tools: None,
                 exclude_tools: None,
                 model: None,
+                isolated: false,
             },
         ]);
         state.input_buffer = "@Agents/code-reviewer review src/auth.rs".to_string();
@@ -4050,6 +4310,43 @@ mod tests {
                 other => panic!("expected ExecuteCommand for {input:?}, got {other:?}"),
             }
         }
+    }
+
+    // 14.3c AI-12.3 human-smoke regression — `/fanout <N> <prompt>` (and
+    // `/fanout cancel`) MUST route to ExecuteCommand so the event-loop `/fanout`
+    // arm launches the wave. Before the fix it fell through to SubmitWithContext
+    // with an empty `text`, dispatching an EMPTY main turn (provider 400 "Empty
+    // input messages") and never launching the wave. Positive control: a genuine
+    // user-defined command name still falls through to SubmitWithContext.
+    #[test]
+    fn slash_fanout_routes_to_execute_command_with_args() {
+        for (input, expected_arg) in [
+            ("/fanout 3 explore the module", Some("3 explore the module")),
+            ("/fanout cancel", Some("cancel")),
+            ("/fanout", None),
+        ] {
+            let mut state = make_state();
+            state.input_buffer = input.to_string();
+            match submit_message(&mut state) {
+                InputAction::ExecuteCommand { name, args } => {
+                    assert_eq!(name, "fanout", "input: {input}");
+                    assert_eq!(args.as_deref(), expected_arg, "input: {input}");
+                }
+                other => panic!("expected ExecuteCommand for {input:?}, got {other:?}"),
+            }
+        }
+
+        // Positive control: an unknown command still routes to SubmitWithContext
+        // (proves the fanout arm is a specific match, not a catch-all).
+        let mut state = make_state();
+        state.input_buffer = "/totallyunknowncmd hi".to_string();
+        assert!(
+            matches!(
+                submit_message(&mut state),
+                InputAction::SubmitWithContext { .. }
+            ),
+            "unknown command must still fall through to SubmitWithContext"
+        );
     }
 
     #[test]
@@ -4307,6 +4604,83 @@ mod tests {
     }
 
     #[test]
+    fn wave_keys_are_conditional_on_retained_wave() {
+        let mut without_wave = make_state();
+        without_wave.focus = FocusState::Chat;
+        assert_ne!(
+            handle_input(&mut without_wave, &DomainInputEvent::KeyPress('d')),
+            InputAction::OpenDivergeView
+        );
+
+        let mut with_wave = state_with_wave();
+        assert_eq!(
+            handle_input(&mut with_wave, &DomainInputEvent::KeyPress('d')),
+            InputAction::OpenDivergeView
+        );
+        assert!(with_wave.needs_redraw);
+
+        let mut with_wave = state_with_wave();
+        assert_eq!(
+            handle_input(&mut with_wave, &DomainInputEvent::KeyPress('s')),
+            InputAction::CloseDivergeView
+        );
+
+        let mut with_wave = state_with_wave();
+        // P3 (review): `r` from Chat focus opens the wave overlay so the user
+        // can select a slot, rather than blindly re-running slot 0.
+        assert_eq!(
+            handle_input(&mut with_wave, &DomainInputEvent::KeyPress('r')),
+            InputAction::OpenWaveOverlay
+        );
+        assert_eq!(
+            with_wave.focus,
+            FocusState::Overlay(OverlayType::WaveOverlay)
+        );
+    }
+
+    #[test]
+    fn enter_on_wave_strip_opens_overlay_before_tool_toggle() {
+        let mut state = state_with_wave();
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
+            InputAction::OpenWaveOverlay
+        );
+    }
+
+    #[test]
+    fn spawn_gate_intercepts_keys_before_chat_handlers() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        state.pending_spawn_gate = Some(crate::adapters::tui::state::PendingSpawnGate {
+            spec: crate::adapters::tui::fanout_spec::parse_fanout(Some("3 test")).unwrap(),
+            requested: 3,
+            threshold: 2,
+            adjusted: None,
+        });
+
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('c')),
+            InputAction::SpawnGateCap
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Left)),
+            InputAction::SpawnGateAdjustLeft
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Right)),
+            InputAction::SpawnGateAdjustRight
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
+            InputAction::SpawnGateConfirm
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc)),
+            InputAction::CloseWaveOverlay
+        );
+    }
+
+    #[test]
     fn rbracket_capital_p_chord_emits_jump_to_latest_prose_anchor() {
         // S16.8 preflight rebinding (2026-05-03): the S16.6 G→JumpToLatestProseAnchor
         // binding moved to the ]P chord (bracket-prefix family). Bracket leader has
@@ -4352,5 +4726,377 @@ mod tests {
         let _action = handle_char(&mut state, 'z');
         // But pending_z must NOT be set (vim chords only activate in Chat focus)
         assert!(!state.pending_z);
+    }
+
+    // ─── AC1 reach-firewall: remaining keys ─────────────────────────────────
+
+    #[test]
+    fn ac1_esc_in_wave_overlay_closes_overlay() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_eq!(action, InputAction::CloseWaveOverlay);
+    }
+
+    #[test]
+    fn ac1_enter_in_wave_overlay_drills_selected_slot() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        state.wave_overlay_selected = 1;
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_eq!(action, InputAction::WaveDrillSpoke(1));
+    }
+
+    #[test]
+    fn ac1_j_in_wave_overlay_advances_selection() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        state.wave_overlay_selected = 0;
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        // With EmptyWaveHandle (0 spokes), selection stays clamped at 0
+        assert_eq!(state.wave_overlay_selected, 0);
+        assert!(state.needs_redraw);
+    }
+
+    #[test]
+    fn ac1_k_in_wave_overlay_reverses_selection() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        state.wave_overlay_selected = 2;
+        let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
+        assert_eq!(state.wave_overlay_selected, 1);
+        assert!(state.needs_redraw);
+    }
+
+    #[test]
+    fn ac1_r_in_wave_overlay_reruns_selected_slot() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        state.wave_overlay_selected = 2;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('r'));
+        assert_eq!(action, InputAction::WaveRerunSpoke(2));
+    }
+
+    #[test]
+    fn ac1_d_in_wave_overlay_opens_diverge() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
+        assert_eq!(action, InputAction::OpenDivergeView);
+    }
+
+    #[test]
+    fn ac1_s_in_wave_overlay_closes_diverge() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('s'));
+        assert_eq!(action, InputAction::CloseDivergeView);
+    }
+
+    // ─── AC1 reach-firewall: positive controls ──────────────────────────────
+
+    #[test]
+    fn ac1_d_without_wave_does_not_open_diverge() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
+        assert_ne!(action, InputAction::OpenDivergeView);
+    }
+
+    #[test]
+    fn ac1_enter_without_wave_does_not_open_overlay() {
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
+        assert_ne!(action, InputAction::OpenWaveOverlay);
+    }
+
+    // ─── AC3 diverge involution ─────────────────────────────────────────────
+
+    #[test]
+    fn ac3_d_then_s_is_identity_involution() {
+        let mut state = state_with_wave();
+        // d opens diverge
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
+        assert_eq!(action, InputAction::OpenDivergeView);
+        assert!(state.needs_redraw);
+
+        // s closes diverge — back to Chat focus
+        state.needs_redraw = false;
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('s'));
+        assert_eq!(action, InputAction::CloseDivergeView);
+        assert!(state.needs_redraw);
+    }
+
+    // ─── 14.3c: Esc-unwind dismiss of the wave display ──────────────────────
+
+    #[test]
+    fn esc_dismisses_wave_in_chat_focus() {
+        let mut state = state_with_wave();
+        state.focus = FocusState::Chat;
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_eq!(action, InputAction::DismissWave);
+    }
+
+    #[test]
+    fn esc_closes_diverge_before_dismissing_wave() {
+        // With the DivergeView open, Esc unwinds it first (keeps the wave),
+        // NOT a full dismiss.
+        let mut state = state_with_wave();
+        state.focus = FocusState::Chat;
+        state.wave_diverge_open = true;
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_eq!(action, InputAction::CloseDivergeView);
+    }
+
+    #[test]
+    fn esc_without_wave_is_unchanged_no_dismiss() {
+        // Regression guard (UX safety): with NO wave present, Esc must NOT
+        // produce DismissWave/CloseDivergeView — the existing focus-toggle
+        // behavior is preserved untouched.
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_ne!(action, InputAction::DismissWave);
+        assert_ne!(action, InputAction::CloseDivergeView);
+        // Existing behavior: Esc in Chat toggles focus to Input.
+        assert_eq!(state.focus, FocusState::Input);
+    }
+
+    #[test]
+    fn dismiss_wave_clears_all_wave_state() {
+        let mut state = state_with_wave();
+        state.wave_state = Some(crate::adapters::tui::state::WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        state.rerunning_slot = Some(1);
+        state.wave_diverge_open = true;
+        state.active_wave_id = Some(5);
+
+        state.dismiss_wave(); // PRODUCTION handler
+
+        assert!(state.wave_run.is_none(), "handle dropped");
+        assert!(state.wave_state.is_none(), "view state cleared");
+        assert!(state.rerunning_slot.is_none(), "lamp cleared");
+        assert!(!state.wave_diverge_open, "diverge closed");
+        assert!(!state.is_wave_in_flight(), "in-flight marker cleared");
+    }
+
+    // ─── AC6 cancel state machine ───────────────────────────────────────────
+
+    // 14.3c AI-12.3 remediation (DF-CR-14-3c-6): the prior LF3/LF4 keystones
+    // were vacuous (inline handler re-implementation / tokio-util / setter-getter
+    // / tautology mutants). These DRIVE the extracted `TuiState::*` handlers — the
+    // SAME code the event loop runs — so a mutated handler turns its keystone RED.
+
+    #[test]
+    fn ac8_request_wave_cancel_fires_token_iff_in_flight() {
+        use tokio_util::sync::CancellationToken;
+
+        // In flight: the trigger fires the wave-cancel token (a real spoke child
+        // observes it), clears the lamp, and self-heals the in-flight marker.
+        let mut state = state_with_wave();
+        let token = CancellationToken::new();
+        let spoke_child = token.child_token(); // models a dispatched spoke's token
+        state.wave_cancel = Some(token);
+        state.active_wave_id = Some(7);
+        state.rerunning_slot = Some(2);
+        assert!(
+            state.request_wave_cancel(),
+            "in-flight Ctrl-C must be consumed"
+        );
+        assert!(
+            spoke_child.is_cancelled(),
+            "cancel-all must propagate to the spoke child token"
+        );
+        assert!(
+            state.rerunning_slot.is_none(),
+            "rerun lamp cleared on cancel"
+        );
+        assert!(!state.is_wave_in_flight(), "in-flight marker self-healed");
+
+        // Positive control + mutant kill: NO wave in flight → the trigger must
+        // NOT fire (returns false so Ctrl-C falls through to quit). An ungated
+        // handler would fire `idle_child` here → RED.
+        let mut idle = make_state();
+        let token2 = CancellationToken::new();
+        let idle_child = token2.child_token();
+        idle.wave_cancel = Some(token2);
+        idle.active_wave_id = None;
+        assert!(
+            !idle.request_wave_cancel(),
+            "idle Ctrl-C must not be consumed"
+        );
+        assert!(
+            !idle_child.is_cancelled(),
+            "idle Ctrl-C must NOT fire a stale wave token"
+        );
+    }
+
+    #[test]
+    fn ac8_handle_wave_cancelled_marks_view_and_retires() {
+        use crate::adapters::tui::state::WaveViewState;
+        let mut state = state_with_wave();
+        state.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        state.active_wave_id = Some(9);
+
+        state.handle_wave_cancelled(); // PRODUCTION handler
+
+        assert!(
+            state.wave_state.as_ref().unwrap().cancelled,
+            "wave view marked cancelled"
+        );
+        assert!(!state.is_wave_in_flight(), "in-flight marker retired");
+        // Positive control: a fresh view is NOT cancelled (the flag is real, not
+        // always-true). A handler that skips record_wave_cancelled → first
+        // assert RED.
+        assert!(!WaveViewState::started(crate::domain::models::AgentId::root(), 3).cancelled);
+    }
+
+    // ─── AC7 rerun-UI state machine ─────────────────────────────────────────
+
+    #[test]
+    fn ac11_handle_wave_run_ready_swaps_handle_and_clears_lamp() {
+        let mut state = state_with_wave();
+        let old_ptr =
+            std::sync::Arc::as_ptr(state.wave_run.as_ref().unwrap()) as *const () as usize;
+        state.rerunning_slot = Some(1); // a rerun was in flight
+        state.active_wave_id = Some(4);
+
+        let new_handle: std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle> =
+            std::sync::Arc::new(SpyWaveHandle::new(3));
+        let new_ptr = std::sync::Arc::as_ptr(&new_handle) as *const () as usize;
+
+        let returned = state.handle_wave_run_ready(new_handle); // PRODUCTION handler
+
+        assert_eq!(
+            returned,
+            Some(1),
+            "rerun completion returns the slot for the notice"
+        );
+        assert!(state.rerunning_slot.is_none(), "lamp cleared on swap");
+        assert!(!state.is_wave_in_flight(), "in-flight marker retired");
+        let current_ptr =
+            std::sync::Arc::as_ptr(state.wave_run.as_ref().unwrap()) as *const () as usize;
+        assert_eq!(current_ptr, new_ptr, "wave_run points at the NEW handle");
+        assert_ne!(current_ptr, old_ptr, "old handle was swapped out");
+    }
+
+    #[test]
+    fn ac11_rerun_swap_leaves_new_handle_live_not_cancelled() {
+        // Shared-token-hazard guard: handle_wave_run_ready must NOT cancel the
+        // swapped-out handle. In the production CoW rerun the prior + new handle
+        // SHARE one wave_cancel token (orchestrator/mod.rs:754), so a naive
+        // old.cancel() would also cancel the freshly-swapped-in handle. Model the
+        // shared token by giving the OLD and NEW handle the SAME cancel flag — a
+        // naive abort then flips it and BOTH asserts go RED.
+        let shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        state.wave_run = Some(std::sync::Arc::new(SpyWaveHandle::with_flag(
+            2,
+            shared.clone(),
+        ))); // prior
+        state.rerunning_slot = Some(0);
+
+        let new_handle: std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle> =
+            std::sync::Arc::new(SpyWaveHandle::with_flag(2, shared.clone())); // CoW: shares the token
+
+        state.handle_wave_run_ready(new_handle); // PRODUCTION handler
+
+        assert!(
+            !shared.load(std::sync::atomic::Ordering::SeqCst),
+            "swap must not cancel the shared token (would kill the new handle)"
+        );
+        assert!(
+            !state.wave_run.as_ref().unwrap().snapshot().cancelled,
+            "new handle stays live after the rerun swap"
+        );
+    }
+
+    #[test]
+    fn ac11_handle_spoke_rerun_started_sets_correct_slot_counter_inert() {
+        use crate::adapters::tui::state::WaveViewState;
+        let mut state = state_with_wave();
+        state.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        state.needs_redraw = false;
+
+        state.handle_spoke_rerun_started(2); // PRODUCTION handler, slot 2 (P3 guard)
+
+        assert_eq!(
+            state.rerunning_slot,
+            Some(2),
+            "lamp must be the pressed slot (P3: not blindly 0)"
+        );
+        assert!(state.needs_redraw, "redraw requested");
+        // Counter-inert: rerun-started must NOT bump completed_count.
+        assert_eq!(
+            state.wave_state.as_ref().unwrap().completed_count,
+            0,
+            "SpokeRerunStarted must not bump completed_count"
+        );
+        // Positive control: the bump method DOES bump — proves the assert above
+        // is non-vacuous (a handler that bumped would read 1 → RED).
+        let mut wv = WaveViewState::started(crate::domain::models::AgentId::root(), 3);
+        wv.record_spoke_completed();
+        assert_eq!(wv.completed_count, 1);
+    }
+
+    #[test]
+    fn ac11_handle_spoke_rerun_reverted_clears_matching_slot_only() {
+        let mut state = state_with_wave();
+        state.rerunning_slot = Some(2);
+
+        state.handle_spoke_rerun_reverted(1); // wrong slot → must NOT clear
+        assert_eq!(
+            state.rerunning_slot,
+            Some(2),
+            "a stale revert for another slot must not clear the live lamp"
+        );
+
+        state.handle_spoke_rerun_reverted(2); // matching slot → clears
+        assert!(
+            state.rerunning_slot.is_none(),
+            "matching revert clears the lamp"
+        );
+    }
+
+    #[test]
+    fn ac11_push_vs_pull_render_reads_swapped_handle_not_stale_push_counter() {
+        // The gate's centre of gravity. The render PULLS the count from
+        // state.wave_run.snapshot().completed (event_loop.rs:9408) — NEVER the
+        // push counter wave_state.completed_count. Poison the push source to 99,
+        // swap in a handle honestly reporting 3 via the PRODUCTION handler, then
+        // assert the production render data-source reads 3, not 99.
+        use crate::adapters::tui::state::WaveViewState;
+        let mut state = state_with_wave();
+        state.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        if let Some(wv) = state.wave_state.as_mut() {
+            wv.completed_count = 99; // POISON the stale push source
+        }
+        state.rerunning_slot = Some(1);
+
+        state.handle_wave_run_ready(std::sync::Arc::new(SpyWaveHandle::new(3)));
+
+        // Mirrors the production render data-source line (event_loop.rs:9408).
+        let rendered_completed = state.wave_run.as_ref().unwrap().snapshot().completed;
+        assert_eq!(
+            rendered_completed, 3,
+            "render must PULL the count from the swapped handle"
+        );
+        assert_ne!(
+            rendered_completed, 99,
+            "render must NOT read the poisoned push counter"
+        );
     }
 }

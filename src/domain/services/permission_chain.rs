@@ -2,7 +2,8 @@
 //! Pure orchestration: calls port traits, no I/O itself.
 
 use crate::domain::models::{
-    ActiveSkill, FileOperation, PermissionMode, ToolRisk, risk_for_builtin,
+    ActiveSkill, ApprovalSource, FileOperation, PermissionMode, ProvenanceTag, TaintDecision,
+    ToolRisk, risk_for_builtin,
 };
 use crate::domain::ports::{SecurityPort, ToolSetPort};
 use std::collections::HashSet;
@@ -134,6 +135,26 @@ pub async fn check_with_source(
         }
     }
 
+    // Step 0.6: Provenance-taint gate (AC2).
+    // R1 is inert: passes the benign default provenance (`UserOriginated`) and
+    // the gate unconditionally Allows. R2 will propagate the subagent-envelope
+    // origin onto the tag and may RequireApproval for self-originated data.
+    // A non-Allow verdict hard-denies, so the seam is load-bearing — not a dead
+    // hook. The gate is decoupled from live revocation (DD5): it never revokes.
+    let path_hint = derive_path_hint(tool_name, input);
+    let server_id = derive_server_id(tool_name);
+    let taint = taint_gate(
+        tool_name,
+        input,
+        source,
+        path_hint.as_deref(),
+        server_id.as_deref(),
+        ProvenanceTag::default(),
+    );
+    if !matches!(taint, TaintDecision::Allow) {
+        return PermissionDecision::Deny("tainted data blocked by provenance policy".to_string());
+    }
+
     // Step 1: Tool restriction (active skill allowed_tools)
     // activate_skill is always allowed (carve-out for skill chaining)
     if tool_name != "activate_skill" {
@@ -206,12 +227,70 @@ pub async fn check_with_source(
         None => {
             // needs prompt — route to ApprovalRuntime
             return PermissionDecision::Prompt {
-                server_id: derive_server_id(tool_name),
-                path_hint: derive_path_hint(tool_name, input),
+                server_id,
+                path_hint,
             };
         }
     }
 }
+
+/// Provenance-taint gate (Story 14.6, AC2 — R1 inert seam).
+///
+/// Inspects the *provenance* of the data driving a tool call and decides
+/// whether the provenance policy permits it. The signature mirrors the
+/// context (the fields mirror `ApprovalRequest` in `approval_runtime`) so R2
+/// can route tainted data through the approval runtime without reshaping the
+/// call site.
+///
+/// **R1 (this revision):** unconditionally returns [`TaintDecision::Allow`],
+/// UNLESS [`TAINT_GATE_FORCE_DENY`] is set (test/instrumentation builds
+/// only) — the load-bearing/non-theater proof (DD4, Murat) needs a way to
+/// prove a non-`Allow` verdict actually blocks dispatch through the real
+/// `ToolScheduler`, which requires flipping the gate's verdict without
+/// touching call sites.
+/// `check_with_source` passes [`ProvenanceTag::default()`] (`UserOriginated`),
+/// so the gate is inert yet **load-bearing** — it sits on the hot path and a
+/// non-`Allow` verdict denies the call, so R2 only has to *populate* the tag
+/// and add verdicts to activate the policy.
+///
+/// Intentionally decoupled from live revocation (DD5): this gate **never** calls
+/// revoke. Provenance tagging (DD4) and approval revocation (DD5) are
+/// independent mechanisms.
+pub fn taint_gate(
+    tool: &str,
+    input: &serde_json::Value,
+    source: Option<&ApprovalSource>,
+    path_hint: Option<&str>,
+    server_id: Option<&str>,
+    provenance: ProvenanceTag,
+) -> TaintDecision {
+    let _ = (tool, input, source, path_hint, server_id, provenance);
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    TAINT_GATE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    if TAINT_GATE_FORCE_DENY.load(std::sync::atomic::Ordering::Relaxed) {
+        return TaintDecision::Deny;
+    }
+    // R1: inert. R2 will consult `provenance` (envelope-origin→tag propagation)
+    // and return `TaintDecision::RequireApproval { reason }` for tainted data.
+    TaintDecision::Allow
+}
+
+/// Wired + load-bearing counter (DD4, Murat — proof (a)): every real
+/// dispatch through `check_with_source` increments this exactly once. A
+/// mutant deleting the `taint_gate` call site drives `count < dispatches`,
+/// caught by `ac2_taint_gate_counter_matches_dispatch_count`.
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub static TAINT_GATE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only override forcing `taint_gate` to return [`TaintDecision::Deny`]
+/// (DD4, Murat — proof (b), the "inert is indistinguishable from not-wired
+/// without a Deny-mutant" requirement). Never read outside
+/// `test`/`test-instrumentation` builds; the R1 production path never sets
+/// this, so R1 behavior is unaffected.
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub static TAINT_GATE_FORCE_DENY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Derive risk for a tool, considering both built-in and MCP tools.
 ///
@@ -252,7 +331,7 @@ fn derive_server_id(tool_name: &str) -> Option<String> {
 /// Derive path_hint from tool_name and input (for Read/Write/Edit).
 fn derive_path_hint(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     match tool_name {
-        "Read" | "Write" | "Edit" => input
+        "Read" | "Write" | "Edit" | "edit" => input
             .get("file_path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
@@ -268,7 +347,7 @@ fn extract_file_path(
 ) -> Option<(String, FileOperation)> {
     let op = match tool_name {
         "Read" => FileOperation::Read,
-        "Write" | "Edit" => FileOperation::Write,
+        "Write" | "Edit" | "edit" => FileOperation::Write,
         _ => return None,
     };
     let path = input.get("file_path").and_then(|v| v.as_str())?;

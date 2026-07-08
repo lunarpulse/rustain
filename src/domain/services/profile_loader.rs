@@ -277,10 +277,16 @@ impl<'a> ProfileLoader<'a> {
         for (port, adapter_opt) in &adapters {
             if let Some(adapter) = adapter_opt {
                 let mut final_adapter = adapter.clone();
-                // Apply feature-gate fallback for preview profiles
+                // Preview profiles advertise feature-gated adapters (e.g. telegram,
+                // cron) but must always compose safely, so rewrite them to their
+                // fallback regardless of whether the cargo feature is enabled.
                 if def.preview {
-                    if let Some(fallback) = AdapterCatalog::fallback_for(*port, &adapter.adapter) {
-                        final_adapter.adapter = fallback.to_string();
+                    if let Some(desc) = AdapterCatalog::lookup(*port, &adapter.adapter) {
+                        if desc.feature_gate.is_some() {
+                            if let Some(fallback) = desc.fallback {
+                                final_adapter.adapter = fallback.to_string();
+                            }
+                        }
                     }
                 }
                 dimensions.insert(*port, final_adapter);

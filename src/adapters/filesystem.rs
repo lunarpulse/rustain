@@ -2,15 +2,17 @@
 //!
 //! Implements `StoragePort` using async file I/O via `tokio::fs`.
 //! Session files use CC-compatible camelCase JSON format (`.meta.json`).
-
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::domain::errors::StorageError;
 use crate::domain::models::{Conversation, ConversationSummary, ImageReference, SessionMeta};
-use crate::domain::ports::StoragePort;
+use crate::domain::ports::{StoragePort, WorkspaceRegistrarPort};
 
 /// Compute a content-addressed hash of image bytes for filename generation.
 ///
@@ -61,7 +63,6 @@ pub enum SessionLayout {
 ///
 /// Stores each conversation as `{sessions_dir}/{id}.meta.json` (flat) or
 /// `{sessions_dir}/{id}/` (directory layout, used when images are attached).
-#[derive(Debug)]
 pub struct FileSystemStorage {
     sessions_dir: PathBuf,
     /// Workspace root used by `snapshot_file` for path-traversal validation.
@@ -69,10 +70,29 @@ pub struct FileSystemStorage {
     /// constructors. Production composition root SHOULD use
     /// [`with_workspace_root`] to pass the real workspace root.
     workspace_root: Option<PathBuf>,
+    /// Best-effort session-persistence side-effect for Story 13.5a-1.
+    workspace_registrar: Option<Arc<dyn WorkspaceRegistrarPort>>,
+    /// Performance throttle only. Correctness lives in the registrar's
+    /// path-keyed upsert; never turn this into a once-latch.
+    last_noted: Arc<AtomicU64>,
     /// Maximum checkpoints to retain per conversation (DF-106).
     /// Older checkpoints are pruned opportunistically in `create_checkpoint`.
     /// `None` = unlimited (test use only). Default: 100.
     snapshot_retention_count: Option<usize>,
+}
+
+impl fmt::Debug for FileSystemStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileSystemStorage")
+            .field("sessions_dir", &self.sessions_dir)
+            .field("workspace_root", &self.workspace_root)
+            .field(
+                "has_workspace_registrar",
+                &self.workspace_registrar.is_some(),
+            )
+            .field("snapshot_retention_count", &self.snapshot_retention_count)
+            .finish()
+    }
 }
 
 impl FileSystemStorage {
@@ -86,6 +106,8 @@ impl FileSystemStorage {
         Self {
             sessions_dir,
             workspace_root: None,
+            workspace_registrar: None,
+            last_noted: Arc::new(AtomicU64::new(0)),
             snapshot_retention_count: Some(100),
         }
     }
@@ -98,6 +120,8 @@ impl FileSystemStorage {
         Self {
             sessions_dir,
             workspace_root: Some(workspace_root),
+            workspace_registrar: None,
+            last_noted: Arc::new(AtomicU64::new(0)),
             snapshot_retention_count: Some(100),
         }
     }
@@ -107,6 +131,41 @@ impl FileSystemStorage {
     pub fn with_snapshot_retention(mut self, count: Option<usize>) -> Self {
         self.snapshot_retention_count = count;
         self
+    }
+    /// Opt-in best-effort workspace registration on successful persistence.
+    pub fn with_workspace_registrar(mut self, registrar: Arc<dyn WorkspaceRegistrarPort>) -> Self {
+        self.workspace_registrar = Some(registrar);
+        self
+    }
+
+    /// Best-effort registration after a successful session save.
+    ///
+    /// The `last_noted` atomic is a performance throttle only. Correctness
+    /// lives in the registrar's path-keyed upsert and internal coalescing.
+    async fn maybe_note_workspace(&self) {
+        const NOTE_THROTTLE_SECS: u64 = 300;
+
+        let Some(registrar) = &self.workspace_registrar else {
+            return;
+        };
+        let Some(workspace_root) = &self.workspace_root else {
+            return;
+        };
+
+        let now = crate::infrastructure::clock_util::now_unix().max(0) as u64;
+        let last = self.last_noted.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < NOTE_THROTTLE_SECS {
+            return;
+        }
+
+        match registrar.note_workspace(workspace_root).await {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(
+                workspace = %workspace_root.display(),
+                "failed to note workspace in registry: {err}"
+            ),
+        }
+        self.last_noted.store(now, Ordering::Relaxed);
     }
 
     /// Ensure the sessions directory exists.
@@ -220,6 +279,227 @@ impl FileSystemStorage {
         }
         SessionLayout::Missing
     }
+    async fn list_conversations_inner(
+        &self,
+        allow_sidecar_backfill: bool,
+    ) -> Result<Vec<ConversationSummary>, StorageError> {
+        let mut entries = match tokio::fs::read_dir(&self.sessions_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => {
+                return Err(StorageError::IoError(format!(
+                    "Failed to read sessions dir: {}",
+                    e
+                )));
+            }
+        };
+
+        // Collect seen ids for dedup across layout variants. Sorted map so we can
+        // overwrite earlier flat matches with directory entries if both are on
+        // disk during a partially-completed migration.
+        let mut by_id: std::collections::BTreeMap<String, ConversationSummary> =
+            std::collections::BTreeMap::new();
+
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| StorageError::IoError(e.to_string()))?
+        {
+            let path = entry.path();
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Skip temp files from in-flight atomic renames.
+            if file_name.ends_with(".tmp") {
+                continue;
+            }
+
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(e) => {
+                    tracing::warn!("Failed to stat {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+
+            if file_type.is_dir() {
+                // Directory layout: expect conversation.json + meta.json inside.
+                let id = file_name.to_string();
+                let meta_path = path.join("meta.json");
+                let conv_path = path.join("conversation.json");
+
+                // Peek at the main conversation to detect legacy forks missing
+                // from the sidecar (DF-095 backfill).
+                let persisted_for_backfill: Option<PersistedConversation> =
+                    match tokio::fs::read_to_string(&conv_path).await {
+                        Ok(c) => serde_json::from_str(&c).ok(),
+                        Err(_) => None,
+                    };
+
+                if let Ok(content) = tokio::fs::read_to_string(&meta_path).await {
+                    match serde_json::from_str::<SessionMeta>(&content) {
+                        Ok(mut meta) => {
+                            // Backfill: if the main conv has fork_source but the
+                            // sidecar doesn't, mirror it and rewrite the sidecar.
+                            if allow_sidecar_backfill
+                                && meta.fork_source.is_none()
+                                && let Some(ref p) = persisted_for_backfill
+                                && p.fork_source.is_some()
+                            {
+                                meta.fork_source = p.fork_source.clone();
+                                if let Err(e) = self.save_session_meta(&id, &meta).await {
+                                    tracing::warn!(
+                                        "Failed to backfill fork_source into sidecar for {}: {}",
+                                        id,
+                                        e
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "Backfilled fork_source into {} sidecar (directory layout)",
+                                        id
+                                    );
+                                }
+                            }
+                            let has_fork_source = meta.fork_source.is_some();
+                            by_id.insert(
+                                id.clone(),
+                                ConversationSummary {
+                                    id,
+                                    title: meta.title,
+                                    created_at: meta.created_at,
+                                    updated_at: meta.updated_at,
+                                    message_count: meta.message_count,
+                                    has_fork_source,
+                                },
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Corrupted directory-layout meta.json for {}: {}",
+                                id,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Fall back to reading conversation.json directly.
+                if let Some(persisted) = persisted_for_backfill {
+                    let has_fork_source = persisted.fork_source.is_some();
+                    let summary_id = persisted.id.clone();
+                    by_id.insert(
+                        summary_id.clone(),
+                        ConversationSummary {
+                            id: summary_id,
+                            title: persisted.title,
+                            created_at: persisted.created_at,
+                            updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
+                            message_count: persisted.messages.len(),
+                            has_fork_source,
+                        },
+                    );
+                }
+                continue;
+            }
+
+            // Flat layout: `{id}.meta.json`.
+            if !file_name.ends_with(".meta.json") || file_name.ends_with(".meta.json.tmp") {
+                continue;
+            }
+            let id = match path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_suffix(".meta"))
+            {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ => continue,
+            };
+
+            // If there's already a directory-layout entry with the same id, skip
+            // the stale flat match (should not happen post-migration, but be safe).
+            if by_id.contains_key(&id) {
+                continue;
+            }
+
+            // Peek at the main conversation to detect legacy forks missing
+            // from the sidecar (DF-095 backfill).
+            let persisted_for_backfill: Option<PersistedConversation> =
+                match tokio::fs::read_to_string(&path).await {
+                    Ok(c) => serde_json::from_str(&c).ok(),
+                    Err(_) => None,
+                };
+
+            // Try the SessionMeta sidecar first (fast path).
+            let sidecar = self.session_meta_path(&id);
+            if let Ok(content) = tokio::fs::read_to_string(&sidecar).await {
+                match serde_json::from_str::<SessionMeta>(&content) {
+                    Ok(mut meta) => {
+                        if allow_sidecar_backfill
+                            && meta.fork_source.is_none()
+                            && let Some(ref p) = persisted_for_backfill
+                            && p.fork_source.is_some()
+                        {
+                            meta.fork_source = p.fork_source.clone();
+                            if let Err(e) = self.save_session_meta(&id, &meta).await {
+                                tracing::warn!(
+                                    "Failed to backfill fork_source into sidecar for {}: {}",
+                                    id,
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "Backfilled fork_source into {} sidecar (flat layout)",
+                                    id
+                                );
+                            }
+                        }
+                        let has_fork_source = meta.fork_source.is_some();
+                        by_id.insert(
+                            id.clone(),
+                            ConversationSummary {
+                                id,
+                                title: meta.title,
+                                created_at: meta.created_at,
+                                updated_at: meta.updated_at,
+                                message_count: meta.message_count,
+                                has_fork_source,
+                            },
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Corrupted session meta sidecar for {}: {}", id, e);
+                    }
+                }
+            }
+
+            // Fallback: use the main conversation file (backward compat).
+            if let Some(persisted) = persisted_for_backfill {
+                let has_fork_source = persisted.fork_source.is_some();
+                by_id.insert(
+                    id.clone(),
+                    ConversationSummary {
+                        id,
+                        title: persisted.title,
+                        created_at: persisted.created_at,
+                        updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
+                        message_count: persisted.messages.len(),
+                        has_fork_source,
+                    },
+                );
+            } else if let Err(e) = tokio::fs::read_to_string(&path).await {
+                tracing::warn!("Failed to read session file {}: {}", path.display(), e);
+            }
+        }
+
+        // Sort by updatedAt desc (most recent first)
+        let mut summaries: Vec<_> = by_id.into_values().collect();
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        Ok(summaries)
+    }
 
     /// Sanitize a conversation ID to prevent path traversal.
     /// Delegates to shared utility; returns "invalid" on failure for backward compatibility.
@@ -305,7 +585,7 @@ impl FileSystemStorage {
                 );
             }
         }
-
+        self.maybe_note_workspace().await;
         Ok(())
     }
 
@@ -636,220 +916,11 @@ impl StoragePort for FileSystemStorage {
     }
 
     async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError> {
-        let mut entries = match tokio::fs::read_dir(&self.sessions_dir).await {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => {
-                return Err(StorageError::IoError(format!(
-                    "Failed to read sessions dir: {}",
-                    e
-                )));
-            }
-        };
+        self.list_conversations_inner(true).await
+    }
 
-        // Collect seen ids for dedup across layout variants. Sorted map so we can
-        // overwrite earlier flat matches with directory entries if both are on
-        // disk during a partially-completed migration.
-        let mut by_id: std::collections::BTreeMap<String, ConversationSummary> =
-            std::collections::BTreeMap::new();
-
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| StorageError::IoError(e.to_string()))?
-        {
-            let path = entry.path();
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n,
-                None => continue,
-            };
-
-            // Skip temp files from in-flight atomic renames.
-            if file_name.ends_with(".tmp") {
-                continue;
-            }
-
-            let file_type = match entry.file_type().await {
-                Ok(ft) => ft,
-                Err(e) => {
-                    tracing::warn!("Failed to stat {}: {}", path.display(), e);
-                    continue;
-                }
-            };
-
-            if file_type.is_dir() {
-                // Directory layout: expect conversation.json + meta.json inside.
-                let id = file_name.to_string();
-                let meta_path = path.join("meta.json");
-                let conv_path = path.join("conversation.json");
-
-                // Peek at the main conversation to detect legacy forks missing
-                // from the sidecar (DF-095 backfill).
-                let persisted_for_backfill: Option<PersistedConversation> =
-                    match tokio::fs::read_to_string(&conv_path).await {
-                        Ok(c) => serde_json::from_str(&c).ok(),
-                        Err(_) => None,
-                    };
-
-                if let Ok(content) = tokio::fs::read_to_string(&meta_path).await {
-                    match serde_json::from_str::<SessionMeta>(&content) {
-                        Ok(mut meta) => {
-                            // Backfill: if the main conv has fork_source but the
-                            // sidecar doesn't, mirror it and rewrite the sidecar.
-                            if meta.fork_source.is_none()
-                                && let Some(ref p) = persisted_for_backfill
-                                && p.fork_source.is_some()
-                            {
-                                meta.fork_source = p.fork_source.clone();
-                                if let Err(e) = self.save_session_meta(&id, &meta).await {
-                                    tracing::warn!(
-                                        "Failed to backfill fork_source into sidecar for {}: {}",
-                                        id,
-                                        e
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        "Backfilled fork_source into {} sidecar (directory layout)",
-                                        id
-                                    );
-                                }
-                            }
-                            let has_fork_source = meta.fork_source.is_some();
-                            by_id.insert(
-                                id.clone(),
-                                ConversationSummary {
-                                    id,
-                                    title: meta.title,
-                                    created_at: meta.created_at,
-                                    updated_at: meta.updated_at,
-                                    message_count: meta.message_count,
-                                    has_fork_source,
-                                },
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Corrupted directory-layout meta.json for {}: {}",
-                                id,
-                                e
-                            );
-                        }
-                    }
-                }
-
-                // Fall back to reading conversation.json directly.
-                if let Some(persisted) = persisted_for_backfill {
-                    let has_fork_source = persisted.fork_source.is_some();
-                    let summary_id = persisted.id.clone();
-                    by_id.insert(
-                        summary_id.clone(),
-                        ConversationSummary {
-                            id: summary_id,
-                            title: persisted.title,
-                            created_at: persisted.created_at,
-                            updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
-                            message_count: persisted.messages.len(),
-                            has_fork_source,
-                        },
-                    );
-                }
-                continue;
-            }
-
-            // Flat layout: `{id}.meta.json`.
-            if !file_name.ends_with(".meta.json") || file_name.ends_with(".meta.json.tmp") {
-                continue;
-            }
-            let id = match path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.strip_suffix(".meta"))
-            {
-                Some(id) if !id.is_empty() => id.to_string(),
-                _ => continue,
-            };
-
-            // If there's already a directory-layout entry with the same id, skip
-            // the stale flat match (should not happen post-migration, but be safe).
-            if by_id.contains_key(&id) {
-                continue;
-            }
-
-            // Peek at the main conversation to detect legacy forks missing
-            // from the sidecar (DF-095 backfill).
-            let persisted_for_backfill: Option<PersistedConversation> =
-                match tokio::fs::read_to_string(&path).await {
-                    Ok(c) => serde_json::from_str(&c).ok(),
-                    Err(_) => None,
-                };
-
-            // Try the SessionMeta sidecar first (fast path).
-            let sidecar = self.session_meta_path(&id);
-            if let Ok(content) = tokio::fs::read_to_string(&sidecar).await {
-                match serde_json::from_str::<SessionMeta>(&content) {
-                    Ok(mut meta) => {
-                        if meta.fork_source.is_none()
-                            && let Some(ref p) = persisted_for_backfill
-                            && p.fork_source.is_some()
-                        {
-                            meta.fork_source = p.fork_source.clone();
-                            if let Err(e) = self.save_session_meta(&id, &meta).await {
-                                tracing::warn!(
-                                    "Failed to backfill fork_source into sidecar for {}: {}",
-                                    id,
-                                    e
-                                );
-                            } else {
-                                tracing::info!(
-                                    "Backfilled fork_source into {} sidecar (flat layout)",
-                                    id
-                                );
-                            }
-                        }
-                        let has_fork_source = meta.fork_source.is_some();
-                        by_id.insert(
-                            id.clone(),
-                            ConversationSummary {
-                                id,
-                                title: meta.title,
-                                created_at: meta.created_at,
-                                updated_at: meta.updated_at,
-                                message_count: meta.message_count,
-                                has_fork_source,
-                            },
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Corrupted session meta sidecar for {}: {}", id, e);
-                    }
-                }
-            }
-
-            // Fallback: use the main conversation file (backward compat).
-            if let Some(persisted) = persisted_for_backfill {
-                let has_fork_source = persisted.fork_source.is_some();
-                by_id.insert(
-                    id.clone(),
-                    ConversationSummary {
-                        id,
-                        title: persisted.title,
-                        created_at: persisted.created_at,
-                        updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
-                        message_count: persisted.messages.len(),
-                        has_fork_source,
-                    },
-                );
-            } else if let Err(e) = tokio::fs::read_to_string(&path).await {
-                tracing::warn!("Failed to read session file {}: {}", path.display(), e);
-            }
-        }
-
-        // Sort by updatedAt desc (most recent first)
-        let mut summaries: Vec<_> = by_id.into_values().collect();
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(summaries)
+    async fn list_conversations_read_only(&self) -> Result<Vec<ConversationSummary>, StorageError> {
+        self.list_conversations_inner(false).await
     }
 
     async fn delete_conversation(&self, id: &str) -> Result<(), StorageError> {
@@ -1523,7 +1594,7 @@ impl StoragePort for FileSystemStorage {
         }
 
         // 3. Sort descending by cp_id (Amendment 1: reverse chronological order).
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
 
         // 4. Per-path dedup: track the LOWEST cp_id (oldest original content for
         //    restoration) AND the HIGHEST cp_id (most recent tool write — its
@@ -1836,7 +1907,7 @@ impl StoragePort for FileSystemStorage {
 
         // Per-path dedup: sort descending first, then track lowest (for path
         // display) and highest (for conflict detection via expected_current_hash).
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
 
         // (lowest_snapshot_path, highest_snapshot_path)
         let mut deduped: HashMap<String, (PathBuf, PathBuf)> = HashMap::new();
@@ -2723,6 +2794,35 @@ mod tests {
             fork_source: None,
             compaction: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_save_conversation_swallows_workspace_registry_error() {
+        struct FailingRegistrar;
+
+        #[async_trait::async_trait]
+        impl WorkspaceRegistrarPort for FailingRegistrar {
+            async fn note_workspace(
+                &self,
+                _workspace: &std::path::Path,
+            ) -> Result<(), crate::domain::ports::WorkspaceRegistryError> {
+                Err(crate::domain::ports::WorkspaceRegistryError::Io(
+                    "boom".to_string(),
+                ))
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::with_workspace_root(
+            tmp.path().join("sessions"),
+            tmp.path().to_path_buf(),
+        )
+        .with_workspace_registrar(Arc::new(FailingRegistrar));
+        let conv = make_test_conversation();
+
+        storage.save_conversation(&conv).await.unwrap();
+
+        assert!(tmp.path().join("sessions/test-conv-123.meta.json").exists());
     }
 
     // 6.1: save_conversation creates valid JSON with camelCase keys

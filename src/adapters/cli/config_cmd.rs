@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::adapters::cli::commands::Cli;
 use crate::domain::ports::ProfileResolver;
-use crate::infrastructure::utils::strip_url_userinfo;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
@@ -49,11 +48,11 @@ pub struct LayerDescriptor {
     pub path: Option<PathBuf>,
     /// Whether the path exists on disk (always `false` for non-file layers).
     pub exists: bool,
-    /// Priority rank: 1 = highest (CLI flags), 7 = lowest (built-in defaults).
+    /// Priority rank: 0 = highest (`-c` overrides), 1 = CLI flags, 7 = built-in defaults.
     pub priority: u8,
 }
 
-/// Compute the 7-layer descriptor list for the figment merge chain.
+/// Compute the config descriptor list for the figment merge chain.
 ///
 /// This is the single source of truth for layer ordering. Both `build_figment`
 /// (which BUILDS the config) and `config path`/`config edit` (which REPORT it)
@@ -76,50 +75,61 @@ pub fn config_layer_paths(cli: &Cli) -> Result<Vec<LayerDescriptor>> {
     let user_global_path =
         dirs::home_dir().map(|h| h.join(".config").join("rustain").join("config.toml"));
 
-    Ok(vec![
+    let mut layers = Vec::with_capacity(8);
+    if !cli.config_override.is_empty() {
+        layers.push(LayerDescriptor {
+            kind: "-c CLI overrides",
+            path: None,
+            exists: false,
+            priority: crate::infrastructure::config::CONFIG_OVERRIDE_PRIORITY,
+        });
+    }
+    layers.extend([
         LayerDescriptor {
             kind: "CLI flags",
             path: None,
             exists: false,
-            priority: 1,
+            priority: crate::infrastructure::config::CLI_FLAGS_PRIORITY,
         },
         LayerDescriptor {
             kind: "RUSTAIN_* env vars",
             path: None,
             exists: false,
-            priority: 2,
+            priority: crate::infrastructure::config::ENV_VARS_PRIORITY,
         },
         LayerDescriptor {
             kind: "local override (rustain-settings.json)",
             path: Some(local_override_path.clone()),
             exists: local_override_path.exists(),
-            priority: 3,
+            priority: crate::infrastructure::config::LOCAL_OVERRIDE_PRIORITY,
         },
         LayerDescriptor {
             kind: "workspace config",
             path: Some(workspace_path.clone()),
             exists: workspace_path.exists(),
-            priority: 4,
+            priority: crate::infrastructure::config::WORKSPACE_CONFIG_PRIORITY,
         },
         LayerDescriptor {
             kind: "user-global config",
             path: user_global_path.clone(),
             exists: user_global_path.as_ref().is_some_and(|p| p.exists()),
-            priority: 5,
+            priority: crate::infrastructure::config::USER_GLOBAL_CONFIG_PRIORITY,
         },
         LayerDescriptor {
             kind: "active profile defaults",
             path: None,
             exists: false,
-            priority: 6,
+            priority: crate::infrastructure::config::ACTIVE_PROFILE_PRIORITY,
         },
         LayerDescriptor {
             kind: "built-in defaults",
             path: None,
             exists: false,
-            priority: 7,
+            priority: crate::infrastructure::config::BUILT_IN_DEFAULTS_PRIORITY,
         },
-    ])
+    ]);
+
+    Ok(layers)
 }
 // ---------------------------------------------------------------------------
 // Fail-closed ConfigDisplay DTO (Story 13.2a AC2 — OQ3 resolution)
@@ -132,9 +142,9 @@ pub fn config_layer_paths(cli: &Cli) -> Result<Vec<LayerDescriptor>> {
 /// the developer makes a redaction decision. This DTO feeds BOTH TOML and JSON
 /// output — one format cannot leak while the other is clean.
 ///
-/// URL-bearing fields pass through `strip_url_userinfo` during mapping.
+/// URL-bearing fields use `RedactedUrl::Display` (strips userinfo automatically).
 #[derive(Debug, Serialize)]
-pub struct ConfigDisplay<'a> {
+pub struct ConfigDisplay {
     model: String,
     active_profile: String,
     log_level: String,
@@ -145,7 +155,7 @@ pub struct ConfigDisplay<'a> {
     skills: SkillsDisplay,
     runtime: RuntimeDisplay,
     layout: LayoutDisplay,
-    provider: std::collections::BTreeMap<String, ProviderDisplay<'a>>,
+    provider: std::collections::BTreeMap<String, ProviderDisplay>,
     mouse: MouseDisplay,
     tool_progress: ToolProgressDisplay,
     router: RouterDisplay,
@@ -159,16 +169,16 @@ pub struct ConfigDisplay<'a> {
     plan: PlanDisplay,
     subagents: SubagentsDisplay,
     daemon: DaemonDisplay,
-    mcp_servers: Vec<McpServerDisplay<'a>>,
+    mcp_servers: Vec<McpServerDisplay>,
 }
 
 #[derive(Debug, Serialize)]
-struct McpServerDisplay<'a> {
+struct McpServerDisplay {
     id: String,
     transport: String,
     command: Option<String>,
     args: Vec<String>,
-    url: Option<std::borrow::Cow<'a, str>>,
+    url: Option<String>,
     env: std::collections::BTreeMap<String, String>,
     persistent: bool,
     source: String,
@@ -200,7 +210,7 @@ struct LayoutDisplay {
 }
 
 #[derive(Debug, Serialize)]
-struct ProviderDisplay<'a> {
+struct ProviderDisplay {
     provider_id: String,
     model_id: String,
     /// Env var NAME (safe — never the resolved value).
@@ -208,7 +218,7 @@ struct ProviderDisplay<'a> {
     enabled: bool,
     kind: Option<String>,
     /// URL with userinfo stripped.
-    base_url: Option<std::borrow::Cow<'a, str>>,
+    base_url: Option<String>,
     context_window: Option<u32>,
     supports_tools: Option<bool>,
     discover_models: bool,
@@ -296,15 +306,15 @@ struct DaemonDisplay {
     low_power_emits_boundary: bool,
 }
 
-impl<'a> ConfigDisplay<'a> {
+impl ConfigDisplay {
     /// Build the fail-closed DTO from a resolved `AppConfig` and optional active profile.
     ///
-    /// Every URL field passes through `strip_url_userinfo`. Every field is
+    /// Every URL field uses `RedactedUrl::Display` (strips userinfo). Every field is
     /// an explicit opt-in — if `AppConfig` gains a new field, it stays
     /// invisible here until mapped.
     pub fn from_config(
-        config: &'a crate::domain::models::AppConfig,
-        active_profile: Option<&'a crate::domain::models::ResolvedProfile>,
+        config: &crate::domain::models::AppConfig,
+        active_profile: Option<&crate::domain::models::ResolvedProfile>,
     ) -> Self {
         let provider = config
             .provider
@@ -318,7 +328,7 @@ impl<'a> ConfigDisplay<'a> {
                         api_key_env: p.api_key_env.clone(),
                         enabled: p.enabled,
                         kind: p.kind.clone(),
-                        base_url: p.base_url.as_deref().map(strip_url_userinfo),
+                        base_url: p.base_url.as_ref().map(|u| u.to_string()),
                         context_window: p.context_window,
                         supports_tools: p.supports_tools,
                         discover_models: p.discover_models,
@@ -338,7 +348,7 @@ impl<'a> ConfigDisplay<'a> {
                 transport: format!("{:?}", s.transport).to_lowercase(),
                 command: s.command.clone(),
                 args: s.args.clone(),
-                url: s.url.as_deref().map(strip_url_userinfo),
+                url: s.url.as_ref().map(|u| u.to_string()),
                 env: s.env.clone(),
                 persistent: s.persistent,
                 source: format!("{:?}", s.source).to_lowercase(),
@@ -473,7 +483,20 @@ pub async fn render_config_show(
     profile_resolver: &Arc<dyn ProfileResolver>,
     cli: &Cli,
 ) -> Result<String> {
-    let config = match crate::infrastructure::config::try_load(cli, profile_resolver.as_ref()) {
+    render_config_show_with_overrides(json, profile_resolver, cli, None).await
+}
+
+pub async fn render_config_show_with_overrides(
+    json: bool,
+    profile_resolver: &Arc<dyn ProfileResolver>,
+    cli: &Cli,
+    cli_config_overrides: Option<&serde_json::Value>,
+) -> Result<String> {
+    let config = match crate::infrastructure::config::try_load_with_config_overrides(
+        cli,
+        profile_resolver.as_ref(),
+        cli_config_overrides,
+    ) {
         Ok(c) => c,
         Err(e) => {
             // Log the original error (may contain raw config values) for diagnostics,
@@ -507,6 +530,18 @@ pub async fn render_config_show(
 /// `std::env::var()` or `env_var_trimmed` calls — it serializes the resolved
 /// config as-loaded. The config holds env-var *names* (`api_key_env`), not
 /// secret values.
+pub async fn run_config_show_with_overrides(
+    json: bool,
+    profile_resolver: &Arc<dyn ProfileResolver>,
+    cli: &Cli,
+    cli_config_overrides: Option<&serde_json::Value>,
+) -> Result<()> {
+    let output =
+        render_config_show_with_overrides(json, profile_resolver, cli, cli_config_overrides)
+            .await?;
+    println!("{output}");
+    Ok(())
+}
 pub async fn run_config_show(
     json: bool,
     profile_resolver: &Arc<dyn ProfileResolver>,
@@ -624,6 +659,12 @@ pub fn render_config_path(json: bool, cli: &Cli) -> Result<String> {
                     "priority".into(),
                     serde_json::Value::Number(l.priority.into()),
                 );
+                if l.priority == crate::infrastructure::config::CONFIG_OVERRIDE_PRIORITY {
+                    obj.insert(
+                        "pairs".into(),
+                        serde_json::Value::Number(cli.config_override.len().into()),
+                    );
+                }
                 if let Some(p) = &l.path {
                     obj.insert(
                         "path".into(),
@@ -645,6 +686,17 @@ pub fn render_config_path(json: bool, cli: &Cli) -> Result<String> {
                 } else {
                     format!("✗ {} — {} (absent)", layer.kind, p.display())
                 }
+            } else if layer.priority == crate::infrastructure::config::CONFIG_OVERRIDE_PRIORITY {
+                format!(
+                    "· {} ({} {})",
+                    layer.kind,
+                    cli.config_override.len(),
+                    if cli.config_override.len() == 1 {
+                        "pair"
+                    } else {
+                        "pairs"
+                    }
+                )
             } else {
                 format!("· {} (non-file layer)", layer.kind)
             };
@@ -673,7 +725,20 @@ pub async fn run_config_validate(
     profile_resolver: &Arc<dyn ProfileResolver>,
     cli: &Cli,
 ) -> Result<()> {
-    match crate::infrastructure::config::try_load(cli, profile_resolver.as_ref()) {
+    run_config_validate_with_overrides(json, profile_resolver, cli, None).await
+}
+
+pub async fn run_config_validate_with_overrides(
+    json: bool,
+    profile_resolver: &Arc<dyn ProfileResolver>,
+    cli: &Cli,
+    cli_config_overrides: Option<&serde_json::Value>,
+) -> Result<()> {
+    match crate::infrastructure::config::try_load_with_config_overrides(
+        cli,
+        profile_resolver.as_ref(),
+        cli_config_overrides,
+    ) {
         Ok(_config) => {
             if json {
                 println!(
@@ -705,7 +770,10 @@ pub async fn run_config_validate(
                 eprintln!("Configuration is invalid: {error_msg}");
             }
             // Non-zero exit via SubcommandExit (mirrors profile validate)
-            Err(crate::infrastructure::startup::SubcommandExit.into())
+            Err(crate::infrastructure::startup::SubcommandExit(
+                crate::infrastructure::startup::SubcommandExit::GENERIC,
+            )
+            .into())
         }
     }
 }
@@ -761,13 +829,13 @@ fn sanitize_toml_map_keys(value: toml::Value) -> toml::Value {
     }
 }
 /// Render a `ConfigDisplay` to pretty TOML with TOML-safe provider/pricing keys.
-fn config_display_to_toml(display: &ConfigDisplay<'_>) -> Result<String> {
+fn config_display_to_toml(display: &ConfigDisplay) -> Result<String> {
     let mut value = toml::Value::try_from(display)?;
     value = sanitize_toml_map_keys(value);
     Ok(toml::to_string_pretty(&value)?)
 }
 
 /// Render a `ConfigDisplay` to pretty JSON with finite floats guaranteed.
-fn config_display_to_json(display: &ConfigDisplay<'_>) -> Result<String> {
+fn config_display_to_json(display: &ConfigDisplay) -> Result<String> {
     Ok(serde_json::to_string_pretty(display)?)
 }

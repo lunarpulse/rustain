@@ -123,7 +123,7 @@ async fn integration_plan_runtime_delegation_happy_path() {
 
     // Stub runner returning Completed
     let stub_runner = Arc::new(StubSubagentRunner::new(
-        rustain::domain::models::SubagentRunStatus::Completed,
+        rustain::domain::models::NodeState::Completed,
         "Code review completed successfully",
     ));
 
@@ -137,6 +137,7 @@ async fn integration_plan_runtime_delegation_happy_path() {
         model: None,
         allowed_tools: None,
         exclude_tools: None,
+        isolated: false,
     };
 
     let emitter = CapturedEvents::new();

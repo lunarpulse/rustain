@@ -84,6 +84,13 @@ pub fn models_cache_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("models_cache.json"))
 }
 
+/// Path to the models.dev pricing cache JSON file (`~/.rustain/models_pricing.json`).
+/// Stores the live per-million pricing snapshot fetched from models.dev.
+/// Sync since `data_dir()` already creates the parent dir; no need to async-create.
+pub fn models_dev_pricing_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("models_pricing.json"))
+}
+
 // ── Daemon path resolution (Story 12.1a AC-12-1a-8) ──────────────────────────
 //
 // "Hybrid" scoping (author decision, 2026-06-06): the PID file is
@@ -122,13 +129,22 @@ pub fn daemon_pid_path(workspace: &std::path::Path) -> Result<PathBuf> {
     Ok(rustain_workspace_dir(workspace)?.join("daemon.pid"))
 }
 
+/// Core logic: build socket path from an explicit `data_dir` root.
+/// Extracted so tests can call it directly without mutating `RUSTAIN_DATA_DIR`.
+fn daemon_socket_path_inner(
+    data_dir: &std::path::Path,
+    workspace: &std::path::Path,
+) -> Result<PathBuf> {
+    let dir = data_dir.join("daemons");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir.join(format!("{}.sock", workspace_hash(workspace))))
+}
+
 /// Path to the per-workspace daemon Unix socket (Story 12.1a AC-12-1a-8).
 /// `{data_dir}/daemons/<workspace-hash>.sock` — short root avoids the AF_UNIX
 /// path-length limit; the hash keeps it per-workspace and collision-free.
 pub fn daemon_socket_path(workspace: &std::path::Path) -> Result<PathBuf> {
-    let dir = data_dir()?.join("daemons");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    Ok(dir.join(format!("{}.sock", workspace_hash(workspace))))
+    daemon_socket_path_inner(&data_dir()?, workspace)
 }
 
 /// Path to the daemon's stdio/log file (re-exec child redirects stdout+stderr
@@ -237,6 +253,15 @@ pub fn crash_log_path() -> Result<PathBuf> {
     Ok(data_dir()?.join(format!("crash-{}.log", timestamp)))
 }
 
+/// Path to the latest-only startup panic log (Story 13.7 AC2).
+/// `{data_dir}/panic.log` — flat under the data dir (party-mode OQ1, USER-RULED:
+/// no `logs/` subdir, consistent with the existing flat layout). Overwritten on
+/// each startup panic so the file always reflects the most recent early-init
+/// crash. Honors the same `RUSTAIN_DATA_DIR` test override as `data_dir()`.
+pub fn panic_log_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("panic.log"))
+}
+
 #[cfg(test)]
 mod daemon_path_tests {
     use super::*;
@@ -262,15 +287,9 @@ mod daemon_path_tests {
     fn socket_path_lives_under_data_dir_and_is_short() {
         let data = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test; RUSTAIN_DATA_DIR override is the documented
-        // test seam consistent with data_dir().
-        unsafe {
-            std::env::set_var("RUSTAIN_DATA_DIR", data.path());
-        }
-        let sock = daemon_socket_path(ws.path()).unwrap();
-        unsafe {
-            std::env::remove_var("RUSTAIN_DATA_DIR");
-        }
+        // Call the inner helper directly — no env-var mutation needed, so this
+        // test is safe under concurrent multi-threaded test execution.
+        let sock = daemon_socket_path_inner(data.path(), ws.path()).unwrap();
         assert!(sock.starts_with(data.path().join("daemons")));
         assert!(sock.extension().unwrap() == "sock");
         // AF_UNIX sun_path limit guard (Linux 108) — the whole point of the hash.
@@ -279,5 +298,25 @@ mod daemon_path_tests {
             "socket path must stay under the AF_UNIX limit: {}",
             sock.display()
         );
+    }
+}
+
+#[cfg(test)]
+mod startup_panic_path_tests {
+    use super::*;
+
+    #[test]
+    fn panic_log_path_is_data_dir_join_panic_log() {
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; RUSTAIN_DATA_DIR override is the documented
+        // test seam consistent with data_dir() / daemon_socket_path tests.
+        unsafe {
+            std::env::set_var("RUSTAIN_DATA_DIR", data.path());
+        }
+        let p = panic_log_path().unwrap();
+        unsafe {
+            std::env::remove_var("RUSTAIN_DATA_DIR");
+        }
+        assert_eq!(p, data.path().join("panic.log"));
     }
 }

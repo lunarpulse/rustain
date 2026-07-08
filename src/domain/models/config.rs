@@ -25,7 +25,7 @@ pub struct ProviderConfig {
     pub kind: Option<String>,
     /// Overrides the adapter's default endpoint URL.
     #[serde(default)]
-    pub base_url: Option<String>,
+    pub base_url: Option<crate::domain::models::redacted_url::RedactedUrl>,
     /// Context window for single-model servers that cannot self-describe.
     #[serde(default)]
     pub context_window: Option<u32>,
@@ -713,6 +713,11 @@ pub struct AppConfig {
     /// daemon mode; the one-shot TUI ignores it. Last field, mirrors `subagents`.
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// Adaptive `/fanout` review-burden threshold. Requests above this value
+    /// surface the spawn gate; requests at-or-below proceed silently. The
+    /// executor's static `FORK_JOIN_SPAWN_CAP` still hard-bounds all requests.
+    #[serde(default = "AppConfig::default_fanout_spawn_gate_threshold")]
+    pub fanout_spawn_gate_threshold: usize,
 }
 
 impl AppConfig {
@@ -733,6 +738,9 @@ impl AppConfig {
     }
     fn default_snapshot_retention_count() -> Option<usize> {
         Some(100)
+    }
+    fn default_fanout_spawn_gate_threshold() -> usize {
+        crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP
     }
 
     /// Curated default pricing catalog (Story 7.5 AC1; Dev Notes §"Default
@@ -892,6 +900,7 @@ impl Default for AppConfig {
             search: SearchConfig::default(),
             plan: PlanConfig::default(),
             subagents: SubagentsConfig::default(),
+            fanout_spawn_gate_threshold: Self::default_fanout_spawn_gate_threshold(),
             daemon: DaemonConfig::default(),
         }
     }
@@ -1325,7 +1334,7 @@ supports_tools = true
 
         let ollama = config.provider.get("ollama").expect("ollama provider");
         assert_eq!(
-            ollama.base_url.as_deref(),
+            ollama.base_url.as_ref().map(|u| u.expose_url()),
             Some("http://192.168.1.50:11434")
         );
         assert_eq!(ollama.kind, None);
@@ -1334,7 +1343,10 @@ supports_tools = true
 
         let local = config.provider.get("local").expect("local provider");
         assert_eq!(local.kind.as_deref(), Some("openai-compatible"));
-        assert_eq!(local.base_url.as_deref(), Some("http://localhost:8080/v1"));
+        assert_eq!(
+            local.base_url.as_ref().map(|u| u.expose_url()),
+            Some("http://localhost:8080/v1")
+        );
         assert_eq!(local.context_window, Some(32_768));
         assert_eq!(local.supports_tools, Some(true));
 

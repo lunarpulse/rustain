@@ -28,7 +28,10 @@ use crate::domain::services::tool_scheduler::ToolScheduler;
 /// 3. On TurnComplete(ToolUse): execute tools, append results, loop to 1
 /// 4. On TurnComplete(EndTurn): done
 /// Maximum number of tool execution loop iterations before forcing termination.
-const MAX_TOOL_ITERATIONS: usize = 25;
+const MAX_TOOL_ITERATIONS: usize = 256;
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub static RUN_TURN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub async fn run_turn(
     provider: Arc<dyn StreamingProvider>,
@@ -50,6 +53,8 @@ pub async fn run_turn(
     parent_trace: Option<crate::domain::models::TraceContext>,
     session_id: String,
 ) {
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Persist the conversation before the first API call so that
     // `create_checkpoint` (called when the API returns tool_use) can load it
     // from storage. Without this, the first tool call in a new conversation
@@ -361,8 +366,15 @@ pub async fn run_turn(
                                     )
                                 })
                                 .collect();
-                            let source = crate::domain::models::ApprovalSource::ForegroundTurn {
-                                conversation_id: conversation_id.clone(),
+                            let source = if crate::adapters::acp::is_acp_session_id(&session_id) {
+                                crate::domain::models::ApprovalSource::AcpSession {
+                                    session_id: session_id.clone(),
+                                    conversation_id: conversation_id.clone(),
+                                }
+                            } else {
+                                crate::domain::models::ApprovalSource::ForegroundTurn {
+                                    conversation_id: conversation_id.clone(),
+                                }
                             };
                             let active_skills = activation_set.as_ref().map(|s| s.active_skills());
                             let requests: Vec<crate::domain::models::ToolCallRequest> =

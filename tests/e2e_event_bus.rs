@@ -33,6 +33,7 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         snapshot_retention: None,
         config_file: None,
         model: None,
+        config_override: Vec::new(),
         profile: None,
         persona: None,
         memory: None,
@@ -44,6 +45,55 @@ fn test_cli() -> rustain::adapters::cli::commands::Cli {
         tool_exposure: None,
         skill_exposure: None,
         sandbox_adapter: None,
+    }
+}
+
+/// No-op Orchestrator for tests that build AppState but don't exercise
+/// fork-join (Story 14.3b added the orchestrator field to AppState).
+struct NoOpOrchestrator;
+
+#[async_trait::async_trait]
+impl rustain::domain::ports::Orchestrator for NoOpOrchestrator {
+    async fn run_fork_join(
+        &self,
+        _request: rustain::domain::ports::ForkJoinRequest,
+    ) -> Result<
+        rustain::domain::models::orchestration::ForkJoinOutcome,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
+    }
+    async fn run_wave(
+        &self,
+        _request: rustain::domain::ports::ForkJoinRequest,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        Arc<dyn rustain::domain::ports::WaveHandle>,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
+    }
+    async fn rerun_spoke(
+        &self,
+        _slot: usize,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<
+        rustain::domain::ports::RerunOutcome,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
     }
 }
 
@@ -112,12 +162,14 @@ fn test_app_state_honors_raw_capacity() {
             rustain::domain::models::AppConfig::default(),
         )),
         agent_core,
+        Some(Arc::new(NoOpOrchestrator) as Arc<dyn rustain::domain::ports::Orchestrator>),
         compose_snapshot,
         Arc::new(ArcSwap::from_pointee(Arc::new(
             rustain::adapters::profile_resolver::noop::NoopProfileResolver,
         )
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
+        None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,
@@ -190,12 +242,14 @@ fn test_app_state_session_cancel_is_root_token() {
             rustain::domain::models::AppConfig::default(),
         )),
         agent_core2,
+        Some(Arc::new(NoOpOrchestrator) as Arc<dyn rustain::domain::ports::Orchestrator>),
         compose_snapshot2,
         Arc::new(ArcSwap::from_pointee(Arc::new(
             rustain::adapters::profile_resolver::noop::NoopProfileResolver,
         )
             as Arc<dyn rustain::domain::ports::ProfileResolver>)),
         test_cli(),
+        None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,
@@ -211,7 +265,7 @@ async fn test_emit_domain_dual_channel_happy_path() {
     let (bus, mut domain_rx) = EventBus::new(16);
     let mut raw_rx = bus.subscribe_raw();
 
-    bus.emit_domain(AppEvent::SystemNotice {
+    let _ = bus.emit_domain(AppEvent::SystemNotice {
         conversation_id: Some("conv-1".to_string()),
         level: NoticeLevel::Info,
         message: "hello".to_string(),
@@ -238,7 +292,7 @@ async fn test_emit_domain_tick_not_broadcast_to_raw() {
     let (bus, mut domain_rx) = EventBus::new(16);
     let mut raw_rx = bus.subscribe_raw();
 
-    bus.emit_domain(AppEvent::Tick);
+    let _ = bus.emit_domain(AppEvent::Tick);
 
     let domain_ev = tokio::time::timeout(Duration::from_millis(50), domain_rx.recv())
         .await
@@ -260,7 +314,7 @@ async fn test_raw_subscriber_lag_receives_lagged_error() {
 
     // Emit events without any subscriber
     for i in 0..10 {
-        bus.emit_domain(AppEvent::SystemNotice {
+        let _ = bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Info,
             message: format!("event-{i}"),
@@ -272,7 +326,7 @@ async fn test_raw_subscriber_lag_receives_lagged_error() {
     let mut raw_rx = bus.subscribe_raw();
 
     // The next event should be receivable
-    bus.emit_domain(AppEvent::SystemNotice {
+    let _ = bus.emit_domain(AppEvent::SystemNotice {
         conversation_id: None,
         level: NoticeLevel::Info,
         message: "latest".to_string(),
@@ -313,7 +367,7 @@ async fn test_raw_subscriber_timeout_pattern() {
     );
 
     // After timeout, subscriber should still be valid and receive next event
-    bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
+    let _ = bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
 
     let raw = tokio::time::timeout(Duration::from_millis(100), raw_rx.recv())
         .await
@@ -333,7 +387,7 @@ async fn test_multiple_raw_subscribers_receive_events() {
     let mut rx_a = bus.subscribe_raw();
     let mut rx_b = bus.subscribe_raw();
 
-    bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Yolo));
+    let _ = bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Yolo));
 
     let raw_a = tokio::time::timeout(Duration::from_millis(100), rx_a.recv())
         .await
@@ -392,6 +446,6 @@ fn test_emit_domain_graceful_when_receiver_dropped() {
     drop(domain_rx);
 
     // emit_domain should not panic when the domain receiver is dropped
-    bus.emit_domain(AppEvent::Tick);
+    let _ = bus.emit_domain(AppEvent::Tick);
     // If we reach here without panic, the graceful discard works
 }

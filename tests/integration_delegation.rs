@@ -55,6 +55,7 @@ fn integration_delegation_decider_suggests_code_reviewer() {
             model: None,
             allowed_tools: None,
             exclude_tools: None,
+            isolated: false,
         },
         AgentDef {
             name: "doc-writer".to_string(),
@@ -63,6 +64,7 @@ fn integration_delegation_decider_suggests_code_reviewer() {
             model: None,
             allowed_tools: None,
             exclude_tools: None,
+            isolated: false,
         },
     ];
 
@@ -88,6 +90,7 @@ fn integration_launch_spec_builder_uses_agent_model() {
         model: Some("gpt-4".to_string()),
         allowed_tools: Some(vec!["bash".to_string(), "read".to_string()]),
         exclude_tools: None,
+        isolated: false,
     };
 
     let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "default-model", 0, None);
@@ -107,6 +110,7 @@ fn integration_launch_spec_builder_fallback_model() {
         model: None,
         allowed_tools: None,
         exclude_tools: None,
+        isolated: false,
     };
 
     let spec = LaunchSpecBuilder::from_plan_task(&task, &agent, "fallback-model", 0, None);

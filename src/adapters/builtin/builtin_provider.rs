@@ -135,9 +135,11 @@ mod tests {
                 names,
                 vec![
                     "Bash",
+                    "Edit",
                     "Read",
                     "Write",
                     "activate_skill",
+                    "apply_patch",
                     "exit_plan_mode",
                     "propose_plan",
                     "remember",
@@ -152,9 +154,11 @@ mod tests {
                 names,
                 vec![
                     "Bash",
+                    "Edit",
                     "Read",
                     "Write",
                     "activate_skill",
+                    "apply_patch",
                     "exit_plan_mode",
                     "propose_plan",
                     "remember",

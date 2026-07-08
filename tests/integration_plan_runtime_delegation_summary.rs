@@ -122,7 +122,7 @@ async fn integration_plan_runtime_delegation_summary() {
     plan.tasks[2].started_at_ms = None;
 
     let stub_runner = Arc::new(StubSubagentRunner::new(
-        rustain::domain::models::SubagentRunStatus::Completed,
+        rustain::domain::models::NodeState::Completed,
         "Delegated result for task 2",
     ));
 
@@ -136,6 +136,7 @@ async fn integration_plan_runtime_delegation_summary() {
         model: None,
         allowed_tools: None,
         exclude_tools: None,
+        isolated: false,
     };
 
     runtime

@@ -94,7 +94,7 @@ impl SessionIndex {
             .collect();
 
         // Sort by updated_at descending (most recent first)
-        entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
 
         let mut id_index = HashMap::with_capacity(entries.len());
         for (idx, entry) in entries.iter().enumerate() {

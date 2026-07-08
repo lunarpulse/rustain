@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use crate::adapters::cli::session::SessionAction;
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Rustain — terminal-native AI coding agent.
 #[derive(Parser, Debug)]
@@ -32,6 +33,10 @@ pub struct Cli {
     /// Path to a workspace-level config file (overrides {workspace}/.rustain/config.toml)
     #[arg(long)]
     pub config_file: Option<PathBuf>,
+
+    /// Override a config value for this invocation only. Dot-paths for nested keys: -c router.threshold_tokens=100000. See available keys: rustain config show --json
+    #[arg(short = 'c', long = "set", global = true, value_name = "KEY=VALUE")]
+    pub config_override: Vec<String>,
     /// Active profile name. Overrides RUSTAIN_PROFILE env var and active_profile config field. Default: coding.
     #[arg(long, short = 'p', global = true)]
     pub profile: Option<String>,
@@ -139,6 +144,13 @@ pub enum Command {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Run rustain as an Agent Client Protocol server over stdio (Story 14.7).
+    Acp {
+        /// Client compatibility profile. R1 profiles are behavior-identical; `auto` inspects initialize.clientInfo for future decoration hooks.
+        #[arg(long, value_enum, default_value_t = AcpClientProfile::Auto)]
+        client: AcpClientProfile,
+    },
+
     /// Run a one-shot query and print the assistant's response to stdout (Story 13.1a).
     /// Non-interactive: no TUI launched. Composable with pipes and scripts.
     Ask {
@@ -170,6 +182,69 @@ pub enum Command {
         /// Output format for --check results
         #[arg(long, value_parser = ["text", "json"], default_value = "text")]
         output_format: String,
+    },
+    /// Generate a shell completion script and print it to stdout (Story 13.3b, FR104).
+    /// Pipe into your shell config, e.g. `rustain completions bash > ~/.local/share/bash-completion/completions/rustain`.
+    /// Completions reflect the subcommands compiled into THIS binary — re-run after upgrading.
+    Completions {
+        /// Target shell. bash/zsh/fish/powershell are supported (FR104); others
+        /// that clap_complete knows (e.g. elvish) also work but are unadvertised.
+        #[arg(value_enum)]
+        shell: clap_complete::aot::Shell,
+        /// Program name to embed in the script (default: "rustain").
+        /// Override for packaging where the installed binary is invoked under a different name.
+        #[arg(long)]
+        bin_name: Option<String>,
+    },
+    /// Manage provider authentication credentials (Story 13.4a, FR123).
+    /// `auth login` validates and stores API keys; env vars remain highest-priority.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+    /// List and manage conversation sessions (Stories 13.5a / 13.5a-1 list,
+    /// 13.5b delete, FR125).
+    /// `session list` shows persisted sessions; `session delete` removes them.
+    /// The delete guard can detect a daemon-held session, but open TUIs cannot
+    /// be detected — close any session windows you care about first.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AcpClientProfile {
+    Auto,
+    Standard,
+    Zed,
+}
+
+/// Auth subcommand actions (Story 13.4a login; 13.4b status; 13.4c adds list).
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthAction {
+    /// Configure API credentials for an AI provider via interactive masked entry
+    /// with pre-storage validation (Story 13.4a, FR123).
+    Login {
+        /// Provider id (e.g. "anthropic", "openai", "ollama").
+        provider: String,
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report configured provider credential status without network validation
+    /// (Story 13.4b, FR123).
+    Status {
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all supported providers with auth methods, configured status,
+    /// and signup URLs (Story 13.4c, FR123).
+    List {
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
     },
 }
 

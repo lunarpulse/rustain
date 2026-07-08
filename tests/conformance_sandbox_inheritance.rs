@@ -37,7 +37,7 @@ use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::sandbox_narrowing::validate_narrowing;
 use rustain::domain::services::tool_scheduler::ToolScheduler;
 use rustain::infrastructure::runtime::event_bus::EventBus;
-use rustain::infrastructure::subagent::{SubagentRegistry, SubagentSpool};
+use rustain::infrastructure::subagent::{NodeTree, SubagentSpool};
 use tokio_util::sync::CancellationToken;
 
 // ── policy constructors ─────────────────────────────────────────────────────
@@ -199,9 +199,17 @@ async fn make_runner_with_parent(
     let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
     let (event_bus, _event_rx) = EventBus::new(1024);
     let event_bus = Arc::new(event_bus);
-    let registry = Arc::new(SubagentRegistry::new());
+    let registry = Arc::new(NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(parent));
     let spool = Arc::new(SubagentSpool::new(tmp.path().join("spool")).await.unwrap());
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     let runner = InProcessSubagentRunner::new(
         provider,
@@ -214,6 +222,8 @@ async fn make_runner_with_parent(
         registry,
         parent_sandbox,
         spool,
+        authority,
+        root_authority,
     );
     (runner, tmp)
 }
@@ -227,6 +237,7 @@ fn spec_with_override(sandbox_override: Option<SandboxPolicy>) -> AgentLaunchSpe
         parent_ctx_tokens: 0,
         sandbox_override,
         parent_trace: None,
+        isolated: false,
     }
 }
 

@@ -82,6 +82,37 @@ pub struct PendingDelegationCard {
     pub suggestion: crate::domain::services::delegation_decider::DelegationSuggestion,
 }
 
+/// Pending `/fanout` spawn gate awaiting inline confirmation.
+#[derive(Debug, Clone)]
+pub struct PendingSpawnGate {
+    pub spec: crate::adapters::tui::fanout_spec::FanOutSpec,
+    pub requested: usize,
+    pub threshold: usize,
+    pub adjusted: Option<usize>,
+}
+
+impl PendingSpawnGate {
+    pub fn effective_n(&self) -> usize {
+        self.adjusted.unwrap_or(self.requested)
+    }
+
+    pub fn adjust_left(&mut self) {
+        self.adjusted = Some(self.effective_n().saturating_sub(1).max(1));
+    }
+
+    pub fn adjust_right(&mut self) {
+        self.adjusted = Some(
+            self.effective_n()
+                .saturating_add(1)
+                .min(crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP),
+        );
+    }
+
+    pub fn cap_at_threshold(&mut self) {
+        self.adjusted = Some(self.threshold.max(1).min(self.requested));
+    }
+}
+
 /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
 /// Reuses the plan-card / delegation-card grammar — a list of proposed durable
 /// facts, each paired with its selection flag (`true` = will be promoted on
@@ -1459,6 +1490,59 @@ impl Default for WhichKeyState {
     }
 }
 
+/// Story 14.3b — live snapshot of an in-flight fork-join wave, tracked so the
+/// render path (14.3a SynthesisBlock/WaveStrip) can paint progress. Updated by
+/// the 14.3 orchestration `AppEvent` handlers; `None` when no wave is active.
+#[derive(Clone, Debug, Default)]
+pub struct WaveViewState {
+    /// The coordinator (root) agent that owns the wave.
+    pub coordinator: crate::domain::models::AgentId,
+    /// Total spokes dispatched in the wave.
+    pub spoke_count: usize,
+    /// Spokes that have reached a terminal state so far.
+    pub completed_count: usize,
+    /// `Some(true)` when the synthesis surfaced an honest-empty floor (AC7).
+    pub honest_empty: Option<bool>,
+    /// `true` once the wave was cancelled (WaveCancelled).
+    pub cancelled: bool,
+}
+
+impl WaveViewState {
+    /// PATCH-2 (14-3b review): the 4 fork-join wave-lifecycle handlers,
+    /// extracted from the `event_loop.rs` match arms into pure, unit-testable
+    /// methods. Each applies a DISTINCT delta (the render path paints the
+    /// WaveStrip from this state). The event loop delegates to these; the
+    /// per-handler unit tests + the 4 mutants (a handler whose body is dropped
+    /// → its delta vanishes → its test goes red) prove non-vacuity (Murat
+    /// vacuity ledger #3 — DF-309 four mutants, one per AppEvent arm).
+
+    /// `AppEvent::ForkJoinStarted`: open the wave view (`None → Some`).
+    pub fn started(coordinator: crate::domain::models::AgentId, spoke_count: usize) -> Self {
+        Self {
+            coordinator,
+            spoke_count,
+            completed_count: 0,
+            honest_empty: None,
+            cancelled: false,
+        }
+    }
+
+    /// `AppEvent::SpokeCompleted`: bump the completed spoke count.
+    pub fn record_spoke_completed(&mut self) {
+        self.completed_count = self.completed_count.saturating_add(1);
+    }
+
+    /// `AppEvent::SynthesisReady`: record the honest-empty flag (AC7).
+    pub fn record_synthesis_ready(&mut self, honest_empty: bool) {
+        self.honest_empty = Some(honest_empty);
+    }
+
+    /// `AppEvent::WaveCancelled`: mark the wave cancelled.
+    pub fn record_wave_cancelled(&mut self) {
+        self.cancelled = true;
+    }
+}
+
 /// TUI-specific state for rendering.
 pub struct TuiState {
     pub active_tab_id: TabId,
@@ -1764,6 +1848,205 @@ pub struct TuiState {
     pub context_warn_level: ContextWarnLevel,
     /// Story 7.4: pending context carryover for fresh tab + summary injection.
     pub pending_context_carryover: Option<String>,
+    /// Story 14.4 — last attributed subagent event delivered through AppEvent::Subagent.
+    /// Minimal R1 surface: retained for handler/conformance observability; richer
+    /// live-status widgets sequence after the bus substrate.
+    pub last_subagent_envelope: Option<crate::domain::models::SubagentEnvelope>,
+    /// Story 14.3b — live snapshot of the current fork-join wave (set by the
+    /// 14.3 `AppEvent` handlers). `None` when no wave is active. The render
+    /// path (14.3a) reads this to paint the WaveStrip/SynthesisBlock.
+    pub wave_state: Option<WaveViewState>,
+    /// Story 14.3a (F1+F2+F5) — the retained wave handle for drill/diverge/
+    /// rerun/cancel. Domain trait object → adapters→domain only (the
+    /// adapters→infra crossing from F5 is gone). NOT a field of WaveViewState
+    /// (which is Clone/Default for the push-counter regime).
+    pub wave_run: Option<std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle>>,
+    /// Story 14.3a — wave-overlay scroll state. The selected row in the
+    /// virtual-scrolled WaveOverlay (j/k to scroll, 0-indexed).
+    pub wave_overlay_selected: usize,
+    /// Story 14.3a — slot currently being rerun (in-progress lamp for AC11).
+    /// Set on SpokeRerunStarted, cleared on Replaced/Reverted terminal.
+    pub rerunning_slot: Option<usize>,
+    /// Story 14.3a — the wave-cancel root token. Held by the event loop so
+    /// Ctrl-C / `/fanout cancel` can fire it (AC8). `None` when no wave is
+    /// live. The token is also threaded into `run_wave` and rerun child tokens.
+    pub wave_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// Story 14.3c — `d` opens the divergent comparison pivot; `s` returns to
+    /// the synthesis surface. Separate from focus so `s` can be an involution
+    /// back to the regular chat-pane wave surface.
+    pub wave_diverge_open: bool,
+    /// Story 14.3c — pending above-threshold fan-out gate rendered in the chat
+    /// pane and controlled by ←/→/c/Enter/Esc before any wave is spawned.
+    pub pending_spawn_gate: Option<PendingSpawnGate>,
+    /// P8 (review): the last-drilled spoke body, rendered inline in the chat
+    /// pane instead of being dumped as a SystemNotice. `None` when no drill is
+    /// open. Cleared on `CloseDivergeView` / `CloseWaveOverlay`.
+    pub wave_drill_body: Option<(usize, String)>,
+    /// D-B (AI-12.3): the identity of the currently-fanning-out `/fanout`
+    /// spawn — the SINGLE SOURCE OF TRUTH for "a wave is in flight". Stamped
+    /// at spawn (`begin_wave_fanout`), cleared at WaveRunReady /
+    /// WaveCancelled / WaveTerminated. Identity-coupled (monotonic per spawn)
+    /// so a stale bool can never survive: `is_wave_in_flight()` is derived,
+    /// never shadowed. Replaces the old free-standing `wave_in_flight: bool`
+    /// whose only defect was that it could desync from the spawn outcome.
+    pub active_wave_id: Option<u64>,
+    /// D-B (AI-12.3): monotonic wave-id source backing `active_wave_id`.
+    /// Stays private — `begin_wave_fanout` is the only writer.
+    wave_id_counter: u64,
+}
+
+impl TuiState {
+    /// D-B (AI-12.3): true while a `/fanout` wave is in flight (spawned but not
+    /// yet delivered or cancelled). DERIVED from `active_wave_id` — never a
+    /// shadow boolean. Gates the Ctrl-C wave-cancel branch so a completed
+    /// wave's stale `wave_cancel` token can't intercept the next Ctrl-C.
+    pub fn is_wave_in_flight(&self) -> bool {
+        self.active_wave_id.is_some()
+    }
+    /// D-B (AI-12.3): stamp a fresh monotonic wave id + arm the lifecycle
+    /// marker. Called at `/fanout` spawn. Returns the id so the spawn closure
+    /// can correlate terminal events (defended against a stale late delivery).
+    pub fn begin_wave_fanout(&mut self) -> u64 {
+        // Derive the next id from the struct's own counter so it is unique per
+        // TuiState (no global). Reads the stored counter, bumps it.
+        let id = self.wave_id_counter.wrapping_add(1);
+        self.wave_id_counter = id;
+        self.active_wave_id = Some(id);
+        id
+    }
+    /// D-B (AI-12.3): retire the in-flight marker. Called by WaveRunReady /
+    /// WaveCancelled / WaveTerminated. `Some(id)` matches the stamp; any stale
+    /// late delivery (id mismatch) is a no-op so a NEWER wave's marker can't be
+    /// clobbered by an OLDER terminal.
+    pub fn retire_wave_fanout(&mut self, id: Option<u64>) {
+        match (self.active_wave_id, id) {
+            (Some(live), Some(evt)) if live == evt => self.active_wave_id = None,
+            (Some(_), None) => self.active_wave_id = None, // uncorrelated retire (Ctrl-C self-heal)
+            _ => {} // stale or already-retired — leave the live marker alone
+        }
+    }
+
+    // ─── 14.3c AI-12.3 remediation (DF-CR-14-3c-6): wave-lifecycle handlers ──
+    //
+    // The wave-cancel + rerun `event_loop.rs` `select!` arms, extracted into
+    // sync, I/O-free methods (the 14.3b PATCH-2 pattern). The production arms
+    // CALL these; the AC8/AC11 keystones DRIVE these — neither re-implements the
+    // state transition inline. A handler whose body is mutated (wrong field /
+    // wrong slot / dropped delta) makes its keystone go red.
+
+    /// Ctrl-C / `/fanout cancel` ABORT TRIGGER (AC8). If a wave is in flight,
+    /// fire the wave-cancel root token (cancel-all → every spoke child via the
+    /// CancellationToken tree), clear the rerun lamp, and self-heal the in-flight
+    /// marker. Returns `true` when a cancel was fired (the caller consumes the
+    /// Ctrl-C instead of quitting). Gated on `is_wave_in_flight()` so a completed
+    /// wave's stale token can't swallow the next Ctrl-C.
+    pub fn request_wave_cancel(&mut self) -> bool {
+        if !self.is_wave_in_flight() {
+            return false;
+        }
+        if let Some(cancel) = self.wave_cancel.as_ref() {
+            cancel.cancel();
+        }
+        self.rerunning_slot = None;
+        self.retire_wave_fanout(None);
+        self.needs_redraw = true;
+        true
+    }
+    /// `AppEvent::Subagent` (Story 14.4): retain the attributed envelope and
+    /// request a redraw. The event loop delegates here so the wiring guard can
+    /// detect an orphaned AppEvent variant.
+    pub fn handle_subagent_envelope(&mut self, envelope: crate::domain::models::SubagentEnvelope) {
+        self.last_subagent_envelope = Some(envelope);
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::WaveCancelled` (AC8): mark the wave view cancelled + retire the
+    /// in-flight marker.
+    pub fn handle_wave_cancelled(&mut self) {
+        if let Some(wave) = self.wave_state.as_mut() {
+            wave.record_wave_cancelled();
+        }
+        self.retire_wave_fanout(None);
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::WaveRunReady` (AC11): retain (swap in) the new wave handle. If
+    /// a rerun was in flight, clear the lamp and return `Some(slot)` so the
+    /// caller emits the "Spoke {slot} updated" notice.
+    ///
+    /// **Does NOT cancel the swapped-out handle.** In the production CoW rerun
+    /// path the prior and new handle SHARE the same `wave_cancel` token
+    /// (`orchestrator/mod.rs:754` — `wave_cancel: prev.wave_cancel.clone()`), so
+    /// a naive `old.cancel()` would also cancel the freshly-swapped-in handle.
+    /// The no-leak property holds structurally instead: WaveRunReady only fires
+    /// after the wave is terminal, and the in-flight guard blocks a concurrent
+    /// wave. The `ac11_rerun_swap_leaves_new_handle_live` keystone guards this.
+    pub fn handle_wave_run_ready(
+        &mut self,
+        handle: std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle>,
+    ) -> Option<usize> {
+        let rerun_slot = self.rerunning_slot.take();
+        self.retire_wave_fanout(None);
+        self.wave_run = Some(handle);
+        self.needs_redraw = true;
+        rerun_slot
+    }
+
+    /// `AppEvent::SpokeRerunStarted` (AC11): set the per-slot in-progress lamp.
+    /// MUST NOT touch `completed_count` (counter-inert — LF4-b).
+    pub fn handle_spoke_rerun_started(&mut self, slot: usize) {
+        self.rerunning_slot = Some(slot);
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::SpokeRerunReverted` (AC11): clear the lamp IFF it matches the
+    /// reverted slot (a stale revert for another slot must not clear a live lamp).
+    pub fn handle_spoke_rerun_reverted(&mut self, slot: usize) {
+        if self.rerunning_slot == Some(slot) {
+            self.rerunning_slot = None;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// `AppEvent::WaveTerminated` (D-B): correlated retire — a stale late delivery
+    /// (`id` != the live marker) is a no-op so an older wave's terminal can't
+    /// retire a NEWER live marker.
+    ///
+    /// F2 (AI-12.3 post-review party-mode): a TERMINATED wave is dead, so when
+    /// this terminal matches the live wave we retire the full view — not just
+    /// the lifecycle marker. Otherwise `wave_state` lingers after failure and
+    /// the two guards diverge: the `/fanout` launch-guard (`wave_state.is_some()`,
+    /// event_loop.rs) blocks the next fan-out while the cancel-guard
+    /// (`is_wave_in_flight()` == `active_wave_id`) is already false — so Ctrl-C
+    /// no longer cancels and falls through to `should_quit`, silently quitting
+    /// the app. `WaveTerminated` is failure-only (success emits `WaveRunReady`),
+    /// so clearing the view here never touches the success/rerun display; the
+    /// id-match guard preserves the stale-late-delivery no-op.
+    pub fn handle_wave_terminated(&mut self, id: u64) {
+        let was_live = matches!(self.active_wave_id, Some(live) if live == id);
+        self.retire_wave_fanout(Some(id));
+        if was_live {
+            self.wave_state = None;
+            self.wave_cancel = None;
+            self.rerunning_slot = None;
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Story 14.3c: dismiss the fan-out wave display — drop the retained handle
+    /// and clear all wave view state so the chat pane returns to normal. Driven
+    /// by the Esc-unwind affordance once a wave is completed/cancelled. Idempotent.
+    pub fn dismiss_wave(&mut self) {
+        self.wave_run = None;
+        self.wave_cancel = None;
+        self.wave_state = None;
+        self.rerunning_slot = None;
+        self.wave_drill_body = None;
+        self.wave_diverge_open = false;
+        self.wave_overlay_selected = 0;
+        self.active_wave_id = None;
+        self.needs_redraw = true;
+    }
 }
 
 impl TuiState {
@@ -1883,6 +2166,17 @@ impl TuiState {
             compacting: false,
             context_warn_level: ContextWarnLevel::None,
             pending_context_carryover: None,
+            last_subagent_envelope: None,
+            wave_state: None,
+            wave_run: None,
+            wave_overlay_selected: 0,
+            rerunning_slot: None,
+            wave_cancel: None,
+            wave_diverge_open: false,
+            pending_spawn_gate: None,
+            wave_drill_body: None,
+            active_wave_id: None,
+            wave_id_counter: 0,
         }
     }
 
@@ -1902,7 +2196,7 @@ impl TuiState {
     pub fn selected_agent(&self) -> Option<&crate::domain::models::subagent_view::AgentRowView> {
         self.agent_panel_state
             .cached_entries
-            .get(self.agent_panel_state.selected_index)
+            .get(self.sidebar_selected)
     }
 
     pub fn refresh_agent_suggestions(&mut self) {
@@ -2651,5 +2945,215 @@ mod tests {
             action,
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents)
         ));
+    }
+
+    // ─── PATCH-2 (14-3b review): wave-lifecycle handler keystones ──────────
+    // Each test drives ONE extracted handler directly and asserts its DISTINCT
+    // delta. A mutant that drops a handler's body → its delta vanishes → its
+    // test goes red (non-vacuous — the post-`started` defaults are
+    // completed_count=0 / honest_empty=None / cancelled=false, so the
+    // non-default values prove the handler fired; the `_ => needs_redraw`
+    // catch-all cannot produce them).
+
+    #[test]
+    fn patch2_fork_join_started_opens_wave_view() {
+        let coord = crate::domain::models::AgentId::root();
+        let wave = WaveViewState::started(coord.clone(), 3);
+        assert_eq!(wave.coordinator, coord);
+        assert_eq!(wave.spoke_count, 3);
+        assert_eq!(wave.completed_count, 0);
+        assert_eq!(wave.honest_empty, None);
+        assert!(!wave.cancelled);
+    }
+
+    #[test]
+    fn patch2_spoke_completed_bumps_completed_count() {
+        let mut wave = WaveViewState::started(crate::domain::models::AgentId::root(), 2);
+        assert_eq!(wave.completed_count, 0);
+        wave.record_spoke_completed();
+        assert_eq!(wave.completed_count, 1);
+        wave.record_spoke_completed();
+        assert_eq!(wave.completed_count, 2);
+    }
+
+    #[test]
+    fn patch2_synthesis_ready_records_honest_empty() {
+        let mut wave = WaveViewState::started(crate::domain::models::AgentId::root(), 1);
+        assert_eq!(wave.honest_empty, None);
+        wave.record_synthesis_ready(true);
+        assert_eq!(wave.honest_empty, Some(true));
+        wave.record_synthesis_ready(false);
+        assert_eq!(wave.honest_empty, Some(false));
+    }
+
+    #[test]
+    fn patch2_wave_cancelled_marks_cancelled() {
+        let mut wave = WaveViewState::started(crate::domain::models::AgentId::root(), 1);
+        assert!(!wave.cancelled);
+        wave.record_wave_cancelled();
+        assert!(wave.cancelled);
+    }
+
+    /// AC1 turn-loop smoke: apply the 4 handlers in a full-wave sequence
+    /// (Started → 2× SpokeCompleted → SynthesisReady → WaveCancelled) and
+    /// assert each handler's DISTINCT delta survives into the final state.
+    /// The non-default final values (completed_count=2, honest_empty=Some,
+    /// cancelled=true) are ONLY producible by their own handler — the
+    /// `_ => needs_redraw` catch-all leaves them at the `started` defaults.
+    #[test]
+    fn patch2_turn_loop_smoke_four_handlers_distinct_deltas() {
+        let coord = crate::domain::models::AgentId::root();
+        let mut wave = WaveViewState::started(coord.clone(), 2);
+        assert_eq!(wave.spoke_count, 2);
+        assert_eq!(wave.completed_count, 0);
+
+        // Two spokes complete.
+        wave.record_spoke_completed();
+        wave.record_spoke_completed();
+        assert_eq!(wave.completed_count, 2);
+
+        // Synthesis lands (non-empty floor).
+        wave.record_synthesis_ready(false);
+        assert_eq!(wave.honest_empty, Some(false));
+
+        // Wave cancelled mid/after.
+        wave.record_wave_cancelled();
+        assert!(wave.cancelled);
+
+        // DISTINCTNESS: the final state carries every handler's signature.
+        assert_eq!(wave.coordinator, coord);
+        assert_eq!(wave.spoke_count, 2);
+        assert_eq!(wave.completed_count, 2);
+        assert_eq!(wave.honest_empty, Some(false));
+        assert!(wave.cancelled);
+    }
+
+    // ─── D-B (AI-12.3) poisoned mutants — wave-lifecycle registry ─────────
+
+    /// `is_wave_in_flight()` is DERIVED from `active_wave_id` (no shadow bool).
+    /// `begin_wave_fanout` arms the marker; the accessor flips true. Kills a
+    /// mutant that leaves `active_wave_id` unset (accessor always false).
+    #[test]
+    fn db_begin_fanout_arms_in_flight_marker() {
+        let mut s = TuiState::new(80, 24);
+        assert!(!s.is_wave_in_flight(), "no wave in flight at start");
+        let id = s.begin_wave_fanout();
+        assert!(id > 0, "wave id is monotonic from a nonzero seed");
+        assert!(
+            s.is_wave_in_flight(),
+            "marker armed after begin_wave_fanout"
+        );
+    }
+
+    /// `retire_wave_fanout(Some(id))` with the MATCHING id clears the marker
+    /// (the normal WaveTerminated/WaveRunReady path). Kills a mutant where the
+    /// retire is a no-op (marker stuck → next Ctrl-C swallowed).
+    #[test]
+    fn db_retire_matching_id_clears_marker() {
+        let mut s = TuiState::new(80, 24);
+        let id = s.begin_wave_fanout();
+        assert!(s.is_wave_in_flight());
+        s.retire_wave_fanout(Some(id));
+        assert!(
+            !s.is_wave_in_flight(),
+            "matching-id retire MUST clear the marker (else a stale Ctrl-C swallow)"
+        );
+    }
+
+    /// POISONED — the identity-coupling core: a STALE terminal (older wave's id)
+    /// MUST NOT retire a NEWER live marker. Kills the "always clear" mutant
+    /// (`active_wave_id = None` unconditionally) — under that mutant, a
+    /// superseded wave's late terminal would retire the live wave's marker.
+    #[test]
+    fn db_stale_id_does_not_clobber_live_marker() {
+        let mut s = TuiState::new(80, 24);
+        let old_id = s.begin_wave_fanout(); // wave A
+        let new_id = s.begin_wave_fanout(); // wave B (supersedes A)
+        assert_ne!(old_id, new_id, "ids are monotonic + distinct");
+        assert!(s.is_wave_in_flight());
+        // A's STALE late terminal arrives after B is live.
+        s.retire_wave_fanout(Some(old_id));
+        assert!(
+            s.is_wave_in_flight(),
+            "a stale (older-wave) terminal MUST NOT retire the live marker"
+        );
+        assert_eq!(
+            s.active_wave_id,
+            Some(new_id),
+            "the live marker is still wave B"
+        );
+        // B's OWN terminal clears it.
+        s.retire_wave_fanout(Some(new_id));
+        assert!(!s.is_wave_in_flight());
+    }
+
+    // ─── F2 (AI-12.3 post-review party-mode): terminated-wave view retire ────
+
+    /// A TERMINATED wave must retire the full VIEW, not just the lifecycle
+    /// marker — otherwise `wave_state` lingers after failure and the two guards
+    /// diverge: the `/fanout` launch-guard (`wave_state.is_some()`) blocks the
+    /// next fan-out while `is_wave_in_flight()` is already false, and Ctrl-C no
+    /// longer cancels (it falls through to `should_quit` → silent app quit).
+    /// RED on the pre-fix `handle_wave_terminated` (which cleared only the
+    /// marker): `wave_state` stays `Some`, so the launch-guard still blocks.
+    #[test]
+    fn f2_terminated_wave_retires_full_view() {
+        let mut s = TuiState::new(80, 24);
+        let id = s.begin_wave_fanout();
+        // ForkJoinStarted arms the view (the launch-guard reads this field).
+        s.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        s.wave_cancel = Some(tokio_util::sync::CancellationToken::new());
+        assert!(s.wave_state.is_some());
+        assert!(s.is_wave_in_flight());
+
+        // The wave fails → WaveTerminated.
+        s.handle_wave_terminated(id);
+
+        // Lifecycle marker retired AND the view cleared → guards agree, no wedge.
+        assert!(!s.is_wave_in_flight(), "marker retired");
+        assert!(
+            s.wave_state.is_none(),
+            "F2: a terminated wave MUST clear wave_state (else the launch-guard \
+             blocks the next /fanout while Ctrl-C no longer cancels → app quit)"
+        );
+        assert!(
+            s.wave_cancel.is_none(),
+            "F2: the dead wave's cancel token must be dropped"
+        );
+        assert!(
+            !s.request_wave_cancel(),
+            "F2: after termination request_wave_cancel must be a no-op (Ctrl-C \
+             must not be swallowed, and the stale view must not bait should_quit)"
+        );
+        // A new fan-out is unblocked (the launch-guard's precondition is gone).
+        let id2 = s.begin_wave_fanout();
+        assert_ne!(id2, id);
+        assert!(s.is_wave_in_flight());
+    }
+
+    /// POISONED — the id-correlation guard: a STALE terminal (older wave) must
+    /// NOT wipe a NEWER live wave's view. Kills a mutant that clears `wave_state`
+    /// unconditionally (a superseded wave's late terminal would destroy the live
+    /// wave's display).
+    #[test]
+    fn f2_stale_terminated_id_does_not_wipe_live_view() {
+        let mut s = TuiState::new(80, 24);
+        let old_id = s.begin_wave_fanout(); // wave A
+        let new_id = s.begin_wave_fanout(); // wave B (supersedes A)
+        s.wave_state = Some(WaveViewState::started(
+            crate::domain::models::AgentId::root(),
+            3,
+        ));
+        // A's STALE late terminal arrives while B is live.
+        s.handle_wave_terminated(old_id);
+        assert!(
+            s.wave_state.is_some(),
+            "a stale terminal MUST NOT wipe the live wave's view"
+        );
+        assert!(s.is_wave_in_flight(), "the live marker is still wave B");
+        assert_eq!(s.active_wave_id, Some(new_id));
     }
 }

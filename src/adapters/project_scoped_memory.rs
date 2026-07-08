@@ -68,7 +68,7 @@ impl ProjectScopedMemory {
         let mut seen: HashSet<String> = HashSet::new();
         let mut out: Vec<MemoryEntry> =
             Vec::with_capacity(limit.min(long_term.len() + daily.len()));
-        for entry in long_term.into_iter().chain(daily.into_iter()) {
+        for entry in long_term.into_iter().chain(daily) {
             if out.len() >= limit {
                 break;
             }

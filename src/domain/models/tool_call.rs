@@ -52,6 +52,10 @@ pub enum ApprovalSource {
         parent_tool_call_id: String,
         subagent_type: String,
     },
+    AcpSession {
+        session_id: String,
+        conversation_id: String,
+    },
     BackgroundAgent {
         conversation_id: String,
         task_id: String,
@@ -67,11 +71,70 @@ impl ApprovalSource {
             ApprovalSource::ForegroundSubagent {
                 conversation_id, ..
             } => conversation_id,
+            ApprovalSource::AcpSession {
+                conversation_id, ..
+            } => conversation_id,
             ApprovalSource::BackgroundAgent {
                 conversation_id, ..
             } => conversation_id,
         }
     }
+
+    /// Return an [`AgentId`] representing the acting agent's scope.
+    ///
+    /// Used by [`InvocationFingerprint`] to bind an approval to the specific
+    /// node that requested it, so an approval for node A cannot replay on node B.
+    ///
+    /// Multi-component scopes are joined via [`length_prefixed_scope`] rather
+    /// than a bare `format!("{}/{}", a, b)` — an unprefixed join lets a `/`
+    /// inside `a` or `b` produce the same joined string from two DIFFERENT
+    /// component pairs (e.g. `("a/b", "c")` and `("a", "b/c")` both yield
+    /// `"a/b/c"`), collapsing two distinct nodes onto one scope and defeating
+    /// the "approval for node A cannot replay on node B" guarantee (DD1).
+    pub fn scope_agent_id(&self) -> crate::domain::models::agent_id::AgentId {
+        match self {
+            ApprovalSource::ForegroundTurn { conversation_id } => {
+                crate::domain::models::agent_id::AgentId(conversation_id.clone())
+            }
+            ApprovalSource::ForegroundSubagent {
+                conversation_id,
+                parent_tool_call_id,
+                ..
+            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
+                conversation_id,
+                parent_tool_call_id,
+            ])),
+            ApprovalSource::AcpSession {
+                conversation_id,
+                session_id,
+            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
+                conversation_id,
+                session_id,
+            ])),
+            ApprovalSource::BackgroundAgent {
+                conversation_id,
+                task_id,
+                ..
+            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
+                conversation_id,
+                task_id,
+            ])),
+        }
+    }
+}
+
+/// Join scope components unambiguously: each component is prefixed with its
+/// own decimal byte length before a `:` separator, so no possible byte
+/// sequence produces the same joined string from two different component
+/// sets (the length itself disambiguates any embedded delimiter).
+fn length_prefixed_scope(components: &[&str]) -> String {
+    let mut out = String::new();
+    for c in components {
+        out.push_str(&c.len().to_string());
+        out.push(':');
+        out.push_str(c);
+    }
+    out
 }
 
 /// 7-variant discriminated-union FSM for a single tool call lifecycle.
@@ -187,6 +250,30 @@ mod tests {
             tool_name: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x"}),
         }
+    }
+
+    #[test]
+    fn scope_agent_id_no_slash_collision() {
+        // Before the length-prefixed fix, ("a/b", "c") and ("a", "b/c") both
+        // joined to "a/b/c" via bare format!("{}/{}"), collapsing two
+        // DIFFERENT nodes onto one scope. The length-prefixed join
+        // disambiguates them.
+        let a = ApprovalSource::ForegroundSubagent {
+            conversation_id: "a/b".into(),
+            parent_tool_call_id: "c".into(),
+            subagent_type: "explore".into(),
+        };
+        let b = ApprovalSource::ForegroundSubagent {
+            conversation_id: "a".into(),
+            parent_tool_call_id: "b/c".into(),
+            subagent_type: "explore".into(),
+        };
+        assert_ne!(
+            a.scope_agent_id(),
+            b.scope_agent_id(),
+            "distinct (conversation_id, parent_tool_call_id) pairs sharing a slash \
+             must not collide onto the same scope"
+        );
     }
 
     #[test]

@@ -1,11 +1,15 @@
 pub mod ask;
+pub mod auth;
 #[cfg(feature = "meta-search")]
 pub mod catalog;
 pub mod commands;
+pub mod completions;
 pub mod config_cmd;
 pub mod doctor;
 pub mod init;
 pub mod migrate;
 pub mod profile;
+pub mod session;
 #[cfg(feature = "openai")]
 pub mod update_catalog;
+pub mod util;

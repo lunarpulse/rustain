@@ -10,12 +10,13 @@ use crate::adapters::noop::{NoOpChannel, NoOpContext, NoOpMemory, NoOpScheduler,
 use crate::adapters::persona_adapter::PersonaAdapter;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
+use crate::adapters::workspace_registry::FileWorkspaceRegistry;
 use crate::domain::errors::AdapterCompositionError;
 use crate::domain::models::profile::{AdapterRef, PortDimension, ProfileSelection};
 use crate::domain::models::project_context::ProjectContext;
 use crate::domain::ports::{
     ChannelPort, ContextPort, MemoryPort, PersonaPort, SandboxManager, SchedulerPort, SecurityPort,
-    SessionPort, StoragePort, StreamingProvider, ToolSetPort,
+    SessionPort, StoragePort, StreamingProvider, ToolSetPort, WorkspaceRegistrarPort,
 };
 use crate::infrastructure::runtime::agent_core::AgentCore;
 
@@ -83,6 +84,18 @@ pub struct ComposeContext {
     pub meta_search_engine: Option<Arc<dyn crate::domain::ports::search::MetaSearchEngine>>,
 }
 
+fn build_workspace_registrar() -> Result<Arc<dyn WorkspaceRegistrarPort>, AdapterCompositionError> {
+    FileWorkspaceRegistry::new()
+        .map(|registry| Arc::new(registry) as Arc<dyn WorkspaceRegistrarPort>)
+        .map_err(
+            |source| AdapterCompositionError::AdapterConstructionFailed {
+                port: PortDimension::Session,
+                name: "workspace-registry".to_string(),
+                source: Box::new(source),
+            },
+        )
+}
+
 impl AgentCore {
     /// Compose an AgentCore from a profile selection. FATAL on any per-port error.
     pub fn compose(
@@ -117,6 +130,8 @@ impl AgentCore {
         let tool_exposure = build_tool_exposure(selection, ctx)?;
         let skill_exposure = build_skill_exposure(selection, ctx)?;
         let sandbox = build_sandbox(selection, ctx)?;
+        let isolation: Arc<dyn crate::domain::ports::IsolationProvider> =
+            Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
 
         let elapsed = started.elapsed();
         tracing::info!(
@@ -132,6 +147,13 @@ impl AgentCore {
             channels: Self::wrap(channels),
             scheduler: Self::wrap(scheduler),
             context: Self::wrap(context),
+            agent_message_bus: AgentCore::wrap(Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    Default::default(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            )
+                as Arc<dyn crate::domain::ports::AgentMessageBus>),
             // Story 11.0a / 11.6 — Message-tier assembler, Option-wrapped like
             // the exposure ports (no BuiltAdapter variant — Option ports are
             // bound here, not via store_for_port). The concrete strategy is
@@ -141,6 +163,7 @@ impl AgentCore {
             tool_exposure: Self::wrap_optional(tool_exposure),
             skill_exposure: Self::wrap_optional(skill_exposure),
             sandbox: Self::wrap(sandbox),
+            isolation: Self::wrap(isolation),
             #[cfg(feature = "meta-search")]
             merged_index: arc_swap::ArcSwap::from_pointee(
                 None as Option<Arc<crate::infrastructure::search::MergedIndex>>,
@@ -479,6 +502,8 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_slot),
                 Arc::clone(&ctx.sandbox_policy),
             );
+            adapter.hide_activate_skill_tool();
+            adapter.set_skill_cache(Arc::clone(&ctx.skill_cache));
             // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
             // can emit PlanProposed / PlanApprovalRequested. Without this the
             // composed adapter's event_tx stays None and plan approval cards
@@ -506,6 +531,7 @@ pub fn build_tools(
                 Arc::clone(&ctx.sandbox_policy),
             );
             adapter.set_activator(Arc::clone(&ctx.skill_activator));
+            adapter.set_skill_cache(Arc::clone(&ctx.skill_cache));
             // Wire the event bus so plan tools (propose_plan / exit_plan_mode)
             // can emit PlanProposed / PlanApprovalRequested. Without this the
             // composed adapter's event_tx stays None and plan approval cards
@@ -527,13 +553,6 @@ pub fn build_tools(
         }
         #[cfg(feature = "mcp")]
         "composite" => {
-            if ctx.mcp_servers.is_empty() {
-                return Err(AdapterCompositionError::MissingComposeContext {
-                    port: PortDimension::Tools,
-                    name: name.to_string(),
-                    missing_field: "mcp_servers (empty Vec) — composite requires at least one server; profile should use 'builtin-full' instead".into(),
-                });
-            }
             let builtin = build_tools("builtin-full", None, ctx)?;
             let mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>> = ctx
                 .mcp_servers
@@ -1213,10 +1232,10 @@ pub fn build_daemon_core(
     // ── Eager parts (cheap, connection-free) ────────────────────────────────
     let memory = build_daemon_memory(workspace, memory_adapter)?;
     let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
-    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        sessions_dir.clone(),
-        workspace.to_path_buf(),
-    ));
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(sessions_dir.clone(), workspace.to_path_buf())
+            .with_workspace_registrar(build_workspace_registrar()?),
+    );
     // Headless security policy — permanently Normal (AC6).
     // `HeadlessSecurityAdapter` ignores `set_mode` so Yolo is structurally
     // unreachable, not just administratively avoided.
@@ -1267,10 +1286,13 @@ pub fn build_daemon_core(
                     approval.clone(),
                     raw_capacity,
                 );
-                let fs_storage = Arc::new(FileSystemStorage::with_workspace_root(
-                    crate::infrastructure::paths::sessions_dir(&workspace),
-                    workspace.clone(),
-                ));
+                let fs_storage = Arc::new(
+                    FileSystemStorage::with_workspace_root(
+                        crate::infrastructure::paths::sessions_dir(&workspace),
+                        workspace.clone(),
+                    )
+                    .with_workspace_registrar(build_workspace_registrar()?),
+                );
                 Ok(Arc::new(DaemonTurnRuntime {
                     provider,
                     app_config: config.clone(),
@@ -1326,6 +1348,56 @@ pub struct CliCore {
     pub ledger: Arc<dyn crate::domain::ports::UsageLedgerPort>,
 }
 
+pub struct AcpCore {
+    pub provider: Arc<dyn StreamingProvider>,
+    pub security: Arc<dyn SecurityPort>,
+    pub tools: Arc<dyn ToolSetPort>,
+    pub tool_scheduler: Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
+    pub approval: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
+    pub storage: Arc<dyn StoragePort>,
+    pub event_tx: tokio::sync::mpsc::UnboundedSender<crate::domain::events::AppEvent>,
+    pub event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::domain::events::AppEvent>,
+    pub ledger: Arc<dyn crate::domain::ports::UsageLedgerPort>,
+    pub registry: Arc<crate::adapters::provider::ProviderRegistry>,
+    pub router: Arc<crate::adapters::provider::ProviderRouter>,
+    pub skill_activator: Arc<SkillActivator>,
+}
+
+impl From<CliCore> for AcpCore {
+    fn from(core: CliCore) -> Self {
+        let CliCore {
+            provider,
+            security,
+            tools,
+            tool_scheduler,
+            approval,
+            storage,
+            event_tx,
+            event_rx,
+            ledger,
+        } = core;
+        let provider_id = provider.provider_id();
+        let registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
+        registry.register_arc(provider.clone());
+        let router = Arc::new(crate::adapters::provider::ProviderRouter::new(provider_id));
+        router.register(provider.clone());
+        Self {
+            provider,
+            security,
+            tools,
+            tool_scheduler,
+            approval,
+            storage,
+            event_tx,
+            event_rx,
+            ledger,
+            registry,
+            router,
+            skill_activator: Arc::new(SkillActivator::new()),
+        }
+    }
+}
+
 pub fn build_cli_core(
     app_config: &crate::domain::models::AppConfig,
     workspace: &std::path::Path,
@@ -1352,10 +1424,10 @@ pub fn build_cli_core(
     };
 
     let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
-    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        sessions_dir,
-        workspace.to_path_buf(),
-    ));
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(sessions_dir, workspace.to_path_buf())
+            .with_workspace_registrar(build_workspace_registrar()?),
+    );
 
     let ctx = ComposeContext {
         workspace_path: workspace.to_path_buf(),
@@ -1417,6 +1489,167 @@ pub fn build_cli_core(
         event_tx,
         event_rx,
         ledger,
+    })
+}
+
+pub fn build_acp_core(
+    app_config: &crate::domain::models::AppConfig,
+    workspace: &std::path::Path,
+    yolo: bool,
+    mcp_servers: &[crate::domain::models::McpServerSpec],
+) -> Result<AcpCore, AdapterCompositionError> {
+    use crate::adapters::filesystem::FileSystemStorage;
+    use crate::adapters::noop::{NoOpApprovalPersistence, NoOpUsageLedger};
+    use crate::adapters::sandbox::NoOpSandbox;
+    use crate::adapters::security_adapter::SecurityAdapter;
+
+    let raw_capacity = app_config.runtime.event_bus.raw_capacity;
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let provider_layer = crate::infrastructure::startup::init_provider_layer(app_config);
+    let router = provider_layer.router;
+    let registry = provider_layer.registry;
+    let provider: Arc<dyn StreamingProvider> = router.clone() as Arc<dyn StreamingProvider>;
+
+    let security: Arc<dyn SecurityPort> = {
+        let adapter = SecurityAdapter::new(workspace.to_path_buf());
+        if yolo {
+            adapter.set_mode(crate::domain::models::PermissionMode::Yolo);
+        }
+        Arc::new(adapter)
+    };
+
+    let sessions_dir = crate::infrastructure::paths::sessions_dir(workspace);
+    let storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(sessions_dir, workspace.to_path_buf())
+            .with_workspace_registrar(build_workspace_registrar()?),
+    );
+
+    let skill_registry = crate::adapters::skill_registry::SkillRegistry::discover(
+        workspace,
+        dirs::home_dir().as_deref(),
+        &app_config.skills.disabled,
+    );
+    let skill_activator = Arc::new(SkillActivator::with_registry(Arc::new(
+        tokio::sync::RwLock::new(skill_registry),
+    )));
+
+    let ctx = ComposeContext {
+        workspace_path: workspace.to_path_buf(),
+        project_context: ProjectContext::empty(),
+        storage: storage.clone(),
+        skill_activator: skill_activator.clone(),
+        mcp_servers: mcp_servers.to_vec(),
+        include_builtin_tools: true,
+        domain_tx: Some(event_tx.clone()),
+        channel_turn_tx: None,
+        tool_exposure: "static-full".into(),
+        assembler: "passthrough".into(),
+        skill_exposure: "l1-metadata".into(),
+        skill_cache: Arc::new(crate::infrastructure::skill_cache::SkillCache::new(
+            crate::infrastructure::skill_cache::SkillCacheConfig::default(),
+        )),
+        sandbox_adapter: "noop".into(),
+        sandbox_startup_policy: crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        sandbox_slot: Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
+        )),
+        sandbox_policy: Arc::new(tokio::sync::RwLock::new(
+            crate::domain::models::sandbox::SandboxPolicy::Permissive,
+        )),
+        memory_slot: Arc::new(arc_swap::ArcSwap::from_pointee(Arc::new(
+            crate::adapters::noop::NoOpMemory,
+        )
+            as Arc<dyn MemoryPort>)),
+        memory_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+        #[cfg(feature = "meta-search")]
+        search_config: crate::domain::models::SearchConfig::default(),
+        #[cfg(feature = "meta-search")]
+        meta_search_engine: None,
+    };
+
+    let tools: Arc<dyn ToolSetPort> = {
+        #[cfg(feature = "mcp")]
+        {
+            if ctx.mcp_servers.is_empty() {
+                build_tools("builtin-full", None, &ctx)?
+            } else {
+                let builtin = build_tools("builtin-full", None, &ctx)?;
+                let mcp_clients: Vec<Arc<crate::adapters::mcp::client::McpClientAdapter>> = ctx
+                    .mcp_servers
+                    .iter()
+                    .map(|spec| {
+                        let client = crate::adapters::mcp::client::McpClientAdapter::new(
+                            spec.clone(),
+                            ctx.domain_tx.clone(),
+                        );
+                        let arc = Arc::new(client);
+                        arc.set_self_weak(Arc::downgrade(&arc));
+                        arc
+                    })
+                    .collect();
+                let adapter =
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter::new(
+                        builtin,
+                        mcp_clients,
+                        ctx.mcp_servers.clone(),
+                        ctx.include_builtin_tools,
+                        ctx.domain_tx.clone(),
+                        Some(ctx.skill_activator.clone()),
+                        None,
+                    );
+                adapter.start_mcp_connections();
+                Arc::new(adapter) as Arc<dyn ToolSetPort>
+            }
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            if !ctx.mcp_servers.is_empty() {
+                // Fail LOUD rather than silently dropping. Accepting the
+                // session while ignoring every forwarded server would let the
+                // client (Zed) believe its MCP tools are available, then fail
+                // every tool call at prompt time — a capability lie by
+                // omission. Surface an error on session/new instead. (Only
+                // reachable on a non-default build: `mcp` is on by default.)
+                return Err(AdapterCompositionError::UnknownAdapter {
+                    port: PortDimension::Tools,
+                    name: format!(
+                        "rustain was built without the `mcp` cargo feature, but \
+                         session/new forwarded {} MCP stdio server(s); rebuild with \
+                         `--features mcp` (on by default) to forward MCP servers",
+                        ctx.mcp_servers.len()
+                    ),
+                    available: vec!["builtin-full (no mcp feature compiled)".into()],
+                });
+            }
+            build_tools("builtin-full", None, &ctx)?
+        }
+    };
+    let approval = crate::domain::services::approval_runtime::ApprovalRuntime::new(
+        raw_capacity,
+        Arc::new(NoOpApprovalPersistence),
+    );
+    let tool_scheduler = crate::domain::services::tool_scheduler::ToolScheduler::new(
+        security.clone(),
+        tools.clone(),
+        approval.clone(),
+        raw_capacity,
+    );
+    let ledger: Arc<dyn crate::domain::ports::UsageLedgerPort> = Arc::new(NoOpUsageLedger);
+
+    Ok(AcpCore {
+        provider,
+        security,
+        tools,
+        tool_scheduler,
+        approval,
+        storage,
+        event_tx,
+        event_rx,
+        ledger,
+        registry,
+        router,
+        skill_activator,
     })
 }
 
@@ -1755,15 +1988,16 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mcp")]
-    fn test_build_tools_composite_empty_fails() {
+    fn test_build_tools_composite_empty_succeeds() {
+        // ADR-10-5 S1: composite must compose with zero MCP servers — MCP is an
+        // additive capability provider, not constitutive of the adapter. The default
+        // `coding` profile relies on this (it selects composite with no MCP config).
         let ctx = test_compose_ctx();
         let result = build_tools("composite", None, &ctx);
-        match result {
-            Err(AdapterCompositionError::MissingComposeContext { port, .. }) => {
-                assert_eq!(port, PortDimension::Tools);
-            }
-            _ => panic!("expected MissingComposeContext for composite with empty mcp_servers"),
-        }
+        assert!(
+            result.is_ok(),
+            "composite must compose with zero MCP servers (ADR-10-5 S1)"
+        );
     }
 
     #[test]

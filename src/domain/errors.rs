@@ -54,6 +54,9 @@ pub enum DomainError {
     #[error(transparent)]
     ApprovalPersistence(#[from] ApprovalPersistenceError),
 
+    #[error(transparent)]
+    Auth(#[from] AuthError),
+
     #[error("Startup error: {0}")]
     Startup(String),
 
@@ -464,4 +467,23 @@ pub enum ApprovalPersistenceError {
 
     #[error("TOML serialization error: {0}")]
     TomlSer(#[from] toml::ser::Error),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Error)]
+pub enum AuthError {
+    #[error("I/O error: {0}")]
+    Io(String),
+    #[error("Parse error: {0}")]
+    Parse(String),
+    #[error("Lock contention: {0}")]
+    Locked(String),
+    #[error("Unknown provider: {0}")]
+    UnknownProvider(String),
+    #[error("Validation failed: {0}")]
+    ValidationFailed(String),
+    #[error("Offline: {0}")]
+    Offline(String),
+    #[error("Provider '{0}' does not require an API key")]
+    KeylessProvider(String),
 }

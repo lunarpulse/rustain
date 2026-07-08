@@ -1,6 +1,7 @@
 pub mod adapter_catalog;
 pub mod adapter_overlay;
 pub mod approval_runtime;
+pub mod authority_ledger;
 pub mod claude_code_jsonl;
 pub mod command_interpolation;
 pub mod command_normalize;
@@ -16,6 +17,7 @@ pub mod import;
 pub mod message_builder;
 pub mod meta_search;
 pub mod normalize;
+pub mod pricing_resolver;
 pub use meta_search::compute_terse;
 pub mod delegation_decider;
 pub mod model_router;

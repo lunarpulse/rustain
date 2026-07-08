@@ -111,9 +111,9 @@ fn test_anthropic_adapter_provider_id_and_models() {
     );
 
     let auth_mode = if let Some(token) = auth_token {
-        rustain::adapters::anthropic::AuthMode::BearerToken(token)
+        rustain::adapters::anthropic::AuthMode::BearerToken(token.into())
     } else if let Some(key) = api_key {
-        rustain::adapters::anthropic::AuthMode::ApiKey(key)
+        rustain::adapters::anthropic::AuthMode::ApiKey(key.into())
     } else {
         unreachable!()
     };

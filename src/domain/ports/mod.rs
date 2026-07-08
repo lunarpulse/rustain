@@ -1,7 +1,13 @@
 // Port traits — used by adapters (noop.rs, future real adapters) and services.
 // Suppress unused warnings: traits are consumed by adapter impls, not by domain code.
 #[allow(unused_imports)]
+mod agent_message_bus;
+#[allow(unused_imports)]
 mod approval_persistence;
+#[allow(unused_imports)]
+mod auth_store;
+#[allow(unused_imports)]
+mod authority_provider;
 #[allow(unused_imports)]
 mod capability_provider;
 #[allow(unused_imports)]
@@ -17,7 +23,11 @@ mod context_assembler;
 #[allow(unused_imports)]
 mod event_emitter;
 #[allow(unused_imports)]
+mod isolation_provider;
+#[allow(unused_imports)]
 mod memory;
+#[allow(unused_imports)]
+mod node_orchestrator;
 #[allow(unused_imports)]
 mod persona;
 #[allow(unused_imports)]
@@ -37,6 +47,8 @@ mod security;
 #[cfg(feature = "self-update")]
 pub mod self_update;
 #[allow(unused_imports)]
+mod session_holder;
+#[allow(unused_imports)]
 mod session_port;
 #[allow(unused_imports)]
 mod skill_exposure;
@@ -50,10 +62,19 @@ mod tool_exposure;
 mod toolset;
 #[allow(unused_imports)]
 mod usage_ledger;
+#[allow(unused_imports)]
+pub mod wave_handle;
+#[allow(unused_imports)]
+mod workspace_registry;
 #[cfg(feature = "self-update")]
 pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 
+pub use agent_message_bus::{
+    AgentMessageBus, DeliveryError, DeliveryPolicy, RelationshipDeliveryPolicy,
+};
 pub use approval_persistence::ApprovalPersistencePort;
+pub use auth_store::AuthStorePort;
+pub use authority_provider::{AuthorityError, AuthorityProvider};
 pub use capability_provider::CapabilityProvider;
 pub use catalog_observer::CatalogObserver;
 pub use catalog_observer::{ObserverError, SubscriptionHandle, SubscriptionId};
@@ -63,7 +84,9 @@ pub use config_store::ConfigStorePort;
 pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
+pub use isolation_provider::IsolationProvider;
 pub use memory::MemoryPort;
+pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};
@@ -72,8 +95,10 @@ pub use recall_provider::RecallProviderPort;
 pub use sandbox::SandboxManager;
 pub use scheduler::SchedulerPort;
 pub use security::SecurityPort;
+pub use session_holder::{HeldSession, HolderState, SessionHolderPort};
 pub use session_port::SessionPort;
 pub use subagent_runner::SubagentRunner;
+pub use wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};
 pub use skill_exposure::SkillExposurePort;
@@ -81,3 +106,6 @@ pub use storage::StoragePort;
 pub use tool_exposure::ToolExposurePort;
 pub use toolset::ToolSetPort;
 pub use usage_ledger::UsageLedgerPort;
+pub use workspace_registry::{
+    WorkspaceEntry, WorkspaceRegistrarPort, WorkspaceRegistryError, WorkspaceRegistryReaderPort,
+};

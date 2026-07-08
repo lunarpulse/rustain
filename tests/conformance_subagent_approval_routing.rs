@@ -115,13 +115,21 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         1024,
     );
     let (event_bus, _rx) = rustain::infrastructure::runtime::event_bus::EventBus::new(1024);
-    let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
+    let registry = Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let parent_sandbox = Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive));
     let spool = Arc::new(
         rustain::infrastructure::subagent::SubagentSpool::new(tmp.path().join("spool"))
             .await
             .unwrap(),
     );
+    let root_authority =
+        rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
+    let authority_ledger = Arc::new(
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+    );
+    let authority =
+        Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))
+            as Arc<dyn rustain::domain::ports::AuthorityProvider>;
 
     let runner = rustain::adapters::subagent::InProcessSubagentRunner::new(
         provider,
@@ -134,6 +142,8 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         registry,
         parent_sandbox,
         spool,
+        authority,
+        root_authority,
     );
 
     let spec = AgentLaunchSpec {
@@ -144,6 +154,7 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
+        isolated: false,
     };
 
     let cancel = CancellationToken::new();

@@ -37,7 +37,7 @@ pub fn risk_for_builtin(tool_name: &str) -> ToolRisk {
     match tool_name {
         "Read" | "Glob" | "Grep" | "activate_skill" | "exit_plan_mode" | "propose_plan"
         | "remember" | "remember_fact" => ToolRisk::Safe,
-        "Write" | "Edit" => ToolRisk::Standard,
+        "Write" | "Edit" | "edit" | "apply_patch" => ToolRisk::Standard,
         "Bash" | "WebFetch" => ToolRisk::Elevated,
         _ => ToolRisk::Elevated,
     }

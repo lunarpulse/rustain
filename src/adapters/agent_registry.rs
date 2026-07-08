@@ -254,6 +254,11 @@ fn parse_agent_file(path: &Path) -> ScanOutcome {
     let allowed_tools = frontmatter::extract_list_field(fm, "allowed-tools");
     let exclude_tools = frontmatter::extract_list_field(fm, "exclude-tools");
     let model = frontmatter::extract_field(fm, "model");
+    // Story 14.5: opt an agent into scratch-dir isolation via frontmatter
+    // (`isolated: true`). Absent / non-"true" → false (the default).
+    let isolated = frontmatter::extract_field(fm, "isolated")
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     let canonical_file = match std::fs::canonicalize(path) {
         Ok(c) => c,
@@ -274,6 +279,7 @@ fn parse_agent_file(path: &Path) -> ScanOutcome {
         allowed_tools,
         exclude_tools,
         model,
+        isolated,
     })
 }
 

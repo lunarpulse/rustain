@@ -21,6 +21,10 @@ path = "tests/common/fake_mcp_server.rs"
 test = true
 bench = false
 required-features = ["mcp"]
+[[bin]]
+name = "startup-panic-harness"
+path = "tests/common/startup_panic_harness.rs"
+test = false
 
 [[test]]
 name = "scheduler_overhead"
@@ -38,16 +42,17 @@ path = "perf-tests/subagent_spawn.rs"
 # them explicitly so every feature combo builds.
 tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "signal", "net", "io-util", "io-std"] }
 tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat"] }
 futures = "0.3"
+agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_resume", "unstable_session_close"] }
 globset = "0.4"
 
 # ── TUI framework ────────────────────────────────────────────────
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
-# ── CLI parsing ──────────────────────────────────────────────────
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "=4.6.5"
 
 # ── Serialization ────────────────────────────────────────────────
 serde = { version = "1.0", features = ["derive"] }
@@ -95,6 +100,8 @@ bm25 = { version = "=2.3.2", optional = true }
 hex = "0.4"
 gray_matter = "0.2"
 url = "2"
+zeroize = { version = "1", features = ["alloc"] }
+rpassword = "7"
 
 # ── Self-update (Story 13.3a, feature-gated `self-update`) ──────
 # Port-based design: SelfUpdatePort (network) + BinaryReplacerPort (filesystem).
@@ -148,6 +155,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tokio = { version = "1.50", features = ["test-util", "rt", "macros", "time", "sync"] }  # deterministic time (pause/advance) for abandonment timing tests
 tempfile = "3.0"
 pretty_assertions = "1"
 mockito = "1"
@@ -163,19 +171,23 @@ predicates = "3"
 tracing-test = "0.2"
 rand = "0.9"  # deterministic seeded shuffle for stratified eval partition (Story 9-7c)
 proptest = "1"  # NN2 property test for synonym collisions (Story 9-7c)
+trybuild = "1"  # Story 14.3 AC5: Window<Handle> inlining-mutant compile_fail + pass-twin pair
 minisign = "0.7"  # Story 13.3a: test-signing fixtures with ephemeral keys (NOT shipped in binary)
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 procfs = "0.17"
 
 [features]
-default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search"]
+default = ["anthropic", "openai", "ollama", "clipboard", "mcp", "meta-search", "models-dev"]
 anthropic = ["dep:reqwest"]
 clipboard = ["dep:arboard", "dep:png"]
 # openai feature transitively enables anthropic because OpenAiAdapter reuses
 # SseLineBuffer from crate::adapters::anthropic::sse (Story 7.1b).
 openai = ["anthropic", "dep:reqwest"]
 ollama = ["dep:reqwest"]
+# models.dev live pricing catalog fetch. reqwest is the HTTP client; the
+# resolver + disk-cache logic compile unconditionally (pure serde/fs).
+models-dev = ["dep:reqwest"]
 mcp = ["dep:rmcp"]
 skills-validation = []
 meta-search = ["dep:bm25"]

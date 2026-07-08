@@ -41,7 +41,7 @@ pub fn cost_for_entry(
     entry: &UsageLedgerEntry,
     pricing: &HashMap<String, PricingConfig>,
 ) -> Option<f64> {
-    let p = pricing.get(&entry.model)?;
+    let p = crate::domain::services::pricing_resolver::lookup_pricing(pricing, &entry.model)?;
     let u = &entry.usage;
 
     let input_rate = p.input_per_million / 1_000_000.0;
@@ -63,6 +63,23 @@ pub fn cost_for_entry(
         + u.reasoning_tokens.unwrap_or(0) as f64 * reasoning_rate;
 
     Some(cost)
+}
+
+/// Cost for a simple `(model, tokens_in, tokens_out)` pair.
+///
+/// Used by lightweight read-only projections such as the Agent Inspector,
+/// which have real token counts and a resolved model id but no cache/reasoning
+/// breakdown. Returns `None` when pricing for `model` is unavailable.
+pub fn cost_for_model_tokens(
+    model: &str,
+    tokens_in: u32,
+    tokens_out: u32,
+    pricing: &HashMap<String, PricingConfig>,
+) -> Option<f64> {
+    let p = crate::domain::services::pricing_resolver::lookup_pricing(pricing, model)?;
+    let input_rate = p.input_per_million / 1_000_000.0;
+    let output_rate = p.output_per_million / 1_000_000.0;
+    Some(tokens_in as f64 * input_rate + tokens_out as f64 * output_rate)
 }
 
 /// Aggregate `entries` into per-model totals + cumulative cost, collecting
@@ -124,7 +141,9 @@ pub fn cache_savings(
 ) -> f64 {
     let mut saved: f64 = 0.0;
     for entry in entries {
-        let Some(p) = pricing.get(&entry.model) else {
+        let Some(p) =
+            crate::domain::services::pricing_resolver::lookup_pricing(pricing, &entry.model)
+        else {
             continue;
         };
         let cache_read = entry.usage.cache_read_tokens.unwrap_or(0) as f64;

@@ -12,7 +12,7 @@ adapter = "project-scoped"
 adapter = "workspace"
 
 [tools]
-adapter = "builtin-full"
+adapter = "composite"
 
 [overrides]
 default_plan_mode = false

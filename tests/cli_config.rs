@@ -231,9 +231,9 @@ fn p0_2b_resolve_editor_increments_env_var_trimmed_counter() {
 
 /// P0-3a: Valid config → exit 0, no provider constructed.
 #[tokio::test]
+#[serial]
 async fn p0_3a_config_validate_valid_no_provider_constructed() {
     use rustain::infrastructure::provider_factory::PROVIDER_CTOR_COUNT;
-
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, "model = \"test\"\n").unwrap();
@@ -678,7 +678,7 @@ base_url = "https://clean.example.com/v1"
     let has_injected_url = config.provider.values().any(|p| {
         p.base_url
             .as_ref()
-            .is_some_and(|u| u.contains("injected.example.com"))
+            .is_some_and(|u| u.expose_url().contains("injected.example.com"))
     });
     assert!(
         has_injected_url,
@@ -829,7 +829,11 @@ async fn config_show_strips_mcp_server_url_userinfo() {
         transport: McpTransport::Http,
         command: None,
         args: vec![],
-        url: Some("https://admin:MCP-SECRET@mcp.example.com/api".to_string()),
+        url: Some(
+            "https://admin:MCP-SECRET@mcp.example.com/api"
+                .to_string()
+                .into(),
+        ),
         env: Default::default(),
         persistent: false,
         source: McpServerSource::Workspace,

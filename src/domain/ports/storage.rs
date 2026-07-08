@@ -16,6 +16,14 @@ pub trait StoragePort: Send + Sync {
     async fn save_conversation(&self, conv: &Conversation) -> Result<(), StorageError>;
     async fn load_conversation(&self, id: &str) -> Result<Option<Conversation>, StorageError>;
     async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, StorageError>;
+    /// List conversation summaries without performing any migration or repair writes.
+    ///
+    /// Default behavior reuses `list_conversations()`. Adapters with legacy
+    /// backfill-on-read behavior should override this to provide a strictly
+    /// read-only listing path for CLI flows that promise no writes.
+    async fn list_conversations_read_only(&self) -> Result<Vec<ConversationSummary>, StorageError> {
+        self.list_conversations().await
+    }
 
     /// Delete a conversation and its metadata.
     /// Default implementation returns NotSupported error.

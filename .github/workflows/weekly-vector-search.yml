@@ -1,6 +1,6 @@
-name: nightly-vector-search
+name: weekly-vector-search
 
-# Nightly-gated network tests for the `vector-search` feature. These NEVER run
+# Weekly-gated network tests for the `vector-search` feature. These NEVER run
 # in PR/push CI because they hit the network (live embedding provider + ONNX
 # model download) and the live probe needs a secret. The offline feature suite
 # (mockito locks, removal-integrity regression) runs per-PR in ci.yml.
@@ -11,8 +11,8 @@ name: nightly-vector-search
 
 on:
   schedule:
-    # 03:17 UTC daily (off the top-of-hour rush).
-    - cron: "17 3 * * *"
+    # 03:17 UTC Mondays (off the top-of-hour rush).
+    - cron: "17 3 * * 1"
   workflow_dispatch:
     inputs:
       gate_model:
@@ -27,9 +27,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Don't pile up overlapping nightly runs.
+# Don't pile up overlapping weekly runs.
 concurrency:
-  group: nightly-vector-search
+  group: weekly-vector-search
   cancel-in-progress: false
 
 jobs:
@@ -92,6 +92,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable # matches ci.yml (AI-12.1)
       - uses: Swatinem/rust-cache@v2
 
+      # Cache the app-level fastembed model cache. Swatinem/rust-cache covers
+      # Cargo artifacts, not ~/.config/rustain/models; without this, every fresh
+      # hosted runner re-downloads the ~130MB ONNX model from Hugging Face.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.config/rustain/models
+          key: rustain-bge-small-en-v1.5-fastembed-5.15.0
+
+      - name: Preflight BGE-small ONNX asset
+        run: curl -fL --head https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx
+
       # Clippy ADVISORY for the vector-search lane (Epic 12 retro AI-12.1). Non-blocking
       # (continue-on-error) — the runner's stable clippy drifts ahead of local toolchains;
       # surface warnings without failing nightly. Lives here (not per-PR ci.yml) because
@@ -104,4 +115,4 @@ jobs:
       # embed/search round-trip and the 1k-index (<5s) / 10k-query (<200ms)
       # NFR bounds. #[ignore] keeps these out of the default + PR feature run.
       - name: Real-model embed + NFR timings
-        run: cargo test --features vector-search real_model -- --ignored --nocapture
+        run: cargo test --features vector-search real_model -- --ignored --nocapture --test-threads=1

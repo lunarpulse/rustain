@@ -160,6 +160,18 @@ pub async fn run_update_catalog(
         eprintln!("Warning: some providers failed — the catalog is partial.");
     }
 
+    // models.dev live pricing refresh (best-effort) — keeps the pricing cache
+    // fresh so the usage & cost dashboard shows real USD. Failures don't fail
+    // the catalog command.
+    #[cfg(feature = "models-dev")]
+    match crate::adapters::models_dev::refresh().await {
+        Ok(cache) => eprintln!(
+            "Refreshed models.dev pricing ({} models cached).",
+            cache.pricing.len()
+        ),
+        Err(e) => eprintln!("Warning: models.dev pricing refresh failed: {e}"),
+    }
+
     Ok(())
 }
 

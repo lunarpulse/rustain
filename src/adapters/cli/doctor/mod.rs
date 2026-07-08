@@ -126,6 +126,19 @@ fn build_check_list(
     checks
 }
 
+/// Representative adapter wiring printed by `rustain doctor --adapters`.
+/// Held as a const so the doctor unit test can pin it — the `tools` row must
+/// track the default `coding` profile's resolved adapter (ADR-10-5 S2 → composite).
+pub(crate) const ADAPTERS_TABLE: [(&str, &str); 7] = [
+    ("persona", "coding (project-aware)"),
+    ("memory", "noop"),
+    ("session", "noop"),
+    ("tools", "composite"),
+    ("channels", "noop"),
+    ("scheduler", "noop"),
+    ("context", "default (no injection)"),
+];
+
 /// Entry point for `rustain doctor`. Runs all checks and displays results.
 pub async fn run_doctor(
     terminal_detail: bool,
@@ -138,15 +151,7 @@ pub async fn run_doctor(
     mcp_servers: Vec<crate::domain::models::McpServerSpec>,
 ) -> Result<()> {
     if adapters {
-        let ports = [
-            ("persona", "coding (project-aware)"),
-            ("memory", "noop"),
-            ("session", "noop"),
-            ("tools", "builtin-full"),
-            ("channels", "noop"),
-            ("scheduler", "noop"),
-            ("context", "default (no injection)"),
-        ];
+        let ports = ADAPTERS_TABLE;
         let start = std::time::Instant::now();
         let mut pass_count = 0usize;
         let mut skip_count = 0usize;
@@ -289,6 +294,26 @@ pub fn display_results(results: &[CheckResult]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ── ADR-10-5 caveat-2a: doctor adapters table must reflect the default profile ──
+
+    /// 10.7.1-INT-DOCTOR · P2 · `rustain doctor --adapters` prints a representative
+    /// adapter wiring. After ADR-10-5 S2 the default `coding` profile selects the
+    /// `composite` tools adapter; doctor must not still advertise `builtin-full`.
+    #[test]
+    fn test_doctor_adapters_table_reports_composite_tools_default() {
+        let tools = ADAPTERS_TABLE
+            .iter()
+            .find(|(port, _)| *port == "tools")
+            .expect("adapters table has a 'tools' row");
+        assert_ne!(
+            tools.1, "builtin-full",
+            "doctor must not advertise the pre-ADR-10-5 default (builtin-full)"
+        );
+        assert_eq!(
+            tools.1, "composite",
+            "doctor adapters table must match the default coding profile's tools adapter"
+        );
+    }
 
     // ── CheckResult formatting tests (Task 8.2, 8.3) ──
 

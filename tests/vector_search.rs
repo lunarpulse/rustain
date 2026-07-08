@@ -286,34 +286,44 @@ mod compiled {
         use std::sync::Arc;
         use std::time::Instant;
 
-        let tmp = tempfile::tempdir().unwrap();
-        let inner: Arc<dyn rustain::domain::ports::MemoryPort> = Arc::new(
-            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()),
-        );
+        // Keep the synthetic entries on the current local day. DailyLogMemory
+        // only reloads the current + previous day; starting at `Local::now()` can
+        // cross midnight and make the future-day tail invisible to a fresh reader.
+        let today_noon = Local::now().date_naive().and_hms_opt(12, 0, 0).unwrap();
+        let base_ts = today_noon
+            .and_local_timezone(Local)
+            .single()
+            .unwrap_or_else(Local::now);
 
-        let mut base_ts = chrono::Local::now();
-        for i in 0..10_000 {
-            inner
+        // NFR57: indexing 1,000 entries must complete in <5s.
+        let tmp_1k = tempfile::tempdir().unwrap();
+        let inner_1k_seed: Arc<dyn rustain::domain::ports::MemoryPort> = Arc::new(
+            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp_1k.path()),
+        );
+        let mut ts = base_ts;
+        for i in 0..1_000 {
+            inner_1k_seed
                 .store(MemoryEntry {
-                    timestamp: base_ts,
+                    timestamp: ts,
                     summary: format!("entry {i}: topic is about {i}"),
                     context: None,
                 })
                 .await
                 .unwrap();
-            base_ts += chrono::Duration::seconds(1);
+            ts += chrono::Duration::seconds(1);
         }
-
-        let index_path = tmp.path().join(".rustain").join("memory").join("index.bin");
-
-        // NFR57: indexing 1,000 entries must complete in <5s.
+        let index_1k_path = tmp_1k
+            .path()
+            .join(".rustain")
+            .join("memory")
+            .join("index.bin");
         let inner_1k: Arc<dyn rustain::domain::ports::MemoryPort> = Arc::new(
-            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()),
+            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp_1k.path()),
         );
         let mem_1k = VectorSearchMemory::new(
             inner_1k,
             Arc::new(LocalEmbeddingProvider::new(default_cache_dir(), None)),
-            index_path.clone(),
+            index_1k_path,
         );
         let started = Instant::now();
         mem_1k.initialize().await.expect("1k index build");
@@ -331,13 +341,35 @@ mod compiled {
         );
 
         // NFR56: query against 10k indexed entries must complete in <200ms.
+        let tmp_10k = tempfile::tempdir().unwrap();
+        let inner_10k_seed: Arc<dyn rustain::domain::ports::MemoryPort> = Arc::new(
+            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp_10k.path()),
+        );
+        let mut ts = base_ts;
+        for i in 0..10_000 {
+            inner_10k_seed
+                .store(MemoryEntry {
+                    timestamp: ts,
+                    summary: format!("entry {i}: topic is about {i}"),
+                    context: None,
+                })
+                .await
+                .unwrap();
+            ts += chrono::Duration::seconds(1);
+        }
+        let index_10k_path = tmp_10k
+            .path()
+            .join(".rustain")
+            .join("memory")
+            .join("index.bin");
+
         let inner_10k: Arc<dyn rustain::domain::ports::MemoryPort> = Arc::new(
-            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp.path()),
+            rustain::adapters::daily_log_memory::DailyLogMemory::new(tmp_10k.path()),
         );
         let mem_10k = VectorSearchMemory::new(
             inner_10k,
             Arc::new(LocalEmbeddingProvider::new(default_cache_dir(), None)),
-            index_path,
+            index_10k_path,
         );
         mem_10k.initialize().await.expect("10k index build");
         let count_10k = mem_10k.indexed_entry_count().await;

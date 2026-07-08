@@ -1074,6 +1074,36 @@ impl HealthCheck for SystemInfoCheck {
     }
 }
 
+/// Resolve the active profile's Tools adapter name, or `None` if resolution fails.
+/// Doctor must never fail over an informational hint, so every error → `None`.
+fn resolve_active_tools_adapter(active: &str, config_dir: &std::path::Path) -> Option<String> {
+    use crate::adapters::profile_resolver::toml_resolver::TomlProfileResolver;
+    use crate::domain::models::PortDimension;
+    use crate::domain::ports::ProfileResolver;
+    TomlProfileResolver::new(active, config_dir.to_path_buf())
+        .ok()?
+        .resolve_active()?
+        .selection
+        .dimensions
+        .get(&PortDimension::Tools)
+        .map(|r| r.adapter.clone())
+}
+
+/// ADR-10-5 §Consequences action item — classify whether the active profile's
+/// Tools adapter hosts the subagent/`task` capability, as a fragment appended to
+/// the `Profiles` doctor line. Only `composite` builds a `CompositeToolsetAdapter`,
+/// the sole adapter that registers `SubagentProvider` (ADR-10-2). Surfacing this
+/// closes the silent-missing-feature trap for `base`/custom-profile users.
+fn tools_reachability_label(tools_adapter: Option<&str>) -> String {
+    match tools_adapter {
+        Some("composite") => " — tools: composite (subagents/task available)".to_string(),
+        Some(other) if !other.is_empty() => format!(
+            " — tools: {other} (subagents/task UNAVAILABLE; set [tools] adapter = \"composite\" to enable)"
+        ),
+        _ => String::new(),
+    }
+}
+
 /// Check profiles directory for .toml profile files.
 pub struct ProfilesCheck;
 
@@ -1170,7 +1200,14 @@ impl HealthCheck for ProfilesCheck {
                 name: self.name().to_string(),
                 category: "profiles".to_string(),
                 status: CheckStatus::Pass,
-                message: format!("{} profile(s), active: {}", count, active),
+                message: format!(
+                    "{} profile(s), active: {}{}",
+                    count,
+                    active,
+                    tools_reachability_label(
+                        resolve_active_tools_adapter(&active, &config_dir).as_deref()
+                    )
+                ),
                 fix: None,
                 latency: None,
                 tier: CheckTier::ExitAffecting,
@@ -1566,5 +1603,53 @@ impl HealthCheck for UpdateHealthCheck {
             latency: None,
             tier: CheckTier::Info,
         }
+    }
+}
+
+#[cfg(test)]
+mod reachability_label_tests {
+    use super::tools_reachability_label;
+
+    #[test]
+    fn composite_adapter_reports_subagents_available() {
+        let label = tools_reachability_label(Some("composite"));
+        assert!(
+            label.contains("available"),
+            "composite must be available, got: {label}"
+        );
+        assert!(
+            !label.contains("UNAVAILABLE"),
+            "composite must not be UNAVAILABLE, got: {label}"
+        );
+    }
+
+    #[test]
+    fn builtin_only_adapter_reports_subagents_unavailable() {
+        // `base` (and `personal-assistant`, which inherits it) resolve to
+        // builtin-only — the silent-missing-feature trap this check closes.
+        let label = tools_reachability_label(Some("builtin-only"));
+        assert!(
+            label.contains("UNAVAILABLE"),
+            "builtin-only must be UNAVAILABLE, got: {label}"
+        );
+        assert!(
+            label.contains("composite"),
+            "hint must name the fix (composite), got: {label}"
+        );
+    }
+
+    #[test]
+    fn builtin_full_adapter_reports_subagents_unavailable() {
+        let label = tools_reachability_label(Some("builtin-full"));
+        assert!(
+            label.contains("UNAVAILABLE"),
+            "builtin-full must be UNAVAILABLE, got: {label}"
+        );
+    }
+
+    #[test]
+    fn resolution_failure_is_silent() {
+        // Doctor must never break over an informational hint.
+        assert_eq!(tools_reachability_label(None), "");
     }
 }

@@ -517,8 +517,10 @@ async fn test_builtin_provider_discover_returns_expected_tools() {
     builtin_names.sort();
     let mut expected = vec![
         "Bash",
+        "Edit",
         "Read",
         "Write",
+        "apply_patch",
         "activate_skill",
         "exit_plan_mode",
         "propose_plan",
@@ -765,12 +767,12 @@ async fn test_registry_holds_all_three_protocols() {
     assert_eq!(mcp_count, 2, "fake MCP server has echo + add tools");
     assert_eq!(
         builtin_count,
-        9 + 2 * cfg!(feature = "meta-search") as usize,
-        "ToolSetAdapter builtin tools (incl. skill_view from 9.6, remember from 11.1, remember_fact from 11.2, search_skills + search_tools from 9.7d)"
+        11 + 2 * cfg!(feature = "meta-search") as usize,
+        "ToolSetAdapter builtin tools (incl. Edit/apply_patch from 14.11, skill_view from 9.6, remember from 11.1, remember_fact from 11.2, search_skills + search_tools from 9.7d)"
     );
     assert_eq!(skill_count, 3, "SkillRegistry has 3 programmatic skills");
-    // 9 builtin + 2 MCP + 3 skill (+ search_skills + search_tools with meta-search).
-    assert_eq!(snap.len(), 14 + 2 * cfg!(feature = "meta-search") as usize);
+    // 11 builtin + 2 MCP + 3 skill (+ search_skills + search_tools with meta-search).
+    assert_eq!(snap.len(), 16 + 2 * cfg!(feature = "meta-search") as usize);
 }
 
 #[cfg(feature = "mcp")]
@@ -987,14 +989,14 @@ async fn test_catalog_delta_added_removed_correctness() {
         None,
     );
 
-    // Initial populate: version=1, registry has 9 builtin (incl. skill_view from 9.6, remember from 11.1, remember_fact from 11.2) + 2 MCP = 11 (13 with meta-search)
+    // Initial populate: version=1, registry has 11 builtin (incl. Edit/apply_patch from 14.11, skill_view from 9.6, remember from 11.1, remember_fact from 11.2) + 2 MCP = 13 (15 with meta-search)
     composite.populate_registry().await.unwrap();
     assert_eq!(composite.catalog_version(), 1);
     let snap1 = composite.capability_registry().snapshot();
     assert_eq!(
         snap1.len(),
-        11 + 2 * cfg!(feature = "meta-search") as usize,
-        "9 builtin + 2 MCP tools (+ search_skills + search_tools with meta-search)"
+        13 + 2 * cfg!(feature = "meta-search") as usize,
+        "11 builtin + 2 MCP tools (+ search_skills + search_tools with meta-search)"
     );
 
     // Emit another delta with no changes: version=2, added=0 removed=0
@@ -1003,7 +1005,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap2 = composite.capability_registry().snapshot();
     assert_eq!(
         snap2.len(),
-        11 + 2 * cfg!(feature = "meta-search") as usize,
+        13 + 2 * cfg!(feature = "meta-search") as usize,
         "no tools added or removed — registry unchanged"
     );
 
@@ -1032,8 +1034,8 @@ async fn test_catalog_delta_added_removed_correctness() {
     let snap3 = composite.capability_registry().snapshot();
     assert_eq!(
         snap3.len(),
-        12 + 2 * cfg!(feature = "meta-search") as usize,
-        "added multiply tool (9 builtin + 2 MCP + 1 extra, + search_skills + search_tools with meta-search)"
+        14 + 2 * cfg!(feature = "meta-search") as usize,
+        "added multiply tool (11 builtin + 2 MCP + 1 extra, + search_skills + search_tools with meta-search)"
     );
 
     // Emit delta: version=3, should detect 1 added
@@ -1050,7 +1052,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     );
     assert_eq!(
         snap4.len(),
-        12 + 2 * cfg!(feature = "meta-search") as usize,
+        14 + 2 * cfg!(feature = "meta-search") as usize,
         "registry unchanged after delta emit"
     );
 }
@@ -1076,7 +1078,7 @@ async fn test_subagent_provider_discover_round_trip() {
         }
     }
     let runner = Arc::new(StubRunner) as Arc<dyn rustain::domain::ports::SubagentRunner>;
-    let registry = Arc::new(rustain::infrastructure::subagent::SubagentRegistry::new());
+    let registry = Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let agent_reg = AgentRegistry::from_agents(vec![
         AgentDef {
             name: "code-reviewer".into(),
@@ -1085,6 +1087,7 @@ async fn test_subagent_provider_discover_round_trip() {
             allowed_tools: Some(vec!["Read".into(), "Grep".into()]),
             exclude_tools: None,
             model: None,
+            isolated: false,
         },
         AgentDef {
             name: "test-writer".into(),
@@ -1093,6 +1096,7 @@ async fn test_subagent_provider_discover_round_trip() {
             allowed_tools: Some(vec!["Read".into(), "Write".into()]),
             exclude_tools: None,
             model: None,
+            isolated: false,
         },
     ]);
     let agent_registry = Arc::new(tokio::sync::RwLock::new(agent_reg));

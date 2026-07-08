@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-use crate::domain::models::{SubagentError, SubagentRunStatus};
+use crate::domain::models::{NodeState, SubagentError};
 
 const RING_CAP: usize = 8192;
 
@@ -45,7 +45,7 @@ pub struct SubagentSpool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpoolMeta {
-    pub status: SubagentRunStatus,
+    pub status: NodeState,
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub started_at: i64, // epoch millis

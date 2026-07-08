@@ -140,7 +140,7 @@ pub(crate) fn apply_density_transition(
             }
         }
     }
-    event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
+    let _ = event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
         conversation_id: None,
         level: crate::domain::models::NoticeLevel::Info,
         message: format!("Density: {}", mode.display_label()),

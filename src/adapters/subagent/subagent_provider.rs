@@ -3,10 +3,10 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::models::{
-    AgentLaunchSpec, Capability, CapabilityError, CapabilityId, ProviderCapabilities, ToolResult,
-    TraceContext, TransportKind,
+    AgentId, AgentLaunchSpec, Capability, CapabilityError, CapabilityFlag, CapabilityId,
+    CapabilityToken, ProviderCapabilities, ToolResult, TraceContext, TransportKind,
 };
-use crate::domain::ports::CapabilityProvider;
+use crate::domain::ports::{AuthorityProvider, CapabilityProvider};
 use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
 
 /// Story 10.7 — per-turn context for subagent dispatch.
@@ -19,7 +19,7 @@ pub struct TaskToolContext {
 
 pub struct SubagentProvider {
     runner: Arc<dyn crate::domain::ports::SubagentRunner>,
-    registry: Arc<crate::infrastructure::subagent::SubagentRegistry>,
+    registry: Arc<crate::infrastructure::subagent::NodeTree>,
     agent_registry: Arc<tokio::sync::RwLock<crate::adapters::agent_registry::AgentRegistry>>,
     model_router: Arc<dyn crate::domain::ports::ProviderInfoPort>,
     spool: Arc<crate::infrastructure::subagent::SubagentSpool>,
@@ -27,6 +27,7 @@ pub struct SubagentProvider {
     running_tasks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, RunningTask>>>,
     /// Story 10.7 — optional usage ledger for per-call TokenUsage recording (AC-10-7-12).
     ledger: Arc<tokio::sync::RwLock<Option<Arc<dyn crate::domain::ports::UsageLedgerPort>>>>,
+    authority: Arc<tokio::sync::RwLock<Option<(Arc<dyn AuthorityProvider>, CapabilityToken)>>>,
 }
 
 struct RunningTask {
@@ -35,7 +36,7 @@ struct RunningTask {
 }
 
 impl SubagentProvider {
-    pub fn registry(&self) -> &Arc<crate::infrastructure::subagent::SubagentRegistry> {
+    pub fn registry(&self) -> &Arc<crate::infrastructure::subagent::NodeTree> {
         &self.registry
     }
 
@@ -55,7 +56,7 @@ impl SubagentProvider {
 
     pub fn new(
         runner: Arc<dyn crate::domain::ports::SubagentRunner>,
-        registry: Arc<crate::infrastructure::subagent::SubagentRegistry>,
+        registry: Arc<crate::infrastructure::subagent::NodeTree>,
         agent_registry: Arc<tokio::sync::RwLock<crate::adapters::agent_registry::AgentRegistry>>,
         model_router: Arc<dyn crate::domain::ports::ProviderInfoPort>,
         spool: Arc<crate::infrastructure::subagent::SubagentSpool>,
@@ -68,12 +69,21 @@ impl SubagentProvider {
             spool,
             running_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             ledger: Arc::new(tokio::sync::RwLock::new(None)),
+            authority: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
     /// Story 10.7 — wire the usage ledger for per-call TokenUsage recording (AC-10-7-12).
     pub async fn set_ledger(&self, ledger: Arc<dyn crate::domain::ports::UsageLedgerPort>) {
         *self.ledger.write().await = Some(ledger);
+    }
+
+    pub async fn set_authority(
+        &self,
+        authority: Arc<dyn AuthorityProvider>,
+        root_authority: CapabilityToken,
+    ) {
+        *self.authority.write().await = Some((authority, root_authority));
     }
 }
 
@@ -184,6 +194,16 @@ impl SubagentProvider {
         mut input: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<ToolResult, CapabilityError> {
+        if let Err(err) = self
+            .validate_authority(CapabilityFlag::Spawn, &AgentId::root())
+            .await
+        {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Subagent launch rejected by authority: {err}"),
+                is_error: true,
+            });
+        }
         // D1 fix: extract per-turn context from input JSON (injected by CompositeToolsetAdapter)
         let parent_ctx_tokens = input
             .get("__parent_ctx_tokens")
@@ -223,7 +243,6 @@ impl SubagentProvider {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let tier_hint = input.get("tier_hint").and_then(|v| v.as_str());
-
         let _ = description;
 
         // 2. Resolve agent definition
@@ -296,23 +315,20 @@ impl SubagentProvider {
 
                 let last_status = loop {
                     if rx.changed().await.is_err() {
-                        break crate::domain::models::SubagentRunStatus::Failed;
+                        break crate::domain::models::NodeState::Failed;
                     }
                     let status = *rx.borrow();
                     if matches!(
                         status,
-                        crate::domain::models::SubagentRunStatus::Completed
-                            | crate::domain::models::SubagentRunStatus::Failed
-                            | crate::domain::models::SubagentRunStatus::Killed
+                        crate::domain::models::NodeState::Completed
+                            | crate::domain::models::NodeState::Failed
+                            | crate::domain::models::NodeState::Cancelled
                     ) {
                         break status;
                     }
                 };
 
-                let is_error = !matches!(
-                    last_status,
-                    crate::domain::models::SubagentRunStatus::Completed
-                );
+                let is_error = !matches!(last_status, crate::domain::models::NodeState::Completed);
                 let content = match self.spool.read_tail(&generated_task_id, 8192).await {
                     Ok(text) if !text.is_empty() => text,
                     Ok(_) => {
@@ -373,9 +389,9 @@ impl SubagentProvider {
         let mut last_status;
         loop {
             match rx.recv().await {
-                Some(s @ crate::domain::models::SubagentRunStatus::Completed)
-                | Some(s @ crate::domain::models::SubagentRunStatus::Failed)
-                | Some(s @ crate::domain::models::SubagentRunStatus::Killed) => {
+                Some(s @ crate::domain::models::NodeState::Completed)
+                | Some(s @ crate::domain::models::NodeState::Failed)
+                | Some(s @ crate::domain::models::NodeState::Cancelled) => {
                     last_status = Some(s);
                     break;
                 }
@@ -396,8 +412,8 @@ impl SubagentProvider {
 
         let is_error = matches!(
             last_status,
-            Some(crate::domain::models::SubagentRunStatus::Failed)
-                | Some(crate::domain::models::SubagentRunStatus::Killed)
+            Some(crate::domain::models::NodeState::Failed)
+                | Some(crate::domain::models::NodeState::Cancelled)
         );
 
         // 9. Read spool tail
@@ -407,7 +423,7 @@ impl SubagentProvider {
                 if is_error {
                     format!(
                         "Subagent terminated with status: {:?}",
-                        last_status.unwrap_or(crate::domain::models::SubagentRunStatus::Failed)
+                        last_status.unwrap_or(crate::domain::models::NodeState::Failed)
                     )
                 } else {
                     "(subagent completed with no output)".into()
@@ -482,6 +498,16 @@ impl SubagentProvider {
             .ok_or_else(|| {
                 CapabilityError::InvocationFailed("subagent".into(), "Missing 'task_id'".into())
             })?;
+        if let Err(err) = self
+            .validate_authority(CapabilityFlag::ReadFs, &AgentId::root())
+            .await
+        {
+            return Ok(ToolResult {
+                tool_use_id: String::new(),
+                content: format!("Task output read rejected by authority: {err}"),
+                is_error: true,
+            });
+        }
 
         let range = input.get("range").and_then(|v| v.as_str());
 
@@ -546,6 +572,21 @@ impl SubagentProvider {
         })
     }
 
+    async fn validate_authority(
+        &self,
+        want: CapabilityFlag,
+        scope: &AgentId,
+    ) -> Result<(), crate::domain::ports::AuthorityError> {
+        let authority = self.authority.read().await.clone();
+        if let Some((authority, token)) = authority {
+            authority.validate(&token, &want, scope).await
+        } else {
+            // Fail-closed (P6): admitting when unconfigured is a security hole.
+            // Production always binds authority via set_authority at startup.
+            Err(crate::domain::ports::AuthorityError::Denied { flag: want })
+        }
+    }
+
     async fn invoke_legacy_agent(
         &self,
         id: &CapabilityId,
@@ -556,6 +597,12 @@ impl SubagentProvider {
         let mut task_input = input;
         if task_input.get("subagent_type").is_none() {
             task_input["subagent_type"] = serde_json::json!(id.tool);
+        }
+        // Legacy agent schemas advertise only `prompt` (see discover(), ~:143-160);
+        // supply a default `description` so the shared `invoke_task` validator
+        // passes. The agent name is a faithful short label for the task.
+        if task_input.get("description").is_none() {
+            task_input["description"] = serde_json::json!(id.tool);
         }
         self.invoke_task(task_input, cancel).await
     }

@@ -39,6 +39,55 @@ fn make_adapter(dir: &std::path::Path) -> ToolSetAdapter {
     )
 }
 
+/// No-op Orchestrator for tests that build AppState but don't exercise
+/// fork-join (Story 14.3b added the orchestrator field to AppState).
+struct NoOpOrchestrator;
+
+#[async_trait::async_trait]
+impl rustain::domain::ports::Orchestrator for NoOpOrchestrator {
+    async fn run_fork_join(
+        &self,
+        _request: rustain::domain::ports::ForkJoinRequest,
+    ) -> Result<
+        rustain::domain::models::orchestration::ForkJoinOutcome,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
+    }
+    async fn run_wave(
+        &self,
+        _request: rustain::domain::ports::ForkJoinRequest,
+        _cancel: CancellationToken,
+    ) -> Result<
+        Arc<dyn rustain::domain::ports::WaveHandle>,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
+    }
+    async fn rerun_spoke(
+        &self,
+        _slot: usize,
+        _cancel: CancellationToken,
+    ) -> Result<
+        rustain::domain::ports::RerunOutcome,
+        rustain::domain::models::orchestration::OrchestrationError,
+    > {
+        Err(
+            rustain::domain::models::orchestration::OrchestrationError::Internal(
+                "no-op orchestrator".into(),
+            ),
+        )
+    }
+}
+
 #[tokio::test]
 async fn ac1_token_hierarchy_cascade() {
     let session = CancellationToken::new();
@@ -305,6 +354,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             rustain::domain::models::AppConfig::default(),
         )),
         agent_core,
+        Some(Arc::new(NoOpOrchestrator) as Arc<dyn rustain::domain::ports::Orchestrator>),
         compose_snapshot,
         Arc::new(ArcSwap::from_pointee(Arc::new(
             rustain::adapters::profile_resolver::noop::NoopProfileResolver,
@@ -318,6 +368,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             snapshot_retention: None,
             config_file: None,
             model: None,
+            config_override: Vec::new(),
             profile: None,
             persona: None,
             memory: None,
@@ -330,6 +381,7 @@ async fn ac4_signal_cancel_before_shutdown() {
             skill_exposure: None,
             sandbox_adapter: None,
         },
+        None,
         rustain::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
         #[cfg(feature = "meta-search")]
         None,

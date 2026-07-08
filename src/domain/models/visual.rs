@@ -175,6 +175,10 @@ pub enum OverlayType {
     /// Inline autocomplete popup (/ or @).
     // Covers: UX-DR75
     Autocomplete(super::autocomplete::AutocompleteKind),
+    /// Wave overlay for fan-out result rows (Story 14.3a AC5). Opened by
+    /// expanding the wave strip; intercepts j/k/↵/r/d/s/Esc before the
+    /// chat/drill-down handlers.
+    WaveOverlay,
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

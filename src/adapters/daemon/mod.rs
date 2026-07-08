@@ -28,6 +28,7 @@ mod crash;
 mod lifecycle;
 #[cfg(unix)]
 mod pidfile;
+#[cfg(unix)]
 mod procargs;
 #[cfg(unix)]
 pub mod protocol;
@@ -38,7 +39,9 @@ pub mod server;
 #[cfg(unix)]
 mod service;
 #[cfg(unix)]
-pub mod session_queue;
+pub mod session_holder;
+#[cfg(unix)]
+mod session_queue;
 #[cfg(unix)]
 mod socket;
 #[cfg(unix)]

@@ -4,8 +4,8 @@ expression: text
 ---
 ┌ Agents ──────────────────────────────────────────────────┐
 │                                                          │
-│                    No agents running.                    │
-│Spawn one with `rustain spawn --agent <name>` or via plan │
+│                     No agents active.                    │
+│      Ask the assistant to delegate or use plan mode.     │
 │                                                          │
 │                                                          │
 │                                                          │

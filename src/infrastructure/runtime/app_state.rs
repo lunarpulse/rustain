@@ -11,6 +11,7 @@ use crate::adapters::budget::BudgetStateStore;
 use crate::adapters::provider::ProviderRegistry;
 use crate::domain::models::{AppConfig, SandboxPolicy};
 use crate::domain::ports::ConfigStorePort;
+use crate::domain::ports::Orchestrator;
 use crate::domain::ports::ProfileResolver;
 use crate::domain::ports::{StreamingProvider, UsageLedgerPort};
 use crate::domain::services::approval_runtime::ApprovalRuntime;
@@ -57,6 +58,12 @@ pub struct AppState {
     /// Central runtime holder of composed port adapters (Story 8.3 AC-1).
     /// Per-port ArcSwap slots on AgentCore support independent hot-swap (Story 8.4).
     pub agent_core: Arc<AgentCore>,
+    /// Fork-join orchestrator (Story 14.3b). `None` when the active toolset is
+    /// not the `CompositeToolsetAdapter` (a non-composite override opts out of
+    /// the subagent subsystem — PATCH-6: no startup panic; `/fanout` emits a
+    /// SystemNotice instead). Plain `Option<Arc<dyn Orchestrator>>` — no
+    /// hot-swap (stable composition-root binding, ADR-06-09).
+    pub orchestrator: Option<Arc<dyn Orchestrator>>,
     /// Domain-pure config access for handlers (Story 8.1 AC-14).
     pub config_store: Arc<AppConfigStore>,
     /// Snapshot of ComposeContext for reload-time re-composition (Story 8.3 AC-8).
@@ -65,6 +72,8 @@ pub struct AppState {
     pub profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
     /// CLI snapshot for config reload (Story 8.1 AC-10).
     pub cli_snapshot: crate::adapters::cli::commands::Cli,
+    /// Pre-parsed `-c` overrides so TUI config reload preserves them (Story 13.6).
+    pub cli_config_overrides: Option<serde_json::Value>,
     /// Story 9.5 — telemetry aggregator for 7-day rolling-window active-ratio
     /// metrics + adapter-status panel warning surface.
     pub telemetry: Arc<ActiveRatioWindow>,
@@ -91,9 +100,11 @@ impl AppState {
         budget_state_store: Arc<BudgetStateStore>,
         app_config: Arc<ArcSwap<AppConfig>>,
         agent_core: Arc<AgentCore>,
+        orchestrator: Option<Arc<dyn Orchestrator>>,
         compose_snapshot: Arc<ComposeContext>,
         profile_resolver: Arc<ArcSwap<Arc<dyn ProfileResolver>>>,
         cli_snapshot: crate::adapters::cli::commands::Cli,
+        cli_config_overrides: Option<serde_json::Value>,
         telemetry: Arc<ActiveRatioWindow>,
         #[cfg(feature = "meta-search")]
         catalog_registry: Option<Arc<crate::infrastructure::composition::catalog_observer_registry::CatalogObserverRegistry>>,
@@ -118,10 +129,12 @@ impl AppState {
                 budget_state_store,
                 app_config,
                 agent_core,
+                orchestrator,
                 config_store,
                 compose_snapshot,
                 profile_resolver,
                 cli_snapshot,
+                cli_config_overrides,
                 telemetry,
                 #[cfg(feature = "meta-search")]
                 catalog_registry,

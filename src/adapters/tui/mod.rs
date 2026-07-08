@@ -3,6 +3,7 @@ pub mod clipboard;
 #[allow(dead_code)]
 pub mod color_detect;
 pub mod editor_suspend;
+pub mod fanout_spec;
 pub mod handlers;
 pub mod help_data;
 pub mod hints;

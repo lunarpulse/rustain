@@ -3,7 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::adapters::approval_persistence_toml::ApprovalPersistenceToml;
-use crate::adapters::cli::commands::{Cli, Command, ConfigAction, ProfileAction};
+use crate::adapters::cli::commands::{AuthAction, Cli, Command, ConfigAction, ProfileAction};
+use crate::adapters::cli::session::SessionAction;
 use crate::adapters::filesystem::FileSystemStorage;
 use crate::adapters::ledger::FileUsageLedger;
 use crate::adapters::persona_adapter::PersonaAdapter;
@@ -13,13 +14,14 @@ use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::ToolSetAdapter;
 use crate::adapters::tui::terminal;
+use crate::adapters::workspace_registry::FileWorkspaceRegistry;
 use crate::domain::errors::ProviderError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
 use crate::domain::models::{AutoApprovePolicy, PermissionMode, ProviderConfig, SandboxPolicy};
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, ProfileResolver, SecurityPort, StoragePort, StreamingProvider,
-    ToolSetPort,
+    ToolSetPort, WorkspaceRegistryReaderPort,
 };
 use crate::domain::services::approval_runtime::ApprovalRuntime;
 use crate::domain::services::plan_manager::PlanManager;
@@ -29,13 +31,19 @@ use crate::infrastructure::runtime::event_loop;
 use crate::infrastructure::{config, logging, paths, permission_rules, signals};
 
 /// Error type for subcommand exits where output was already printed.
-/// Used by `main.rs` to suppress redundant error display.
+/// Carries the exit code so destructive/scriptable subcommands can return
+/// distinct non-zero codes (Story 13.5b).
 #[derive(Debug)]
-pub struct SubcommandExit;
+pub struct SubcommandExit(pub i32);
+
+impl SubcommandExit {
+    /// Generic non-zero exit code used by most subcommand failures.
+    pub const GENERIC: i32 = 1;
+}
 
 impl std::fmt::Display for SubcommandExit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "subcommand exited with error")
+        write!(f, "subcommand exited with code {}", self.0)
     }
 }
 
@@ -50,6 +58,12 @@ impl std::error::Error for SubcommandExit {}
 /// 6. Setup terminal
 /// 7. Enter event loop
 pub async fn run() -> Result<()> {
+    // Story 13.7 AC1 — install the startup panic hook BEFORE everything else
+    // (even CLI parsing) so any panic during arg parsing, logging init, `-c`
+    // override parsing, or config loading is captured to ~/.rustain/panic.log
+    // with a user-friendly stderr message. The TUI hook (install_panic_hook)
+    // installs later (~line 245) and superseds this one via AtomicBool.
+    signals::install_startup_panic_hook();
     // 1. Parse CLI args — augment with rich long_version (FR109)
     let cli = {
         use clap::{CommandFactory, FromArgMatches};
@@ -66,6 +80,18 @@ pub async fn run() -> Result<()> {
     let _log_guard = logging::init(cli.log_level.as_deref().unwrap_or("info"))?;
     tracing::info!("Starting rustain...");
 
+    let cli_config_overrides = if cli.config_override.is_empty() {
+        None
+    } else {
+        match config::parse_config_overrides(&cli.config_override) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                eprintln!("{e}");
+                return Err(anyhow::anyhow!("Invalid -c override: {e}"));
+            }
+        }
+    };
+
     // Story 8.1 AC-10 — capture CLI snapshot for config reload handler
     let cli_snapshot = Cli {
         log_level: cli.log_level.clone(),
@@ -75,6 +101,7 @@ pub async fn run() -> Result<()> {
         snapshot_retention: cli.snapshot_retention,
         config_file: cli.config_file.clone(),
         model: cli.model.clone(),
+        config_override: cli.config_override.clone(),
         profile: cli.profile.clone(),
         persona: cli.persona.clone(),
         memory: cli.memory.clone(),
@@ -92,7 +119,8 @@ pub async fn run() -> Result<()> {
     //
     // Pass 1: bootstrap config with NoopProfileResolver to discover active_profile name
     let noop = crate::adapters::profile_resolver::noop::NoopProfileResolver;
-    let bootstrap_config = config::load(&cli, &noop);
+    let bootstrap_config =
+        config::load_with_config_overrides(&cli, &noop, cli_config_overrides.as_ref());
 
     // Resolve effective active profile name (CLI > env > config > default "coding")
     let config_dir = paths::config_dir().unwrap_or_else(|_| std::path::PathBuf::from(".rustain"));
@@ -147,7 +175,8 @@ pub async fn run() -> Result<()> {
         }
     };
 
-    let app_config = config::load(&cli, &toml_resolver);
+    let app_config =
+        config::load_with_config_overrides(&cli, &toml_resolver, cli_config_overrides.as_ref());
 
     // Story 9.4 — validate tools.exposure BEFORE AgentCore composition
     if let Err(e) = validate_tools_exposure(&app_config.tools.exposure) {
@@ -225,6 +254,132 @@ pub async fn run() -> Result<()> {
     if let Some(Command::Init) = cli.command {
         return crate::adapters::cli::init::run_init().await;
     }
+    // Story 13.3b — Completions subcommand intercept. Sync (no .await), no provider needed.
+    if let Some(Command::Completions { shell, bin_name }) = cli.command {
+        return crate::adapters::cli::completions::run_completions(shell, bin_name).map_err(|e| {
+            // Surface the error to the user on stderr; main.rs suppresses
+            // SubcommandExit errors, so logging alone would hide the message.
+            eprintln!("{e}");
+            SubcommandExit(SubcommandExit::GENERIC).into()
+        });
+    }
+    // Story 13.4a/13.4b/13.4c — Auth subcommand intercept. Runs before provider
+    // construction and terminal setup. All auth subcommands are read-only/offline-safe
+    // except `auth login` which validates via an ad hoc candidate adapter.
+    if let Some(Command::Auth { action }) = &cli.command {
+        match action {
+            AuthAction::Login { provider, json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::login::run_auth_login(
+                    provider.clone(),
+                    *json,
+                    &store,
+                    &app_config,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Auth login subcommand failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
+            AuthAction::Status { json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::status::run_auth_status(*json, &store)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Auth status subcommand failed: {e}");
+                        SubcommandExit(SubcommandExit::GENERIC).into()
+                    });
+            }
+            AuthAction::List { json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::list::run_auth_list(*json, &app_config, &store)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Auth list subcommand failed: {e}");
+                        SubcommandExit(SubcommandExit::GENERIC).into()
+                    });
+            }
+        }
+    }
+    // Story 13.5a / 13.5b — Session subcommand intercept. Runs before provider
+    // construction and terminal setup. `session list` is read-only, offline-safe,
+    // and non-billable. `session delete` is the first irreversible, scriptable
+    // destructive operation; it carries distinct exit codes.
+    if let Some(Command::Session { action }) = &cli.command {
+        match action {
+            SessionAction::List { json, all } => {
+                let workspace = paths::workspace_dir()?;
+                let sessions_dir = paths::sessions_dir(&workspace);
+                let storage: Arc<dyn StoragePort> = Arc::new(
+                    FileSystemStorage::with_workspace_root(sessions_dir, workspace.clone()),
+                );
+                let reader: Arc<dyn WorkspaceRegistryReaderPort> =
+                    Arc::new(FileWorkspaceRegistry::new()?);
+                return crate::adapters::cli::session::list::run_session_list(
+                    *json, *all, &workspace, &storage, &reader,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Session list subcommand failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
+            SessionAction::Delete {
+                id,
+                all,
+                all_workspaces,
+                workspace,
+                force,
+                dry_run,
+                json,
+            } => {
+                use std::io::IsTerminal;
+                let workspace_root = paths::workspace_dir()?;
+                let storage_for = |ws: &std::path::Path| -> Arc<dyn StoragePort> {
+                    Arc::new(FileSystemStorage::with_workspace_root(
+                        paths::sessions_dir(ws),
+                        ws.to_path_buf(),
+                    ))
+                };
+                let reader: Arc<dyn WorkspaceRegistryReaderPort> =
+                    Arc::new(FileWorkspaceRegistry::new()?);
+                let holder = crate::adapters::daemon::session_holder::DaemonSessionHolder;
+                let stdin = std::io::stdin();
+                let mut stdin_lock = stdin.lock();
+                let mut stdout = std::io::stdout();
+                let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+                return crate::adapters::cli::session::delete::run_session_delete(
+                    id.clone(),
+                    *all,
+                    *all_workspaces,
+                    workspace.clone(),
+                    *force,
+                    *dry_run,
+                    *json,
+                    &workspace_root,
+                    storage_for,
+                    &holder,
+                    &*reader,
+                    is_tty,
+                    &mut stdin_lock,
+                    &mut stdout,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Session delete subcommand failed: {e}");
+                    if e.downcast_ref::<SubcommandExit>().is_some() {
+                        e
+                    } else {
+                        SubcommandExit(SubcommandExit::GENERIC).into()
+                    }
+                });
+            }
+        }
+    }
     if let Some(Command::Doctor {
         terminal,
         adapters,
@@ -259,7 +414,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Doctor subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Migrate {
@@ -274,7 +429,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("Migrate subcommand failed: {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
     #[cfg(feature = "openai")]
@@ -283,7 +438,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("UpdateCatalog subcommand failed: {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
     #[cfg(not(feature = "openai"))]
@@ -308,7 +463,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 eprintln!("✗ {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
     #[cfg(not(feature = "self-update"))]
@@ -325,19 +480,20 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Config reload subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             ConfigAction::Show { json } => {
-                return crate::adapters::cli::config_cmd::run_config_show(
+                return crate::adapters::cli::config_cmd::run_config_show_with_overrides(
                     *json,
                     &profile_resolver_arc,
                     &cli,
+                    cli_config_overrides.as_ref(),
                 )
                 .await
                 .map_err(|e| {
                     tracing::error!("Config show subcommand failed: {e}");
-                    SubcommandExit.into()
+                    SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
             ConfigAction::Edit { global } => {
@@ -345,7 +501,7 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Config edit subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             ConfigAction::Path { json } => {
@@ -353,19 +509,20 @@ pub async fn run() -> Result<()> {
                     .await
                     .map_err(|e| {
                         tracing::error!("Config path subcommand failed: {e}");
-                        SubcommandExit.into()
+                        SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
             ConfigAction::Validate { json } => {
-                return crate::adapters::cli::config_cmd::run_config_validate(
+                return crate::adapters::cli::config_cmd::run_config_validate_with_overrides(
                     *json,
                     &profile_resolver_arc,
                     &cli,
+                    cli_config_overrides.as_ref(),
                 )
                 .await
                 .map_err(|e| {
                     tracing::error!("Config validate subcommand failed: {e}");
-                    SubcommandExit.into()
+                    SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
         }
@@ -380,7 +537,7 @@ pub async fn run() -> Result<()> {
             .await
             .map_err(|e| {
                 tracing::error!("Profile switch subcommand failed: {e}");
-                SubcommandExit.into()
+                SubcommandExit(SubcommandExit::GENERIC).into()
             });
     }
 
@@ -398,7 +555,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile list subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -421,7 +578,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile show subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -444,7 +601,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile create subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -461,7 +618,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile edit subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -479,7 +636,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile validate subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -496,7 +653,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile export subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     if let Some(Command::Profile {
@@ -514,7 +671,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile import subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     // Profile install (Story 8.6b) — public-repo HTTPS fetch + validate + community/ dir install.
@@ -542,7 +699,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Profile install subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
     #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
@@ -553,7 +710,7 @@ pub async fn run() -> Result<()> {
         eprintln!(
             "Error: 'rustain profile install' requires HTTPS support. Rebuild with --features anthropic."
         );
-        return Err(SubcommandExit.into());
+        return Err(SubcommandExit(SubcommandExit::GENERIC).into());
     }
 
     // Story 9.8 — Catalog dev-tool dispatch (before TUI initialization)
@@ -602,8 +759,21 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Daemon subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
+    }
+
+    // Story 14.7 — ACP server intercept. MUST run before provider construction
+    // and terminal setup: stdout is the JSON-RPC transport.
+    if let Some(Command::Acp { client }) = cli.command.clone() {
+        let workspace = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?;
+        return crate::adapters::acp::run_acp(app_config, workspace, cli.model.clone(), client)
+            .await
+            .map_err(|e| {
+                tracing::error!("ACP subcommand failed: {e}");
+                SubcommandExit(SubcommandExit::GENERIC).into()
+            });
     }
 
     // Story 13.1a — Ask subcommand intercept. MUST run before provider
@@ -633,7 +803,7 @@ pub async fn run() -> Result<()> {
         .await
         .map_err(|e| {
             tracing::error!("Ask subcommand failed: {e}");
-            SubcommandExit.into()
+            SubcommandExit(SubcommandExit::GENERIC).into()
         });
     }
 
@@ -732,7 +902,7 @@ pub async fn run() -> Result<()> {
     // (before EventBus exists); emit them now via emit_domain to preserve the
     // EventBus bypass ratchet (MAX_KNOWN_BYPASSES = 48, unchanged).
     for msg in &accumulated_notices {
-        event_bus.emit_domain(AppEvent::SystemNotice {
+        let _ = event_bus.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
             message: msg.clone(),
@@ -937,10 +1107,10 @@ pub async fn run() -> Result<()> {
     // Story 4-3b P2: pass the real workspace root so `snapshot_file` can enforce
     // path-traversal checks without falling back to the sessions_dir grandparent proxy.
     let tools_sessions_dir = paths::sessions_dir(&workspace_path);
-    let tools_storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
-        tools_sessions_dir.clone(),
-        workspace_path.clone(),
-    ));
+    let tools_storage: Arc<dyn StoragePort> = Arc::new(
+        FileSystemStorage::with_workspace_root(tools_sessions_dir.clone(), workspace_path.clone())
+            .with_workspace_registrar(Arc::new(FileWorkspaceRegistry::new()?)),
+    );
     let shared_skill_registry = Arc::new(tokio::sync::RwLock::new(SkillRegistry::new()));
     let skill_activator = Arc::new(SkillActivator::with_registry(shared_skill_registry));
     skill_activator.set_event_tx(domain_tx.clone()).await;
@@ -1236,6 +1406,13 @@ pub async fn run() -> Result<()> {
     let persona: Arc<dyn PersonaPort> = Arc::clone(&*agent_core_inner.persona.load());
     let tools: Arc<dyn ToolSetPort> = Arc::clone(&*agent_core_inner.tools.load());
 
+    // Story 14.3b — hoist the orchestrator out of the composite-tools block so
+    // AppState can hold it. The orchestrator is bound to the SAME ports as the
+    // runner (AC8); those ports only exist when the toolset is the
+    // CompositeToolsetAdapter (the app default). A non-composite toolset opts
+    // out of the subagent subsystem entirely, so `/fanout` is unavailable there
+    // by construction.
+    let mut orchestrator: Option<Arc<dyn crate::domain::ports::Orchestrator>> = None;
     // Story 10.2 — wire subagent provider into CompositeToolsetAdapter
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
@@ -1245,12 +1422,33 @@ pub async fn run() -> Result<()> {
                 crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),
             ));
 
-            // Construct subagent infrastructure
+            let root_authority = crate::domain::models::CapabilityToken::r1_root(
+                crate::domain::models::AgentId::root(),
+            );
+            let authority_ledger = Arc::new(
+                crate::domain::services::authority_ledger::AuthorityLedger::new(
+                    root_authority.clone(),
+                ),
+            );
+            // Construct subagent infrastructure first so trust-drop revoke can
+            // route into cascade_kill (AC5): the provider holds an Arc<NodeTree>.
             let subagent_registry = Arc::new(
-                crate::infrastructure::subagent::SubagentRegistry::with_event_tx(
+                crate::infrastructure::subagent::NodeTree::with_event_tx(
                     domain_tx.clone(),
                     Arc::new(|| chrono::Utc::now().timestamp_millis()),
-                ),
+                )
+                .with_on_cascade_kill({
+                    let authority_ledger = authority_ledger.clone();
+                    Arc::new(move |id| {
+                        let _ = authority_ledger.revoke_scope(id);
+                    })
+                }),
+            );
+            let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
+                crate::adapters::authority::InProcessAuthorityProvider::new(
+                    authority_ledger.clone(),
+                )
+                .with_node_tree(subagent_registry.clone()),
             );
             let spool = Arc::new(
                 crate::infrastructure::subagent::SubagentSpool::new(
@@ -1330,8 +1528,35 @@ pub async fn run() -> Result<()> {
                 1024,
             );
 
-            let runner: Arc<dyn crate::domain::ports::SubagentRunner> =
-                Arc::new(crate::adapters::subagent::InProcessSubagentRunner::new(
+            let isolation_provider: Arc<dyn crate::domain::ports::IsolationProvider> =
+                Arc::new(crate::adapters::isolation::CowIsolationProvider::default());
+            let tools_factory_storage = tools_storage.clone();
+            let tools_factory_sandbox_slot = sandbox_slot.clone();
+            let tools_factory_sandbox_policy = sandbox_policy_ref.clone();
+            let tools_factory_skill_activator = skill_activator.clone();
+            let tools_factory_skill_cache = shared_skill_cache.clone();
+            let tools_factory_plan_manager = plan_manager.clone();
+            let tools_factory_domain_tx = domain_tx.clone();
+            let tools_factory: Arc<
+                dyn Fn(&std::path::Path) -> Arc<dyn crate::domain::ports::ToolSetPort>
+                    + Send
+                    + Sync,
+            > = Arc::new(move |workspace| {
+                let mut adapter = crate::adapters::toolset_adapter::ToolSetAdapter::new(
+                    workspace.to_path_buf(),
+                    tools_factory_storage.clone(),
+                    tools_factory_sandbox_slot.clone(),
+                    tools_factory_sandbox_policy.clone(),
+                );
+                adapter.set_activator(tools_factory_skill_activator.clone());
+                adapter.set_skill_cache(tools_factory_skill_cache.clone());
+                adapter.set_plan_manager(tools_factory_plan_manager.clone());
+                adapter.set_event_tx(tools_factory_domain_tx.clone());
+                Arc::new(adapter) as Arc<dyn crate::domain::ports::ToolSetPort>
+            });
+
+            let runner: Arc<dyn crate::domain::ports::SubagentRunner> = Arc::new(
+                crate::adapters::subagent::InProcessSubagentRunner::new(
                     router.clone() as Arc<dyn crate::domain::ports::StreamingProvider>,
                     tools_storage.clone(),
                     security.clone(),
@@ -1342,7 +1567,34 @@ pub async fn run() -> Result<()> {
                     subagent_registry.clone(),
                     sandbox_policy_ref.clone(),
                     spool.clone(),
+                    authority_provider.clone(),
+                    root_authority.clone(),
+                )
+                .with_isolation(
+                    workspace_path.clone(),
+                    isolation_provider,
+                    tools_factory,
+                ),
+            );
+
+            // Story 14.3 — fork-join orchestrator, bound to the SAME ports as
+            // the runner (AC8: drives children through the SubagentRunner port,
+            // never a concrete impl). The executor is the multi-node
+            // generalization of the single-turn driver; the coordinator's turn
+            // loop invokes `run_fork_join` when it fans out (the trigger — a
+            // model fan-out intent — is the connection point wired with the
+            // turn-loop integration).
+            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
+                Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                    runner.clone(),
+                    authority_provider.clone(),
+                    authority_ledger.clone(),
+                    event_bus.clone(),
+                    Arc::new(crate::domain::clock::SystemClock::default())
+                        as Arc<dyn crate::domain::clock::Clock>,
+                    root_authority.clone(),
                 ));
+            orchestrator = Some(orchestrator_inner);
 
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(
                 runner,
@@ -1351,10 +1603,31 @@ pub async fn run() -> Result<()> {
                 model_router,
                 spool.clone(),
             ));
+            subagent_provider
+                .set_authority(authority_provider.clone(), root_authority.clone())
+                .await;
 
             composite.set_subagent_provider(subagent_provider);
+
+            // Story 14-4a (AC5, CS-1) — re-store the agent_message_bus slot with
+            // a LocalMessageBus wired to the REAL subagent_registry tree (not the
+            // phantom Default::default() empty tree composed at AgentCore::compose).
+            // This matches the 11-slot re-store pattern (sandbox, tool_exposure, etc.).
+            agent_core_inner.agent_message_bus.store(Arc::new(Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    (*subagent_registry).clone(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            )
+                as Arc<dyn crate::domain::ports::AgentMessageBus>));
         }
     }
+    // PATCH-6 (review): the orchestrator stays an `Option`. A non-composite
+    // toolset override legitimately has no subagent subsystem (no runner), so
+    // `/fanout` surfaces a SystemNotice ("fan-out unavailable with the current
+    // toolset") instead of the process panicking at startup. The normal
+    // (composite-toolset) path sets it. `orchestrator` (the Option from above)
+    // flows to AppState::new unchanged.
 
     // Deferred AppState::new — now that AgentCore is composed, create the runtime state
     // Story 9.5 — telemetry aggregator (7-day rolling window for active-ratio metrics).
@@ -1385,9 +1658,11 @@ pub async fn run() -> Result<()> {
         budget_state_store,
         app_config_swap.clone(),
         agent_core_inner,
+        orchestrator,
         compose_snapshot,
         profile_resolver_swap,
         cli_snapshot,
+        cli_config_overrides.clone(),
         telemetry,
         #[cfg(feature = "meta-search")]
         catalog_registry_for_app_state,
@@ -1404,6 +1679,7 @@ pub async fn run() -> Result<()> {
         .snapshot_retention
         .or(app_config.snapshot_retention_count);
     let storage = FileSystemStorage::with_workspace_root(sessions_dir, workspace_path.clone())
+        .with_workspace_registrar(Arc::new(FileWorkspaceRegistry::new()?))
         .with_snapshot_retention(retention);
     if let Err(e) = storage.ensure_dir().await {
         tracing::warn!("Failed to create sessions directory: {}", e);
@@ -1547,6 +1823,30 @@ pub async fn run() -> Result<()> {
                 );
             }
         }
+    }
+
+    // models.dev live pricing — best-effort background refresh (60-min spaced).
+    // Keeps the disk cache fresh; `config` load merges it into the effective
+    // pricing map. Detached + non-blocking: failures log and retry next cycle.
+    // Mirrors opencode's spaced-refresh posture.
+    #[cfg(feature = "models-dev")]
+    {
+        tokio::spawn(async {
+            use crate::adapters::models_dev::{CACHE_TTL, load_cache, refresh};
+            loop {
+                // Skip the network fetch when the on-disk cache is still fresh —
+                // avoids a blocking HTTP request on every app launch.
+                let fresh = load_cache()
+                    .map(|c| !c.is_stale(CACHE_TTL))
+                    .unwrap_or(false);
+                if !fresh {
+                    if let Err(e) = refresh().await {
+                        tracing::warn!(error = %e, "models.dev pricing refresh failed; will retry");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+            }
+        });
     }
 
     let result = event_loop::run(
@@ -1767,10 +2067,16 @@ fn build_anthropic_provider_from_env(
 
         let auth_mode = if let Some(token) = auth_token {
             tracing::info!("Using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
-            AuthMode::BearerToken(token)
+            AuthMode::BearerToken(token.into())
         } else if let Some(key) = api_key {
             tracing::info!("Using ANTHROPIC_API_KEY (X-Api-Key auth)");
-            AuthMode::ApiKey(key)
+            AuthMode::ApiKey(key.into())
+        } else if let Some(stored_key) =
+            crate::adapters::auth_store::FileAuthStore::get_sync("anthropic")
+        {
+            // Story 13.4a AC7: auth.json fallback — strictly below env vars.
+            tracing::info!("Using stored credential from auth.json (X-Api-Key auth)");
+            AuthMode::ApiKey(stored_key.into())
         } else {
             anyhow::bail!(
                 "No API key found.\n\n\
@@ -1778,6 +2084,7 @@ fn build_anthropic_provider_from_env(
                  \n\
                  export ANTHROPIC_API_KEY=sk-ant-...       # Direct Anthropic\n\
                  export ANTHROPIC_AUTH_TOKEN=your-key       # Anthropic-compatible gateway\n\
+                 rustain auth login anthropic               # Store via auth.json\n\
                  \n\
                  Get your API key at: https://console.anthropic.com/"
             );

@@ -4,8 +4,8 @@ expression: text
 ---
 ┌ Agent Inspector · coder ─────────────────────────────────┐
 │Agent: coder                                              │
-│Model: (unknown — Story 10.7)                             │
-│Tools: (pending — Story 10.7)                             │
+│Model: (unresolved)                                       │
+│Tools: (unresolved)                                       │
 │Spawned: 2h 0m 0s ago                                     │
 │                                                          │
 │Current task:                                             │
@@ -14,9 +14,9 @@ expression: text
 │working...                                                │
 │                                                          │
 │Resource usage:                                           │
-│  Tokens: (pending — Story 10.7)                          │
-│  Cost: (pending — Story 10.7)                            │
-│  Turns: (pending — Story 10.7)                           │
+│  Tokens: 0 in / 0 out                                    │
+│  Cost: n/a                                               │
+│  Turns: 0                                                │
 │  Memory: (n/a — in-process tier)                         │
 │                                                          │
 │Children:                                                 │

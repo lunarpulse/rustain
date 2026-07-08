@@ -51,6 +51,120 @@ use ratatui::layout::Rect;
 /// Timeout for background tasks (title generation, session save).
 /// Separate from shutdown persist timeout (2s) which is more critical.
 const BACKGROUND_TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn launch_wave_request(
+    state: &mut TuiState,
+    app_state: &AppState,
+    conversation_id: crate::domain::models::tab::ConversationId,
+    request: crate::domain::ports::ForkJoinRequest,
+) {
+    let Some(orchestrator) = app_state.orchestrator.clone() else {
+        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            conversation_id: Some(conversation_id),
+            level: crate::domain::models::NoticeLevel::Warning,
+            message: "/fanout unavailable: subagent orchestrator is not configured.".to_string(),
+        });
+        state.needs_redraw = true;
+        return;
+    };
+
+    let event_bus = app_state.event_bus.clone();
+    let wave_cancel = tokio_util::sync::CancellationToken::new();
+    state.wave_cancel = Some(wave_cancel.clone());
+    let wave_id = state.begin_wave_fanout();
+    let conv_id = conversation_id;
+    let wave = tokio::spawn(async move {
+        use crate::domain::ports::Orchestrator;
+        orchestrator.run_wave(request, wave_cancel).await
+    });
+    tokio::spawn(async move {
+        match wave.await {
+            Ok(Ok(handle)) => {
+                let snap = handle.snapshot();
+                let summary = snap.outcome.synthesis.summary.clone();
+                let _ = event_bus.emit_domain(AppEvent::WaveRunReady(handle));
+                let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conv_id),
+                    level: crate::domain::models::NoticeLevel::Info,
+                    message: format!("Fan-out complete: {summary}"),
+                });
+            }
+            Ok(Err(e)) => {
+                let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conv_id.clone()),
+                    level: crate::domain::models::NoticeLevel::Warning,
+                    message: format!("Fan-out failed: {e}"),
+                });
+                let _ = event_bus.emit_domain(AppEvent::WaveTerminated { id: wave_id });
+            }
+            Err(join_err) if join_err.is_panic() => {
+                let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conv_id.clone()),
+                    level: crate::domain::models::NoticeLevel::Warning,
+                    message: "Fan-out task panicked — see logs.".to_string(),
+                });
+                let _ = event_bus.emit_domain(AppEvent::WaveTerminated { id: wave_id });
+            }
+            Err(_) => {
+                let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                    conversation_id: Some(conv_id.clone()),
+                    level: crate::domain::models::NoticeLevel::Info,
+                    message: "Fan-out task was cancelled.".to_string(),
+                });
+                let _ = event_bus.emit_domain(AppEvent::WaveTerminated { id: wave_id });
+            }
+        }
+    });
+    state.needs_redraw = true;
+}
+
+fn wave_result_rows(
+    snap: &crate::domain::ports::wave_handle::WaveSnapshot,
+    rerunning_slot: Option<usize>,
+) -> Vec<crate::adapters::tui::widgets::result_row::ResultRowSnapshot> {
+    snap.outcome
+        .spokes
+        .iter()
+        .enumerate()
+        .map(|(slot, (agent_id, result))| {
+            crate::adapters::tui::widgets::result_row::ResultRowSnapshot {
+                agent_label: agent_id.0.clone(),
+                result: result.clone(),
+                slot,
+                is_self: false,
+                rerun_count: snap.rerun_counts.get(slot).copied().unwrap_or(0),
+                rerunning: rerunning_slot == Some(slot),
+            }
+        })
+        .collect()
+}
+
+fn render_lines_bottom(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    lines: Vec<ratatui::text::Line<'static>>,
+) {
+    if area.height == 0 || lines.is_empty() {
+        return;
+    }
+    // P5 (review): prepend a thin separator so the overlay doesn't silently
+    // obscure the most recent chat content.
+    let sep = ratatui::text::Line::styled(
+        "─".repeat(area.width as usize),
+        ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+    );
+    let mut all_lines = vec![sep];
+    all_lines.extend(lines);
+    let height = (all_lines.len() as u16).min(area.height);
+    let card_area = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(height),
+        width: area.width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, card_area);
+    frame.render_widget(ratatui::widgets::Paragraph::new(all_lines), card_area);
+}
 use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::turn::TurnId;
@@ -391,7 +505,7 @@ pub async fn run(
             loop {
                 match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
                     Ok(Ok(transition)) => {
-                        bus.emit_domain(AppEvent::ToolCallTransitionBridged {
+                        let _ = bus.emit_domain(AppEvent::ToolCallTransitionBridged {
                             conversation_id: transition.conversation_id.clone(),
                             transition,
                         });
@@ -416,7 +530,7 @@ pub async fn run(
             loop {
                 match tokio::time::timeout(Duration::from_secs(30), rx.recv()).await {
                     Ok(Ok(event)) => {
-                        bus.emit_domain(AppEvent::ApprovalRuntimeEventBridged { event });
+                        let _ = bus.emit_domain(AppEvent::ApprovalRuntimeEventBridged { event });
                     }
                     Ok(Err(RecvError::Lagged(n))) => {
                         tracing::warn!(missed = n, "approval runtime subscriber lagged");
@@ -601,7 +715,7 @@ pub async fn run(
 
     // Send recovery prompt if crash detected (before first render)
     if let Some((title, token_count)) = recovery_prompt {
-        app_state.event_bus.emit_domain(AppEvent::RecoveryPrompt {
+        let _ = app_state.event_bus.emit_domain(AppEvent::RecoveryPrompt {
             conversation_id: conversation.id.clone(),
             title,
             token_count,
@@ -624,7 +738,7 @@ pub async fn run(
             }
         }
         for (_pid, ptitle, tnum) in &plans_to_warn {
-            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                 conversation_id: Some(conversation.id.clone()),
                 level: NoticeLevel::Warning,
                 message: format!(
@@ -727,7 +841,7 @@ pub async fn run(
                 Ok(_) => { /* provider reachable — nothing to surface */ }
                 Err(e) if e.is_offline() => {
                     let provider_name = probe_provider.provider_id();
-                    event_bus.emit_domain(AppEvent::SystemNotice {
+                    let _ = event_bus.emit_domain(AppEvent::SystemNotice {
                         conversation_id: None,
                         level: NoticeLevel::Warning,
                         message: format!(
@@ -810,7 +924,7 @@ pub async fn run(
         {
             HandlerOutcome::Quiet => {}
             HandlerOutcome::Notify(ev) => {
-                app_state.event_bus.emit_domain(ev);
+                let _ = app_state.event_bus.emit_domain(ev);
             }
             _ => unreachable!("apply_startup_provider_fallback only returns Quiet or Notify"),
         }
@@ -965,7 +1079,7 @@ pub async fn run(
                                                 &app_state.profile_resolver, port,
                                             ).await;
                                             if let HandlerOutcome::Notify(event) = outcome {
-                                                app_state.event_bus.emit_domain(event);
+                                                let _ = app_state.event_bus.emit_domain(event);
                                             }
                                         }
                                         state.needs_redraw = true;
@@ -987,6 +1101,17 @@ pub async fn run(
                                 && state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents)
                                 && state.agent_panel_state.drill_down_agent.is_some()
                             {
+                                // Esc in inspector: close inspector first (back to panel list),
+                                // don't jump straight to chat. A second Esc from the panel
+                                // list will close the sidebar via the normal handle_input path.
+                                if matches!(domain_event, crate::domain::events::DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc)) {
+                                    state.agent_panel_state.drill_down_agent = None;
+                                    state.agent_panel_state.inspector_scroll_offset = 0;
+                                    state.agent_panel_state.pending_kill_confirm = None;
+                                    state.needs_redraw = true;
+                                    continue;
+                                }
+
                                 // Block inspector owner controls when active tab is read-only
                                 if tab_manager.active_tab().read_only {
                                     state.status = StatusState::Flash {
@@ -1000,8 +1125,16 @@ pub async fn run(
                                             'p' => {
                                                 if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id).cloned() {
                                                     let op = match entry.current_status {
-                                                        crate::domain::models::SubagentRunStatus::RunningFg | crate::domain::models::SubagentRunStatus::RunningBg => crate::domain::models::Op::Pause,
-                                                        _ => crate::domain::models::Op::Resume,
+                                                        crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
+                                                        crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
+                                                        _ => {
+                                                            state.status = StatusState::Flash {
+                                                                message: format!("Cannot pause/resume agent in {:?} state", entry.current_status),
+                                                                remaining_ms: 2000,
+                                                            };
+                                                            state.needs_redraw = true;
+                                                            continue;
+                                                        }
                                                     };
                                                     let _ = refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
                                                     if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
@@ -1027,7 +1160,7 @@ pub async fn run(
                                                             state.agent_panel_state.pending_kill_confirm = None;
                                                         }
                                                         Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
-                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                                 conversation_id: Some(conversation.id.clone()),
                                                                 level: NoticeLevel::Warning,
                                                                 message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
@@ -1059,7 +1192,7 @@ pub async fn run(
                                                 continue;
                                             }
                                             'm' => {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
                                                     message: "Change model: open model selector via Ctrl+P :sonnet etc. — Story 10.7 wires direct dispatch".to_string(),
@@ -1068,7 +1201,7 @@ pub async fn run(
                                                 continue;
                                             }
                                             't' => {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
                                                     message: "Update tools: requires Story 10.7 child-state read accessor — deferred to Story 10.7 wiring".to_string(),
@@ -1119,6 +1252,11 @@ pub async fn run(
                                             }
                                             'j' => {
                                                 state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_add(1);
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            'k' => {
+                                                state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_sub(1);
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
@@ -1284,7 +1422,7 @@ pub async fn run(
                                     // Drain user-driven pending activation (Story 5-2 deadlock fix).
                                     if let Some(pending) = state.pending_activation.take() {
                                         state.pending_activation_inspect_content = None;
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(pending.conversation_id),
                                             level: NoticeLevel::Info,
                                             message: format!(
@@ -1297,6 +1435,22 @@ pub async fn run(
                                             state.skill_trust_inspect_mode = false;
                                         }
                                         state.needs_redraw = true;
+                                    }
+                                    // Story 14.3a (AC8): cancel an in-flight wave
+                                    // (primary cancel trigger = Ctrl-C). Fires the
+                                    // wave-cancel root token, propagating to every
+                                    // child via the token tree.
+                                    // D-B (AI-12.3): gate on the DERIVED
+                                    // in-flight signal (`active_wave_id`) so a
+                                    // completed wave's stale token can't swallow
+                                    // the next Ctrl-C. Single source of truth —
+                                    // no shadow boolean.
+                                    // 14.3c (AI-12.3): the abort trigger, via the
+                                    // extracted handler so the AC8 keystone drives
+                                    // the SAME fire-the-token path Ctrl-C runs.
+                                    if state.request_wave_cancel() {
+                                        // Don't quit — wave cancel consumed the Ctrl-C.
+                                        continue;
                                     }
                                     if streaming.is_streaming {
                                         // AC12: Finalize active tool calls with [aborted] before clearing
@@ -1391,7 +1545,7 @@ pub async fn run(
                                 // Plan approval card key handlers (Story 6-0d AC4)
                                 InputAction::PlanApproveNormal => {
                                     if let Some(pending) = state.pending_plan_approval.take() {
-                                        app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
                                             conversation_id: pending.conversation_id,
                                             outcome: crate::domain::models::PlanApprovalOutcome::ApproveNormal,
                                         });
@@ -1399,7 +1553,7 @@ pub async fn run(
                                 }
                                 InputAction::PlanApproveAutoEdit => {
                                     if let Some(pending) = state.pending_plan_approval.take() {
-                                        app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
                                             conversation_id: pending.conversation_id,
                                             outcome: crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit,
                                         });
@@ -1407,7 +1561,7 @@ pub async fn run(
                                 }
                                 InputAction::PlanReject => {
                                     if let Some(pending) = state.pending_plan_approval.take() {
-                                        app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
                                             conversation_id: pending.conversation_id,
                                             outcome: crate::domain::models::PlanApprovalOutcome::Reject,
                                         });
@@ -1432,7 +1586,7 @@ pub async fn run(
                                     if let Some(ref pending) = state.pending_plan_card {
                                         let conversation_id = conversation.id.clone();
                                         let plan_id = pending.plan_id.clone();
-                                        app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
                                             conversation_id,
                                             plan_id,
                                             decision: crate::domain::models::plan::PlanDecision::Approve,
@@ -1443,7 +1597,7 @@ pub async fn run(
                                     if let Some(ref pending) = state.pending_plan_card {
                                         let conversation_id = conversation.id.clone();
                                         let plan_id = pending.plan_id.clone();
-                                        app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
                                             conversation_id,
                                             plan_id,
                                             decision: crate::domain::models::plan::PlanDecision::Reject,
@@ -1454,7 +1608,7 @@ pub async fn run(
                                     if let Some(ref pending) = state.pending_plan_card {
                                         let conversation_id = conversation.id.clone();
                                         let plan_id = pending.plan_id.clone();
-                                        app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
                                             conversation_id,
                                             plan_id,
                                             decision: crate::domain::models::plan::PlanDecision::Edit,
@@ -1470,7 +1624,7 @@ pub async fn run(
                                         let agent_name = pending.suggestion.agent_name.clone();
                                         state.pending_delegation_card = None;
                                         state.needs_redraw = true;
-                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
                                             conversation_id,
                                             plan_id,
                                             task_number,
@@ -1487,7 +1641,7 @@ pub async fn run(
                                         let agent_name = pending.suggestion.agent_name.clone();
                                         state.pending_delegation_card = None;
                                         state.needs_redraw = true;
-                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
                                             conversation_id,
                                             plan_id,
                                             task_number,
@@ -1503,7 +1657,7 @@ pub async fn run(
                                         let accepted: Vec<crate::domain::models::MemoryFact> =
                                             card.proposals.into_iter().map(|(f, _)| f).collect();
                                         state.needs_redraw = true;
-                                        app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
                                             conversation_id,
                                             accepted,
                                         });
@@ -1513,7 +1667,7 @@ pub async fn run(
                                     if state.pending_consolidation_card.take().is_some() {
                                         let conversation_id = conversation.id.clone();
                                         state.needs_redraw = true;
-                                        app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
                                             conversation_id,
                                             accepted: Vec::new(),
                                         });
@@ -1522,7 +1676,7 @@ pub async fn run(
                                 // Story 11.4a: `/memory forget` card key handlers.
                                 InputAction::ForgetAcceptAll => {
                                     if let Some(ev) = handlers::forget_command::resolve_forget_card(&mut state, &conversation.id, true) {
-                                        app_state.event_bus.emit_domain(ev);
+                                        let _ = app_state.event_bus.emit_domain(ev);
                                     }
                                 }
                                 InputAction::ForgetToggleSelection => {
@@ -1542,7 +1696,7 @@ pub async fn run(
                                 }
                                 InputAction::ForgetDeclineAll => {
                                     if let Some(ev) = handlers::forget_command::resolve_forget_card(&mut state, &conversation.id, false) {
-                                        app_state.event_bus.emit_domain(ev);
+                                        let _ = app_state.event_bus.emit_domain(ev);
                                     }
                                 }
                                 InputAction::DelegationCardCancel => {
@@ -1559,7 +1713,7 @@ pub async fn run(
                                             }
                                         };
                                         if plan.status != PlanStatus::Executing {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: NoticeLevel::Info,
                                                 message: "Plan already finished.".to_string(),
@@ -1573,7 +1727,7 @@ pub async fn run(
                                                 task.status = PlanTaskStatus::Cancelled;
                                                 task.completed_at_ms = Some(now_ms);
                                                 task.error = Some("Plan cancelled by user".to_string());
-                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                     conversation_id: conv_id.clone(),
                                                     plan_id: plan_id.clone(),
                                                     task_number: task.number,
@@ -1583,7 +1737,7 @@ pub async fn run(
                                         }
                                         plan.status = PlanStatus::Cancelled;
                                         let _ = plan;
-                                        app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
                                             conversation_id: conv_id.clone(),
                                             plan_id: plan_id.clone(),
                                             cancelled_at_task: Some(task_number),
@@ -1658,7 +1812,7 @@ pub async fn run(
                                         skill_activator
                                             .mark_trusted(&pending.conversation_id, pending.skill_file.clone())
                                             .await;
-                                        app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
                                             conversation_id: pending.conversation_id,
                                             skill_name: pending.skill_name,
                                             skill_file: pending.skill_file,
@@ -1685,7 +1839,7 @@ pub async fn run(
                                 InputAction::SkillTrustDecline => {
                                     let handled = if let Some(pending) = state.pending_activation.take() {
                                         state.pending_activation_inspect_content = None;
-                                        app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
                                             conversation_id: pending.conversation_id,
                                             skill_name: pending.skill_name,
                                             skill_file: pending.skill_file,
@@ -1874,7 +2028,7 @@ pub async fn run(
                                         port, crate::domain::models::AdapterRef { adapter, _config: None },
                                     ).await;
                                     if let HandlerOutcome::Notify(event) = outcome {
-                                        app_state.event_bus.emit_domain(event);
+                                        let _ = app_state.event_bus.emit_domain(event);
                                     }
                                 }
                                 InputAction::ClearAdapterOverride { port } => {
@@ -1883,7 +2037,7 @@ pub async fn run(
                                         &app_state.profile_resolver, port,
                                     ).await;
                                     if let HandlerOutcome::Notify(event) = outcome {
-                                        app_state.event_bus.emit_domain(event);
+                                        let _ = app_state.event_bus.emit_domain(event);
                                     }
                                 }
                                 InputAction::SubmitQuestionAnswer(answer) => {
@@ -1936,7 +2090,7 @@ pub async fn run(
                                                     Some(arg.as_str()),
                                                 );
                                                 if let Some(m) = mode {
-                                                    app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
                                                 } else {
                                                     if !matches!(state.status, StatusState::Flash { .. }) {
                                                         state.status_before_flash = Some(state.status.clone());
@@ -1980,7 +2134,7 @@ pub async fn run(
                                                     _ => None,
                                                 };
                                                 if let Some(m) = target {
-                                                    app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(m));
                                                 } else {
                                                     if !matches!(state.status, StatusState::Flash { .. }) {
                                                         state.status_before_flash = Some(state.status.clone());
@@ -2080,13 +2234,13 @@ pub async fn run(
                                         // /deactivate [name] — Story 5-2 AC5
                                         let conv_id = conversation.id.clone();
                                         if let Some(ref target) = cmd_arg {
-                                            app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                                 conversation_id: conv_id,
                                                 name: format!("__deactivate__{}", target),
                                                 arguments: String::new(),
                                             });
                                         } else {
-                                            app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                                 conversation_id: conv_id,
                                                 name: "__deactivate_all__".to_string(),
                                                 arguments: String::new(),
@@ -2108,7 +2262,7 @@ pub async fn run(
                                         // confirm AC4 requires) and surfaces a propose→confirm review
                                         // card. Daily-log entries are NEVER deleted (AC4).
                                         if streaming.is_streaming {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: crate::domain::models::NoticeLevel::Info,
                                                 message: "Consolidation unavailable while a turn is in progress — try again after it finishes.".to_string(),
@@ -2118,7 +2272,7 @@ pub async fn run(
                                             let memory = app_state.agent_core.memory.load_full();
                                             match memory.recent(30).await {
                                                 Ok(entries) if entries.is_empty() => {
-                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                         conversation_id: Some(conversation.id.clone()),
                                                         level: crate::domain::models::NoticeLevel::Info,
                                                         message: "Nothing to consolidate yet — no recent activity recorded.".to_string(),
@@ -2135,7 +2289,7 @@ pub async fn run(
                                                         domain_tx: domain_tx.clone(),
                                                     };
                                                     tokio::spawn(handlers::consolidation::run_consolidation(payload));
-                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                         conversation_id: Some(conversation.id.clone()),
                                                         level: crate::domain::models::NoticeLevel::Info,
                                                         message: "Reviewing recent activity for durable facts…".to_string(),
@@ -2143,7 +2297,7 @@ pub async fn run(
                                                     state.needs_redraw = true;
                                                 }
                                                 Err(e) => {
-                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                         conversation_id: Some(conversation.id.clone()),
                                                         level: crate::domain::models::NoticeLevel::Warning,
                                                         message: format!("Consolidation failed: {e}"),
@@ -2159,7 +2313,7 @@ pub async fn run(
                                         // handle_apply_adapter_override. Logic lives in the handler to
                                         // respect the AC-4 line budget; NOTHING is purged until confirm.
                                         if streaming.is_streaming {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: crate::domain::models::NoticeLevel::Info,
                                                 message: "Memory forget unavailable while a turn is in progress — try again after it finishes.".to_string(),
@@ -2172,7 +2326,7 @@ pub async fn run(
                                                 Some(app_state.agent_core.memory.load_full().forget_candidates(&query, handlers::forget_command::FORGET_CANDIDATE_LIMIT).await)
                                             };
                                             for ev in handlers::forget_command::handle_forget_command(&mut state, &conversation.id, &query, result) {
-                                                app_state.event_bus.emit_domain(ev);
+                                                let _ = app_state.event_bus.emit_domain(ev);
                                             }
                                         }
                                     } else if cmd_name == "context" {
@@ -2187,7 +2341,99 @@ pub async fn run(
                                             &conversation.id,
                                             cmd_arg,
                                         ) {
-                                            app_state.event_bus.emit_domain(ev);
+                                            let _ = app_state.event_bus.emit_domain(ev);
+                                        }
+                                    } else if cmd_name == "fanout" {
+                                        // Story 14.3b — `/fanout <N> <prompt>`: fan out N identical
+                                        // spokes (DD-B1). FanOutSpec is parsed here (turn-seam DTO)
+                                        // and translated to a ForkJoinRequest at the boundary.
+                                        // Intercepted BEFORE the adapter-override path. The
+                                        // orchestrator emits the 14.3a wave lifecycle events
+                                        // (ForkJoinStarted/SpokeCompleted/SynthesisReady/
+                                        // WaveCancelled) via the event bus; the handlers below
+                                        // render them.
+                                        // Story 14.3a (AC8): `/fanout cancel` explicit floor.
+                                        if cmd_arg.map(|a| a.trim()) == Some("cancel") {
+                                            if let Some(ref cancel) = state.wave_cancel {
+                                                if !cancel.is_cancelled() {
+                                                    cancel.cancel();
+                                                    state.rerunning_slot = None;
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Info,
+                                                        message: "Fan-out wave cancelled.".to_string(),
+                                                    });
+                                                } else {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Info,
+                                                        message: "Wave already cancelled.".to_string(),
+                                                    });
+                                                }
+                                            } else {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: crate::domain::models::NoticeLevel::Info,
+                                                    message: "No active wave to cancel.".to_string(),
+                                                });
+                                            }
+                                            state.needs_redraw = true;
+                                        } else if streaming.is_streaming {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: "/fanout unavailable while a turn is in progress — try again after it finishes.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                        } else if state.wave_state.is_some() {
+                                            // DN-1 (review): in-flight guard — reject a 2nd `/fanout` while a
+                                            // wave is active (prevents `wave_state` cross-pollution). The
+                                            // wave-id correlation + abort-on-cancel land in 14.3a (the UX
+                                            // consumer + cancel trigger).
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: "A fan-out wave is already in flight — wait for it to finish.".to_string(),
+                                            });
+                                            state.needs_redraw = true;
+                                        } else {
+                                            match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
+                                                Ok(spec) => {
+                                                    use crate::adapters::tui::widgets::exceptional_spawn_gate::{gate_decision, GateDecision};
+                                                    let request = crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config));
+                                                    let requested = request.spokes.len();
+                                                    let threshold = config.fanout_spawn_gate_threshold;
+                                                    match gate_decision(requested, threshold) {
+                                                        GateDecision::Allow => {
+                                                            launch_wave_request(
+                                                                &mut state,
+                                                                &app_state,
+                                                                conversation.id.clone(),
+                                                                request,
+                                                            );
+                                                        }
+                                                        GateDecision::Refuse => {
+                                                            state.pending_spawn_gate = Some(
+                                                                crate::adapters::tui::state::PendingSpawnGate {
+                                                                    spec,
+                                                                    requested,
+                                                                    threshold,
+                                                                    adjusted: None,
+                                                                },
+                                                            );
+                                                            state.needs_redraw = true;
+                                                        }
+                                                    }
+                                                }
+                                                Err(msg) => {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: msg,
+                                                    });
+                                                    state.needs_redraw = true;
+                                                }
+                                            }
                                         }
                                     } else if let Some(port) = crate::domain::services::adapter_overlay::port_dimension_from_command_name(cmd_name) {
                                         // Story 8.5 AC-7 — /persona, /memory, /session, /tools, /channels, /scheduler, /context
@@ -2198,7 +2444,7 @@ pub async fn run(
                                                     port, crate::domain::models::AdapterRef { adapter: adapter_name.to_string(), _config: None },
                                                 ).await;
                                                 if let HandlerOutcome::Notify(event) = outcome {
-                                                    app_state.event_bus.emit_domain(event);
+                                                    let _ = app_state.event_bus.emit_domain(event);
                                                 }
                                             }
                                             None => {
@@ -2242,7 +2488,7 @@ pub async fn run(
                                             let args_text = cmd_arg
                                                 .map(|s| s.trim().to_string())
                                                 .unwrap_or_default();
-                                            app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                                 conversation_id: conv_id,
                                                 name: cmd_name.to_string(),
                                                 arguments: args_text,
@@ -2311,7 +2557,23 @@ pub async fn run(
                                     all_images.extend(mention_images);
                                     state.image_indicator = None;
 
-                                    if streaming.is_streaming {
+                                    // Hardening (14.3c AI-12.3 smoke): NEVER POST an empty turn.
+                                    // An unrecognized slash command resolves to no command-context
+                                    // + empty text → submitting sends `messages: []` and the
+                                    // provider rejects with 400 "Empty input messages". Surface a
+                                    // clear notice instead of firing a doomed turn.
+                                    if full_text.trim().is_empty() && all_images.is_empty() {
+                                        if let Some(ref cmd) = command {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conversation.id.clone()),
+                                                level: crate::domain::models::NoticeLevel::Warning,
+                                                message: format!(
+                                                    "Unknown command: /{cmd} — not a built-in or a custom command."
+                                                ),
+                                            });
+                                        }
+                                        state.needs_redraw = true;
+                                    } else if streaming.is_streaming {
                                         let msg = UserMessage {
                                             content: full_text,
                                             images: all_images,
@@ -2426,7 +2688,7 @@ pub async fn run(
                                         match crate::adapters::tui::task_panel_handlers::resolve_panel_task_number(&state, &conversation, n) {
                                             Some(tn) => tn,
                                             None => {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
                                                     message: "No task selected.".to_string(),
@@ -2441,7 +2703,7 @@ pub async fn run(
                                         task_number,
                                     );
                                     for notice in &outcome.notices {
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(notice.conversation_id.clone()),
                                             level: notice.level,
                                             message: notice.message.clone(),
@@ -2455,7 +2717,7 @@ pub async fn run(
                                             .map(|t| t.status)
                                     };
                                     if let Some(status) = current_status {
-                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                             conversation_id: conversation.id.clone(),
                                             plan_id: plan_id.clone(),
                                             task_number,
@@ -2502,7 +2764,7 @@ pub async fn run(
                                         match crate::adapters::tui::task_panel_handlers::resolve_panel_task_number(&state, &conversation, n) {
                                             Some(tn) => tn,
                                             None => {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
                                                     message: "No task selected.".to_string(),
@@ -2517,7 +2779,7 @@ pub async fn run(
                                         task_number,
                                     );
                                     for notice in &notices {
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(notice.conversation_id.clone()),
                                             level: notice.level,
                                             message: notice.message.clone(),
@@ -2530,7 +2792,7 @@ pub async fn run(
                                             .map(|t| t.status)
                                     };
                                     if let Some(status) = current_status {
-                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                             conversation_id: conversation.id.clone(),
                                             plan_id: plan_id.clone(),
                                             task_number,
@@ -2564,7 +2826,7 @@ pub async fn run(
                                     let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
                                         Some(id) => id.clone(),
                                         None => {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Info,
                                                 message: "No active plan.".to_string(),
@@ -2589,13 +2851,13 @@ pub async fn run(
                                         None => false,
                                     };
                                     if should_retry {
-                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                             conversation_id: conversation.id.clone(),
                                             plan_id: plan_id.clone(),
                                             task_number: n,
                                             status: PlanTaskStatus::Pending,
                                         });
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Info,
                                             message: format!("Retrying Task {}.", n),
@@ -2666,7 +2928,7 @@ pub async fn run(
                                             match std::fs::read_to_string(&path) {
                                                 Ok(content) => {
                                                     if content == template {
-                                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                             conversation_id: Some(conversation.id.clone()),
                                                             level: NoticeLevel::Info,
                                                             message: "Task edit cancelled.".to_string(),
@@ -2699,7 +2961,7 @@ pub async fn run(
                                                             }
                                                         }
                                                         if new_title.is_empty() {
-                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                                 conversation_id: Some(conversation.id.clone()),
                                                                 level: NoticeLevel::Warning,
                                                                 message: "Failed to parse edited task — missing title. Task unchanged.".to_string(),
@@ -2717,13 +2979,13 @@ pub async fn run(
                                                                 plan.tasks[idx].error = None;
                                                                 plan.tasks[idx].result = None;
                                                             }
-                                                            app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                                 conversation_id: conversation.id.clone(),
                                                                 plan_id: plan_id.clone(),
                                                                 task_number: n,
                                                                 status: PlanTaskStatus::Pending,
                                                             });
-                                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                                 conversation_id: Some(conversation.id.clone()),
                                                                 level: NoticeLevel::Info,
                                                                 message: format!("Task {} edited and queued for retry.", n),
@@ -2750,7 +3012,7 @@ pub async fn run(
                                                     }
                                                 }
                                                 Err(_) => {
-                                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                         conversation_id: Some(conversation.id.clone()),
                                                         level: NoticeLevel::Warning,
                                                         message: "Failed to read edited file. Task unchanged.".to_string(),
@@ -2759,7 +3021,7 @@ pub async fn run(
                                             }
                                         }
                                         Err(_e) => {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Info,
                                                 message: "Task edit cancelled (editor exited with error).".to_string(),
@@ -2775,7 +3037,7 @@ pub async fn run(
                                     if let Some(plan) = executing_plan {
                                         state.task_panel_state.cancel_plan_confirm = Some(plan.id.clone());
                                     } else {
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Info,
                                             message: "No active plan to cancel.".to_string(),
@@ -2788,7 +3050,7 @@ pub async fn run(
                                     let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
                                         Some(id) => id.clone(),
                                         None => {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Info,
                                                 message: "No paused tasks.".to_string(),
@@ -2801,7 +3063,7 @@ pub async fn run(
                                         let plan = match conversation.plans.get_mut(&plan_id) {
                                             Some(p) => p,
                                             None => {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
                                                     message: "No paused tasks.".to_string(),
@@ -2818,7 +3080,7 @@ pub async fn run(
                                                     task.started_at_ms = None;
                                                 }
                                                 count += 1;
-                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                     conversation_id: conversation.id.clone(),
                                                     plan_id: plan_id.clone(),
                                                     task_number: task.number,
@@ -2828,13 +3090,13 @@ pub async fn run(
                                         }
                                     }
                                     if count == 0 {
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Info,
                                             message: "No paused tasks.".to_string(),
                                         });
                                     } else {
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Info,
                                             message: format!("Resumed {} task(s).", count),
@@ -2864,7 +3126,7 @@ pub async fn run(
                                     let plan_id = match state.task_panel_state.last_executed_plan_id.as_ref() {
                                         Some(id) => id.clone(),
                                         None => {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message: "No active plan.".to_string(),
@@ -2879,7 +3141,7 @@ pub async fn run(
                                             state.task_panel_state.reorder_mode_for = Some(n);
                                             state.task_panel_state.reorder_original_order = Some(orig_order);
                                         } else {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message: "Reorder requires a pending task selected.".to_string(),
@@ -2914,7 +3176,7 @@ pub async fn run(
                                                 continue;
                                             }
                                             if let Err(reason) = crate::domain::services::plan_runtime::validate_reorder(plan, task_n, new_i) {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Warning,
                                                     message: format!("Reorder violates dependencies: {}.", reason),
@@ -2932,7 +3194,7 @@ pub async fn run(
                                     if let Some(plan_id) = state.task_panel_state.last_executed_plan_id.as_ref() {
                                         if let Some(plan) = conversation.plans.get(plan_id) {
                                             for task in &plan.tasks {
-                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                     conversation_id: conversation.id.clone(),
                                                     plan_id: plan_id.clone(),
                                                     task_number: task.number,
@@ -2943,7 +3205,7 @@ pub async fn run(
                                     }
                                     state.task_panel_state.reorder_mode_for = None;
                                     state.task_panel_state.reorder_original_order = None;
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: NoticeLevel::Info,
                                         message: "Plan reordered.".to_string(),
@@ -3003,7 +3265,7 @@ pub async fn run(
                                                             "Skipped — upstream Task {} skipped",
                                                             skip_pending.source_task
                                                         ));
-                                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                             conversation_id: conv_id.clone(),
                                                             plan_id: plan_id.clone(),
                                                             task_number: *num,
@@ -3047,7 +3309,7 @@ pub async fn run(
                                             if let Some(plan) = conversation.plans.get(&plan_id) {
                                                 let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
                                                 if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
-                                                    app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                         conversation_id: conv_id.clone(),
                                                         plan_id: plan_id.clone(),
                                                         task_number: skip_pending.source_task,
@@ -3085,7 +3347,7 @@ pub async fn run(
                                         ).await;
                                         }
                                         PlanDecision::Edit => {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message: "Nothing to edit on auto-skip deviation. Use [n] to reject and stop.".to_string(),
@@ -3105,7 +3367,7 @@ pub async fn run(
                                                         task.status = PlanTaskStatus::Cancelled;
                                                         task.completed_at_ms = Some(now_ms);
                                                         task.error = Some("Plan cancelled by user".to_string());
-                                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                             conversation_id: conv_id.clone(),
                                                             plan_id: plan_id.clone(),
                                                             task_number: task.number,
@@ -3115,7 +3377,7 @@ pub async fn run(
                                                 }
                                                 plan.status = PlanStatus::Cancelled;
                                             }
-                                            app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
                                                 conversation_id: conv_id.clone(),
                                                 plan_id: plan_id.clone(),
                                                 cancelled_at_task: None,
@@ -3159,7 +3421,7 @@ pub async fn run(
                                                     }
                                                 }
                                             }
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: NoticeLevel::Info,
                                                 message: "Cancelling plan...".to_string(),
@@ -3171,7 +3433,7 @@ pub async fn run(
                                             };
                                             // Guard against plan that became terminal while confirm card was visible
                                             if plan.status != PlanStatus::Executing {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conv_id.clone()),
                                                     level: NoticeLevel::Info,
                                                     message: "Plan already finished.".to_string(),
@@ -3184,7 +3446,7 @@ pub async fn run(
                                                     task.status = PlanTaskStatus::Cancelled;
                                                     task.completed_at_ms = Some(now_ms);
                                                     task.error = Some("Plan cancelled by user".to_string());
-                                                    app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
                                                         conversation_id: conv_id.clone(),
                                                         plan_id: plan_id.clone(),
                                                         task_number: task.number,
@@ -3194,7 +3456,7 @@ pub async fn run(
                                             }
                                             plan.status = PlanStatus::Cancelled;
                                             let _ = plan;
-                                            app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
                                                 conversation_id: conv_id.clone(),
                                                 plan_id: plan_id.clone(),
                                                 cancelled_at_task: None,
@@ -3363,7 +3625,7 @@ pub async fn run(
                                 }
                                 InputAction::SkillSelected { name, arguments } => {
                                     let conv_id = conversation.id.clone();
-                                    app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::AskActivateSkill {
                                         conversation_id: conv_id,
                                         name,
                                         arguments,
@@ -3550,7 +3812,7 @@ pub async fn run(
                                 }
                                 InputAction::CycleMode => {
                                     let next = cycle_mode(security.current_mode());
-                                    app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(next));
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(next));
                                 }
                                 InputAction::SwitchToTab(n) => {
                                     if tab_manager.tab_count() > 1
@@ -3629,7 +3891,7 @@ pub async fn run(
                                             state.focus = FocusState::Chat;
                                         }
                                         if let Some(notice) = outcome.notice {
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(notice.conversation_id),
                                                 level: notice.level,
                                                 message: notice.message,
@@ -3668,7 +3930,7 @@ pub async fn run(
                                         } else {
                                             "Panel requires terminal width >= 120 cols.".to_string()
                                         };
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Warning,
                                             message: narrow_msg,
@@ -3777,6 +4039,29 @@ pub async fn run(
                                         }
                                     }
                                 }
+                                InputAction::AgentPauseToggle => {
+                                    if let Some(entry) = state.selected_agent().cloned() {
+                                        let op = match entry.current_status {
+                                            crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
+                                            crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
+                                            _ => {
+                                                // Only Running→Pause and Suspended→Resume are valid
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Cannot pause/resume agent in {:?} state", entry.current_status),
+                                                    remaining_ms: 2000,
+                                                };
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        };
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let registry = provider.registry();
+                                            let _ = registry.send_op(&entry.agent_id, op).await;
+                                        }
+                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                        state.needs_redraw = true;
+                                    }
+                                }
                                 InputAction::DeleteSidebarConversation => {
                                     // Resolve conversation ID from sidebar selection
                                     if let Some(entry) = session_index.entries().get(state.sidebar_selected) {
@@ -3840,7 +4125,7 @@ pub async fn run(
                                                     let tab_id = tab_manager.active_tab_id();
                                         if streaming.is_streaming || state.pending_consolidation_card.is_some() {
                                             if state.pending_consolidation_card.is_some() {
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: crate::domain::models::NoticeLevel::Info,
                                                     message: "A consolidation review is already pending — accept or decline it first.".to_string(),
@@ -4533,13 +4818,13 @@ pub async fn run(
                                             } else {
                                                 format!("Active agent: {}", name)
                                             };
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: crate::domain::models::NoticeLevel::Info,
                                                 message: notice_msg,
                                             });
                                             if let Some(text) = then_submit {
-                                                app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                                     conversation_id: conv_id,
                                                     text,
                                                     synthetic: false,
@@ -4554,7 +4839,7 @@ pub async fn run(
                                             if matches!(e, crate::adapters::agent_activation::AgentActivationError::OutsideWorkspace(..)) {
                                                 state.agent_registry.remove(&name);
                                             }
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id),
                                                 level,
                                                 message: format!("Agent activation failed: {}", e),
@@ -4573,13 +4858,13 @@ pub async fn run(
                                     } else {
                                         "No active agent".to_string()
                                     };
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conv_id.clone()),
                                         level: crate::domain::models::NoticeLevel::Info,
                                         message: notice_msg,
                                     });
                                     if let Some(text) = then_submit {
-                                        app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                             conversation_id: conv_id,
                                             text,
                                             synthetic: false,
@@ -4590,7 +4875,7 @@ pub async fn run(
                                 InputAction::AgentDiscoveryPending { name, then_submit } => {
                                     state.pending_agent_activation =
                                         Some((name.clone(), then_submit));
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: crate::domain::models::NoticeLevel::Info,
                                         message: format!(
@@ -4601,7 +4886,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::UnknownAgent(name) => {
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: crate::domain::models::NoticeLevel::Warning,
                                         message: format!(
@@ -4999,14 +5284,14 @@ pub async fn run(
                                 InputAction::ScrollLineDown => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::LineDown) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
                                 InputAction::ScrollLineUp => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::LineUp) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
@@ -5026,28 +5311,28 @@ pub async fn run(
                                 InputAction::ScrollHalfPageDown => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::HalfPageDown) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
                                 InputAction::ScrollHalfPageUp => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::HalfPageUp) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
                                 InputAction::ScrollFullPageDown => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::FullPageDown) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
                                 InputAction::ScrollFullPageUp => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, crate::domain::models::view_state::ScrollDelta::FullPageUp) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
@@ -5059,7 +5344,7 @@ pub async fn run(
                                     // AC3 + AC15 (G is jump-intent, not scroll-intent).
                                     let mode = tab_manager.active_tab().view_state.mode.clone();
                                     if matches!(mode, crate::domain::models::AnchorMode::Pinned(_)) {
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: crate::domain::models::NoticeLevel::Info,
                                             message: "Anchored. Press ]] to release, then G to jump.".to_string(),
@@ -5072,7 +5357,7 @@ pub async fn run(
                                 InputAction::MouseScroll(delta) => {
                                     match handlers::scroll::handle_apply_scroll_intent(&mut tab_manager, &mut state, &conversation, delta) {
                                         HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::Notify(ev) => { app_state.event_bus.emit_domain(ev); }
+                                        HandlerOutcome::Notify(ev) => { let _ = app_state.event_bus.emit_domain(ev); }
                                         _ => unreachable!("scroll_intent only returns Quiet or Notify"),
                                     }
                                 }
@@ -5230,7 +5515,7 @@ pub async fn run(
                                                 db.dismissed_until_unix = next_midnight;
                                             }
                                             handlers::budget::handle_clear_daily_budget_warning(&mut state);
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Info,
                                                 message:
@@ -5241,7 +5526,7 @@ pub async fn run(
                                             tracing::error!(
                                                 "Failed to persist budget pause: {e}"
                                             );
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message:
@@ -5316,7 +5601,7 @@ pub async fn run(
                                     .await;
                                     match outcome {
                                         HandlerOutcome::Notify(event) => {
-                                            app_state.event_bus.emit_domain(event);
+                                            let _ = app_state.event_bus.emit_domain(event);
                                         }
                                         HandlerOutcome::RequestSpawn(spawn_req) => {
                                             if let crate::adapters::tui::handlers::SpawnRequest::ProfileSwap {
@@ -5352,6 +5637,210 @@ pub async fn run(
                                             }
                                         }
                                         _ => {}
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                // === Story 14.3a: wave overlay dispatchers ===
+                                InputAction::WaveRerunSpoke(slot) => {
+                                    // P2 (AI-12.3 — Amelia): reject a 2nd in-flight
+                                    // rerun with a DISTINCT event — the single-slot
+                                    // lamp can't represent two, and overlapping reruns
+                                    // race on `rerunning_slot`. `RerunRejectedBusy`
+                                    // (not a silent drop / generic notice) so AC11
+                                    // starvation is observable + testable.
+                                    if state.rerunning_slot.is_some() {
+                                        let _ = app_state
+                                            .event_bus
+                                            .emit_domain(AppEvent::RerunRejectedBusy { slot });
+                                        state.needs_redraw = true;
+                                    } else if state
+                                        .wave_cancel
+                                        .as_ref()
+                                        .is_some_and(|c| c.is_cancelled())
+                                    {
+                                        // Story 14.3c: the wave was cancelled (Ctrl-C /
+                                        // `/fanout cancel`). A re-run is a child of the now-dead
+                                        // wave token, so it would be born cancelled and revert
+                                        // with a misleading "cap reached". Surface a clear retry
+                                        // hint instead of dispatching a doomed re-run.
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: crate::domain::models::NoticeLevel::Info,
+                                            message: "Wave cancelled — run /fanout again to retry."
+                                                .to_string(),
+                                        });
+                                        state.needs_redraw = true;
+                                    } else if let (Some(orchestrator), Some(wave_cancel)) = (
+                                        app_state.orchestrator.clone(),
+                                        state.wave_cancel.clone(),
+                                    ) {
+                                        // AC11 + P2: set the lamp synchronously AND
+                                        // only now that the rerun will actually
+                                        // dispatch (emit-before-guard left the lamp
+                                        // stuck when the guard failed).
+                                        state.rerunning_slot = Some(slot);
+                                        let _ = app_state
+                                            .event_bus
+                                            .emit_domain(AppEvent::SpokeRerunStarted { slot });
+                                        // AC8: child token of the wave root for the rerun.
+                                        let event_bus = app_state.event_bus.clone();
+                                        let cancel = wave_cancel.child_token();
+                                        let conv_id = conversation.id.clone();
+                                        // F1 (AI-12.3 post-review party-mode): OWN the rerun
+                                        // JoinHandle in a supervisor task — DN-1 parity with
+                                        // `launch_wave_request`. Without it a panic inside
+                                        // `rerun_spoke` is silently swallowed (the fire-and-
+                                        // forget match never runs), `rerunning_slot` is never
+                                        // cleared, the AC11 lamp sticks, and the busy-guard at
+                                        // the top of this arm fires `RerunRejectedBusy` for
+                                        // every later rerun until a manual Esc/Ctrl-C.
+                                        let rerun = tokio::spawn(async move {
+                                            use crate::domain::ports::Orchestrator;
+                                            orchestrator.rerun_spoke(slot, cancel).await
+                                        });
+                                        tokio::spawn(async move {
+                                            match rerun.await {
+                                                Ok(Ok(outcome)) => {
+                                                    use crate::domain::ports::wave_handle::RerunOutcome;
+                                                    match outcome {
+                                                        RerunOutcome::Replaced(new_handle) => {
+                                                            let _ = event_bus.emit_domain(
+                                                                AppEvent::WaveRunReady(new_handle),
+                                                            );
+                                                        }
+                                                        RerunOutcome::Reverted { slot: rev_slot } => {
+                                                            // AC11 lamp-clear: emit SpokeRerunReverted
+                                                            // so the event handler clears rerunning_slot.
+                                                            let _ = event_bus.emit_domain(
+                                                                AppEvent::SpokeRerunReverted {
+                                                                    slot: rev_slot,
+                                                                },
+                                                            );
+                                                            let _ = event_bus.emit_domain(
+                                                                AppEvent::SystemNotice {
+                                                                    conversation_id: Some(
+                                                                        conv_id.clone(),
+                                                                    ),
+                                                                    level: crate::domain::models::NoticeLevel::Info,
+                                                                    message: format!("Spoke {rev_slot} re-run cap reached (3×) — press `r` again to queue, or `e` to extend cap."),
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Err(e)) => {
+                                                    // AC11 lamp-clear on error
+                                                    let _ = event_bus.emit_domain(
+                                                        AppEvent::SpokeRerunReverted { slot },
+                                                    );
+                                                    let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conv_id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: format!("Spoke re-run failed: {e}"),
+                                                    });
+                                                }
+                                                Err(_join_err) if _join_err.is_panic() => {
+                                                    // F1: a rerun-task panic must clear the lamp —
+                                                    // mirror launch_wave_request's panic→terminal arm.
+                                                    let _ = event_bus.emit_domain(
+                                                        AppEvent::SpokeRerunReverted { slot },
+                                                    );
+                                                    let _ = event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conv_id.clone()),
+                                                        level: crate::domain::models::NoticeLevel::Warning,
+                                                        message: format!(
+                                                            "Spoke {slot} re-run task panicked — see logs."
+                                                        ),
+                                                    });
+                                                }
+                                                Err(_) => {
+                                                    // cancelled / aborted — clear the lamp.
+                                                    let _ = event_bus.emit_domain(
+                                                        AppEvent::SpokeRerunReverted { slot },
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::OpenWaveOverlay => {
+                                    state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+                                    state.wave_overlay_selected = 0;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CloseWaveOverlay => {
+                                    state.pending_spawn_gate = None;
+                                    state.wave_diverge_open = false;
+                                    state.wave_drill_body = None;
+                                    state.focus = FocusState::Chat;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::WaveDrillSpoke(slot) => {
+                                    // P8 (review): lazy drill — store the body in state so
+                                    // the render path can show it inline, instead of dumping
+                                    // it as a SystemNotice that scrolls away.
+                                    if let Some(ref handle) = state.wave_run {
+                                        if let Some(body) = handle.drill(slot) {
+                                            state.wave_drill_body =
+                                                Some((slot, body.as_render_str().to_string()));
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::OpenDivergeView => {
+                                    if state.wave_run.is_some() {
+                                        state.wave_diverge_open = true;
+                                        state.focus = FocusState::Chat;
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::CloseDivergeView => {
+                                    state.wave_diverge_open = false;
+                                    state.focus = FocusState::Chat;
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::DismissWave => {
+                                    // Story 14.3c: Esc-unwind dismiss of a
+                                    // completed/cancelled wave display.
+                                    state.dismiss_wave();
+                                }
+                                InputAction::SpawnGateConfirm => {
+                                    if let Some(mut pending) = state.pending_spawn_gate.take() {
+                                        let effective_n = pending.effective_n();
+                                        match &mut pending.spec {
+                                            crate::adapters::tui::fanout_spec::FanOutSpec::Identical {
+                                                count,
+                                                ..
+                                            } => {
+                                                *count = effective_n;
+                                            }
+                                        }
+                                        let request = crate::adapters::tui::fanout_spec::to_request(&pending.spec, effective_model(&state, config));
+                                        launch_wave_request(
+                                            &mut state,
+                                            &app_state,
+                                            conversation.id.clone(),
+                                            request,
+                                        );
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::SpawnGateCap => {
+                                    if let Some(gate) = state.pending_spawn_gate.as_mut() {
+                                        gate.cap_at_threshold();
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::SpawnGateAdjustLeft => {
+                                    if let Some(gate) = state.pending_spawn_gate.as_mut() {
+                                        gate.adjust_left();
+                                    }
+                                    state.needs_redraw = true;
+                                }
+                                InputAction::SpawnGateAdjustRight => {
+                                    if let Some(gate) = state.pending_spawn_gate.as_mut() {
+                                        gate.adjust_right();
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -5721,7 +6210,7 @@ pub async fn run(
                                                 conversation.messages.truncate(pos);
                                             }
                                             fallback_agent.model = None;
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message: format!(
@@ -5881,7 +6370,7 @@ pub async fn run(
 
                         match outcome {
                             crate::domain::models::PlanApprovalOutcome::ApproveNormal => {
-                                app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
                                 let plan_path = app_state.plan_manager.plan_file_for(&mut tab_manager.active_tab_mut().session_meta).path;
                                 let synthetic_msg = crate::domain::models::ChatMessage {
                                     id: crate::domain::models::generate_conversation_id(),
@@ -5905,7 +6394,7 @@ pub async fn run(
                                 submit_turn!(text, vec![], false, _snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                             }
                             crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit => {
-                                app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::AutoEdit));
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::AutoEdit));
                                 let plan_path = app_state.plan_manager.plan_file_for(&mut tab_manager.active_tab_mut().session_meta).path;
                                 let synthetic_msg = crate::domain::models::ChatMessage {
                                     id: crate::domain::models::generate_conversation_id(),
@@ -6120,7 +6609,7 @@ pub async fn run(
                                         message: "Plan rejected. You can provide feedback or try a different approach.".to_string(),
                                     });
                                     let conv_id = conversation.id.clone();
-                                    app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                         conversation_id: conv_id,
                                         text: "Plan rejected by user. Please revise the approach or ask clarifying questions before retrying.".to_string(),
                                         synthetic: true,
@@ -6142,7 +6631,7 @@ pub async fn run(
                                                     None
                                                 }
                                             };
-                                            app_state.event_bus.emit_domain(AppEvent::PlanCardEditCompleted {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardEditCompleted {
                                                 conversation_id: conversation.id.clone(),
                                                 plan_id,
                                                 edited_plan,
@@ -6202,7 +6691,7 @@ pub async fn run(
                         if conversation.id != conversation_id {
                             tracing::warn!("MemoryConsolidationProposed for mismatched conversation");
                         } else if proposals.is_empty() {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation.id.clone()),
                                 level: NoticeLevel::Info,
                                 message: "Nothing worth promoting from recent activity.".to_string(),
@@ -6224,7 +6713,7 @@ pub async fn run(
                             state.focus = FocusState::Input;
                             if accepted.is_empty() {
                                 // Declined — AC3/AC4: nothing is written.
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: NoticeLevel::Info,
                                     message: "Consolidation declined — nothing promoted.".to_string(),
@@ -6268,7 +6757,7 @@ pub async fn run(
                                 } else {
                                     format!("Promoted {promoted} fact(s) to MEMORY.md.")
                                 };
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: NoticeLevel::Info,
                                     message,
@@ -6279,7 +6768,7 @@ pub async fn run(
                     }
                     AppEvent::MemoryConsolidationFailed { conversation_id, reason } => {
                         if conversation.id == conversation_id {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation.id.clone()),
                                 level: NoticeLevel::Warning,
                                 message: format!("Consolidation failed: {reason}"),
@@ -6301,7 +6790,7 @@ pub async fn run(
                             } else {
                                 Some(app_state.agent_core.memory.load_full().forget(&keys).await)
                             };
-                            app_state.event_bus.emit_domain(handlers::forget_command::forget_result_notice(&conversation.id, keys.len(), result));
+                            let _ = app_state.event_bus.emit_domain(handlers::forget_command::forget_result_notice(&conversation.id, keys.len(), result));
                             state.needs_redraw = true;
                         } else {
                             tracing::warn!("MemoryForgetResolved for mismatched conversation");
@@ -6337,7 +6826,7 @@ pub async fn run(
                             &auto_open_setting,
                         );
                         for notice in outcome.notices {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(notice.conversation_id),
                                 level: notice.level,
                                 message: notice.message,
@@ -6384,7 +6873,7 @@ pub async fn run(
                                     .map(|p| p.tasks.len())
                                     .unwrap_or(0);
                                 state.needs_redraw = true;
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: NoticeLevel::Warning,
                                     message: "Plan failed — task panel reopened.".to_string(),
@@ -6400,7 +6889,7 @@ pub async fn run(
                             tracing::info!("{}", msg);
                             if conversation_id == conversation.id {
                                 state.task_panel_state.last_executed_plan_id = Some(plan_id);
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: NoticeLevel::Info,
                                     message: msg,
@@ -6414,7 +6903,7 @@ pub async fn run(
                             if suggestion.auto_proceed || yolo {
                                 // YOLO auto-accept: emit resolved immediately
                                 let agent_name = suggestion.agent_name.clone();
-                                app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
                                     conversation_id,
                                     plan_id,
                                     task_number,
@@ -6422,7 +6911,7 @@ pub async fn run(
                                     agent_name,
                                 });
                                 if yolo {
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("YOLO: auto-delegated Task {} to {}", task_number, suggestion.agent_name),
@@ -6464,13 +6953,13 @@ pub async fn run(
                                             ).await;
                                             if let Err(e) = result {
                                                 tracing::warn!("Delegation failed for task {}: {}", task_number, e);
-                                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Warning,
                                                     message: format!("⚠ Could not delegate Task {} ({}). Running locally.", task_number, e),
                                                 });
                                                 // Fallback: re-emit RunLocally so the Resolved arm handles it
-                                                app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
                                                     conversation_id,
                                                     plan_id,
                                                     task_number,
@@ -6480,13 +6969,13 @@ pub async fn run(
                                             }
                                         } else {
                                             tracing::warn!("Agent {} not found in registry", agent_name);
-                                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
                                                 level: NoticeLevel::Warning,
                                                 message: format!("⚠ Agent '{}' not found. Running Task {} locally.", agent_name, task_number),
                                             });
                                             // Fallback: re-emit RunLocally
-                                            app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
                                                 conversation_id,
                                                 plan_id,
                                                 task_number,
@@ -6496,13 +6985,13 @@ pub async fn run(
                                         }
                                     } else {
                                         tracing::warn!("No subagent provider available for delegation");
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
                                             level: NoticeLevel::Warning,
                                             message: format!("⚠ No subagent provider available. Running Task {} locally.", task_number),
                                         });
                                         // Fallback: re-emit RunLocally
-                                        app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
                                             conversation_id,
                                             plan_id,
                                             task_number,
@@ -6560,7 +7049,7 @@ pub async fn run(
                         AppEvent::PlanDeviation { conversation_id: cid, plan_id: pid, deviation_kind, original_step_count: _, current_step_count: _, changed_steps: _, summary } => {
                             let yolo = security.current_mode() == PermissionMode::Yolo;
                             if yolo {
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(cid.clone()),
                                     level: NoticeLevel::Info,
                                     message: format!("Plan adjusted: {}", summary),
@@ -6852,8 +7341,6 @@ pub async fn run(
                                     state.active_agent_name = None;
                                     session_index.set_open(&conversation.id, true);
                                     session_index.set_active(Some(&conversation.id));
-                                    state.compacting = false;
-                                    state.needs_redraw = true;
                                     let event = AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id),
                                         level: NoticeLevel::Warning,
@@ -6873,11 +7360,17 @@ pub async fn run(
                                     let fb_id = fb.id.clone();
                                     state.feedback_blocks.insert(fb_id.clone(), fb);
                                     state.active_feedback_id = Some(fb_id);
-                                    state.compacting = false;
-                                    state.needs_redraw = true;
                                 }
                             }
                         }
+                        // Release the global `compacting` flag regardless of whether the
+                        // originating conversation is still the active tab. A mid-compaction
+                        // tab switch makes `is_active` false; clearing only inside the
+                        // `is_active` blocks would leave the flag set forever and wedge all
+                        // future /compact attempts (guard: compaction.rs `state.compacting`).
+                        // Mirrors the unconditional clear in the CompactionComplete arm above.
+                        state.compacting = false;
+                        state.needs_redraw = true;
                     }
                     AppEvent::AskUserQuestion {
                         conversation_id,
@@ -7016,14 +7509,14 @@ pub async fn run(
                             .await;
                         }
                         if count > 0 {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Info,
                                 message: format!("Loaded {} skills", count),
                             });
                         }
                         if warnings > 0 {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Warning,
                                 message: format!(
@@ -7053,14 +7546,14 @@ pub async fn run(
                             .await;
                         }
                         if count > 0 {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Info,
                                 message: format!("Discovered {} custom agent(s) in .claude/agents/", count),
                             });
                         }
                         if warnings > 0 {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: None,
                                 level: NoticeLevel::Warning,
                                 message: format!(
@@ -7087,13 +7580,13 @@ pub async fn run(
                                         } else {
                                             format!("Active agent: {}", pending_name)
                                         };
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conv_id.clone()),
                                             level: crate::domain::models::NoticeLevel::Info,
                                             message: notice_msg,
                                         });
                                         if let Some(text) = then_submit {
-                                            app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::AgentThenSubmit {
                                                 conversation_id: conv_id,
                                                 text,
                                                 synthetic: false,
@@ -7114,7 +7607,7 @@ pub async fn run(
                                         ) {
                                             state.agent_registry.remove(&pending_name);
                                         }
-                                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conv_id),
                                             level,
                                             message: format!("Agent activation failed: {}", e),
@@ -7123,7 +7616,7 @@ pub async fn run(
                                 }
                                 state.needs_redraw = true;
                             } else {
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation.id.clone()),
                                     level: crate::domain::models::NoticeLevel::Warning,
                                     message: format!(
@@ -7164,7 +7657,7 @@ pub async fn run(
                                 let names: Vec<&str> = deactivated.iter().map(|s| s.name.as_str()).collect();
                                 format!("Deactivated {} skill(s): [{}]", names.len(), names.join(", "))
                             };
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: msg,
@@ -7176,14 +7669,14 @@ pub async fn run(
                                     state.active_skill_count = skill_activator
                                         .active_count(&conversation_id)
                                         .await;
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("Deactivated skill '{}'", deactivated.name),
                                     });
                                 }
                                 None => {
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("Skill '{}' is not active", stripped),
@@ -7195,7 +7688,7 @@ pub async fn run(
                             let def = match def {
                                 Some(d) => d,
                                 None => {
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Error,
                                         message: format!("Skill '{}' not found", name),
@@ -7222,7 +7715,7 @@ pub async fn run(
                                         existing = ?state.pending_activation.as_ref().map(|p| &p.skill_name),
                                         "second user-driven skill trust prompt while one is already pending; dropping"
                                     );
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!(
@@ -7246,7 +7739,7 @@ pub async fn run(
                             // during `rx.await` — if so, skip activation + turn kickoff
                             // (the turn driver would run against the wrong conversation).
                             if conversation.id != conversation_id {
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
                                     message: format!(
@@ -7271,14 +7764,14 @@ pub async fn run(
                                         .await;
                                     let agent_snap = agent_activator.snapshot(&conversation.id).await;
                                     submit_turn!(user_msg, Vec::new(), false, snap, agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Info,
                                         message: format!("Skill '{}' activated", active.name),
                                     });
                                 }
                                 Err(e) => {
-                                    app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation_id.clone()),
                                         level: NoticeLevel::Error,
                                         message: e.to_string(),
@@ -7317,7 +7810,7 @@ pub async fn run(
                         trusted,
                     } => {
                         if !trusted {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: format!(
@@ -7330,7 +7823,7 @@ pub async fn run(
                         }
 
                         if conversation.id != conversation_id {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: format!(
@@ -7345,7 +7838,7 @@ pub async fn run(
                         let def = match skill_activator.lookup_skill(&skill_name).await {
                             Some(d) => d,
                             None => {
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Error,
                                     message: format!(
@@ -7359,7 +7852,7 @@ pub async fn run(
                         };
 
                         if def.file != skill_file {
-                            app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                 conversation_id: Some(conversation_id.clone()),
                                 level: NoticeLevel::Info,
                                 message: format!(
@@ -7384,14 +7877,14 @@ pub async fn run(
                                     .await;
                                 let agent_snap = agent_activator.snapshot(&conversation.id).await;
                                 submit_turn!(user_msg, Vec::new(), false, snap, agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Info,
                                     message: format!("Skill '{}' activated", active.name),
                                 });
                             }
                             Err(e) => {
-                                app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                     conversation_id: Some(conversation_id.clone()),
                                     level: NoticeLevel::Error,
                                     message: format!("Skill '{}' activation failed: {}", skill_name, e),
@@ -7410,6 +7903,7 @@ pub async fn run(
                             cli: &app_state.cli_snapshot,
                             config_store: app_state.config_store.as_ref(),
                             profile_store: &app_state.profile_resolver,
+                            cli_config_overrides: app_state.cli_config_overrides.as_ref(),
                             // Story 8.3 AC-8 — pass AgentCore + ComposeContext for reload re-composition
                             agent_core: &app_state.agent_core,
                             compose_snapshot: &app_state.compose_snapshot,
@@ -7428,9 +7922,9 @@ pub async fn run(
                             _ => "Configuration reload failed — keeping previous config",
                         };
                         if let crate::adapters::tui::handlers::HandlerOutcome::Notify(event) = outcome {
-                            app_state.event_bus.emit_domain(event);
+                            let _ = app_state.event_bus.emit_domain(event);
                         }
-                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                             conversation_id: None,
                             level: notice_level,
                             message: notice_msg.to_string(),
@@ -7508,7 +8002,7 @@ pub async fn run(
                         } else {
                             " (PARTIAL — restart recommended)"
                         };
-                        app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                             conversation_id: None,
                             level: crate::domain::models::NoticeLevel::Warning,
                             message: format!(
@@ -7593,6 +8087,84 @@ pub async fn run(
                             actions: vec![],
                         };
                         state.feedback_blocks.insert(fb.id.clone(), fb);
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::Subagent(envelope) => {
+                        state.handle_subagent_envelope(envelope);
+                    }
+                    // Story 14.3b — fork-join wave lifecycle handlers. The
+                    // orchestrator emits these via the event bus; each updates
+                    // the live wave snapshot on TuiState and flags a redraw.
+                    // The render path (14.3a) paints the WaveStrip/SynthesisBlock
+                    // from `state.wave_state`.
+                    AppEvent::ForkJoinStarted { coordinator, spoke_count } => {
+                        state.wave_state = Some(
+                            crate::adapters::tui::state::WaveViewState::started(coordinator, spoke_count),
+                        );
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SpokeCompleted { .. } => {
+                        if let Some(wave) = state.wave_state.as_mut() {
+                            wave.record_spoke_completed();
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::SynthesisReady { honest_empty, .. } => {
+                        if let Some(wave) = state.wave_state.as_mut() {
+                            wave.record_synthesis_ready(honest_empty);
+                        }
+                        state.needs_redraw = true;
+                    }
+                    AppEvent::WaveCancelled { .. } => {
+                        // 14.3c (AI-12.3): delegate to the extracted handler so
+                        // the AC8 keystone drives the SAME code production runs.
+                        state.handle_wave_cancelled();
+                    }
+                    // Story 14.3a (F1+F2+F5): the wave handle arrived from the
+                    // detached spawn. Store it on TuiState for drill/diverge/
+                    // rerun/cancel. This is the RETAINED handle — a domain
+                    // trait object, never the infra ForkJoinRun.
+                    AppEvent::WaveRunReady(handle) => {
+                        // AC11: swap in the new handle via the extracted handler.
+                        // If a rerun was in flight it returns the slot — surface
+                        // the transient "updated" notice. The keystone drives the
+                        // SAME handler, never an inline copy.
+                        if let Some(slot) = state.handle_wave_run_ready(handle) {
+                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                conversation_id: Some(conversation.id.clone()),
+                                level: crate::domain::models::NoticeLevel::Info,
+                                message: format!("Spoke {slot} updated"),
+                            });
+                        }
+                    }
+                    // Story 14.3a (AI-12.3 D-B): the wave ended WITHOUT a handle
+                    // (run_wave Err / spawn panic/cancel). Retire the in-flight
+                    // marker so a stale token/flag can't swallow a later Ctrl-C.
+                    AppEvent::WaveTerminated { id } => {
+                        // D-B (AI-12.3): correlated retire via the extracted
+                        // handler (a stale id is a no-op).
+                        state.handle_wave_terminated(id);
+                    }
+                    // Story 14.3a (AC11): rerun in-progress lamp. Set
+                    // synchronously BEFORE the rerun future completes. Cleared
+                    // on Replaced/Reverted terminal.
+                    AppEvent::SpokeRerunStarted { slot } => {
+                        state.handle_spoke_rerun_started(slot);
+                    }
+                    // Story 14.3a (AC11): rerun Reverted terminal — clear lamp.
+                    AppEvent::SpokeRerunReverted { slot } => {
+                        state.handle_spoke_rerun_reverted(slot);
+                    }
+                    // Story 14.3a (AI-12.3 — Amelia): rerun rejected — a rerun is
+                    // already in flight. Surface a transient notice (the lamp stays
+                    // on the in-flight rerun; the reject is non-destructive). The
+                    // DISTINCT event keeps AC11 starvation observable + testable.
+                    AppEvent::RerunRejectedBusy { slot } => {
+                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                            conversation_id: Some(conversation.id.clone()),
+                            level: crate::domain::models::NoticeLevel::Info,
+                            message: format!("Spoke {slot} re-run busy — wait for the in-flight re-run."),
+                        });
                         state.needs_redraw = true;
                     }
                     _ => {
@@ -8923,6 +9495,99 @@ fn render(
                     msg_bounds = result.message_boundaries;
                     user_msg_bounds = result.user_message_boundaries;
                     focused_tool_id = result.focused_tool_id;
+                }
+
+                if let Some(ref gate) = state.pending_spawn_gate {
+                    let lines = crate::adapters::tui::widgets::exceptional_spawn_gate::render_spawn_gate(
+                        &crate::adapters::tui::widgets::exceptional_spawn_gate::SpawnGateSnapshot {
+                            requested: gate.requested,
+                            threshold: gate.threshold,
+                            adjusted: gate.adjusted,
+                        },
+                        app_layout.chat_pane.width,
+                    );
+                    render_lines_bottom(frame, app_layout.chat_pane, lines);
+                } else if let Some(ref handle) = state.wave_run {
+                    let snap = handle.snapshot();
+                    if state.wave_diverge_open {
+                        let lines = crate::adapters::tui::widgets::diverge_view::render_diverge_view(
+                            &crate::adapters::tui::widgets::diverge_view::DivergeSnapshot::new(
+                                snap.outcome
+                                    .spokes
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(slot, (_, result))| {
+                                        (format!("SPOKE-{slot}"), result.clone())
+                                    })
+                                    .collect(),
+                                app_layout.chat_pane.width,
+                            ),
+                        );
+                        render_lines_bottom(frame, app_layout.chat_pane, lines);
+                    } else if let Some((drill_slot, ref drill_text)) = state.wave_drill_body {
+                        // P8 (review): render the drilled spoke body inline
+                        // instead of dumping it as a SystemNotice.
+                        let header = ratatui::text::Line::styled(
+                            format!("── Drill: spoke {drill_slot} ──"),
+                            ratatui::style::Style::default()
+                                .fg(ratatui::style::Color::Cyan)
+                                .add_modifier(ratatui::style::Modifier::BOLD),
+                        );
+                        let mut lines = vec![header];
+                        for line in drill_text.lines().take(app_layout.chat_pane.height.saturating_sub(2) as usize) {
+                            lines.push(ratatui::text::Line::raw(line.to_string()));
+                        }
+                        render_lines_bottom(frame, app_layout.chat_pane, lines);
+                    } else if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {
+                        let rows = wave_result_rows(&snap, state.rerunning_slot);
+                        let lines = crate::adapters::tui::widgets::wave_overlay::render_wave_overlay(
+                            &crate::adapters::tui::widgets::wave_overlay::WaveOverlaySnapshot {
+                                rows,
+                                selected: state.wave_overlay_selected,
+                                viewport_height: app_layout.chat_pane.height,
+                                collapsed: false,
+                            },
+                            app_layout.chat_pane.width,
+                        );
+                        render_lines_bottom(frame, app_layout.chat_pane, lines);
+                    } else {
+                        let rows = wave_result_rows(&snap, state.rerunning_slot);
+                        let lines: Vec<_> = rows
+                            .iter()
+                            .map(|row| {
+                                crate::adapters::tui::widgets::result_row::render_result_row(
+                                    row,
+                                    app_layout.chat_pane.width,
+                                )
+                            })
+                            .collect();
+                        render_lines_bottom(frame, app_layout.chat_pane, lines);
+                    }
+                // WAVE_RUN_RENDER_BLOCK_END — conformance boundary. The COMPLETED
+                // wave render above must PULL its counts from `handle.snapshot()`
+                // (AC11 honesty); the IN-PROGRESS strip below legitimately reads
+                // the push-counter `wave_state` because there is no handle yet.
+                } else if let Some(ref wave) = state.wave_state {
+                    // 14.3c (human-smoke fix): the IN-PROGRESS wave strip. `wave_run`
+                    // is None until the wave reaches a terminal state, so without
+                    // this branch a running `/fanout` paints nothing on screen —
+                    // the user saw only the spokes' tool-permission prompts and the
+                    // final results. The strip is a single bottom-anchored line fed
+                    // from `wave_state`; it ticks 0/N → N/N and offers cancel-all.
+                    let snap = crate::adapters::tui::widgets::wave_strip::WaveStripSnapshot {
+                        handle_count: wave.spoke_count,
+                        completed: wave.completed_count,
+                        high: 0,
+                        degraded: 0,
+                        burn_micros: 0,
+                        paused: false,
+                        cancelled: wave.cancelled,
+                    };
+                    let line = crate::adapters::tui::widgets::wave_strip::render_wave_strip_line(
+                        &snap,
+                        !wave.cancelled,
+                    );
+                    render_lines_bottom(frame, app_layout.chat_pane, vec![line]);
                 }
 
                 // Story 10.5: render delegation suggestion card as a centered popup over chat pane

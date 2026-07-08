@@ -228,7 +228,10 @@ pub fn render(
     // Context window ratio (Story 7.4 AC1/AC2)
     if context_window > 0 {
         let used = token_usage.map_or(0, |u| u.input_tokens);
-        let pct = used.saturating_mul(100) / context_window;
+        let pct = used
+            .saturating_mul(100)
+            .checked_div(context_window)
+            .unwrap_or(0);
         let ctx_color = if pct >= 95 {
             theme.colors.error
         } else if pct >= 80 {

@@ -10,8 +10,9 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::domain::ports::{
-    ChannelPort, ContextAssemblerPort, ContextPort, MemoryPort, PersonaPort, SandboxManager,
-    SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort, ToolSetPort,
+    AgentMessageBus, ChannelPort, ContextAssemblerPort, ContextPort, IsolationProvider, MemoryPort,
+    PersonaPort, SandboxManager, SchedulerPort, SessionPort, SkillExposurePort, ToolExposurePort,
+    ToolSetPort,
 };
 
 pub struct AgentCore {
@@ -22,6 +23,8 @@ pub struct AgentCore {
     pub channels: Arc<ArcSwap<Arc<dyn ChannelPort>>>,
     pub scheduler: Arc<ArcSwap<Arc<dyn SchedulerPort>>>,
     pub context: Arc<ArcSwap<Arc<dyn ContextPort>>>,
+    /// Story 14.4 — send-side status-aware local/remote message delivery seam.
+    pub agent_message_bus: Arc<ArcSwap<Arc<dyn AgentMessageBus>>>,
     /// Story 11.0a — per-turn Message-tier context assembler (ADR-10-4): the
     /// `Conversation -> Vec<Message>` wire-payload builder. Option-wrapped like
     /// `tool_exposure`/`skill_exposure`: `Some(StaticPassthroughAssembler)` is the
@@ -48,6 +51,8 @@ pub struct AgentCore {
     /// "headless / eval" path that wants NO sandbox-binding at all; the eval
     /// harness wants `NoOpSandbox` explicitly.
     pub sandbox: Arc<ArcSwap<Arc<dyn SandboxManager>>>,
+    /// Story 14.5 — filesystem scratch-dir isolation seam.
+    pub isolation: Arc<ArcSwap<Arc<dyn IsolationProvider>>>,
     /// Story 9.7 Phase B — shared merged BM25 index for meta-search.
     /// `None` when the `meta-search` feature is compiled but no `[search]`
     /// knob is "on" per ADR-09-01 v2.1 §W1 inherited.
@@ -79,6 +84,12 @@ impl AgentCore {
             channels: Self::wrap(Arc::new(NoOpChannel) as Arc<dyn ChannelPort>),
             scheduler: Self::wrap(Arc::new(NoOpScheduler) as Arc<dyn SchedulerPort>),
             context: Self::wrap(Arc::new(NoOpContext) as Arc<dyn ContextPort>),
+            agent_message_bus: Self::wrap(Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    Default::default(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            ) as Arc<dyn AgentMessageBus>),
             // Asymmetry vs tool_exposure (which defaults None in noop):
             // StaticPassthroughAssembler IS the behaviour-preserving default —
             // there is no "no assembler" TUI path; None is only the eval bypass.
@@ -88,6 +99,9 @@ impl AgentCore {
             tool_exposure: Self::wrap_optional(None as Option<Arc<dyn ToolExposurePort>>),
             skill_exposure: Self::wrap_optional(None as Option<Arc<dyn SkillExposurePort>>),
             sandbox: Self::wrap(Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>),
+            isolation: Self::wrap(Arc::new(
+                crate::adapters::isolation::CowIsolationProvider::default(),
+            ) as Arc<dyn IsolationProvider>),
             #[cfg(feature = "meta-search")]
             merged_index: ArcSwap::from_pointee(
                 None as Option<Arc<crate::infrastructure::search::MergedIndex>>,

@@ -1,6 +1,8 @@
 pub mod adapter_health;
 pub mod agent;
 pub mod agent_id;
+pub mod agent_message;
+pub mod agent_node;
 pub mod approval;
 pub mod assembled_context;
 pub mod autocomplete;
@@ -9,6 +11,7 @@ pub mod capability;
 pub mod capability_id;
 pub mod capability_kind;
 pub mod capability_registry;
+pub mod capability_token;
 pub mod catalog_delta;
 pub mod channel_kind;
 pub mod channel_turn_request;
@@ -18,20 +21,26 @@ mod config;
 mod content;
 pub mod context_bundle;
 pub mod conversation;
+pub mod credential;
 pub mod cron_config;
 pub mod daemon_crash;
 pub mod doc_key;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
 mod focus;
+pub mod invocation_fingerprint;
+pub mod isolation;
 pub mod launch_spec;
 pub mod mcp_server_spec;
 pub mod mcp_server_state;
 pub mod memory_entry;
 pub mod memory_fact;
 mod message;
+pub mod node_state;
 mod notice;
+pub mod orchestration;
 pub mod palette;
+pub mod peer_identity;
 mod permission;
 pub mod plan;
 pub mod pricing;
@@ -39,10 +48,12 @@ pub mod profile;
 pub mod project_context;
 pub mod provider;
 pub mod provider_capabilities;
+pub mod redacted_url;
 pub mod redaction;
 pub mod router;
 pub mod sandbox;
 pub mod search_hit;
+pub mod secret;
 pub mod session;
 pub mod session_boundary;
 pub mod session_meta;
@@ -51,10 +62,12 @@ mod skill;
 pub mod skill_catalog_delta;
 pub mod skill_metadata;
 mod stream;
+pub mod subagent_envelope;
 pub mod subagent_error;
-pub mod subagent_status;
+mod subagent_status;
 pub mod subagent_view;
 pub mod tab;
+pub mod taint;
 pub mod task_handle;
 pub mod tool_call;
 pub mod tool_descriptor;
@@ -77,8 +90,22 @@ pub use agent::{
     validate_agent_frontmatter,
 };
 #[allow(unused_imports)]
+pub use agent_message::{
+    AgentDelivery, AgentMessage, CorrelationId, DeliveryDisposition, DeliveryMode, DeliveryOutcome,
+    Envelope, MessageHeader, MessageKind, RefuseReason, delivery_decision,
+    relationship_disposition,
+};
+#[allow(unused_imports)]
+pub use agent_node::{
+    AbandonmentAction, AgentMetrics, AgentNode, NodeCheckpoint, NodeOrigin, abandonment_action,
+};
+#[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope};
 #[allow(unused_imports)]
+pub use capability_token::{
+    Budget, CapabilityFlag, CapabilitySet, CapabilityToken, CapabilityTokenId, DelegateConstraint,
+    DelegateRequest,
+};
 pub use channel_kind::ChannelKind;
 pub use channel_turn_request::ChannelTurnRequest;
 pub use checkpoint::{CheckpointId, CheckpointMeta, RevertStatus, RevertedFile};
@@ -98,19 +125,37 @@ pub use conversation::{
     ChatMessage, Conversation, ConversationSummary, ForkSource, ImageReference,
     generate_conversation_id, generate_message_id,
 };
+#[allow(unused_imports)]
+pub use credential::{
+    AuthMethod, AuthSource, AuthStatus, Credential, ProviderStatus, ResolvedAuth,
+};
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
 pub use focus::FocusState;
 #[allow(unused_imports)]
+pub use invocation_fingerprint::{FingerprintError, InvocationFingerprint};
+#[allow(unused_imports)]
+pub use isolation::{IsolationError, IsolationHandle, ProvisioningTier, UnifiedDiff};
+#[allow(unused_imports)]
 pub use message::{
     ImageAttachment, Message, MessageRole, ToolResultMessage, ToolUseMessage, UserMessage,
 };
+#[allow(unused_imports)]
+pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
     FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
 };
 #[allow(unused_imports)]
+pub use orchestration::{
+    CoverageLine, DrillBody, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, ForkJoinSpec,
+    OrchestrationError, SpokeCitation, SpokeResult, SpokeSpec, SynthesisView, WaitPolicy,
+    WaitReason,
+};
+#[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
+#[allow(unused_imports)]
+pub use peer_identity::{Ed25519Sig, PeerId};
 #[allow(unused_imports)]
 pub use permission::{
     FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,
@@ -121,7 +166,9 @@ pub use plan::{
     DelegationInfo, EffortEstimate, Plan, PlanDecision, PlanStatus, PlanSubTask, PlanTask,
     PlanTaskStatus, TaskResult,
 };
+pub use redacted_url::RedactedUrl;
 pub use sandbox::SandboxPolicy;
+pub use secret::SecretString;
 #[allow(unused_imports)]
 pub use session::{SessionId, SessionManager, SessionState};
 pub use session_boundary::SessionBoundary;
@@ -141,9 +188,7 @@ pub use skill_metadata::SkillMetadata;
 #[allow(unused_imports)]
 pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};
-pub use subagent_status::SubagentStatus;
-pub use subagent_status::SubagentStatus as SubagentRunStatus;
-pub use subagent_view::{AgentRowView, OwnershipKind};
+pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};
 pub use tool_policy::ToolPolicy;
 pub use trace_context::TraceContext;
@@ -197,7 +242,11 @@ pub use redaction::{RedactionOp, RedactionRecord};
 pub use router::{EscalationReason, ModelTier, RouterConfig, StepKind};
 pub use search_hit::SearchHit;
 #[allow(unused_imports)]
+pub use subagent_envelope::{SubagentEnvelope, SubagentEvent};
+#[allow(unused_imports)]
 pub use tab::{ConversationId, TabId, TabManager, TabState};
+#[allow(unused_imports)]
+pub use taint::{ProvenanceTag, TaintDecision};
 #[allow(unused_imports)]
 pub use tool_call::{
     ApprovalSource, RequestId, ToolCall, ToolCallRequest, ToolCallResult, ToolCallTransition,
