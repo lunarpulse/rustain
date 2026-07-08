@@ -85,31 +85,53 @@ impl OpenAiStreamTransformer {
             // Tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
                 for tc in tool_calls {
-                    if let Some(id) = &tc.id {
-                        // New tool call starting
-                        self.active_tools.insert(
-                            tc.index,
-                            ToolAccumulator {
-                                id: id.clone(),
-                                name: tc
-                                    .function
-                                    .as_ref()
-                                    .and_then(|f| f.name.clone())
-                                    .unwrap_or_default(),
-                                arguments_json: String::new(),
-                            },
-                        );
-                    } else if let Some(function) = &tc.function {
-                        // Accumulating arguments
-                        if let Some(args) = &function.arguments {
-                            if let Some(tool) = self.active_tools.get_mut(&tc.index) {
-                                tool.arguments_json.push_str(args);
+                    // `id`, `function.name`, and `function.arguments` are
+                    // independently optional fields on each delta once a
+                    // tool-call id has established the accumulator. A provider
+                    // may coalesce all three into the first delta (ZAI GLM
+                    // Coding Plan) or split them across deltas (OpenAI/DeepSeek).
+                    // Modeling id and arguments as mutually exclusive phases
+                    // drops same-delta arguments; accepting function fragments
+                    // before any id would instead emit unusable empty ids.
+                    let tool = match self.active_tools.entry(tc.index) {
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            let tool = entry.into_mut();
+                            if let Some(id) = &tc.id {
+                                if id.is_empty() {
+                                    tracing::warn!(
+                                        "Received empty tool-call id for index {}",
+                                        tc.index
+                                    );
+                                } else if tool.id != *id {
+                                    tracing::warn!("Tool-call id changed for index {}", tc.index);
+                                    tool.id = id.clone();
+                                    tool.name.clear();
+                                    tool.arguments_json.clear();
+                                }
                             }
+                            tool
                         }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            let Some(id) = tc.id.as_ref().filter(|id| !id.is_empty()) else {
+                                tracing::warn!(
+                                    "Received tool-call delta for index {} before tool-call id",
+                                    tc.index
+                                );
+                                continue;
+                            };
+                            entry.insert(ToolAccumulator {
+                                id: id.clone(),
+                                name: String::new(),
+                                arguments_json: String::new(),
+                            })
+                        }
+                    };
+                    if let Some(function) = &tc.function {
                         if let Some(name) = &function.name {
-                            if let Some(tool) = self.active_tools.get_mut(&tc.index) {
-                                tool.name = name.clone();
-                            }
+                            tool.name = name.clone();
+                        }
+                        if let Some(args) = &function.arguments {
+                            tool.arguments_json.push_str(args);
                         }
                     }
                 }
@@ -297,6 +319,237 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, StreamChunk::Usage { .. })),
             "no Usage chunk should be emitted for a content-only delta"
+        );
+    }
+
+    #[test]
+    fn zai_coalesced_first_delta_arguments_are_preserved() {
+        // ZAI GLM Coding Plan: the first `tool_calls` delta coalesces the call
+        // `id`, `function.name`, AND the complete `function.arguments` into one
+        // chunk. The previous parser dropped the arguments because it only
+        // created a fresh accumulator (with empty args) when `id` was present.
+        let first = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_zai_1",
+            "type":"function","function":{"name":"get_weather",
+            "arguments":"{\"city\":\"Paris\"}"}}]},
+            "finish_reason":null}]}"#;
+        let terminal = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut t = OpenAiStreamTransformer::new();
+        let _ = t.transform(&frame(first));
+        let chunks = t.transform(&frame(terminal));
+
+        // ToolUse with the coalesced arguments, then TurnComplete(ToolUse).
+        let tool_use = chunks
+            .iter()
+            .find(|c| matches!(c, StreamChunk::ToolUse { .. }));
+        assert!(tool_use.is_some(), "expected a ToolUse chunk");
+        match tool_use.unwrap() {
+            StreamChunk::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_zai_1", "tool id from first delta");
+                assert_eq!(name, "get_weather", "function name from first delta");
+                assert_eq!(*input, serde_json::json!({"city": "Paris"}));
+            }
+            other => panic!("expected StreamChunk::ToolUse, got {other:?}"),
+        }
+        assert!(
+            chunks.iter().any(|c| matches!(
+                c,
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::ToolUse
+                }
+            )),
+            "expected TurnComplete with ToolUse stop reason"
+        );
+    }
+
+    #[test]
+    fn zai_streamed_first_fragment_is_retained_and_completed() {
+        // ZAI tool_stream-style chunking: the opening argument fragment `{"`
+        // arrives in the same delta as `id`/`name`; later deltas without `id`
+        // append the remaining fragments (`city`, `":"`, `Paris"`, `}`). The
+        // first fragment must be retained, and the concatenated fragments must
+        // parse into the complete JSON object.
+        let d1 = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_zai_2",
+            "type":"function","function":{"name":"get_weather",
+            "arguments":"{\""}}]},"finish_reason":null}]}"#;
+        let d2 = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,
+            "function":{"arguments":"city"}}]},"finish_reason":null}]}"#;
+        let d3 = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,
+            "function":{"arguments":"\":\""}}]},"finish_reason":null}]}"#;
+        let d4 = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,
+            "function":{"arguments":"Paris\""}}]},"finish_reason":null}]}"#;
+        let d5 = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,
+            "function":{"arguments":"}"}}]},"finish_reason":null}]}"#;
+        let terminal = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut t = OpenAiStreamTransformer::new();
+        let _ = t.transform(&frame(d1));
+        let _ = t.transform(&frame(d2));
+        let _ = t.transform(&frame(d3));
+        let _ = t.transform(&frame(d4));
+        let _ = t.transform(&frame(d5));
+        let chunks = t.transform(&frame(terminal));
+
+        let tool_use = chunks
+            .iter()
+            .find(|c| matches!(c, StreamChunk::ToolUse { .. }));
+        assert!(tool_use.is_some(), "expected a ToolUse chunk");
+        match tool_use.unwrap() {
+            StreamChunk::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_zai_2");
+                assert_eq!(name, "get_weather");
+                assert_eq!(*input, serde_json::json!({"city": "Paris"}));
+            }
+            other => panic!("expected StreamChunk::ToolUse, got {other:?}"),
+        }
+        assert!(
+            chunks.iter().any(|c| matches!(
+                c,
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::ToolUse
+                }
+            )),
+            "expected TurnComplete with ToolUse stop reason"
+        );
+    }
+
+    #[test]
+    fn split_delta_arguments_accumulate_unchanged() {
+        // Existing OpenAI/DeepSeek behavior: `id`/`name` arrive on the first
+        // delta with no arguments; arguments arrive on a later delta. This
+        // split-delta path must remain unchanged after the refactor.
+        let first = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_split",
+            "type":"function","function":{"name":"get_weather"}}]},
+            "finish_reason":null}]}"#;
+        let args = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,
+            "function":{"arguments":"{\"city\":\"Tokyo\"}"}}]},
+            "finish_reason":null}]}"#;
+        let terminal = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut t = OpenAiStreamTransformer::new();
+        let _ = t.transform(&frame(first));
+        let _ = t.transform(&frame(args));
+        let chunks = t.transform(&frame(terminal));
+
+        let tool_use = chunks
+            .iter()
+            .find(|c| matches!(c, StreamChunk::ToolUse { .. }));
+        assert!(tool_use.is_some(), "expected a ToolUse chunk");
+        match tool_use.unwrap() {
+            StreamChunk::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_split");
+                assert_eq!(name, "get_weather");
+                assert_eq!(*input, serde_json::json!({"city": "Tokyo"}));
+            }
+            other => panic!("expected StreamChunk::ToolUse, got {other:?}"),
+        }
+        assert!(
+            chunks.iter().any(|c| matches!(
+                c,
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::ToolUse
+                }
+            )),
+            "expected TurnComplete with ToolUse stop reason"
+        );
+    }
+
+    #[test]
+    fn function_delta_before_id_is_ignored() {
+        // A function-only first delta cannot be correlated to a later tool
+        // result. Preserve the previous behavior of not emitting a ToolUse for
+        // fragments that arrive before any tool-call id establishes the index.
+        let args_before_id = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,
+            "function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},
+            "finish_reason":null}]}"#;
+        let terminal = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut t = OpenAiStreamTransformer::new();
+        let _ = t.transform(&frame(args_before_id));
+        let chunks = t.transform(&frame(terminal));
+
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolUse { .. })),
+            "function-only delta before id must not emit an uncorrelatable ToolUse"
+        );
+        assert!(
+            chunks.iter().any(|c| matches!(
+                c,
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::ToolUse
+                }
+            )),
+            "terminal tool_calls still completes the turn"
+        );
+    }
+
+    #[test]
+    fn changed_tool_call_id_resets_accumulated_arguments() {
+        // If a provider reuses an index with a different id before the finish
+        // chunk, the new call must not concatenate onto the previous call's JSON.
+        let first = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_old",
+            "type":"function","function":{"name":"get_weather",
+            "arguments":"{\"city\":\"Old\"}"}}]},"finish_reason":null}]}"#;
+        let changed = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_new",
+            "type":"function","function":{"name":"get_weather",
+            "arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":null}]}"#;
+        let terminal = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut t = OpenAiStreamTransformer::new();
+        let _ = t.transform(&frame(first));
+        let _ = t.transform(&frame(changed));
+        let chunks = t.transform(&frame(terminal));
+
+        let tool_use = chunks
+            .iter()
+            .find(|c| matches!(c, StreamChunk::ToolUse { .. }));
+        assert!(tool_use.is_some(), "expected a ToolUse chunk");
+        match tool_use.unwrap() {
+            StreamChunk::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_new");
+                assert_eq!(name, "get_weather");
+                assert_eq!(*input, serde_json::json!({"city": "Paris"}));
+            }
+            other => panic!("expected StreamChunk::ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tool_call_id_cannot_start_accumulator() {
+        let empty_id = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":0,"id":"",
+            "type":"function","function":{"name":"get_weather",
+            "arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":null}]}"#;
+        let terminal = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        let mut t = OpenAiStreamTransformer::new();
+        let _ = t.transform(&frame(empty_id));
+        let chunks = t.transform(&frame(terminal));
+
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, StreamChunk::ToolUse { .. })),
+            "empty id must not create an uncorrelatable ToolUse"
         );
     }
 }
