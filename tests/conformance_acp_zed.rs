@@ -2191,3 +2191,838 @@ async fn acp_load_path_re_runs_skill_trust_gate_identical_to_fresh_session() {
         "the trust prompt must offer the allow option; got {fresh_opts:?}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Section 9 — Story 14-11 Task 5: real `run_prompt` path ToolCall keystones
+// ─────────────────────────────────────────────────────────────────────
+//
+// Anti-vacuity: the `translate.rs` unit tests prove `stream_chunk_to_session_update`
+// maps a `ToolUse` chunk correctly in ISOLATION, but they do NOT prove the mapper
+// is actually wired into the live `run_prompt` turn loop — a regression that
+// dropped the `stream_chunk_to_session_update` call (or sent a different frame)
+// would leave every unit test green while Zed received the wrong wire shape.
+// These keystones drive a REAL `initialize → session/new → session/prompt` over
+// the in-memory ACP seam with a scripted provider that EMITS a `ToolUse` chunk,
+// then assert on the `session/update` notification the client actually receives.
+//
+// The EDIT / APPLY_PATCH keystones additionally use a REAL `ToolSetAdapter` (the
+// same executor production uses) so the turn's tool-execution loop really runs:
+// the model's ToolUse is dispatched through `run_turn → ToolScheduler → execute`,
+// and the target file is mutated on disk — proving the whole chain, not just the
+// frame. A `Yolo` permission posture auto-allows the Standard-risk edit/apply_patch
+// builtins so no `session/requestPermission` round-trip (and no hang) is needed.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use rustain::domain::errors::PermissionError;
+use rustain::domain::models::{FileOperation, PathAccessType, PermissionMode};
+use rustain::domain::models::{StopReason, StreamChunk};
+use rustain::domain::ports::StreamingProvider;
+
+/// A scripted provider: on its FIRST `stream_completion` call it replays a fixed
+/// chunk script (the test's `ToolUse` + `TurnComplete(ToolUse)`); on every later
+/// call it emits a bare `EndTurn` so the agentic loop terminates after the tool
+/// result is fed back. The call boundary is a deterministic atomic counter — no
+/// sleeps, no wall-clock races.
+struct ScriptedToolUseProvider {
+    first_call: Vec<StreamChunk>,
+    calls: AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for ScriptedToolUseProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<rustain::domain::models::Message>,
+        _options: rustain::domain::models::CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        use futures::StreamExt;
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        let chunks: Vec<StreamChunk> = if n == 0 {
+            self.first_call.clone()
+        } else {
+            vec![StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            }]
+        };
+        Ok(futures::stream::iter(chunks).boxed())
+    }
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+    fn provider_id(&self) -> String {
+        "scripted-tooluse".to_string()
+    }
+    fn list_models(&self) -> Vec<rustain::domain::models::provider::ModelDescriptor> {
+        Vec::new()
+    }
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        Ok(())
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        Ok(rustain::domain::ports::ProbeOutcome {
+            latency: Duration::ZERO,
+        })
+    }
+    fn provider_descriptor(&self) -> rustain::domain::models::provider::ProviderDescriptor {
+        rustain::domain::models::provider::ProviderDescriptor {
+            provider_id: "scripted-tooluse".to_string(),
+            healthy: true,
+            model_count: 0,
+            display_name: "scripted-tooluse".to_string(),
+        }
+    }
+}
+
+/// A `SecurityPort` pinned to `Yolo` mode that allows every workspace path.
+///
+/// `edit`/`apply_patch` are `ToolRisk::Standard`; under `Yolo`,
+/// `mode_risk_outcome` returns `Some(true)` → auto-Allow, so the scheduler
+/// dispatches the builtin with NO `session/requestPermission` round-trip. This
+/// is the only piece of test-local wiring needed to drive the real executor
+/// end-to-end without an approval handshake (which would otherwise hang the
+/// turn for the 30 s approval timeout under the default `Normal` posture).
+struct YoloSecurity;
+
+#[async_trait::async_trait]
+impl SecurityPort for YoloSecurity {
+    fn check_blocklist(&self, _command: &str) -> Result<(), PermissionError> {
+        Ok(())
+    }
+    fn check_workspace_access(
+        &self,
+        _path: &std::path::Path,
+        _op: FileOperation,
+    ) -> Result<PathAccessType, PermissionError> {
+        Ok(PathAccessType::Workspace)
+    }
+    fn current_mode(&self) -> PermissionMode {
+        PermissionMode::Yolo
+    }
+    fn set_mode(&self, _mode: PermissionMode) {}
+}
+
+/// Build a REAL `ToolSetAdapter` over `ws` — the same executor production uses
+/// for the `edit`/`apply_patch`/`read`/`bash` builtins. Mirrors `make_adapter`
+/// in `toolset_adapter.rs` (NoOp sandbox, permissive policy) so a turn dispatched
+/// through `run_turn → ToolScheduler` actually performs file I/O on disk.
+fn make_real_toolset(ws: &std::path::Path) -> rustain::adapters::toolset_adapter::ToolSetAdapter {
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::sandbox::NoOpSandbox;
+    use rustain::domain::models::sandbox::SandboxPolicy;
+    use rustain::domain::ports::{SandboxManager, StoragePort};
+
+    let sessions_dir = ws.join(".rustain").join("sessions");
+    let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+        sessions_dir,
+        ws.to_path_buf(),
+    ));
+    rustain::adapters::toolset_adapter::ToolSetAdapter::new(
+        ws.to_path_buf(),
+        storage,
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            Arc::new(NoOpSandbox) as Arc<dyn SandboxManager>
+        )),
+        Arc::new(tokio::sync::RwLock::new(SandboxPolicy::Permissive)),
+    )
+}
+
+/// Build an `AcpCoreFactory` whose provider replays `script` on the first turn,
+/// whose `SecurityPort` is `Yolo` (auto-allow), and whose toolset is `tools`.
+///
+/// Passing `Arc::new(NoOpToolSet)` yields a frame-only harness (the ToolUse is
+/// mapped to a wire `ToolCall` but the executor is a no-op); passing a real
+/// `ToolSetAdapter` additionally drives the live file mutation. Every other
+/// field the ACP agent reads stays live (provider, scheduler, storage, ledger).
+fn scripted_factory(
+    ws: PathBuf,
+    script: Vec<StreamChunk>,
+    tools: Arc<dyn rustain::domain::ports::ToolSetPort>,
+) -> AcpCoreFactory {
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::noop::{NoOpApprovalPersistence, NoOpUsageLedger};
+    use rustain::domain::services::approval_runtime::ApprovalRuntime;
+    use rustain::domain::services::tool_scheduler::ToolScheduler;
+
+    Rc::new(move |_cwd, _mcp_servers| {
+        let provider: Arc<dyn StreamingProvider> = Arc::new(ScriptedToolUseProvider {
+            first_call: script.clone(),
+            calls: AtomicU32::new(0),
+        });
+        let security: Arc<dyn SecurityPort> = Arc::new(YoloSecurity);
+        let sessions_dir = ws.join(".rustain").join("sessions");
+        let storage: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            sessions_dir,
+            ws.clone(),
+        ));
+        let approval = ApprovalRuntime::new(64, Arc::new(NoOpApprovalPersistence));
+        let tool_scheduler =
+            ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 64);
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
+        let ledger: Arc<dyn UsageLedgerPort> = Arc::new(NoOpUsageLedger);
+        Ok(AcpCore::from(CliCore {
+            provider,
+            security,
+            tools: tools.clone(),
+            tool_scheduler,
+            approval,
+            storage,
+            event_tx,
+            event_rx,
+            ledger,
+        }))
+    })
+}
+
+/// Drive `initialize → session/new → session/prompt` over the in-memory ACP seam
+/// and return the FIRST `session/update` notification whose `update` is a
+/// `tool_call`, returning its `params.update` payload. Panics with the full wire
+/// trace if no `tool_call` frame arrives before the `session/prompt` (id:3)
+/// response — so a wiring regression surfaces as a readable failure, not a
+/// timeout.
+///
+/// Determinism: scripted provider (no network), in-memory duplex transport (no
+/// listener), deterministic first session id `acp-1`, Yolo posture (no approval
+/// round-trip). The read is bounded by the id:3 response (the turn is complete
+/// once it lands) with a per-line 10 s safety timeout matching the rest of the
+/// suite.
+async fn drive_first_tool_call_update(
+    factory: AcpCoreFactory,
+    workspace: &std::path::Path,
+) -> serde_json::Value {
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
+
+    let server = serve_acp_with_acp_core_factory_and_node_tree(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        rustain::domain::models::AppConfig::default(),
+        None,
+        factory,
+        node_tree,
+        workspace.to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace, "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        let prompt = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": {
+                "sessionId": "acp-1",
+                "prompt": [ { "type": "text", "text": "perform the tool call" } ],
+            }
+        });
+        client_write
+            .write_all(line(prompt.to_string()).as_bytes())
+            .await
+            .expect("write session/prompt");
+        client_write.flush().await.expect("flush");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        let mut tool_call: Option<serde_json::Value> = None;
+        let mut trace: Vec<String> = Vec::new();
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            match next {
+                Ok(Ok(Some(raw))) => {
+                    trace.push(raw.clone());
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if v["id"] == serde_json::json!(3) {
+                            return (tool_call.map(|f| f["params"]["update"].clone()), trace);
+                        }
+                        if v["method"] == serde_json::json!("session/update")
+                            && v["params"]["update"]["sessionUpdate"]
+                                == serde_json::json!("tool_call")
+                            && tool_call.is_none()
+                        {
+                            tool_call = Some(v);
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        (tool_call.map(|f| f["params"]["update"].clone()), trace)
+    };
+
+    let (update, trace) = tokio::select! {
+        pair = drive => pair,
+        server_res = server => {
+            panic!("ACP server exited before session/prompt completed: {server_res:?}");
+        }
+    };
+    update.unwrap_or_else(|| {
+        panic!(
+            "no tool_call session/update observed before the id:3 response;\nframes:\n{}",
+            trace.join("\n")
+        )
+    })
+}
+
+/// Drive `initialize → session/new → session/prompt` over the in-memory ACP seam
+/// and return the FIRST `session/update` notification whose `update` is a
+/// `tool_call_update` (the POST-execution result frame carrying `status` and
+/// `toolCallId`), returning its `params.update` payload. Panics with the full
+/// wire trace if no `tool_call_update` frame arrives before the `session/prompt`
+/// (id:3) response — so a wiring regression surfaces as a readable failure, not
+/// a timeout.
+///
+/// Mirrors `drive_first_tool_call_update` exactly (same handshake drive, same
+/// id:3 termination, same per-line 10 s safety timeout) except it captures the
+/// post-execution `tool_call_update` rather than the pre-execution `tool_call`,
+/// so callers can read `.status` ("completed" | "failed") and `.toolCallId`.
+///
+/// Determinism: scripted provider (no network), in-memory duplex transport (no
+/// listener), deterministic first session id `acp-1`, Yolo posture (no approval
+/// round-trip). The read is bounded by the id:3 response (the turn is complete
+/// once it lands) with a per-line 10 s safety timeout matching the rest of the
+/// suite.
+async fn drive_tool_call_update_status(
+    factory: AcpCoreFactory,
+    workspace: &std::path::Path,
+) -> serde_json::Value {
+    let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(8 * 1024);
+    let node_tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000));
+
+    let server = serve_acp_with_acp_core_factory_and_node_tree(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        rustain::domain::models::AppConfig::default(),
+        None,
+        factory,
+        node_tree,
+        workspace.to_path_buf(),
+        rustain::adapters::acp::run::deterministic_acp_id_source(),
+    );
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .expect("write initialize");
+        let session_new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace, "mcpServers": [] },
+        });
+        client_write
+            .write_all(line(session_new.to_string()).as_bytes())
+            .await
+            .expect("write session/new");
+        let prompt = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": {
+                "sessionId": "acp-1",
+                "prompt": [ { "type": "text", "text": "perform the tool call" } ],
+            }
+        });
+        client_write
+            .write_all(line(prompt.to_string()).as_bytes())
+            .await
+            .expect("write session/prompt");
+        client_write.flush().await.expect("flush");
+
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        let mut tool_call_update: Option<serde_json::Value> = None;
+        let mut trace: Vec<String> = Vec::new();
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await;
+            match next {
+                Ok(Ok(Some(raw))) => {
+                    trace.push(raw.clone());
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if v["id"] == serde_json::json!(3) {
+                            return (
+                                tool_call_update.map(|f| f["params"]["update"].clone()),
+                                trace,
+                            );
+                        }
+                        if v["method"] == serde_json::json!("session/update")
+                            && v["params"]["update"]["sessionUpdate"]
+                                == serde_json::json!("tool_call_update")
+                            && tool_call_update.is_none()
+                        {
+                            tool_call_update = Some(v);
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        (
+            tool_call_update.map(|f| f["params"]["update"].clone()),
+            trace,
+        )
+    };
+
+    let (update, trace) = tokio::select! {
+        pair = drive => pair,
+        server_res = server => {
+            panic!("ACP server exited before session/prompt completed: {server_res:?}");
+        }
+    };
+    update.unwrap_or_else(|| {
+        panic!(
+            "no tool_call_update session/update observed before the id:3 response;\nframes:\n{}",
+            trace.join("\n")
+        )
+    })
+}
+
+/// Kind-correctness guard over the REAL prompt path: `read`→`read`, `edit`→
+/// `edit`, `bash`→NO kind (the `Other` default is skipped on the wire so Zed
+/// does not render a non-file tool as a file-open/edit follow).
+///
+/// Defends the contract that `tool_call_kind` is reached from `run_prompt`: the
+/// kind discriminator is what Zed keys off to choose its tool-call UI treatment,
+/// so a regression that stopped setting `.kind(...)` (defaulting every call to
+/// `Other`) would surface here as `read`/`edit` losing their kinds. Uses the
+/// no-op toolset — these keystones assert the wire FRAME, not execution.
+///
+/// Non-vacuity: each row drives a fresh session/prompt through the real seam;
+/// the `read`/`edit` assertions reddens if the kind is absent or wrong, and the
+/// `bash` assertion reddens if a file kind leaks onto a non-file tool.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_prompt_tool_kind_guard_read_edit_bash_over_wire() {
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+
+    // read → kind = "read"
+    let read_script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-read".into(),
+            name: "read".into(),
+            input: serde_json::json!({ "file_path": "src/lib.rs" }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> =
+        Arc::new(rustain::adapters::noop::NoOpToolSet);
+    let update = drive_first_tool_call_update(
+        scripted_factory(ws_path.clone(), read_script, tools),
+        &ws_path,
+    )
+    .await;
+    assert_eq!(
+        update["kind"],
+        serde_json::json!("read"),
+        "a read must surface kind=read on the wire; update = {update}"
+    );
+
+    // edit → kind = "edit"
+    let edit_script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-edit".into(),
+            name: "edit".into(),
+            input: serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "a",
+                "new_string": "b",
+            }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> =
+        Arc::new(rustain::adapters::noop::NoOpToolSet);
+    let update = drive_first_tool_call_update(
+        scripted_factory(ws_path.clone(), edit_script, tools),
+        &ws_path,
+    )
+    .await;
+    assert_eq!(
+        update["kind"],
+        serde_json::json!("edit"),
+        "an edit must surface kind=edit on the wire; update = {update}"
+    );
+
+    // bash → NO kind (`Other` is the unset default and is skipped on serialize,
+    // so a non-file tool never advertises a file kind). Tolerate a future "other"
+    // literal too — the contract is "no Read/Edit/etc kind", not a specific token.
+    let bash_script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-bash".into(),
+            name: "bash".into(),
+            input: serde_json::json!({ "command": "echo hi" }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> =
+        Arc::new(rustain::adapters::noop::NoOpToolSet);
+    let update = drive_first_tool_call_update(
+        scripted_factory(ws_path.clone(), bash_script, tools),
+        &ws_path,
+    )
+    .await;
+    let kind_ok = update
+        .get("kind")
+        .map(|k| k == &serde_json::json!("other"))
+        .unwrap_or(true);
+    assert!(
+        kind_ok,
+        "bash must carry NO file kind (Other default is skipped on the wire); \
+         update = {update}"
+    );
+}
+
+/// EDIT keystone over the real `run_prompt` path with the LIVE executor: the
+/// model emits an `edit` ToolUse → the emitted `ToolCall` carries `kind=Edit`,
+/// exactly ONE cwd-resolved location, and ONE hunk `Diff` whose old/new text
+/// mirror the input — AND the real `execute_edit` builtin actually mutates the
+/// file on disk (old gone, new present, surrounding lines untouched).
+///
+/// Non-vacuity: the frame half reddens if the mapper stops setting kind/content
+/// or mis-resolves the path; the mutation half reddens if the executor no-ops,
+/// appends, or touches surrounding lines. Together they prove the full
+/// model→run_turn→scheduler→execute→disk chain through the ACP seam.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_prompt_edit_mutates_file_and_surfaces_edit_kind_hunk_diff() {
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+    std::fs::create_dir_all(ws_path.join("src")).expect("create src dir");
+    let file = ws_path.join("src").join("lib.rs");
+    std::fs::write(&file, "fn old() {}\nfn main() {}\n").expect("seed target file");
+
+    let script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-edit".into(),
+            name: "edit".into(),
+            input: serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "fn old() {}",
+                "new_string": "fn new() {}",
+            }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> = Arc::new(make_real_toolset(&ws_path));
+    let update =
+        drive_first_tool_call_update(scripted_factory(ws_path.clone(), script, tools), &ws_path)
+            .await;
+
+    // ── Frame contract (emitted at ToolUse time, before execution) ──────────
+    assert_eq!(
+        update["sessionUpdate"],
+        serde_json::json!("tool_call"),
+        "expected a tool_call update; got {update}"
+    );
+    assert_eq!(
+        update["kind"],
+        serde_json::json!("edit"),
+        "an edit must surface kind=edit; update = {update}"
+    );
+    let resolved = ws_path.join("src").join("lib.rs");
+    let resolved_str = resolved.to_str().expect("utf-8 workspace path");
+    assert_eq!(
+        update["locations"].as_array().map(Vec::len),
+        Some(1),
+        "an edit advertises exactly one follow location; update = {update}"
+    );
+    assert_eq!(
+        update["locations"][0]["path"].as_str(),
+        Some(resolved_str),
+        "the relative file_path is cwd-resolved in the location; update = {update}"
+    );
+    assert_eq!(
+        update["content"].as_array().map(Vec::len),
+        Some(1),
+        "an edit carries exactly one hunk Diff; update = {update}"
+    );
+    let diff = &update["content"][0];
+    assert_eq!(
+        diff["type"],
+        serde_json::json!("diff"),
+        "content[0] is a Diff; got {diff}"
+    );
+    assert_eq!(
+        diff["path"].as_str(),
+        Some(resolved_str),
+        "Diff path is the cwd-resolved file path; got {diff}"
+    );
+    assert_eq!(
+        diff["oldText"],
+        serde_json::json!("fn old() {}"),
+        "Diff.oldText mirrors the input old_string (hunk-scoped); got {diff}"
+    );
+    assert_eq!(
+        diff["newText"],
+        serde_json::json!("fn new() {}"),
+        "Diff.newText mirrors the input new_string; got {diff}"
+    );
+
+    // ── Mutation contract (the live builtin executed through run_turn) ──────
+    let after = std::fs::read_to_string(&file).expect("read file after the turn");
+    assert!(
+        after.contains("fn new() {}"),
+        "edit must have replaced old→new on disk; got:\n{after}"
+    );
+    assert!(
+        !after.contains("fn old() {}"),
+        "the old_string must be gone after the edit; got:\n{after}"
+    );
+    assert!(
+        after.contains("fn main() {}"),
+        "surrounding lines must be byte-identical after the edit; got:\n{after}"
+    );
+}
+
+/// APPLY_PATCH keystone over the real `run_prompt` path: a 2-file patch
+/// (Update + Add) → the emitted `ToolCall` carries `kind=Edit`, exactly TWO
+/// cwd-resolved locations (one per file, in patch order), and TWO hunk-scoped
+/// Diffs (Update = old/new, Add = new-only) — AND both files are mutated on
+/// disk by the live `execute_apply_patch` builtin.
+///
+/// Non-vacuity: the frame half reddens if the mapper fails to parse the patch
+/// into per-hunk Diffs/locations; the mutation half reddens if the executor
+/// skips a hunk or writes the wrong content.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_prompt_apply_patch_mutates_two_files_and_surfaces_edit_kind_two_diffs() {
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+    std::fs::create_dir_all(ws_path.join("src")).expect("create src dir");
+    std::fs::write(ws_path.join("src/existing.rs"), "old fn\n").expect("seed existing file");
+    // src/created.rs must NOT pre-exist (Add File requires absence).
+
+    let patch = "*** Begin Patch\n\
+*** Update File: src/existing.rs\n\
+@@\n\
+-old fn\n\
++new fn\n\
+*** Add File: src/created.rs\n\
++fresh line\n\
+*** End Patch\n";
+    let script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-patch".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({ "patch": patch }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> = Arc::new(make_real_toolset(&ws_path));
+    let update =
+        drive_first_tool_call_update(scripted_factory(ws_path.clone(), script, tools), &ws_path)
+            .await;
+
+    // ── Frame contract ──────────────────────────────────────────────────────
+    assert_eq!(
+        update["kind"],
+        serde_json::json!("edit"),
+        "apply_patch must surface kind=edit; update = {update}"
+    );
+    let existing = ws_path.join("src/existing.rs");
+    let created = ws_path.join("src/created.rs");
+    assert_eq!(
+        update["locations"].as_array().map(Vec::len),
+        Some(2),
+        "one follow location per file touched; update = {update}"
+    );
+    assert_eq!(
+        update["locations"][0]["path"].as_str(),
+        Some(existing.to_str().unwrap()),
+        "the Update hunk's path is cwd-resolved; update = {update}"
+    );
+    assert_eq!(
+        update["locations"][1]["path"].as_str(),
+        Some(created.to_str().unwrap()),
+        "the Add hunk's path is cwd-resolved; update = {update}"
+    );
+    assert_eq!(
+        update["content"].as_array().map(Vec::len),
+        Some(2),
+        "one hunk Diff per file; update = {update}"
+    );
+    // Hunk 1 — Update: hunk-scoped old/new.
+    let update_diff = &update["content"][0];
+    assert_eq!(update_diff["type"], serde_json::json!("diff"));
+    assert_eq!(
+        update_diff["oldText"],
+        serde_json::json!("old fn"),
+        "Update old_text; got {update_diff}"
+    );
+    assert_eq!(
+        update_diff["newText"],
+        serde_json::json!("new fn"),
+        "Update new_text; got {update_diff}"
+    );
+    // Hunk 2 — Add: new content only (old_text is null on the wire).
+    let add_diff = &update["content"][1];
+    assert_eq!(add_diff["type"], serde_json::json!("diff"));
+    assert!(
+        add_diff["oldText"].is_null(),
+        "an Add File hunk has no prior content; got {add_diff}"
+    );
+    assert_eq!(
+        add_diff["newText"],
+        serde_json::json!("fresh line"),
+        "Add new_text; got {add_diff}"
+    );
+
+    // ── Mutation contract ───────────────────────────────────────────────────
+    assert_eq!(
+        std::fs::read_to_string(&existing).unwrap(),
+        "new fn\n",
+        "the Update hunk replaced old→new on disk"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&created).unwrap(),
+        "fresh line",
+        "the Add hunk created the new file with its content"
+    );
+}
+
+/// A MALFORMED `apply_patch` (no `*** End Patch` terminator) over the real path
+/// must STILL emit the `ToolCall` (kind=Edit, raw-text content fallback — never
+/// an empty Vec that drops the call from the client's view), and the parse
+/// failure must leave the workspace UNMUTATED (no file created or touched).
+///
+/// Non-vacuity: the frame half reddens if a malformed patch is dropped or
+/// emits a spurious half-parsed Diff; the mutation half reddens if the executor
+/// writes anything before detecting the parse error.
+#[tokio::test(flavor = "current_thread")]
+async fn acp_prompt_apply_patch_malformed_emits_text_fallback_without_mutating() {
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+    std::fs::create_dir_all(ws_path.join("src")).expect("create src dir");
+
+    let malformed = "*** Begin Patch\n\
+*** Update File: src/existing.rs\n\
+@@\n\
+-old fn\n\
++new fn\n";
+    let script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-patch-bad".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({ "patch": malformed }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> = Arc::new(make_real_toolset(&ws_path));
+    let update =
+        drive_first_tool_call_update(scripted_factory(ws_path.clone(), script, tools), &ws_path)
+            .await;
+
+    // ── Frame contract: kind=Edit, content is raw text (NOT a Diff), non-empty ─
+    assert_eq!(
+        update["kind"],
+        serde_json::json!("edit"),
+        "kind=Edit is independent of parse success; update = {update}"
+    );
+    let content = update["content"]
+        .as_array()
+        .expect("a malformed patch must fall back to raw text content, not an empty Vec");
+    assert!(
+        !content.is_empty(),
+        "a malformed patch must NOT be dropped from the client's view; update = {update}"
+    );
+    assert_ne!(
+        content[0]["type"],
+        serde_json::json!("diff"),
+        "the parse-failure fallback is raw text, not a spurious half-parsed Diff; got {content:?}"
+    );
+    assert_eq!(
+        content[0]["type"],
+        serde_json::json!("content"),
+        "the fallback content is a text content block; got {content:?}"
+    );
+
+    // ── Mutation contract: the parse failure must leave the workspace untouched ─
+    assert!(
+        !ws_path.join("src/existing.rs").exists(),
+        "a malformed patch must NOT create/mutate any file; src/existing.rs should not exist"
+    );
+}
+
+/// AC2 anti-vacuity keystone over the REAL `run_prompt` path: an `edit` whose
+/// `old_string` is NON-UNIQUE (matches twice) MUST surface a POST-execution
+/// `tool_call_update` with `status == "failed"` and leave the target file
+/// UNMUTATED. This proves the real run_prompt→run_turn→scheduler→execute chain
+/// rejects a 2-match edit and reports the failure on the wire, with NO partial
+/// write.
+///
+/// Non-vacuity: the `translate.rs` unit tests prove `ToolResult{is_error}` →
+/// `ToolCallUpdate{status:Failed}` in ISOLATION, but NOT that the live
+/// `execute_edit` rejection (an `Err` from a non-unique old_string) flows
+/// through run_turn→scheduler→emit as `is_error` and reaches the client as a
+/// `failed` `tool_call_update`. A mutant that replace-alls instead of
+/// rejecting reddens BOTH the `status == "failed"` assertion (it would be
+/// "completed") AND the no-mutation assertion (the file would change).
+#[tokio::test(flavor = "current_thread")]
+async fn acp_prompt_edit_with_non_unique_old_string_surfaces_failed_status_without_mutation() {
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_path = ws.path().to_path_buf();
+    std::fs::create_dir_all(ws_path.join("src")).expect("create src dir");
+    let file = ws_path.join("src").join("lib.rs");
+    // old_string "dup" appears TWICE → non-unique → execute_edit rejects.
+    std::fs::write(&file, "dup\ndup\n").expect("seed target file");
+
+    let script = vec![
+        StreamChunk::ToolUse {
+            id: "tc-edit-dup".into(),
+            name: "edit".into(),
+            input: serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "dup",
+                "new_string": "x",
+            }),
+        },
+        StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        },
+    ];
+    let tools: Arc<dyn rustain::domain::ports::ToolSetPort> = Arc::new(make_real_toolset(&ws_path));
+    let update =
+        drive_tool_call_update_status(scripted_factory(ws_path.clone(), script, tools), &ws_path)
+            .await;
+
+    // ── Wire contract (the POST-execution result frame) ────────────────────
+    assert_eq!(
+        update["sessionUpdate"],
+        serde_json::json!("tool_call_update"),
+        "expected the post-execution tool_call_update frame; got {update}"
+    );
+    assert_eq!(
+        update["status"],
+        serde_json::json!("failed"),
+        "a non-unique old_string edit must surface status=failed; update = {update}"
+    );
+
+    // ── Mutation contract (AC2 no-partial-write) ────────────────────────────
+    let after = std::fs::read_to_string(&file).expect("read file after the turn");
+    assert_eq!(
+        after, "dup\ndup\n",
+        "a rejected (non-unique) edit must leave the file byte-identical; got:\n{after}"
+    );
+}

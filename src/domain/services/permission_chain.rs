@@ -331,7 +331,7 @@ fn derive_server_id(tool_name: &str) -> Option<String> {
 /// Derive path_hint from tool_name and input (for Read/Write/Edit).
 fn derive_path_hint(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     match tool_name {
-        "Read" | "Write" | "Edit" => input
+        "Read" | "Write" | "Edit" | "edit" => input
             .get("file_path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
@@ -347,7 +347,7 @@ fn extract_file_path(
 ) -> Option<(String, FileOperation)> {
     let op = match tool_name {
         "Read" => FileOperation::Read,
-        "Write" | "Edit" => FileOperation::Write,
+        "Write" | "Edit" | "edit" => FileOperation::Write,
         _ => return None,
     };
     let path = input.get("file_path").and_then(|v| v.as_str())?;

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::adapters::apply_patch::{PatchHunk, parse_apply_patch, resolve_workspace_path};
 use agent_client_protocol as acp;
 
 use crate::domain::models::{
@@ -117,27 +118,117 @@ pub fn stop_reason_to_acp(reason: &StopReason) -> acp::StopReason {
 /// intentionally excluded (no follow target — the correct behavior). Relative
 /// paths are resolved against the session `cwd` so the client always receives
 /// an absolute target it can open.
-fn tool_call_locations(
-    tool_name: &str,
+fn resolve_tool_path(path_str: &str, cwd: &Path) -> PathBuf {
+    let path = Path::new(path_str);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn tool_call_kind(tool_name: &str) -> acp::ToolKind {
+    // Exact match on the canonical builtin names — the SAME set the risk
+    // classifier and executor dispatch recognize. A case-variant like
+    // `Apply_Patch` is NOT coerced to Edit: it stays Other here, Elevated in
+    // `risk_for_builtin`, and NotFound in dispatch, consistently surfacing the
+    // unrecognized name instead of rendering an Edit-kind call that cannot run.
+    match tool_name {
+        "Read" | "read" | "view" | "read_file" => acp::ToolKind::Read,
+        "Edit" | "edit" | "apply_patch" => acp::ToolKind::Edit,
+        _ => acp::ToolKind::Other,
+    }
+}
+
+/// Build the ACP presentation `content` (hunk `Diff`s) and follow `locations`
+/// for a tool call in a SINGLE pass, so an `apply_patch` body is parsed exactly
+/// once per frame (it was previously parsed separately for content and for
+/// locations). Shared by the live stream path and the `session/load` replay
+/// path so reconnecting clients see the same kind/content/locations shape.
+///
+/// `apply_patch` paths are confined through `resolve_workspace_path` (the
+/// executor's own gate): a hunk whose path escapes the workspace is omitted
+/// from both content and locations, mirroring that the executor will reject it
+/// — no misleading follow target or path leak. `edit`/read/write paths use
+/// `resolve_tool_path` (matching what the executor actually touches).
+fn tool_call_surface(
+    name: &str,
     input: &serde_json::Value,
     cwd: &Path,
-) -> Vec<acp::ToolCallLocation> {
-    let Some(path_str) = (match tool_name.to_ascii_lowercase().as_str() {
-        "read" | "write" | "edit" | "apply_patch" | "view" | "read_file" | "write_file" => input
+) -> (Vec<acp::ToolCallContent>, Vec<acp::ToolCallLocation>) {
+    if name == "apply_patch" {
+        let Some(patch) = input.get("patch").and_then(serde_json::Value::as_str) else {
+            return (Vec::new(), Vec::new());
+        };
+        return match parse_apply_patch(patch) {
+            Ok(parsed) => {
+                let mut content = Vec::with_capacity(parsed.hunks.len());
+                let mut locations = Vec::with_capacity(parsed.hunks.len());
+                for hunk in parsed.hunks {
+                    let (path, new_text, old_text_opt) = match hunk {
+                        PatchHunk::AddFile { path, new_text } => (path, new_text, None),
+                        PatchHunk::DeleteFile { path } => {
+                            (path, String::new(), Some("[file deleted]".to_string()))
+                        }
+                        PatchHunk::UpdateFile {
+                            path,
+                            old_text,
+                            new_text,
+                        } => (path, new_text, Some(old_text)),
+                    };
+                    // Confine: omit hunks whose path escapes the workspace.
+                    let Some(resolved) = resolve_workspace_path(cwd, &path).ok() else {
+                        continue;
+                    };
+                    let mut diff = acp::Diff::new(resolved.clone(), new_text);
+                    if let Some(old) = old_text_opt {
+                        diff = diff.old_text(old);
+                    }
+                    content.push(acp::ToolCallContent::Diff(diff));
+                    locations.push(acp::ToolCallLocation::new(resolved));
+                }
+                (content, locations)
+            }
+            Err(_) => (
+                vec![acp::ToolCallContent::from(patch.to_string())],
+                Vec::new(),
+            ),
+        };
+    }
+    if name == "edit" || name == "Edit" {
+        let Some(path_str) = input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(old_string) = input.get("old_string").and_then(serde_json::Value::as_str) else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(new_string) = input.get("new_string").and_then(serde_json::Value::as_str) else {
+            return (Vec::new(), Vec::new());
+        };
+        let resolved = resolve_tool_path(path_str, cwd);
+        let content = vec![acp::ToolCallContent::Diff(
+            acp::Diff::new(resolved.clone(), new_string).old_text(old_string),
+        )];
+        let locations = vec![acp::ToolCallLocation::new(resolved)];
+        return (content, locations);
+    }
+    // read/write/view/etc.: location only, no Diff content (ADR-14-10-02
+    // read-follow; Write stays location-only by AC5).
+    if let Some(path_str) = match name {
+        "Read" | "read" | "Write" | "write" | "view" | "read_file" | "write_file" => input
             .get("file_path")
             .or_else(|| input.get("path"))
             .and_then(serde_json::Value::as_str),
         _ => None,
-    }) else {
-        return Vec::new();
-    };
-    let path = Path::new(path_str);
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    vec![acp::ToolCallLocation::new(abs)]
+    } {
+        let resolved = resolve_tool_path(path_str, cwd);
+        return (Vec::new(), vec![acp::ToolCallLocation::new(resolved)]);
+    }
+    (Vec::new(), Vec::new())
 }
 
 pub fn stream_chunk_to_session_update(
@@ -151,12 +242,17 @@ pub fn stream_chunk_to_session_update(
         StreamChunk::Thinking { content, .. } => Some(acp::SessionUpdate::AgentThoughtChunk(
             acp::ContentChunk::new(acp::ContentBlock::from(content.clone())),
         )),
-        StreamChunk::ToolUse { id, name, input } => Some(acp::SessionUpdate::ToolCall(
-            acp::ToolCall::new(id.clone(), name.clone())
-                .status(acp::ToolCallStatus::Pending)
-                .locations(tool_call_locations(name, input, cwd))
-                .raw_input(input.clone()),
-        )),
+        StreamChunk::ToolUse { id, name, input } => {
+            let (content, locations) = tool_call_surface(name, input, cwd);
+            Some(acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(id.clone(), name.clone())
+                    .kind(tool_call_kind(name))
+                    .status(acp::ToolCallStatus::Pending)
+                    .content(content)
+                    .locations(locations)
+                    .raw_input(input.clone()),
+            ))
+        }
         StreamChunk::ToolResult {
             id,
             content,
@@ -200,10 +296,16 @@ pub fn message_to_replay_updates(message: &ChatMessage, cwd: &Path) -> Vec<acp::
     }
 
     for tc in &message.tool_calls {
+        // P8: replay now carries kind + Diff content too, so a reconnecting
+        // client renders prior edit/apply_patch calls the same as the live
+        // stream (Edit-kind + hunk Diffs), not as generic Other/empty.
+        let (content, locations) = tool_call_surface(&tc.name, &tc.input, cwd);
         updates.push(acp::SessionUpdate::ToolCall(
             acp::ToolCall::new(tc.id.clone(), tc.name.clone())
+                .kind(tool_call_kind(&tc.name))
                 .status(acp::ToolCallStatus::Completed)
-                .locations(tool_call_locations(&tc.name, &tc.input, cwd))
+                .content(content)
+                .locations(locations)
                 .raw_input(tc.input.clone()),
         ));
     }
@@ -637,6 +739,11 @@ mod tests {
             call.locations[0].line.is_none(),
             "no line hint is available for a plain read"
         );
+        assert_eq!(
+            call.kind,
+            acp::ToolKind::Read,
+            "a read must advertise kind=Read so Zed treats it as a file-open follow"
+        );
     }
 
     /// Absolute paths pass through verbatim (never re-anchored to cwd); the
@@ -676,6 +783,137 @@ mod tests {
             call.locations.is_empty(),
             "bash must not advertise a follow location"
         );
+        assert_eq!(
+            call.kind,
+            acp::ToolKind::Other,
+            "a non-file tool must carry no kind (the unset default), so Zed does \
+             not render it as a file-open or inline-edit follow"
+        );
+    }
+
+    // ── Story 14-11 Task 2 — `edit` surfaces as an Edit-kind hunk Diff ────
+    //
+    // The Diff is built from the input at ToolUse time (old_string/new_string
+    // are already present — no execution needed), mirroring codex-acp's shape.
+    // These are RED today: `stream_chunk_to_session_update` never sets `.kind`
+    // (defaults to `Other`) nor `.content` (empty), so the kind/Diff assertions
+    // fail until Task 2 lands.
+
+    /// An `edit` (search-and-replace) tool call surfaces as an Edit-kind
+    /// `ToolCall` carrying exactly ONE hunk `Diff` whose path/old_text/new_text
+    /// mirror the input, plus exactly one cwd-resolved follow location. This is
+    /// the codex-parity surface Zed matches to follow + render the edited region.
+    ///
+    /// Red-on-mutant: drop `.kind(Edit)` → `Other` RED; drop `.content([Diff])`
+    /// → `len()==0` RED; swap old/new → field-equalities RED; mis-resolve path →
+    /// path/location assertions RED.
+    #[test]
+    fn edit_tool_use_emits_edit_kind_with_hunk_diff() {
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-edit".into(),
+            name: "edit".into(),
+            input: serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "fn old() {}",
+                "new_string": "fn new() {}",
+            }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo"))
+            .expect("an edit ToolUse must map to a ToolCall");
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall, got {update:?}");
+        };
+
+        // kind = Edit (the Zed rendering discriminant for an inline buffer diff).
+        assert_eq!(
+            call.kind,
+            acp::ToolKind::Edit,
+            "an edit must advertise kind=Edit so Zed renders an inline buffer diff"
+        );
+
+        // Exactly one follow location; relative path resolved against cwd.
+        assert_eq!(
+            call.locations.len(),
+            1,
+            "an edit advertises exactly one follow location (its file)"
+        );
+        let resolved = std::path::PathBuf::from("/repo/src/lib.rs");
+        assert_eq!(
+            call.locations[0].path, resolved,
+            "the relative file_path is resolved against cwd"
+        );
+
+        // Exactly ONE hunk Diff, hunk-scoped (not whole-file): path/old_text/
+        // new_text mirror the input directly.
+        assert_eq!(
+            call.content.len(),
+            1,
+            "an edit carries exactly one hunk Diff"
+        );
+        let diff = match &call.content[0] {
+            acp::ToolCallContent::Diff(d) => d,
+            other => panic!("expected ToolCallContent::Diff, got {other:?}"),
+        };
+        assert_eq!(
+            diff.path, resolved,
+            "Diff path is the cwd-resolved file path (same target as the location)"
+        );
+        assert_eq!(
+            diff.old_text.as_deref(),
+            Some("fn old() {}"),
+            "Diff.old_text is the input old_string (hunk-scoped, not whole-file)"
+        );
+        assert_eq!(
+            diff.new_text.as_str(),
+            "fn new() {}",
+            "Diff.new_text is the input new_string"
+        );
+    }
+
+    /// The canonical capitalized `Edit` surfaces identically to the lowercase
+    /// `edit` alias: same Edit kind, one location, one hunk Diff mirroring the
+    /// input. An absolute file_path passes through verbatim (never re-anchored).
+    /// Guards against a mapper that classifies only one spelling.
+    #[test]
+    fn edit_tool_use_canonical_capitalized_alias_surfaces_identically() {
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-edit-cap".into(),
+            name: "Edit".into(),
+            input: serde_json::json!({
+                "file_path": "/abs/Cargo.toml",
+                "old_string": "name = \"old\"",
+                "new_string": "name = \"new\"",
+            }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo"))
+            .expect("capitalized Edit ToolUse must map to a ToolCall");
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall, got {update:?}");
+        };
+
+        assert_eq!(
+            call.kind,
+            acp::ToolKind::Edit,
+            "the capitalized Edit alias must also be kind=Edit"
+        );
+        assert_eq!(call.locations.len(), 1);
+        assert_eq!(
+            call.locations[0].path,
+            std::path::PathBuf::from("/abs/Cargo.toml"),
+            "an absolute file_path passes through verbatim"
+        );
+        assert_eq!(
+            call.content.len(),
+            1,
+            "the Edit alias carries one hunk Diff"
+        );
+        let diff = match &call.content[0] {
+            acp::ToolCallContent::Diff(d) => d,
+            other => panic!("expected Diff, got {other:?}"),
+        };
+        assert_eq!(diff.path, std::path::PathBuf::from("/abs/Cargo.toml"));
+        assert_eq!(diff.old_text.as_deref(), Some("name = \"old\""));
+        assert_eq!(diff.new_text.as_str(), "name = \"new\"");
     }
 
     /// A persisted read tool call is replayed with its location on
@@ -713,6 +951,122 @@ mod tests {
             tool_calls[0].locations[0].path,
             std::path::PathBuf::from("/repo/a/b.rs"),
             "replay must carry the follow location"
+        );
+    }
+
+    // ── Story 14-11 Task 4 — `apply_patch` surfaces as multi-hunk Diffs ───
+    //
+    // The mapper parses the input `patch` at ToolUse time into one
+    // `ToolCallContent::Diff` per hunk + one `ToolCallLocation` per file,
+    // `kind = Edit` (codex-parity). RED today: `edit_tool_call_content`
+    // returns an empty Vec for `apply_patch` (it only handles `edit`), and
+    // `tool_call_locations` reads a top-level `file_path` (apply_patch carries
+    // `patch` — paths live inside it), so both the Diff-content and the
+    // multi-location assertions fail. `kind=Edit` for apply_patch is already
+    // wired in `tool_call_kind`, so that assertion passes and guards it.
+
+    /// A valid `apply_patch` with ONE Update File hunk + ONE Add File hunk
+    /// surfaces as a single Edit-kind `ToolCall` with exactly TWO locations
+    /// (one per file, cwd-resolved) and TWO `ToolCallContent::Diff` entries:
+    /// the Update hunk hunk-scoped old/new text, the Add hunk new-text-only.
+    #[test]
+    fn apply_patch_tool_use_emits_edit_kind_with_one_diff_per_hunk() {
+        let patch = "*** Begin Patch\n*** Update File: src/existing.rs\n@@\n-old fn\n+new fn\n*** Add File: src/created.rs\n+fresh line\n*** End Patch\n";
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-patch".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({ "patch": patch }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo"))
+            .expect("an apply_patch ToolUse must map to a ToolCall");
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall, got {update:?}");
+        };
+
+        assert_eq!(
+            call.kind,
+            acp::ToolKind::Edit,
+            "apply_patch must advertise kind=Edit so Zed renders inline buffer diffs"
+        );
+
+        // One follow location per file touched, cwd-resolved, in patch order.
+        assert_eq!(call.locations.len(), 2, "one location per file");
+        assert_eq!(
+            call.locations[0].path,
+            std::path::PathBuf::from("/repo/src/existing.rs"),
+            "the Update hunk's relative path resolves against cwd"
+        );
+        assert_eq!(
+            call.locations[1].path,
+            std::path::PathBuf::from("/repo/src/created.rs"),
+            "the Add hunk's relative path resolves against cwd"
+        );
+
+        // One Diff per hunk, in patch order.
+        assert_eq!(call.content.len(), 2, "one hunk Diff per file");
+
+        // Hunk 1 — Update File: hunk-scoped old/new text.
+        let update_diff = match &call.content[0] {
+            acp::ToolCallContent::Diff(d) => d,
+            other => panic!("content[0] must be a Diff, got {other:?}"),
+        };
+        assert_eq!(
+            update_diff.path,
+            std::path::PathBuf::from("/repo/src/existing.rs")
+        );
+        assert_eq!(
+            update_diff.old_text.as_deref(),
+            Some("old fn"),
+            "Update hunk old_text is the joined `-` lines (hunk-scoped)"
+        );
+        assert_eq!(update_diff.new_text.as_str(), "new fn");
+
+        // Hunk 2 — Add File: new content only, no old_text.
+        let add_diff = match &call.content[1] {
+            acp::ToolCallContent::Diff(d) => d,
+            other => panic!("content[1] must be a Diff, got {other:?}"),
+        };
+        assert_eq!(
+            add_diff.path,
+            std::path::PathBuf::from("/repo/src/created.rs")
+        );
+        assert_eq!(
+            add_diff.old_text, None,
+            "an Add File hunk has no prior content — old_text must be absent"
+        );
+        assert_eq!(add_diff.new_text.as_str(), "fresh line");
+    }
+
+    /// A MALFORMED `apply_patch` (no `*** End Patch` terminator) must NOT be
+    /// dropped: the `ToolCall` is still emitted with `kind=Edit`, and content
+    /// falls back to raw text rather than the empty Vec a parse failure leaves.
+    #[test]
+    fn apply_patch_malformed_preserves_tool_call_with_text_fallback() {
+        let malformed = "*** Begin Patch\n*** Update File: src/existing.rs\n@@\n-old fn\n+new fn\n";
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-patch-bad".into(),
+            name: "apply_patch".into(),
+            input: serde_json::json!({ "patch": malformed }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo"))
+            .expect("a malformed apply_patch must still emit a ToolCall");
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall, got {update:?}");
+        };
+
+        assert_eq!(
+            call.kind,
+            acp::ToolKind::Edit,
+            "kind=Edit is independent of parse success"
+        );
+        assert!(
+            !call.content.is_empty(),
+            "a malformed patch must fall back to raw text content, not an empty Vec that \
+             drops the edit from the client's view"
+        );
+        assert!(
+            !matches!(&call.content[0], acp::ToolCallContent::Diff(_)),
+            "the parse-failure fallback is raw text, not a spurious half-parsed Diff"
         );
     }
 }

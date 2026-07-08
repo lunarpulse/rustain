@@ -953,7 +953,8 @@ impl RustainAcpAgent {
         // the old state before replacing it. Otherwise an in-flight old prompt
         // can keep streaming and race persistence against the restored session.
         let agent_id = AgentId(session_key.clone());
-        if let Some(old_state) = self.sessions.borrow_mut().remove(&session_key) {
+        let old_state = { self.sessions.borrow_mut().remove(&session_key) };
+        if let Some(old_state) = old_state {
             old_state.cancel.cancel();
             self.node_tree
                 .set_state(&agent_id, NodeState::Cancelled)

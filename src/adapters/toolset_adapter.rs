@@ -18,6 +18,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::adapters::apply_patch::{PatchHunk, parse_apply_patch, resolve_workspace_path};
 use crate::adapters::skill_activation::SkillActivator;
 use crate::domain::errors::ToolError;
 use crate::domain::events::{AppEvent, ToolProgressEvent};
@@ -191,6 +192,24 @@ async fn stream_lines(
             }
         }
     }
+}
+
+/// Detect the dominant line ending of a file's contents: `\r\n` if any CRLF is
+/// present, otherwise `\n`. Used so an `old_string`/patch `old_text` (always
+/// `\n`-joined because the model emits `\n` and `str::lines` strips a trailing
+/// `\r`) can match a CRLF file and so the replacement preserves that ending.
+fn line_ending_of(s: &str) -> &str {
+    if s.contains("\r\n") { "\r\n" } else { "\n" }
+}
+
+/// Adapt `s` to `ending`, first normalizing any existing CRLF to LF so a value
+/// that already carries `\r\n` is not double-converted. For `\n` endings the
+/// input is returned unchanged.
+fn adapt_line_endings(s: &str, ending: &str) -> String {
+    if ending == "\n" {
+        return s.to_string();
+    }
+    s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 impl ToolSetAdapter {
@@ -690,6 +709,261 @@ impl ToolSetAdapter {
             is_error: false,
         })
     }
+
+    async fn execute_edit(
+        &self,
+        input: &serde_json::Value,
+        tool_use_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let file_path = input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed("Missing 'file_path' parameter".into()))?;
+        let old_string = input
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed("Missing 'old_string' parameter".into()))?;
+        let new_string = input
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed("Missing 'new_string' parameter".into()))?;
+
+        if old_string.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "old_string must be non-empty for Edit".into(),
+            ));
+        }
+        if old_string == new_string {
+            return Err(ToolError::InvalidInput(
+                "old_string and new_string must differ for Edit".into(),
+            ));
+        }
+
+        let path = if std::path::Path::new(file_path).is_absolute() {
+            PathBuf::from(file_path)
+        } else {
+            self.workspace_path.join(file_path)
+        };
+
+        let read_fut = tokio::fs::read(&path);
+        let bytes = tokio::select! {
+            res = read_fut => res.map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to read '{}': {}", file_path, e))
+            })?,
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+        };
+        let content = String::from_utf8(bytes).map_err(|_| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to edit '{}': file is not valid UTF-8",
+                file_path
+            ))
+        })?;
+        // Adapt to the file's line ending so an old_string (always \n-joined)
+        // matches a CRLF file and the replacement preserves that ending.
+        let ending = line_ending_of(&content);
+        let old_adapted = adapt_line_endings(old_string, ending);
+        let match_count = content.matches(old_adapted.as_str()).count();
+        if match_count != 1 {
+            return Err(ToolError::InvalidInput(format!(
+                "Edit old_string must match exactly once in '{}'; found {} matches",
+                file_path, match_count
+            )));
+        }
+        let new_adapted = adapt_line_endings(new_string, ending);
+        let new_content = content.replacen(old_adapted.as_str(), new_adapted.as_str(), 1);
+        let write_input = serde_json::json!({
+            "file_path": file_path,
+            "content": new_content,
+        });
+        self.execute_write(&write_input, tool_use_id, cancel).await
+    }
+
+    async fn execute_apply_patch(
+        &self,
+        input: &serde_json::Value,
+        tool_use_id: &str,
+        cancel: CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        let patch = input
+            .get("patch")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::ExecutionFailed("Missing 'patch' parameter".into()))?;
+        let parsed = parse_apply_patch(patch)?;
+
+        // Per-file plan. Multiple hunks for the same path fold onto ONE evolving
+        // buffer (read once, replace each hunk's old->new against the running
+        // content) so earlier hunks are NOT overwritten by later ones computed
+        // from the original — the silent last-write-wins data-loss bug. All
+        // hunks are validated before any file is mutated (AC3 all-or-nothing for
+        // validation failures). A write/delete I/O failure mid-apply can still
+        // leave earlier files mutated (atomicity is validation-only — see
+        // ADR-14-11-01); true FS transactions are out of scope.
+        enum FilePlan {
+            Create { content: String },
+            Update { content: String },
+            Remove,
+        }
+        // Insertion-ordered plan keyed by the original patch path string.
+        let mut plan: Vec<(String, PathBuf, FilePlan)> = Vec::new();
+        let mut added_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for hunk in parsed.hunks {
+            match hunk {
+                PatchHunk::AddFile { path, new_text } => {
+                    let resolved = resolve_workspace_path(&self.workspace_path, &path)?;
+                    if tokio::fs::metadata(&resolved).await.is_ok() {
+                        return Err(ToolError::InvalidInput(format!(
+                            "apply_patch Add File '{}' already exists",
+                            path
+                        )));
+                    }
+                    if plan.iter().any(|(p, _, _)| p == &path) {
+                        return Err(ToolError::InvalidInput(format!(
+                            "apply_patch Add File '{}' appears more than once",
+                            path
+                        )));
+                    }
+                    added_paths.insert(path.clone());
+                    plan.push((path, resolved, FilePlan::Create { content: new_text }));
+                }
+                PatchHunk::DeleteFile { path } => {
+                    let resolved = resolve_workspace_path(&self.workspace_path, &path)?;
+                    let on_disk = tokio::fs::metadata(&resolved).await.is_ok();
+                    if !on_disk && !added_paths.contains(&path) {
+                        return Err(ToolError::InvalidInput(format!(
+                            "apply_patch Delete File '{}' does not exist",
+                            path
+                        )));
+                    }
+                    // A later Delete supersedes any prior plan for this path.
+                    if let Some(entry) = plan.iter_mut().find(|(p, _, _)| p == &path) {
+                        entry.2 = FilePlan::Remove;
+                    } else {
+                        plan.push((path, resolved, FilePlan::Remove));
+                    }
+                }
+                PatchHunk::UpdateFile {
+                    path,
+                    old_text,
+                    new_text,
+                } => {
+                    if old_text.is_empty() {
+                        return Err(ToolError::InvalidInput(format!(
+                            "apply_patch Update File '{}' old text must be non-empty",
+                            path
+                        )));
+                    }
+                    let idx = plan.iter().position(|(p, _, _)| p == &path);
+                    // Fold onto the existing buffer for this path if a prior hunk
+                    // already planned a change; otherwise read from disk once.
+                    let mut content = if let Some(i) = idx {
+                        match &mut plan[i].2 {
+                            FilePlan::Create { content } | FilePlan::Update { content } => {
+                                std::mem::take(content)
+                            }
+                            FilePlan::Remove => {
+                                return Err(ToolError::InvalidInput(format!(
+                                    "apply_patch Update File '{}' after its deletion",
+                                    path
+                                )));
+                            }
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let mut resolved_opt: Option<PathBuf> = None;
+                    if idx.is_none() {
+                        let resolved = resolve_workspace_path(&self.workspace_path, &path)?;
+                        let read_fut = tokio::fs::read(&resolved);
+                        let bytes = tokio::select! {
+                            res = read_fut => res.map_err(|e| {
+                                ToolError::ExecutionFailed(format!("Failed to read '{}': {}", path, e))
+                            })?,
+                            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+                        };
+                        content = String::from_utf8(bytes).map_err(|_| {
+                            ToolError::ExecutionFailed(format!(
+                                "Failed to patch '{}': file is not valid UTF-8",
+                                path
+                            ))
+                        })?;
+                        resolved_opt = Some(resolved);
+                    }
+                    let ending = line_ending_of(&content);
+                    let old_adapted = adapt_line_endings(&old_text, ending);
+                    let match_count = content.matches(old_adapted.as_str()).count();
+                    if match_count != 1 {
+                        return Err(ToolError::InvalidInput(format!(
+                            "apply_patch Update File '{}' hunk must match exactly once; found {} matches",
+                            path, match_count
+                        )));
+                    }
+                    let new_adapted = adapt_line_endings(&new_text, ending);
+                    let updated = content.replacen(old_adapted.as_str(), new_adapted.as_str(), 1);
+                    match idx {
+                        Some(i) => match &mut plan[i].2 {
+                            FilePlan::Create { content } | FilePlan::Update { content } => {
+                                *content = updated
+                            }
+                            FilePlan::Remove => unreachable!(),
+                        },
+                        None => plan.push((
+                            path,
+                            resolved_opt.expect("resolved is set for a new Update path"),
+                            FilePlan::Update { content: updated },
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Apply phase: materialize each planned file exactly once. Honor
+        // execute_write's is_error — a TOCTOU conflict returns Ok(is_error:true)
+        // and SKIPS the write; treat that as an abort, not a swallowed success.
+        let mut touched = Vec::with_capacity(plan.len());
+        for (path, resolved, file_plan) in plan {
+            match file_plan {
+                FilePlan::Create { content } | FilePlan::Update { content } => {
+                    let write_input = serde_json::json!({
+                        "file_path": path,
+                        "content": content,
+                    });
+                    let result = self
+                        .execute_write(&write_input, tool_use_id, cancel.clone())
+                        .await?;
+                    if result.is_error {
+                        return Ok(result);
+                    }
+                    touched.push(path);
+                }
+                FilePlan::Remove => {
+                    let res = tokio::select! {
+                        r = tokio::fs::remove_file(&resolved) => r,
+                        _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+                    };
+                    if let Err(e) = res {
+                        // NotFound is acceptable for an add-then-delete (net
+                        // no-op); validation already guaranteed existence for
+                        // any file not Added in this patch. Anything else aborts.
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            return Err(ToolError::ExecutionFailed(format!(
+                                "Failed to delete '{}': {}",
+                                path, e
+                            )));
+                        }
+                    }
+                    touched.push(path);
+                }
+            }
+        }
+
+        Ok(ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: format!("Applied patch to {}", touched.join(", ")),
+            is_error: false,
+        })
+    }
 }
 
 impl std::fmt::Debug for ToolSetAdapter {
@@ -762,6 +1036,44 @@ impl ToolSetPort for ToolSetAdapter {
                         }
                     },
                     "required": ["file_path", "content"]
+                }),
+                parallel_safe: false,
+            },
+            ToolDefinition {
+                name: "Edit".to_string(),
+                description: "Replace one exact string in a UTF-8 file".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path to the file to edit"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "The exact string to replace; must occur exactly once"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "The replacement string"
+                        }
+                    },
+                    "required": ["file_path", "old_string", "new_string"]
+                }),
+                parallel_safe: false,
+            },
+            ToolDefinition {
+                name: "apply_patch".to_string(),
+                description: "Apply a codex-format multi-file patch".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "patch": {
+                            "type": "string",
+                            "description": "A *** Begin Patch / *** End Patch patch body"
+                        }
+                    },
+                    "required": ["patch"]
                 }),
                 parallel_safe: false,
             },
@@ -963,6 +1275,8 @@ impl ToolSetPort for ToolSetAdapter {
             "Bash" | "bash" => self.execute_bash(&input, cancel).await,
             "Read" | "read" => self.execute_read(&input, cancel).await,
             "Write" | "write" => self.execute_write(&input, "", cancel).await,
+            "Edit" | "edit" => self.execute_edit(&input, "", cancel).await,
+            "apply_patch" => self.execute_apply_patch(&input, "", cancel).await,
             "activate_skill" => self.execute_activate_skill(&input).await,
             "skill_view" => self.execute_skill_view(&input, "", cancel).await,
             "exit_plan_mode" => self.execute_exit_plan_mode(&input).await,
@@ -2421,5 +2735,449 @@ mod tests {
                 "deadlock-freedom: fact {i} persisted"
             );
         }
+    }
+
+    // ── Story 14-11 Task 1 — `Edit` (search-and-replace) tool ──────────────
+    //
+    // `Edit` mutates exactly ONE occurrence of `old_string` (→ `new_string`)
+    // and rejects every ambiguous/broken input WITHOUT mutating the file. The
+    // success paths are RED today: the builtin catalog and `execute` dispatch
+    // have no `Edit`/`edit` arm, so a call resolves to `ToolError::NotFound`.
+    // The rejection paths are green today only because `NotFound` errors before
+    // any write; they become the real AC2 guards once the executor lands (a
+    // replace-all-on-duplicate or write-then-error mutant reddens them).
+
+    /// A unique single-match `Edit` (and its lowercase `edit` alias) replaces
+    /// exactly that one occurrence and leaves the surrounding file byte-identical.
+    ///
+    /// Non-vacuity: the resulting file is asserted byte-for-byte, so a mutant
+    /// that appends, touches surrounding lines, or no-ops reddens. The duplicate
+    /// rejection below pins the "exactly-one" semantics — this test alone cannot
+    /// distinguish single-replace from replace-all when only one match exists.
+    #[tokio::test]
+    async fn edit_and_lowercase_alias_replace_unique_match() {
+        for tool_name in ["Edit", "edit"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let file = tmp.path().join("src.txt");
+            std::fs::write(&file, "line one\nTARGET\nline three").unwrap();
+
+            let adapter = make_adapter(tmp.path());
+            let result = adapter
+                .execute(
+                    tool_name,
+                    serde_json::json!({
+                        "file_path": file.to_str().unwrap(),
+                        "old_string": "TARGET",
+                        "new_string": "REPLACED",
+                    }),
+                    test_cancel(),
+                )
+                .await
+                .expect("a unique single-match edit must succeed");
+
+            assert!(
+                !result.is_error,
+                "{tool_name}: a successful edit must not be flagged as an error"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                "line one\nREPLACED\nline three",
+                "{tool_name}: exactly the one unique occurrence is replaced; \
+                 surrounding lines are untouched"
+            );
+        }
+    }
+
+    /// Every ambiguous/broken edit input is REJECTED with an error AND leaves
+    /// the file byte-identical — no partial write, no silent success.
+    ///   - absent:    `old_string` occurs 0 times.
+    ///   - duplicate: `old_string` occurs >=2 times (must not replace-all).
+    ///   - empty:     `old_string` is "" (ambiguous).
+    ///   - no-op:     `old_string == new_string`.
+    ///
+    /// Non-vacuity: each row asserts BOTH an error result AND an unchanged file,
+    /// so a replace-all-on-duplicate, silent-no-op, or write-then-error mutant
+    /// reddens the file-equality assertion.
+    #[tokio::test]
+    async fn edit_rejects_invalid_inputs_without_mutation() {
+        // (name, initial file content, old_string, new_string)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("absent_old_string", "alpha\nbeta\n", "gamma", "delta"),
+            ("duplicate_old_string", "foo\nbar\nfoo\n", "foo", "baz"),
+            ("empty_old_string", "alpha\n", "", "x"),
+            ("no_op_same_old_new", "alpha\nfoo\nbeta", "foo", "foo"),
+        ];
+        for (name, initial, old, new) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let file = tmp.path().join("target.txt");
+            std::fs::write(&file, *initial).unwrap();
+
+            let adapter = make_adapter(tmp.path());
+            let result = adapter
+                .execute(
+                    "Edit",
+                    serde_json::json!({
+                        "file_path": file.to_str().unwrap(),
+                        "old_string": *old,
+                        "new_string": *new,
+                    }),
+                    test_cancel(),
+                )
+                .await;
+
+            assert!(
+                result.is_err(),
+                "{name}: an invalid edit must be rejected with an error, got {result:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&file).unwrap(),
+                *initial,
+                "{name}: a rejected edit must not mutate the file"
+            );
+        }
+    }
+
+    /// A non-UTF8 file is REJECTED and left byte-identical — `Edit` must never
+    /// lossy-decode and rewrite a binary file (that would corrupt it).
+    ///
+    /// Non-vacuity: raw bytes are compared before/after, so a mutant that reads
+    /// via `from_utf8_lossy` and writes the lossy result reddens (bytes change).
+    #[tokio::test]
+    async fn edit_rejects_non_utf8_file_without_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("binary.bin");
+        let original: Vec<u8> = vec![0xFFu8, 0xFE, 0x00, 0x41, b'\n', 0xC3, 0x28];
+        std::fs::write(&file, &original).unwrap();
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "Edit",
+                serde_json::json!({
+                    "file_path": file.to_str().unwrap(),
+                    "old_string": "A",
+                    "new_string": "B",
+                }),
+                test_cancel(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a non-UTF8 file must be rejected, never lossy-rewritten (got {result:?})"
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            original,
+            "a rejected edit on a binary file must leave it byte-identical"
+        );
+    }
+
+    /// A missing target file is REJECTED (distinct from "0 matches in an
+    /// existing file"). Guards against a mutant that creates the file.
+    #[tokio::test]
+    async fn edit_rejects_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("does_not_exist.txt");
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "Edit",
+                serde_json::json!({
+                    "file_path": file.to_str().unwrap(),
+                    "old_string": "x",
+                    "new_string": "y",
+                }),
+                test_cancel(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "editing a non-existent file must error, not create it (got {result:?})"
+        );
+        assert!(
+            !file.exists(),
+            "a rejected edit on a missing file must not create it"
+        );
+    }
+
+    /// Permission/catalog metadata: the canonical `Edit` and its accepted
+    /// lowercase execution alias `edit` must BOTH classify as the existing
+    /// Write/Edit `Standard` risk — so the alias neither bypasses (Safe) nor
+    /// over-prompts (Elevated) relative to `Write`.
+    ///
+    /// - `risk_for_builtin("Edit")` is already `Standard` (regression guard: a
+    ///   mutant that drops `Edit` from the Standard arm reddens this).
+    /// - `risk_for_builtin("edit")` is currently `Elevated` (only the canonical
+    ///   spelling is matched) — RED until Task 1 classifies the alias. This is
+    ///   the narrowest failing test for the intended alias classification. It
+    ///   does not contradict the historic `read`/`bash` lowercase→Elevated
+    ///   fail-safe (security.rs), which the story scopes to the Edit alias.
+    #[test]
+    fn edit_risk_classification_keeps_canonical_and_alias_at_standard() {
+        use crate::domain::models::{ToolRisk, risk_for_builtin};
+        assert_eq!(
+            risk_for_builtin("Edit"),
+            ToolRisk::Standard,
+            "canonical Edit is a Standard (file-mutation) risk"
+        );
+        assert_eq!(
+            risk_for_builtin("edit"),
+            ToolRisk::Standard,
+            "the accepted lowercase `edit` alias must not bypass the Standard posture"
+        );
+    }
+
+    /// Permission/catalog metadata: `apply_patch` is a file-mutation tool and
+    /// must classify as the Write/Edit `Standard` risk — so it neither bypasses
+    /// (Safe) nor over-prompts (Elevated). This is the red-on-mutant guard: a
+    /// mutant that drops `apply_patch` from the `Standard` arm in
+    /// `risk_for_builtin` reddens this assertion.
+    #[test]
+    fn apply_patch_risk_classification_is_standard() {
+        use crate::domain::models::{ToolRisk, risk_for_builtin};
+        assert_eq!(
+            risk_for_builtin("apply_patch"),
+            ToolRisk::Standard,
+            "apply_patch is a Standard (file-mutation) risk"
+        );
+    }
+
+    // ── Story 14-11 Task 3 — `apply_patch` (codex-format) tool ────────────
+    //
+    // `apply_patch` takes one input key `patch` (a codex-format
+    // `*** Begin Patch … *** End Patch` body) and applies every hunk in a
+    // single atomic call: `*** Update File:` chunks do a unique old→new
+    // replace, `*** Add File:` chunks create a new file. Hunk text is the
+    // `-`/`+`-prefixed lines joined by "\n" (codex `new_lines.join("\n")`).
+    //
+    // These are RED today: the `execute` dispatch has no `apply_patch` arm,
+    // so every call resolves to `ToolError::NotFound`. The success test
+    // reddens via `.expect`; the rejection tests are green today only because
+    // `NotFound` errors before any write — they become the real all-or-nothing
+    // / confinement guards once the executor lands (a write-then-fail or
+    // apply-in-order mutant reddens the unchanged-file assertions).
+
+    /// A valid patch with ONE `Update File` hunk (replace a unique region)
+    /// AND ONE `Add File` hunk (create a file) applies BOTH in one call: the
+    /// existing file is mutated old→new and the new file is created with the
+    /// Add content. Pins the multi-hunk success path the tests below guard.
+    #[tokio::test]
+    async fn apply_patch_updates_existing_and_creates_new_file_in_one_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("existing.txt");
+        std::fs::write(&existing, "alpha\nbeta\ngamma\n").unwrap();
+        let created = tmp.path().join("created.txt");
+
+        let patch = "*** Begin Patch\n*** Update File: existing.txt\n@@\n-beta\n+BETA\n*** Add File: created.txt\n+created-content\n*** End Patch\n";
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "apply_patch",
+                serde_json::json!({ "patch": patch }),
+                test_cancel(),
+            )
+            .await
+            .expect("a valid multi-hunk patch must apply");
+
+        assert!(
+            !result.is_error,
+            "a fully-applied patch must not be flagged as an error"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "alpha\nBETA\ngamma\n",
+            "the Update hunk replaces old_text→new_text, leaving the rest untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&created).unwrap(),
+            "created-content",
+            "the Add hunk creates the new file with its joined +lines as content"
+        );
+    }
+
+    /// A structurally malformed patch (no `*** End Patch` terminator) is
+    /// rejected and leaves the target byte-identical — no partial write.
+    #[tokio::test]
+    async fn apply_patch_rejects_truncated_patch_without_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("existing.txt");
+        let original = "alpha\nbeta\ngamma\n";
+        std::fs::write(&existing, original).unwrap();
+
+        // Missing the `*** End Patch` terminator — structurally incomplete.
+        let malformed = "*** Begin Patch\n*** Update File: existing.txt\n@@\n-beta\n+BETA\n";
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "apply_patch",
+                serde_json::json!({ "patch": malformed }),
+                test_cancel(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a malformed patch must be rejected, not applied (got {result:?})"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            original,
+            "a rejected patch must not mutate the target file"
+        );
+    }
+
+    /// A patch whose SECOND hunk cannot apply (its Update old_text is ABSENT
+    /// from the file, or occurs ≥2 times) is rejected atomically: the FIRST
+    /// (valid) hunk's file is left byte-identical too — all-or-nothing (AC3)
+    /// plus the duplicate/absent old_text edge guard.
+    #[tokio::test]
+    async fn apply_patch_failed_hunk_leaves_all_files_unchanged() {
+        // Hunk 1 (a.txt) is always valid; hunk 2 (b.txt) is set up to fail.
+        // (case, b.txt initial content, hunk-2 old_text that fails to match once)
+        let cases: &[(&str, &str, &str)] = &[
+            ("absent_old_text", "no match here\n", "TARGET"),
+            ("duplicate_old_text", "dup\ndup\n", "dup"),
+        ];
+
+        for (name, b_initial, fail_old) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join("a.txt"), "keep-a\n").unwrap();
+            std::fs::write(tmp.path().join("b.txt"), *b_initial).unwrap();
+
+            let patch = format!(
+                "*** Begin Patch\n*** Update File: a.txt\n@@\n-keep-a\n+changed-a\n*** Update File: b.txt\n@@\n-{fail_old}\n+hit\n*** End Patch\n",
+            );
+
+            let adapter = make_adapter(tmp.path());
+            let result = adapter
+                .execute(
+                    "apply_patch",
+                    serde_json::json!({ "patch": patch }),
+                    test_cancel(),
+                )
+                .await;
+
+            assert!(
+                result.is_err(),
+                "{name}: a patch with a failing hunk must be rejected (got {result:?})"
+            );
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+                "keep-a\n",
+                "{name}: all-or-nothing — the valid first hunk must NOT apply when a later \
+                 hunk fails"
+            );
+        }
+    }
+
+    /// D2 (ADR-14-11-01): apply_patch atomicity is VALIDATION-ONLY. A patch
+    /// that passes validation (every path resolves, every target exists, every
+    /// old_text matches exactly once) is still applied file-by-file with no
+    /// transactional rollback. This test pins the mutation-failure boundary:
+    /// when a LATER hunk fails at APPLY time (an I/O error, not a validation
+    /// error), the executor surfaces an error BUT the EARLIER, already-applied
+    /// hunks stay mutated on disk.
+    ///
+    /// Here the Delete of `src/bdir` passes validation — the directory exists,
+    /// so `metadata().is_ok()` — yet `remove_file` on a directory returns
+    /// `IsADirectory` at apply time, by which point the Update of `src/a.rs`
+    /// has already been written. True FS transactions are out of scope per
+    /// ADR-14-11-01; contrast this with
+    /// `apply_patch_failed_hunk_leaves_all_files_unchanged`, where a VALIDATION
+    /// failure (non-matching old_text) is all-or-nothing.
+    #[tokio::test]
+    async fn apply_patch_mid_apply_failure_surfaces_error_and_leaves_earlier_hunk_applied() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/a.rs"), "a\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("src/bdir")).unwrap();
+
+        // Update src/a.rs (a -> A) then Delete src/bdir. The Delete clears
+        // validation (dir exists) but fails at apply with IsADirectory, AFTER
+        // the Update write committed.
+        let patch = "*** Begin Patch\n\
+                     *** Update File: src/a.rs\n\
+                     @@\n\
+                     -a\n\
+                     +A\n\
+                     *** Delete File: src/bdir\n\
+                     *** End Patch\n";
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "apply_patch",
+                serde_json::json!({ "patch": patch }),
+                test_cancel(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "the apply-time IsADirectory failure must surface as an error (got {result:?})"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("src/a.rs")).unwrap(),
+            "A\n",
+            "validation-only atomicity: the earlier hunk WAS applied and stays \
+             mutated when a later hunk fails at apply time (ADR-14-11-01)"
+        );
+        assert!(
+            tmp.path().join("src/bdir").exists(),
+            "the failing Delete target is left untouched (not removed)"
+        );
+    }
+
+    /// A patch whose path escapes the workspace cwd (`../…`) is rejected, and
+    /// the error happens BEFORE any mutation: the valid in-workspace hunk is
+    /// not applied either. The parser/executor is the final confinement gate
+    /// because paths live inside the patch body, not a top-level `file_path`.
+    #[tokio::test]
+    async fn apply_patch_rejects_outside_workspace_path_before_any_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("existing.txt");
+        std::fs::write(&existing, "alpha\nbeta\n").unwrap();
+
+        // The escaped Add target lands in the temp parent; a unique name plus a
+        // cleanup guard keep the test hermetic across runs.
+        let escaped = tmp
+            .path()
+            .parent()
+            .unwrap()
+            .join("rustain_apply_patch_escape_probe.txt");
+        let _ = std::fs::remove_file(&escaped);
+        let _cleanup = scopeguard::guard(escaped.clone(), |p| {
+            let _ = std::fs::remove_file(p);
+        });
+
+        let patch = "*** Begin Patch\n*** Update File: existing.txt\n@@\n-beta\n+BETA\n*** Add File: ../rustain_apply_patch_escape_probe.txt\n+escaped\n*** End Patch\n";
+
+        let adapter = make_adapter(tmp.path());
+        let result = adapter
+            .execute(
+                "apply_patch",
+                serde_json::json!({ "patch": patch }),
+                test_cancel(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a patch escaping the workspace cwd must be rejected (got {result:?})"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&existing).unwrap(),
+            "alpha\nbeta\n",
+            "confinement failure must abort before the in-workspace hunk applies"
+        );
+        assert!(
+            !escaped.exists(),
+            "the out-of-workspace Add target must never be created"
+        );
     }
 }

@@ -26,7 +26,9 @@
 
 use std::collections::HashSet;
 
-use rustain::domain::models::agent_node::{AgentMetrics, NodeOrigin};
+use rustain::domain::models::agent_node::AgentMetrics;
+#[cfg(feature = "test-instrumentation")]
+use rustain::domain::models::agent_node::NodeOrigin;
 use rustain::domain::models::node_state::NodeState;
 use rustain::domain::models::subagent_view::{OwnershipKind, WireOwnershipKind};
 use rustain::domain::models::{AgentId, CapabilityTokenId, Op};
