@@ -209,9 +209,9 @@ impl RustainAcpAgent {
                                 "ACP image block carried a URI but no inline data; \
                                  rustain supports inline base64 images only — dropping"
                             ),
-                            None => tracing::warn!(
-                                "ACP image block has no data and no URI; dropping"
-                            ),
+                            None => {
+                                tracing::warn!("ACP image block has no data and no URI; dropping")
+                            }
                         }
                     } else {
                         images.push(ImageAttachment {
@@ -793,7 +793,7 @@ impl RustainAcpAgent {
                                     }
                                     _ => {}
                                 }
-                                if let Some(update) = stream_chunk_to_session_update(&other) {
+                                if let Some(update) = stream_chunk_to_session_update(&other, &cwd) {
                                     self.send_session_update(session_id.clone(), update).await?;
                                 }
                             }
@@ -1015,7 +1015,7 @@ impl RustainAcpAgent {
         // session active.
         if replay_history {
             for message in &replay_messages {
-                for update in message_to_replay_updates(message) {
+                for update in message_to_replay_updates(message, &request_cwd) {
                     if let Err(e) = self.send_session_update(session_id.clone(), update).await {
                         cancel.cancel();
                         self.node_tree

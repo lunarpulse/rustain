@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use agent_client_protocol as acp;
 
@@ -104,7 +105,45 @@ pub fn stop_reason_to_acp(reason: &StopReason) -> acp::StopReason {
     }
 }
 
-pub fn stream_chunk_to_session_update(chunk: &StreamChunk) -> Option<acp::SessionUpdate> {
+/// Extract the file location a tool call touches, so the ACP client (Zed) can
+/// implement its "follow" feature — navigating to the file the agent is
+/// reading/writing in real time. Maps to `ToolCallLocation` on the emitted
+/// `ToolCall`/`ToolCallUpdate` (see agentclientprotocol.com tool-calls#following-the-agent).
+///
+/// Only tools that KNOWN carry a file path contribute a location — guessing
+/// risks pointing the editor at a wrong file. rustain's file tools (`read`/
+/// `write`) key the path under `file_path`. MCP-forwarded and dynamic tools
+/// have arbitrary inputs and advertise no extractable path, so they are
+/// intentionally excluded (no follow target — the correct behavior). Relative
+/// paths are resolved against the session `cwd` so the client always receives
+/// an absolute target it can open.
+fn tool_call_locations(
+    tool_name: &str,
+    input: &serde_json::Value,
+    cwd: &Path,
+) -> Vec<acp::ToolCallLocation> {
+    let Some(path_str) = (match tool_name.to_ascii_lowercase().as_str() {
+        "read" | "write" | "edit" | "apply_patch" | "view" | "read_file" | "write_file" => input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let path = Path::new(path_str);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    vec![acp::ToolCallLocation::new(abs)]
+}
+
+pub fn stream_chunk_to_session_update(
+    chunk: &StreamChunk,
+    cwd: &Path,
+) -> Option<acp::SessionUpdate> {
     match chunk {
         StreamChunk::Text { content, .. } => Some(acp::SessionUpdate::AgentMessageChunk(
             acp::ContentChunk::new(acp::ContentBlock::from(content.clone())),
@@ -115,6 +154,7 @@ pub fn stream_chunk_to_session_update(chunk: &StreamChunk) -> Option<acp::Sessio
         StreamChunk::ToolUse { id, name, input } => Some(acp::SessionUpdate::ToolCall(
             acp::ToolCall::new(id.clone(), name.clone())
                 .status(acp::ToolCallStatus::Pending)
+                .locations(tool_call_locations(name, input, cwd))
                 .raw_input(input.clone()),
         )),
         StreamChunk::ToolResult {
@@ -149,7 +189,7 @@ pub fn stream_chunk_to_session_update(chunk: &StreamChunk) -> Option<acp::Sessio
 /// turn's tool invocations. Returns a `Vec` because an assistant message with
 /// tool calls yields several updates. Meta/context items are intentionally
 /// skipped (codex `replay_history` shape).
-pub fn message_to_replay_updates(message: &ChatMessage) -> Vec<acp::SessionUpdate> {
+pub fn message_to_replay_updates(message: &ChatMessage, cwd: &Path) -> Vec<acp::SessionUpdate> {
     let mut updates = Vec::new();
     if !message.content.is_empty() {
         let chunk = acp::ContentChunk::new(acp::ContentBlock::from(message.content.clone()));
@@ -163,6 +203,7 @@ pub fn message_to_replay_updates(message: &ChatMessage) -> Vec<acp::SessionUpdat
         updates.push(acp::SessionUpdate::ToolCall(
             acp::ToolCall::new(tc.id.clone(), tc.name.clone())
                 .status(acp::ToolCallStatus::Completed)
+                .locations(tool_call_locations(&tc.name, &tc.input, cwd))
                 .raw_input(tc.input.clone()),
         ));
     }
@@ -497,7 +538,7 @@ mod tests {
     fn test_mcp_servers_from_acp_collapses_double_underscore_in_id() {
         let cases: &[(&str, &str)] = &[
             ("my__server", "my_server"),
-            ("a____b", "a_b"),     // runs of `_` collapse fully
+            ("a____b", "a_b"), // runs of `_` collapse fully
             ("keep__one__two", "keep_one_two"),
             ("under_score", "under_score"), // single `_` is preserved
         ];
@@ -532,10 +573,8 @@ mod tests {
             );
         }
         // A valid server after a dropped-empty one still forwards.
-        let specs = mcp_servers_from_acp(vec![
-            stdio_server("", "/cmd"),
-            stdio_server("good", "/cmd"),
-        ]);
+        let specs =
+            mcp_servers_from_acp(vec![stdio_server("", "/cmd"), stdio_server("good", "/cmd")]);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].id, "good");
     }
@@ -562,5 +601,118 @@ mod tests {
         );
         assert_eq!(specs[0].id, "alpha_beta");
         assert_eq!(specs[1].id, "gamma");
+    }
+    // ── ACP "follow" feature: ToolCall carries ToolCallLocation ─────────
+
+    use super::{message_to_replay_updates, stream_chunk_to_session_update};
+    use crate::domain::models::{ChatMessage, MessageRole, StreamChunk, ToolCallInfo};
+    use std::path::Path;
+    /// A `read` tool call emits a `ToolCall` whose `locations` point Zed's
+    /// "follow" feature at the file, with a relative path resolved against the
+    /// session `cwd`. Red-on-mutant: dropping the `.locations(...)` call in
+    /// `stream_chunk_to_session_update` reddens the `len()` assertion.
+    #[test]
+    fn read_tool_use_emits_tool_call_with_cwd_resolved_location() {
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-1".into(),
+            name: "read".into(),
+            input: serde_json::json!({ "file_path": "src/lib.rs" }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo"))
+            .expect("read ToolUse must map to a ToolCall");
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall, got {update:?}");
+        };
+        assert_eq!(
+            call.locations.len(),
+            1,
+            "a read must advertise exactly one follow location"
+        );
+        assert_eq!(
+            call.locations[0].path,
+            std::path::PathBuf::from("/repo/src/lib.rs"),
+            "relative file_path must be resolved against cwd"
+        );
+        assert!(
+            call.locations[0].line.is_none(),
+            "no line hint is available for a plain read"
+        );
+    }
+
+    /// Absolute paths pass through verbatim (never re-anchored to cwd); the
+    /// tool name match is case-insensitive (`Read` == `read`).
+    #[test]
+    fn read_tool_use_keeps_absolute_path_verbatim() {
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-2".into(),
+            name: "Read".into(),
+            input: serde_json::json!({ "file_path": "/etc/hostname" }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo")).unwrap();
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall");
+        };
+        assert_eq!(
+            call.locations[0].path,
+            std::path::PathBuf::from("/etc/hostname")
+        );
+    }
+
+    /// A non-file tool (`bash`) advertises NO location — never point the editor
+    /// at a guessed file. Guards against a mutant that attaches a bogus path to
+    /// every tool call.
+    #[test]
+    fn non_file_tool_emits_no_location() {
+        let chunk = StreamChunk::ToolUse {
+            id: "tc-3".into(),
+            name: "bash".into(),
+            input: serde_json::json!({ "command": "ls -la" }),
+        };
+        let update = stream_chunk_to_session_update(&chunk, Path::new("/repo")).unwrap();
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall");
+        };
+        assert!(
+            call.locations.is_empty(),
+            "bash must not advertise a follow location"
+        );
+    }
+
+    /// A persisted read tool call is replayed with its location on
+    /// `session/load`, so a reconnecting Zed client can still follow prior turns.
+    #[test]
+    fn replay_emits_completed_tool_call_with_location() {
+        let message = ChatMessage {
+            role: MessageRole::Assistant,
+            tool_calls: vec![ToolCallInfo {
+                id: "tc-replay".into(),
+                name: "read".into(),
+                input: serde_json::json!({ "file_path": "a/b.rs" }),
+                result: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+                status: None,
+            }],
+            ..Default::default()
+        };
+        let updates = message_to_replay_updates(&message, Path::new("/repo"));
+        let tool_calls: Vec<_> = updates
+            .into_iter()
+            .filter_map(|u| match u {
+                acp::SessionUpdate::ToolCall(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].status,
+            acp::ToolCallStatus::Completed,
+            "replayed tool calls are already complete"
+        );
+        assert_eq!(
+            tool_calls[0].locations[0].path,
+            std::path::PathBuf::from("/repo/a/b.rs"),
+            "replay must carry the follow location"
+        );
     }
 }
