@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(workspace_registry)]
+    #[serial(rustain_data_dir)]
     async fn note_workspace_writes_minimal_schema_and_0600() {
         let data_dir = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(workspace_registry)]
+    #[serial(rustain_data_dir)]
     async fn note_workspace_throttles_same_workspace() {
         let data_dir = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(workspace_registry)]
+    #[serial(rustain_data_dir)]
     async fn live_workspaces_omits_dead_entries_without_rewriting() {
         let data_dir = tempfile::tempdir().unwrap();
         let live_workspace = tempfile::tempdir().unwrap();
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(workspace_registry)]
+    #[serial(rustain_data_dir)]
     async fn live_workspaces_gracefully_ignores_corrupt_or_newer_registry() {
         let data_dir = tempfile::tempdir().unwrap();
         unsafe {
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(workspace_registry)]
+    #[serial(rustain_data_dir)]
     async fn note_workspace_save_save_contention_keeps_both_entries() {
         let data_dir = tempfile::tempdir().unwrap();
         let workspace_a = tempfile::tempdir().unwrap();

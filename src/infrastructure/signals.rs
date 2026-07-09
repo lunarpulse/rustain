@@ -206,7 +206,7 @@ mod tests {
     /// "Rustain Startup Crash Report" proves the RIGHT hook's write function ran,
     /// not just any file write.
     #[test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     fn record_startup_panic_writes_expected_format() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: #[serial] guarantees no concurrent env mutation; RUSTAIN_DATA_DIR
@@ -265,7 +265,7 @@ mod tests {
     /// path (proves `record_startup_panic` creates the file, not just writes to
     /// a pre-existing one).
     #[test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     fn record_startup_panic_creates_file_in_fresh_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let expected = tmp.path().join("panic.log");

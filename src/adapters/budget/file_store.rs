@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(rustain_data_dir)]
     async fn budget_state_save_load_roundtrip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation

@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn save_load_roundtrip() {
         let _dir = temp_dir();
         let mut catalog = CachedCatalog::default();
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn load_missing_file_returns_default() {
         let _dir = temp_dir();
         let cache = ModelCatalogCache::new();
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn load_corrupt_file_returns_default() {
         let dir = temp_dir();
         let path = dir.join("models_cache.json");
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn v1_file_deserializes_as_v2() {
         let dir = temp_dir();
         let path = dir.join("models_cache.json");
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn merge_marks_ghosts_stale() {
         let _dir = temp_dir();
         let mut catalog = CachedCatalog::default();
