@@ -304,8 +304,10 @@ mod daemon_path_tests {
 #[cfg(test)]
 mod startup_panic_path_tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial(rustain_data_dir)]
     fn panic_log_path_is_data_dir_join_panic_log() {
         let data = tempfile::tempdir().unwrap();
         // SAFETY: single-threaded test; RUSTAIN_DATA_DIR override is the documented

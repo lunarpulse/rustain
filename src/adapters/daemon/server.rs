@@ -717,23 +717,20 @@ impl AttachServer {
         self.ensure_approval_gate(rt.approval.clone());
 
         let turn_complete = self.turn_complete.notified();
-        let (handle, snapshot) = {
+        let handle = {
             let mut conv = self.conversation.lock().await;
-            let handle = rt.drive_turn(
+            rt.drive_turn(
                 text,
                 origin,
                 &mut conv,
                 &self.domain_tx,
                 CancellationToken::new(),
-            );
-            (handle, conv.clone())
-        }; // lock dropped before save — avoid holding across .await
+            )
+        }; // lock dropped before awaiting the spawned turn
 
-        // Persist the user message immediately (the assistant side persists on
-        // TurnComplete in the forwarder).
-        if let Err(e) = self.core.storage.save_conversation(&snapshot).await {
-            tracing::warn!(error = %e, "daemon: persisting user message failed");
-        }
+        // `run_turn` persists this user-message snapshot before the provider call.
+        // Saving another user-only snapshot here races the forwarder and can
+        // overwrite the completed assistant commit on fast provider paths.
 
         if let Err(e) = handle.await {
             tracing::warn!(error = ?e, "daemon turn task failed");
@@ -1266,6 +1263,19 @@ mod tests {
             crate::infrastructure::paths::sessions_dir(workspace),
             workspace.to_path_buf(),
         ));
+        mock_core_with_storage(workspace, chunks, memory, storage)
+    }
+
+    /// Like [`mock_core`] but with an injectable [`StoragePort`]. The same
+    /// `storage` handle is wired into both the [`DaemonCore`] and the per-turn
+    /// runtime factory, so a wrapping storage observes every save the daemon
+    /// issues — `run_turn`'s pre-turn snapshot and the forwarder's commit alike.
+    fn mock_core_with_storage(
+        workspace: &Path,
+        chunks: Vec<StreamChunk>,
+        memory: Arc<dyn crate::domain::ports::MemoryPort>,
+        storage: Arc<dyn StoragePort>,
+    ) -> (Arc<DaemonCore>, Arc<dyn StoragePort>) {
         let provider: Arc<dyn StreamingProvider> = Arc::new(ScriptedProvider { chunks });
         let ws = workspace.to_path_buf();
         let storage_for_factory = storage.clone();
@@ -1285,6 +1295,65 @@ mod tests {
             }),
         );
         (Arc::new(core), storage)
+    }
+
+    /// Test-only [`StoragePort`] that tallies how many *user-only* snapshots are
+    /// persisted — a conversation that carries a user message but no assistant
+    /// message.
+    ///
+    /// `run_turn` persists exactly one such snapshot before the provider call.
+    /// The daemon turn driver used to persist a *second* user-only snapshot
+    /// after spawning the turn; that snapshot raced the forwarder's assistant
+    /// commit and could overwrite the completed transcript on fast provider
+    /// paths. Counting at entry (before the delegate) makes the tally
+    /// independent of which save the scheduler completes first, so a regression
+    /// fails deterministically rather than only when the race lands the wrong way.
+    struct UserOnlySaveCountingStorage {
+        inner: Arc<dyn StoragePort>,
+        user_only_saves: Arc<AtomicUsize>,
+    }
+
+    impl UserOnlySaveCountingStorage {
+        fn new(inner: Arc<dyn StoragePort>, user_only_saves: Arc<AtomicUsize>) -> Self {
+            Self {
+                inner,
+                user_only_saves,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoragePort for UserOnlySaveCountingStorage {
+        async fn save_conversation(
+            &self,
+            conv: &Conversation,
+        ) -> Result<(), crate::domain::errors::StorageError> {
+            let has_user = conv.messages.iter().any(|m| m.role == MessageRole::User);
+            let has_assistant = conv
+                .messages
+                .iter()
+                .any(|m| m.role == MessageRole::Assistant);
+            if has_user && !has_assistant {
+                self.user_only_saves.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.save_conversation(conv).await
+        }
+
+        async fn load_conversation(
+            &self,
+            id: &str,
+        ) -> Result<Option<Conversation>, crate::domain::errors::StorageError> {
+            self.inner.load_conversation(id).await
+        }
+
+        async fn list_conversations(
+            &self,
+        ) -> Result<
+            Vec<crate::domain::models::ConversationSummary>,
+            crate::domain::errors::StorageError,
+        > {
+            self.inner.list_conversations().await
+        }
     }
 
     /// AC2/AC3/AC4/AC5: attach → UserMessage → forwarded provider chunks →
@@ -1493,6 +1562,102 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("telegram channel turn was not persisted");
+    }
+
+    /// Regression for the daemon turn-driver save race (AC4): a channel turn
+    /// must persist a user-only snapshot exactly once — `run_turn`'s pre-turn
+    /// save, before the provider streams — and then again with the assistant
+    /// commit. A *second* user-only snapshot saved after the turn is spawned
+    /// races the forwarder's `commit_assistant_turn` and overwrites the
+    /// completed transcript on fast provider paths. Asserting on the save tally
+    /// (counted at entry) catches the redundant save deterministically,
+    /// independent of which save the scheduler happens to complete first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_turn_persists_user_snapshot_once_before_assistant_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let chunks = vec![
+            StreamChunk::Text {
+                content: "telegram response".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ];
+
+        // Wrap the real storage so every persisted user-only snapshot is tallied.
+        let user_only_saves = Arc::new(AtomicUsize::new(0));
+        let inner: Arc<dyn StoragePort> = Arc::new(FileSystemStorage::with_workspace_root(
+            crate::infrastructure::paths::sessions_dir(ws),
+            ws.to_path_buf(),
+        ));
+        let storage: Arc<dyn StoragePort> = Arc::new(UserOnlySaveCountingStorage::new(
+            inner,
+            user_only_saves.clone(),
+        ));
+        let (core, storage) = mock_core_with_storage(ws, chunks, Arc::new(NoOpMemory), storage);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "race-conv".into(),
+            ..Default::default()
+        }));
+
+        let (bus, domain_rx) = EventBus::new(64);
+        let domain_tx = bus.domain_tx.clone();
+        let (channel_tx, channel_rx) = mpsc::unbounded_channel::<ChannelTurnRequest>();
+        let socket = ws.join("race.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = AttachServer::new(core, conversation, domain_tx);
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let handle = tokio::spawn(async move {
+            srv.run(listener, domain_rx, Some(channel_rx), None, sd)
+                .await
+        });
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        channel_tx
+            .send(ChannelTurnRequest {
+                text: "hi from telegram".into(),
+                origin: ChannelKind::Telegram,
+                response_tx,
+            })
+            .unwrap();
+
+        // The response is sent from `commit_assistant_turn` *after* it persists
+        // the assistant message, so receiving it implies the commit save landed.
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), response_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response, "telegram response");
+
+        // Exactly one user-only snapshot may be persisted — `run_turn`'s
+        // pre-turn save. A second one (the removed post-spawn snapshot) would
+        // race and overwrite this commit; the tally is deterministic regardless
+        // of save completion order.
+        assert_eq!(
+            user_only_saves.load(Ordering::SeqCst),
+            1,
+            "a second user-only snapshot save would race the assistant commit"
+        );
+
+        // The assistant commit survived (not clobbered by a stale snapshot).
+        let conv = storage
+            .load_conversation("race-conv")
+            .await
+            .unwrap()
+            .expect("conversation persisted");
+        let asst = conv
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("assistant commit persisted");
+        assert_eq!(asst.content, "telegram response");
+
+        shutdown.cancel();
+        handle.abort();
     }
     /// AC2: a protocol version mismatch is rejected with a clear Error frame.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

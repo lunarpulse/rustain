@@ -338,7 +338,7 @@ mod tests {
     // P0-3a: 0600 permissions (unix only)
     #[cfg(unix)]
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn auth_file_has_0600_permissions() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -368,7 +368,7 @@ mod tests {
 
     // P0-3b: Versioned schema on disk
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn auth_file_uses_versioned_schema() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -399,7 +399,7 @@ mod tests {
 
     // P0-3c: Missing file returns empty
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn missing_auth_file_returns_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -413,7 +413,7 @@ mod tests {
 
     // P0-5: Overwrite (set replaces)
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn set_replaces_existing_entry() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -444,7 +444,7 @@ mod tests {
 
     // P0-3d: Remove works
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn remove_deletes_entry() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -467,7 +467,7 @@ mod tests {
 
     // P0-3e: List returns stored providers
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn list_returns_all_stored_providers() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -506,7 +506,7 @@ mod tests {
 
     // get_sync works
     #[test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     fn get_sync_returns_stored_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());
@@ -541,7 +541,7 @@ mod tests {
 
     // AC3 anti-vacuous round-trip: real key on disk, no `***`, read-back equality.
     #[tokio::test]
-    #[serial]
+    #[serial(rustain_data_dir)]
     async fn auth_json_round_trip_persists_real_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = set_data_dir(tmp.path());

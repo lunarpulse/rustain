@@ -135,7 +135,7 @@ mod tests {
     use crate::domain::models::usage::TokenUsage;
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(rustain_data_dir)]
     async fn ledger_append_roundtrip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(rustain_data_dir)]
     async fn read_session_returns_appended_entries() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(rustain_data_dir)]
     async fn read_since_filters_by_timestamp() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(rustain_data_dir)]
     async fn read_session_skips_corrupt_lines() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
