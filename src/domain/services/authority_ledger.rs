@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
+
 use crate::domain::models::{
-    AgentId, Budget, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest,
+    AgentId, Budget, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest, PeerId,
+    PeerIdentity,
 };
 use crate::domain::ports::AuthorityError;
 
@@ -36,6 +39,7 @@ struct AuthorityState {
     entries: BTreeMap<CapabilityTokenId, LedgerEntry>,
     scope_to_token: HashMap<AgentId, CapabilityTokenId>,
     children: BTreeMap<CapabilityTokenId, BTreeSet<CapabilityTokenId>>,
+    trusted_issuers: HashMap<PeerId, VerifyingKey>,
 }
 
 /// Synchronous authority ledger for Story 14.2.
@@ -49,6 +53,67 @@ struct AuthorityState {
 ///   node is terminated synchronously via `cascade_kill` in the same extent.
 pub struct AuthorityLedger {
     state: Mutex<AuthorityState>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: AuthorityState single-writer map; ADR-14-2-01
+}
+impl AuthorityLedger {
+    /// Construct a ledger for a signed authority root and register the sole
+    /// trust anchor that may attest cross-process tokens.
+    pub fn new_with_trusted_issuer(
+        root: CapabilityToken,
+        issuer: &PeerIdentity,
+    ) -> Result<Self, AuthorityError> {
+        let ledger = Self::new(root.clone());
+        ledger.trust_issuer(issuer)?;
+        ledger.verify_signed_token(&root)?;
+        Ok(ledger)
+    }
+
+    /// Register an explicitly trusted issuer. Trust establishment is a caller
+    /// policy decision (for example a handshake-pinned PeerIdentity); this
+    /// method validates the PeerId/public-key binding before storing it.
+    pub fn trust_issuer(&self, issuer: &PeerIdentity) -> Result<(), AuthorityError> {
+        issuer
+            .verify_binding()
+            .map_err(|_| AuthorityError::Malformed {
+                reason: "trusted issuer identity binding is invalid",
+            })?;
+        let key_bytes: [u8; 32] =
+            issuer
+                .public_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| AuthorityError::Malformed {
+                    reason: "trusted issuer public key length is invalid",
+                })?;
+        let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| AuthorityError::Malformed {
+            reason: "trusted issuer public key is invalid",
+        })?;
+        self.lock_state()
+            .trusted_issuers
+            .insert(issuer.peer_id.clone(), key);
+        Ok(())
+    }
+
+    fn verify_signed_token(&self, token: &CapabilityToken) -> Result<(), AuthorityError> {
+        if token.malformed_signature_state() {
+            return Err(AuthorityError::Malformed {
+                reason: "issuer and signature must be present together",
+            });
+        }
+        let Some(issuer) = token.issuer.as_ref() else {
+            return Ok(());
+        };
+        let key = self
+            .lock_state()
+            .trusted_issuers
+            .get(issuer)
+            .cloned()
+            .ok_or(AuthorityError::Malformed {
+                reason: "signed token issuer is not trusted",
+            })?;
+        token.verify(&key).map_err(|_| AuthorityError::Malformed {
+            reason: "signed token cryptographic verification failed",
+        })
+    }
 }
 
 impl AuthorityLedger {
@@ -110,7 +175,8 @@ impl AuthorityLedger {
         parent: &CapabilityToken,
         req: DelegateRequest,
     ) -> Result<CapabilityToken, AuthorityError> {
-        if req.scope.0.is_empty() || !req.scope.is_local() || req.scope == AgentId::root() {
+        self.verify_signed_token(parent)?;
+        if req.scope.as_str().is_empty() || !req.scope.is_local() || req.scope == AgentId::root() {
             return Err(AuthorityError::Malformed {
                 reason: "scope must be one non-root local AgentId",
             });
@@ -182,22 +248,40 @@ impl AuthorityLedger {
         Ok(child)
     }
 
+    /// Delegate and attest the new grant for a cross-process recipient. The
+    /// token id is computed before signing and remains the ledger key; callers
+    /// register the issuer at receiving ledgers through [`Self::trust_issuer`].
+    pub fn delegate_signed(
+        &self,
+        parent: &CapabilityToken,
+        req: DelegateRequest,
+        signing_key: &SigningKey,
+        issuer: PeerId,
+    ) -> Result<CapabilityToken, AuthorityError> {
+        let child = self.delegate(parent, req)?;
+        let mut signed = child.clone();
+        signed.sign(signing_key, issuer);
+        debug_assert_eq!(signed.id, child.id);
+        let mut state = self.lock_state();
+        let entry = state
+            .entries
+            .get_mut(&signed.id)
+            .ok_or(AuthorityError::NotFound)?;
+        entry.token = signed.clone();
+        Ok(signed)
+    }
+
     pub fn validate(
         &self,
         token: &CapabilityToken,
         want: &CapabilityFlag,
         scope: &AgentId,
     ) -> Result<(), AuthorityError> {
-        if token.malformed_signature_state() {
-            return Err(AuthorityError::Malformed {
-                reason: "issuer and signature must be present together",
-            });
-        }
-        if token.has_signature() {
-            return Err(AuthorityError::Malformed {
-                reason: "signed tokens require an R2 verifier",
-            });
-        }
+        // Signed cross-process grants are trusted only after the ledger has
+        // resolved their issuer through an explicitly registered PeerIdentity
+        // and verified the Ed25519 attestation. Hash self-consistency alone is
+        // not authority: an attacker can recompute a hash.
+        self.verify_signed_token(token)?;
         if &token.scope != scope {
             return Err(AuthorityError::Malformed {
                 reason: "scope mismatch",
@@ -487,4 +571,79 @@ fn validate_request_subset(
         return Err(AuthorityError::NonSubset { dimension: "depth" });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod signed_token_ledger_tests {
+    use super::*;
+    use crate::domain::models::agent_id::AgentId;
+    use ed25519_dalek::SigningKey;
+
+    fn signed_root(scope: &str) -> (CapabilityToken, SigningKey, PeerIdentity) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let identity =
+            PeerIdentity::from_public_key(key.verifying_key().to_bytes().to_vec()).unwrap();
+        let mut token = CapabilityToken::r1_root(AgentId::parse(scope).unwrap());
+        token.sign(&key, identity.peer_id.clone());
+        (token, key, identity)
+    }
+
+    #[test]
+    fn receiver_ledger_accepts_trusted_signed_token() {
+        let (token, _key, identity) = signed_root("peer/agent");
+        let scope = token.scope.clone();
+        let ledger = AuthorityLedger::new_with_trusted_issuer(token.clone(), &identity).unwrap();
+        ledger
+            .validate(&token, &CapabilityFlag::Spawn, &scope)
+            .expect("trusted signed token must pass the ledger gate");
+    }
+
+    #[test]
+    fn delegate_signed_preserves_ledger_identity_and_verifies_at_receiver() {
+        let (root, key, identity) = signed_root("peer/agent");
+        let ledger = AuthorityLedger::new_with_trusted_issuer(root.clone(), &identity).unwrap();
+        let request = CapabilityToken::r1_child_request(AgentId::parse("child").unwrap());
+        let expected_id = CapabilityToken::child(&root, request.clone()).id;
+        let child = ledger
+            .delegate_signed(&root, request, &key, identity.peer_id.clone())
+            .unwrap();
+        assert_eq!(
+            child.id, expected_id,
+            "signature must not re-key the ledger entry"
+        );
+        ledger
+            .validate(&child, &CapabilityFlag::Spawn, &child.scope)
+            .expect("trusted signed delegation must validate at the receiver");
+    }
+
+    #[test]
+    fn ledger_rejects_unknown_issuer_and_tampered_signed_token() {
+        let (token, _key, identity) = signed_root("peer/agent");
+        let scope = token.scope.clone();
+        let untrusted = AuthorityLedger::new(token.clone());
+        assert!(matches!(
+            untrusted.validate(&token, &CapabilityFlag::Spawn, &scope),
+            Err(AuthorityError::Malformed { .. })
+        ));
+
+        let ledger = AuthorityLedger::new_with_trusted_issuer(token.clone(), &identity).unwrap();
+        let mut tampered = token.clone();
+        tampered.budget.requests += 1;
+        assert!(matches!(
+            ledger.validate(&tampered, &CapabilityFlag::Spawn, &scope),
+            Err(AuthorityError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn ledger_still_rejects_malformed_signature_state() {
+        let root = CapabilityToken::r1_root(AgentId::parse("peer/agent").unwrap());
+        let ledger = AuthorityLedger::new(root.clone());
+        let mut bad = root.clone();
+        bad.issuer = Some(PeerId::from_public_key(&[7u8; 32]).unwrap());
+        assert!(matches!(
+            ledger.validate(&bad, &CapabilityFlag::Spawn, &root.scope),
+            Err(AuthorityError::Malformed { .. })
+        ));
+    }
 }

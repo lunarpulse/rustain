@@ -395,7 +395,7 @@ impl SubagentRunner for InProcessSubagentRunner {
             // entry is cleaned up.
             let entries = registry.list().await;
             if entries.iter().any(|e| e.agent_id == agent_id_for_bridge) {
-                tracing::warn!(agent_id = %agent_id_for_bridge.0, "Bridge task exiting without terminal state — force deregistering");
+                tracing::warn!(agent_id = %agent_id_for_bridge, "Bridge task exiting without terminal state — force deregistering");
                 registry.deregister(&agent_id_for_bridge).await;
             }
         });
@@ -540,7 +540,7 @@ async fn run_child(
                 None
             },
             subagent_type: subagent_type.to_string(),
-            agent_id: agent_id.0.clone(),
+            agent_id: agent_id.as_str().to_string(),
         };
         if let Err(e) = spool.write_meta(task_id, &meta).await {
             tracing::warn!(task_id = %task_id, error = %e, "Spool meta write failed");
@@ -623,7 +623,7 @@ async fn run_child(
         mailbox_budget.release();
         if let Err(e) = event_bus.emit_domain(crate::domain::events::AppEvent::Subagent(
             crate::domain::models::SubagentEnvelope::new(
-                delivery.envelope.header.sender.0.clone(),
+                delivery.envelope.header.sender.as_str().to_string(),
                 agent_id.clone(),
                 delivery.envelope.header.kind.clone(),
                 crate::domain::models::SubagentEvent::MessageRefused {
@@ -667,7 +667,7 @@ async fn run_child(
             if let Op::Deliver(delivery) = op {
                 mailbox_budget.release();
                 if let Err(e) = event_bus.emit_domain(AppEvent::Subagent(SubagentEnvelope::new(
-                    delivery.envelope.header.sender.0.clone(),
+                    delivery.envelope.header.sender.as_str().to_string(),
                     agent_id.clone(),
                     delivery.envelope.header.kind,
                     SubagentEvent::MessageRefused {
@@ -682,7 +682,7 @@ async fn run_child(
         while let Some(delivery) = parked_queue.pop_front() {
             mailbox_budget.release();
             if let Err(e) = event_bus.emit_domain(AppEvent::Subagent(SubagentEnvelope::new(
-                delivery.envelope.header.sender.0.clone(),
+                delivery.envelope.header.sender.as_str().to_string(),
                 agent_id.clone(),
                 delivery.envelope.header.kind,
                 SubagentEvent::MessageRefused {
@@ -702,7 +702,7 @@ async fn run_child(
         for (correlation_id, sender, kind) in pending_injected_headers.drain(..) {
             mailbox_budget.release();
             if let Err(e) = event_bus.emit_domain(AppEvent::Subagent(SubagentEnvelope::new(
-                sender.0.clone(),
+                sender.as_str().to_string(),
                 agent_id.clone(),
                 kind,
                 SubagentEvent::MessageRefused {
@@ -1432,7 +1432,7 @@ async fn run_child(
         }
 
         if !received_turn_complete {
-            tracing::warn!(agent_id = %agent_id.0, "Provider stream ended without TurnComplete");
+            tracing::warn!(agent_id = %agent_id, "Provider stream ended without TurnComplete");
             emit_status(
                 NodeState::Failed,
                 &status_tx,
@@ -1566,7 +1566,7 @@ async fn run_child(
                     continue;
                 }
                 let source = ApprovalSource::ForegroundSubagent {
-                    conversation_id: agent_id.0.clone(),
+                    conversation_id: agent_id.as_str().to_string(),
                     parent_tool_call_id: task_id.clone(),
                     subagent_type: "in-process".to_string(),
                 };
@@ -1677,7 +1677,7 @@ async fn run_child(
     }
 
     // P5 fix: Max iterations reached — emit Failed, not Completed
-    tracing::warn!(agent_id = %agent_id.0, "Subagent reached max tool iterations");
+    tracing::warn!(agent_id = %agent_id, "Subagent reached max tool iterations");
     let _ = spool
         .append(&task_id, b"WARNING: max tool iterations reached\n")
         .await;
@@ -2034,7 +2034,7 @@ mod tests {
         for i in 0..n {
             let env = Envelope::new(
                 MessageHeader {
-                    sender: AgentId("parent".into()),
+                    sender: AgentId::from_validated("parent"),
                     recipient: agent_id.clone(),
                     correlation_id: CorrelationId::new(format!("c{i}")),
                     kind: MessageKind::PeerMessage,
@@ -2156,7 +2156,7 @@ mod tests {
         );
         let env = Envelope::new(
             MessageHeader {
-                sender: AgentId("attacker".into()),
+                sender: AgentId::from_validated("attacker"),
                 recipient: agent_id.clone(),
                 correlation_id: CorrelationId::new("hostile-1"),
                 kind: MessageKind::PeerMessage,
@@ -2499,8 +2499,8 @@ mod tests {
         };
         let make_delivery = |content: &str| {
             let header = MessageHeader {
-                sender: AgentId("parent".into()),
-                recipient: AgentId("child".into()),
+                sender: AgentId::from_validated("parent"),
+                recipient: AgentId::from_validated("child"),
                 correlation_id: CorrelationId::new("corr-1"),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
@@ -3764,7 +3764,7 @@ mod tests {
         assert_eq!(budget.current(), 1);
 
         let (event_bus, mut domain_rx) = EventBus::new(16);
-        let agent_id = AgentId("recipient".into());
+        let agent_id = AgentId::from_validated("recipient");
         let correlation = CorrelationId::new("corr-42");
 
         // Simulate what emit_refusal_receipt does: release + emit receipt
@@ -3825,8 +3825,8 @@ mod tests {
         let delivery = AgentDelivery {
             envelope: Envelope {
                 header: MessageHeader {
-                    sender: AgentId("s".into()),
-                    recipient: AgentId("r".into()),
+                    sender: AgentId::from_validated("s"),
+                    recipient: AgentId::from_validated("r"),
                     correlation_id: CorrelationId::new("c"),
                     kind: MessageKind::PeerMessage,
                     sequence: None,

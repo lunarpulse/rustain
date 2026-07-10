@@ -31,6 +31,7 @@ pub mod profile_resolver;
 pub mod project_context_loader;
 pub mod project_scoped_memory;
 pub mod provider;
+pub mod rap;
 pub mod sandbox;
 #[cfg(feature = "cron")]
 pub mod scheduler;

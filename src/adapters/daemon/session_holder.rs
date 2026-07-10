@@ -6,7 +6,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::pidfile::{self, GuardOutcome};
-use super::protocol::{ClientFrame, DaemonFrame, PROTOCOL_VERSION, read_frame, write_frame};
+use super::protocol::{
+    ClientFrame, ConnectionTier, DaemonFrame, answer_attach_challenge, read_frame, write_frame,
+};
+use crate::adapters::rap::IdentityKeyStore;
 use crate::domain::models::channel_kind::ChannelKind;
 use crate::domain::ports::{HeldSession, HolderState, SessionHolderPort};
 use crate::infrastructure::paths;
@@ -67,12 +70,15 @@ async fn query_holder(socket: &Path, pid: u32) -> anyhow::Result<HolderState> {
     let stream = UnixStream::connect(socket).await?;
     let (mut read_half, mut write_half) = stream.into_split();
 
-    write_frame(
+    // Server-first challenge handshake (Story 17.1a): prove identity possession
+    // before the daemon will even register this probe connection.
+    let signer = IdentityKeyStore::new(paths::data_dir()?).load_or_generate()?;
+    answer_attach_challenge(
+        &mut read_half,
         &mut write_half,
-        &ClientFrame::Attach {
-            protocol_version: PROTOCOL_VERSION,
-            read_only_ok: true,
-        },
+        true,
+        ConnectionTier::TrustedLocal,
+        &signer,
     )
     .await?;
 

@@ -120,7 +120,7 @@ fn snapshot_dir(
     let mut paths = std::collections::HashSet::new();
     let mut hashes = vec![];
     walk(dir, dir, &mut paths, &mut hashes);
-    hashes.sort_by(|a, b| a.0.cmp(&b.0));
+    hashes.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     (paths, hashes)
 }
 

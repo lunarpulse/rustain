@@ -37,7 +37,7 @@ use tokio_util::sync::CancellationToken;
 
 #[test]
 fn ac3_fingerprint_deterministic() {
-    let scope = AgentId("agent-a".into());
+    let scope = AgentId::parse("agent-a").unwrap();
     let input = serde_json::json!({"command": "ls -la", "path": "/home"});
     let fp1 = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
     let fp2 = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
@@ -47,8 +47,10 @@ fn ac3_fingerprint_deterministic() {
 #[test]
 fn ac3_fingerprint_scope_binding() {
     let input = serde_json::json!({"command": "rm -rf /"});
-    let fp_a = InvocationFingerprint::of("Bash", &input, &AgentId("node-a".into())).unwrap();
-    let fp_b = InvocationFingerprint::of("Bash", &input, &AgentId("node-b".into())).unwrap();
+    let fp_a =
+        InvocationFingerprint::of("Bash", &input, &AgentId::parse("node-a").unwrap()).unwrap();
+    let fp_b =
+        InvocationFingerprint::of("Bash", &input, &AgentId::parse("node-b").unwrap()).unwrap();
     assert_ne!(
         fp_a, fp_b,
         "approval for node A must not replay on node B (DD1, Murat)"
@@ -79,7 +81,7 @@ fn ac3_fingerprint_scope_binding() {
 /// half to the exact comparator `run_one` uses.
 #[tokio::test]
 async fn ac3_fingerprint_match_mismatch_keystone() {
-    let scope = AgentId("agent-x".into());
+    let scope = AgentId::parse("agent-x").unwrap();
     let original_input = serde_json::json!({"command": "echo hello"});
 
     let approval_runtime = ApprovalRuntime::new(
@@ -87,7 +89,7 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
         Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
     );
     let source = ApprovalSource::ForegroundTurn {
-        conversation_id: scope.0.clone(),
+        conversation_id: scope.as_str().to_string(),
     };
 
     // Real request() — computes + stores the fp server-side in PendingRecord.
@@ -119,7 +121,8 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
     // tampered resume) must NOT match the real stored fp.
     let mutated_input = serde_json::json!({"command": "echo EVIL"});
     let local_fp_mutated =
-        InvocationFingerprint::of("Bash", &mutated_input, &AgentId("agent-x".into())).unwrap();
+        InvocationFingerprint::of("Bash", &mutated_input, &AgentId::parse("agent-x").unwrap())
+            .unwrap();
     assert_ne!(
         local_fp_mutated, resolved.fp,
         "mutated input recomputed at resume-time MUST NOT match the real stored fp \
@@ -130,7 +133,7 @@ async fn ac3_fingerprint_match_mismatch_keystone() {
 /// 14.2 boundary-collision pair: length-prefix discipline
 #[test]
 fn ac3_fingerprint_length_prefix_collision_pair() {
-    let scope = AgentId("s".into());
+    let scope = AgentId::parse("s").unwrap();
     // ("ab", "c") ≠ ("a", "bc") — length-prefix discipline from CapabilityToken
     let fp1 = InvocationFingerprint::of("ab", &serde_json::json!("c"), &scope).unwrap();
     let fp2 = InvocationFingerprint::of("a", &serde_json::json!("bc"), &scope).unwrap();
@@ -143,7 +146,7 @@ fn ac3_fingerprint_length_prefix_collision_pair() {
 /// Whitespace variation: "rm -rf /" vs "rm  -rf /"
 #[test]
 fn ac3_fingerprint_whitespace_variation() {
-    let scope = AgentId("s".into());
+    let scope = AgentId::parse("s").unwrap();
     let fp1 =
         InvocationFingerprint::of("Bash", &serde_json::json!({"cmd": "rm -rf /"}), &scope).unwrap();
     let fp2 = InvocationFingerprint::of("Bash", &serde_json::json!({"cmd": "rm  -rf /"}), &scope)
@@ -160,7 +163,7 @@ fn ac3_fingerprint_whitespace_variation() {
 fn ac3_always_rule_is_not_fingerprint_bypass() {
     // This is a documentation test — the fingerprint asserts identity-of-invocation,
     // never breadth-of-policy.
-    let scope = AgentId("s".into());
+    let scope = AgentId::parse("s").unwrap();
     let fp1 = InvocationFingerprint::of("Bash", &serde_json::json!({"cmd": "ls"}), &scope).unwrap();
     let fp2 = InvocationFingerprint::of(
         "Bash",

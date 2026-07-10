@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     fn id(s: &str) -> AgentId {
-        AgentId(s.to_string())
+        AgentId::from_validated(s.to_string())
     }
 
     #[test]

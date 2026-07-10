@@ -246,8 +246,8 @@ mod tests {
     /// flips a field is more likely to surface.
     fn sample_node() -> AgentNode {
         AgentNode {
-            id: AgentId("child123".into()),
-            parent: Some(AgentId("parentabc".into())),
+            id: AgentId::from_validated("child123"),
+            parent: Some(AgentId::from_validated("parentabc")),
             token: CapabilityTokenId::root(),
             ownership: OwnershipKind::Peer,
             state: NodeState::Running,

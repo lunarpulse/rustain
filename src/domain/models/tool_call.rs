@@ -94,31 +94,37 @@ impl ApprovalSource {
     pub fn scope_agent_id(&self) -> crate::domain::models::agent_id::AgentId {
         match self {
             ApprovalSource::ForegroundTurn { conversation_id } => {
-                crate::domain::models::agent_id::AgentId(conversation_id.clone())
+                crate::domain::models::agent_id::AgentId::from_validated(conversation_id.clone())
             }
             ApprovalSource::ForegroundSubagent {
                 conversation_id,
                 parent_tool_call_id,
                 ..
-            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
-                conversation_id,
-                parent_tool_call_id,
-            ])),
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    parent_tool_call_id,
+                ]))
+            }
             ApprovalSource::AcpSession {
                 conversation_id,
                 session_id,
-            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
-                conversation_id,
-                session_id,
-            ])),
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    session_id,
+                ]))
+            }
             ApprovalSource::BackgroundAgent {
                 conversation_id,
                 task_id,
                 ..
-            } => crate::domain::models::agent_id::AgentId(length_prefixed_scope(&[
-                conversation_id,
-                task_id,
-            ])),
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    task_id,
+                ]))
+            }
         }
     }
 }

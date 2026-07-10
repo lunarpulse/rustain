@@ -80,7 +80,7 @@ mod tests {
 
     fn h(label: &str) -> SpokeHandle {
         SpokeHandle {
-            agent_id: AgentId(label.into()),
+            agent_id: AgentId::from_validated(label),
             label: label.into(),
             status: NodeState::Completed,
             salience: format!("{label} salience"),

@@ -77,13 +77,13 @@ mod tests {
     fn envelope_keeps_parent_tool_call_and_agent_identity() {
         let env = SubagentEnvelope::new(
             "tc-1",
-            AgentId("child".into()),
+            AgentId::from_validated("child"),
             MessageKind::PeerMessage,
             SubagentEvent::StateChanged {
                 state: NodeState::Waiting,
             },
         );
         assert_eq!(env.parent_tool_call_id, "tc-1");
-        assert_eq!(env.agent_id, AgentId("child".into()));
+        assert_eq!(env.agent_id, AgentId::from_validated("child"));
     }
 }

@@ -128,7 +128,7 @@ fn wave_result_rows(
         .enumerate()
         .map(|(slot, (agent_id, result))| {
             crate::adapters::tui::widgets::result_row::ResultRowSnapshot {
-                agent_label: agent_id.0.clone(),
+                agent_label: agent_id.as_str().to_string(),
                 result: result.clone(),
                 slot,
                 is_self: false,
@@ -311,7 +311,7 @@ async fn refresh_spool_tail(
     };
     let spool = provider.spool();
     if let Ok(tail) = spool.read_tail(task_id, 8192).await {
-        let agent_id = crate::domain::models::AgentId(task_id.to_string());
+        let agent_id = crate::domain::models::AgentId::from_validated(task_id.to_string());
         state
             .agent_panel_state
             .spool_tail_cache
@@ -1237,7 +1237,7 @@ pub async fn run(
                                                     created_at: crate::domain::models::session_meta::now_unix(),
                                                     updated_at: crate::domain::models::session_meta::now_unix(),
                                                     last_response_at: None,
-                                                    session_id: Some(agent_id.0.clone()),
+                                                    session_id: Some(agent_id.as_str().to_string()),
                                                     usage: None,
                                                     plans: std::collections::HashMap::new(),
                                                     fork_source: None,

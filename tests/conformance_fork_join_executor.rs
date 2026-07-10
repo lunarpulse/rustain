@@ -302,7 +302,7 @@ async fn ac2_waits_for_non_empty_is_rejected_as_not_single_level() {
         root_token(),
     );
     let mut spoke_with_dep = spoke("a");
-    spoke_with_dep.waits_for = vec![AgentId("sibling".into())];
+    spoke_with_dep.waits_for = vec![AgentId::parse("sibling").unwrap()];
     let mut req = request(AgentId::root(), vec![spoke_with_dep]);
     req.spokes.push(spoke("b"));
     let err = exe.run_fork_join(req).await.unwrap_err();
@@ -848,7 +848,7 @@ fn mint_child(
         caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
     }
     let req = DelegateRequest {
-        scope: AgentId(scope.into()),
+        scope: AgentId::parse(scope).unwrap(),
         capabilities: caps,
         constraint: DelegateConstraint {
             allowed: caps,

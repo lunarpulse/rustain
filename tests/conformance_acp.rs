@@ -1006,7 +1006,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
         .list()
         .await
         .into_iter()
-        .filter(|e| e.agent_id.0.as_str() == "acp-1")
+        .filter(|e| e.agent_id.as_str().to_string().as_str() == "acp-1")
         .collect();
     assert_eq!(
         present.len(),
@@ -1033,7 +1033,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
         .list()
         .await
         .into_iter()
-        .filter(|e| e.agent_id.0.as_str() == "acp-1")
+        .filter(|e| e.agent_id.as_str().to_string().as_str() == "acp-1")
         .collect();
     assert!(
         remaining.is_empty(),
@@ -2037,7 +2037,7 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
         .list()
         .await
         .into_iter()
-        .find(|e| e.agent_id.0.as_str() == "acp-1")
+        .find(|e| e.agent_id.as_str().to_string().as_str() == "acp-1")
         .expect("session/new must register the `acp-1` Self-rooted node");
     assert_eq!(
         entry.spawned_at, FIXED_NOW_MS,
@@ -2829,7 +2829,7 @@ async fn acp_approval_source_routing_matrix() {
 
     // DD1 node-binding on the live path: scope must be length-prefixed, so it
     // cannot equal a bare delimiter join of the two components.
-    let scope = source.scope_agent_id().0;
+    let scope = source.scope_agent_id().as_str().to_string();
     let bare_join = format!("{conversation_id}/{session_id}");
     assert_ne!(
         scope, bare_join,

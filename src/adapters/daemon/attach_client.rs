@@ -18,8 +18,10 @@ use crate::domain::models::{ApprovalOutcome, StreamChunk};
 use crate::infrastructure::runtime::event_bus::RawEventKind;
 
 use super::protocol::{
-    AttachMode, ClientFrame, DaemonFrame, PROTOCOL_VERSION, read_frame, write_frame,
+    AttachMode, ClientFrame, ConnectionTier, DaemonFrame, answer_attach_challenge, read_frame,
+    write_frame,
 };
+use crate::adapters::rap::IdentityKeyStore;
 
 /// Connect + attach to this workspace's daemon and run the line-based client loop.
 pub async fn run_attach(workspace: &Path) -> Result<()> {
@@ -32,12 +34,18 @@ pub async fn run_attach(workspace: &Path) -> Result<()> {
     })?;
     let (mut read_half, mut write_half) = stream.into_split();
 
-    write_frame(
+    // Server-first challenge handshake (Story 17.1a): load (or provision) this
+    // machine's identity key from the rustain data directory, then answer the
+    // daemon's one-use challenge with an Ed25519 proof of possession.
+    let signer = IdentityKeyStore::new(crate::infrastructure::paths::data_dir()?)
+        .load_or_generate()
+        .context("loading the local peer identity key")?;
+    answer_attach_challenge(
+        &mut read_half,
         &mut write_half,
-        &ClientFrame::Attach {
-            protocol_version: PROTOCOL_VERSION,
-            read_only_ok: false,
-        },
+        false,
+        ConnectionTier::TrustedLocal,
+        &signer,
     )
     .await?;
 

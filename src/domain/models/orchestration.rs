@@ -464,12 +464,12 @@ mod tests {
         let coverage = CoverageLine::from_results(&results);
         let citations = vec![
             SpokeCitation {
-                agent_id: AgentId("a1".into()),
+                agent_id: AgentId::from_validated("a1"),
                 label: "a".into(),
                 summary: "a".into(),
             },
             SpokeCitation {
-                agent_id: AgentId("b1".into()),
+                agent_id: AgentId::from_validated("b1"),
                 label: "b".into(),
                 summary: "b".into(),
             },

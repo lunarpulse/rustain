@@ -952,7 +952,7 @@ impl RustainAcpAgent {
         // Idempotent on re-load: if the id is already live, cancel and remove
         // the old state before replacing it. Otherwise an in-flight old prompt
         // can keep streaming and race persistence against the restored session.
-        let agent_id = AgentId(session_key.clone());
+        let agent_id = AgentId::from_validated(session_key.clone());
         let old_state = { self.sessions.borrow_mut().remove(&session_key) };
         if let Some(old_state) = old_state {
             old_state.cancel.cancel();
@@ -1199,7 +1199,7 @@ impl acp::Agent for RustainAcpAgent {
         let conversation_id = (self.id_source)();
         let session_id = super::format_acp_session_id(&conversation_id);
         let cancel = CancellationToken::new();
-        let agent_id = AgentId(session_id.clone());
+        let agent_id = AgentId::from_validated(session_id.clone());
         self.node_tree
             .register_self_session(
                 agent_id.clone(),
@@ -1391,7 +1391,7 @@ impl acp::Agent for RustainAcpAgent {
         args: acp::CloseSessionRequest,
     ) -> Result<acp::CloseSessionResponse, acp::Error> {
         let session_id = args.session_id.0.to_string();
-        let agent_id = AgentId(session_id.clone());
+        let agent_id = AgentId::from_validated(session_id.clone());
         let (cancel, was_cancelled) = {
             let sessions = self.sessions.borrow();
             let state = sessions

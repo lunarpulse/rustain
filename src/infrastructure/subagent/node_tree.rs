@@ -421,11 +421,11 @@ impl NodeTree {
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),
-                    tool: agent_id.0.clone(),
+                    tool: agent_id.as_str().to_string(),
                 },
                 protocol: "subagent".into(),
                 provider_id: "subagent".into(),
-                name: agent_id.0.clone(),
+                name: agent_id.as_str().to_string(),
                 description: String::new(),
                 input_schema: serde_json::Value::Object(Default::default()),
                 parallel_safe: false,
@@ -573,11 +573,11 @@ impl NodeTree {
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),
-                        tool: id.0.clone(),
+                        tool: id.as_str().to_string(),
                     },
                     protocol: "subagent".into(),
                     provider_id: "subagent".into(),
-                    name: id.0.clone(),
+                    name: id.as_str().to_string(),
                     description: String::new(),
                     input_schema: serde_json::Value::Object(Default::default()),
                     parallel_safe: false,
@@ -598,11 +598,11 @@ impl NodeTree {
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),
-                        tool: agent_id.0.clone(),
+                        tool: agent_id.as_str().to_string(),
                     },
                     protocol: "subagent".into(),
                     provider_id: "subagent".into(),
-                    name: agent_id.0.clone(),
+                    name: agent_id.as_str().to_string(),
                     description: String::new(),
                     input_schema: serde_json::Value::Object(Default::default()),
                     parallel_safe: false,
@@ -611,7 +611,7 @@ impl NodeTree {
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),
-                        tool: agent_id.0.clone(),
+                        tool: agent_id.as_str().to_string(),
                     },
                     protocol: "subagent".into(),
                     provider_id: "subagent".into(),
@@ -702,7 +702,7 @@ impl NodeTree {
                 .filter(|(_, p)| *p == &current)
                 .map(|(id, _)| id.clone())
                 .collect();
-            children.sort_by(|a, b| a.0.cmp(&b.0));
+            children.sort_by(|a, b| a.as_str().cmp(b.as_str()));
             for child in children {
                 if !result.contains(&child) {
                     result.push(child.clone());
@@ -752,7 +752,12 @@ impl NodeTree {
             })
             .collect();
         drop(guard);
-        entries.sort_by(|a, b| a.agent_id.0.cmp(&b.agent_id.0));
+        entries.sort_by(|a, b| {
+            a.agent_id
+                .as_str()
+                .to_string()
+                .cmp(&b.agent_id.as_str().to_string())
+        });
         entries
     }
 
@@ -791,7 +796,7 @@ impl NodeTree {
                 Ok(()) => true,
                 Err(error) => {
                     tracing::warn!(
-                        agent_id = %agent_id.0,
+                        agent_id = %agent_id,
                         current = ?current,
                         ?target,
                         %error,
@@ -1326,8 +1331,8 @@ mod tests {
 
         let entries = reg.list().await;
         assert_eq!(entries.len(), 3);
-        assert!(entries[0].agent_id.0 <= entries[1].agent_id.0);
-        assert!(entries[1].agent_id.0 <= entries[2].agent_id.0);
+        assert!(entries[0].agent_id.as_str() <= entries[1].agent_id.as_str());
+        assert!(entries[1].agent_id.as_str() <= entries[2].agent_id.as_str());
         assert_eq!(entries[0].spawned_at, 1_700_000_000_000);
     }
 
@@ -1472,8 +1477,8 @@ mod tests {
         use crate::domain::models::*;
         Envelope::new(
             MessageHeader {
-                sender: AgentId("parent".into()),
-                recipient: AgentId("child".into()),
+                sender: AgentId::from_validated("parent"),
+                recipient: AgentId::from_validated("child"),
                 correlation_id: CorrelationId::new(corr),
                 kind: MessageKind::PeerMessage,
                 sequence: None,
@@ -1520,7 +1525,7 @@ mod tests {
     #[tokio::test]
     async fn t1_admission_cap_sync_refusal() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         let budget = tree.mailbox_budget(&agent).await.unwrap();
@@ -1539,7 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn t1_positive_below_cap_deliver_accepted() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         let result = bus.deliver(&agent, make_envelope("hello", "c1")).await;
@@ -1557,7 +1562,7 @@ mod tests {
     #[tokio::test]
     async fn t2_toctou_concurrency_at_capacity_boundary() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         let budget = tree.mailbox_budget(&agent).await.unwrap();
@@ -1593,7 +1598,7 @@ mod tests {
     #[tokio::test]
     async fn t5_deliver_after_terminal_refused_terminal_state() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
 
         // Valid FSM path: Created → Running → Completed
@@ -1617,7 +1622,7 @@ mod tests {
     #[tokio::test]
     async fn t8_unified_budget_bounds_aside_wake() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let _rx = register_live_agent(&tree, &agent).await;
         tree.set_state(&agent, NodeState::Running).await;
 
@@ -1667,7 +1672,7 @@ mod tests {
     #[tokio::test]
     async fn t3_cancel_time_conservation_keystone() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let mut rx = register_live_agent(&tree, &agent).await;
 
         let n = 10;
@@ -1701,7 +1706,7 @@ mod tests {
     #[tokio::test]
     async fn t3_mutant_skip_drain_leaks_budget() {
         let (tree, bus) = make_bus();
-        let agent = AgentId("child".into());
+        let agent = AgentId::from_validated("child");
         let mut rx = register_live_agent(&tree, &agent).await;
 
         for i in 0..5 {
@@ -1741,7 +1746,7 @@ mod tests {
         }
 
         let tree = NodeTree::new();
-        let agent = AgentId("target".into());
+        let agent = AgentId::from_validated("target");
 
         // --- Hostile policy bus ---
         let hostile_bus = LocalMessageBus::new(tree.clone(), Arc::new(RefuseAllPolicy));
@@ -1801,7 +1806,7 @@ mod tests {
         // This is the "collapsed" state — the mutant that the hostile
         // differential test catches.
         let (tree, bus) = make_bus(); // uses RelationshipDeliveryPolicy
-        let agent = AgentId("target".into());
+        let agent = AgentId::from_validated("target");
         let mut rx = register_live_agent(&tree, &agent).await;
         bus.deliver(&agent, make_envelope("msg", "m1"))
             .await

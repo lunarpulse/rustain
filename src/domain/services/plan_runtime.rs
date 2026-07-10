@@ -1416,12 +1416,12 @@ impl PlanRuntime {
                 if let Some(sub_number) = active_sub {
                     let sub_idx = (sub_number - 1) as usize;
                     if let Some(ref mut info) = plan.tasks[idx].sub_tasks[sub_idx].delegated_to {
-                        info.agent_id = Some(task_handle.agent_id.0.clone());
+                        info.agent_id = Some(task_handle.agent_id.as_str().to_string());
                         info.spool_task_id = Some(task_handle.task_id.clone());
                     }
                 }
             } else if let Some(ref mut info) = plan.tasks[idx].delegated_to {
-                info.agent_id = Some(task_handle.agent_id.0.clone());
+                info.agent_id = Some(task_handle.agent_id.as_str().to_string());
                 info.spool_task_id = Some(task_handle.task_id.clone());
             }
         }

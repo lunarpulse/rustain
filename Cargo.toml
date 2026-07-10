@@ -101,6 +101,13 @@ hex = "0.4"
 gray_matter = "0.2"
 url = "2"
 zeroize = { version = "1", features = ["alloc"] }
+ed25519-dalek = { version = "=2.2.0", features = ["pkcs8", "rand_core"] }
+# Portable OS CSPRNG for identity key generation (Story 17.1a: replaces the
+# Unix-only `/dev/urandom` read). Pinned to 0.6.4 — the exact version already
+# resolved transitively via ed25519-dalek's `rand_core` feature — so this only
+# makes `rand_core::OsRng` directly importable (no lockfile change). `getrandom`
+# (a rand_core default feature) backs `OsRng` on Linux/macOS/Windows/FreeBSD.
+rand_core = "0.6.4"
 rpassword = "7"
 
 # ── Self-update (Story 13.3a, feature-gated `self-update`) ──────

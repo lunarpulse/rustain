@@ -1,7 +1,9 @@
 use std::ops::{Add, AddAssign, Sub};
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::domain::models::agent_id::AgentId;
 use crate::domain::models::peer_identity::{Ed25519Sig, PeerId};
@@ -252,6 +254,9 @@ impl CapabilityToken {
         token
     }
 
+    /// Stable token identity. Issuer and signature are authenticated transport
+    /// attestations, not authority content, so attaching either cannot change
+    /// the id used by parent references and ledger entries.
     pub fn compute_id(&self) -> CapabilityTokenId {
         self.compute_id_with_signature_for_test(None)
     }
@@ -261,20 +266,20 @@ impl CapabilityToken {
         &self,
         signature: Option<&[u8]>,
     ) -> CapabilityTokenId {
-        let bytes = self.canonical_bytes(signature);
-        let digest = Sha256::digest(&bytes);
+        let _ = signature;
+        let digest = Sha256::digest(self.identity_bytes());
         let mut out = [0u8; 32];
         out.copy_from_slice(&digest);
         CapabilityTokenId(out)
     }
 
-    pub fn canonical_bytes(&self, signature: Option<&[u8]>) -> Vec<u8> {
+    fn identity_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(160);
         out.extend_from_slice(DOMAIN_TAG);
         out.push(FORMAT_VERSION);
         push_opt_token_id(&mut out, self.parent);
         push_u64(&mut out, self.capabilities.0);
-        push_str(&mut out, &self.scope.0);
+        push_str(&mut out, self.scope.as_str());
         push_u64(&mut out, self.constraint.allowed.0);
         push_u64(&mut out, self.constraint.max_depth as u64);
         push_u64(&mut out, self.constraint.max_subset.0);
@@ -282,9 +287,14 @@ impl CapabilityToken {
         push_u64(&mut out, self.budget.cost_micros);
         push_opt_u64(&mut out, self.not_after);
         push_opt_u32(&mut out, self.uses_limit);
-        push_opt_str(&mut out, self.issuer.as_ref().map(|id| id.0.as_str()));
-        // Signature is deliberately represented only by a constant exclusion tag:
-        // id(None) == id(Some(fake64)) is the R1 proof required by ADR-14-2-02.
+        out
+    }
+
+    /// Canonical bytes signed by the issuer. The issuer is included so the
+    /// signature binds the claimed key; the signature itself is excluded.
+    pub fn canonical_bytes(&self, signature: Option<&[u8]>) -> Vec<u8> {
+        let mut out = self.identity_bytes();
+        push_opt_str(&mut out, self.issuer.as_ref().map(|id| id.as_str()));
         let _ = signature;
         out.push(0xFE);
         out
@@ -296,6 +306,64 @@ impl CapabilityToken {
 
     pub fn has_signature(&self) -> bool {
         self.signature.is_some()
+    }
+
+    /// Cryptographically sign this token with the issuer's Ed25519 key.
+    ///
+    /// Sets `issuer` and `signature` together (preserving the both-or-neither
+    /// invariant enforced by [`Self::malformed_signature_state`]). The signature
+    /// covers [`Self::canonical_bytes`] with the signature excluded, so the id
+    /// (also derived from those canonical bytes) is preserved across signature
+    /// presence: `id(with-sig) == id(without-sig)`.
+    pub fn sign(&mut self, signing_key: &SigningKey, issuer: PeerId) {
+        self.issuer = Some(issuer);
+        // Recompute the id with the issuer now bound; the signature is excluded
+        // from the canonical bytes so the id is stable once set.
+        self.signature = None;
+        self.id = self.compute_id();
+        let signing_input = self.canonical_bytes(None);
+        let sig = signing_key.sign(&signing_input);
+        self.signature = Some(Ed25519Sig(sig.to_bytes().to_vec()));
+    }
+
+    /// Verify the issuer signature and content integrity cryptographically.
+    ///
+    /// Gates (all must pass): (1) issuer and signature are both present;
+    /// (2) the issuer [`PeerId`] matches the verifying key; (3) the Ed25519
+    /// signature is valid over the canonical bytes; (4) the stored id equals
+    /// the recomputed content hash (defense-in-depth tamper detection).
+    pub fn verify(&self, verifying_key: &VerifyingKey) -> Result<(), CapabilityTokenError> {
+        let sig = self
+            .signature
+            .as_ref()
+            .ok_or(CapabilityTokenError::NotSigned)?;
+        let issuer = self
+            .issuer
+            .as_ref()
+            .ok_or(CapabilityTokenError::NotSigned)?;
+        if !issuer.matches_public_key(&verifying_key.to_bytes()) {
+            return Err(CapabilityTokenError::IssuerKeyMismatch);
+        }
+        let signing_input = self.canonical_bytes(None);
+        let sig_bytes: [u8; 64] = sig
+            .as_bytes()
+            .try_into()
+            .map_err(|_| CapabilityTokenError::InvalidSignatureLength(sig.as_bytes().len()))?;
+        verifying_key
+            .verify(&signing_input, &Signature::from_bytes(&sig_bytes))
+            .map_err(|_| CapabilityTokenError::BadSignature)?;
+        if !self.integrity_ok() {
+            return Err(CapabilityTokenError::IntegrityFailed);
+        }
+        Ok(())
+    }
+
+    /// Self-consistency check: the stored id equals the content hash recomputed
+    /// from the canonical bytes. The authority ledger uses this to gate signed
+    /// tokens without a verifying key; a tampered field changes the content
+    /// hash and fails here.
+    pub fn integrity_ok(&self) -> bool {
+        self.id == self.compute_id()
     }
 
     pub fn is_subset_of(&self, parent: &Self) -> bool {
@@ -315,6 +383,22 @@ impl CapabilityToken {
             && option_u32_lte(self.uses_limit, parent.uses_limit)
             && self.constraint.max_depth <= parent.constraint.max_depth
     }
+}
+
+/// Failure modes for [`CapabilityToken::verify`] (cryptographic signed-token
+/// verification).
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum CapabilityTokenError {
+    #[error("capability token is not signed (issuer and signature both absent)")]
+    NotSigned,
+    #[error("capability token issuer peer id does not match the verifying key")]
+    IssuerKeyMismatch,
+    #[error("capability token signature is not a valid 64-byte ed25519 signature")]
+    InvalidSignatureLength(usize),
+    #[error("capability token signature is invalid")]
+    BadSignature,
+    #[error("capability token id does not match recomputed content (integrity failed)")]
+    IntegrityFailed,
 }
 
 fn option_u64_lte(child: Option<u64>, parent: Option<u64>) -> bool {
@@ -391,5 +475,105 @@ fn push_opt_token_id(out: &mut Vec<u8>, value: Option<CapabilityTokenId>) {
             out.extend_from_slice(&v.0);
         }
         None => out.push(0),
+    }
+}
+
+#[cfg(test)]
+mod sign_verify_tests {
+    use super::*;
+    use crate::domain::models::agent_id::AgentId;
+
+    fn issuer_key() -> (SigningKey, VerifyingKey, PeerId) {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let vk = key.verifying_key();
+        let peer_id = PeerId::from_public_key(&vk.to_bytes()).unwrap();
+        (key, vk, peer_id)
+    }
+
+    fn signed_token() -> (CapabilityToken, VerifyingKey) {
+        let scope = AgentId::parse("peer/agent").unwrap();
+        let mut token = CapabilityToken::r1_root(scope);
+        let (key, vk, peer_id) = issuer_key();
+        token.sign(&key, peer_id);
+        (token, vk)
+    }
+
+    #[test]
+    fn sign_then_verify_round_trips() {
+        let (token, vk) = signed_token();
+        assert!(token.has_signature());
+        assert!(!token.malformed_signature_state());
+        token.verify(&vk).expect("signed token must verify");
+    }
+
+    #[test]
+    fn id_is_preserved_under_signature_presence() {
+        // The id is derived from canonical bytes that exclude the signature, so
+        // attaching a signature must not change the id (ADR-14-2-02).
+        let scope = AgentId::parse("peer/agent").unwrap();
+        let mut token = CapabilityToken::r1_root(scope);
+        let (key, _vk, peer_id) = issuer_key();
+        // Set the issuer first so both states share identical non-signature fields.
+        token.issuer = Some(peer_id.clone());
+        let id_before = token.compute_id();
+        token.sign(&key, peer_id);
+        assert_eq!(
+            token.id, id_before,
+            "id must be stable across signature presence"
+        );
+        assert_eq!(token.compute_id(), id_before);
+    }
+
+    #[test]
+    fn signing_fresh_token_never_changes_its_identity() {
+        let mut token = CapabilityToken::r1_root(AgentId::parse("peer/agent").unwrap());
+        let id_before = token.id;
+        let (key, _vk, peer_id) = issuer_key();
+        token.sign(&key, peer_id);
+        assert_eq!(token.id, id_before);
+    }
+
+    #[test]
+    fn verify_rejects_tampered_field() {
+        let (mut token, vk) = signed_token();
+        // Tamper with a covered field after signing — signature + integrity fail.
+        token.budget.requests += 1;
+        assert!(matches!(
+            token.verify(&vk),
+            Err(CapabilityTokenError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let (token, _vk) = signed_token();
+        let other = SigningKey::from_bytes(&[99u8; 32]).verifying_key();
+        assert!(matches!(
+            token.verify(&other),
+            Err(CapabilityTokenError::IssuerKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_unsigned_and_issuer_key_mismatch() {
+        let scope = AgentId::parse("peer/agent").unwrap();
+        let token = CapabilityToken::r1_root(scope); // unsigned
+        let other_vk = SigningKey::from_bytes(&[99u8; 32]).verifying_key();
+        assert!(matches!(
+            token.verify(&other_vk),
+            Err(CapabilityTokenError::NotSigned)
+        ));
+
+        // Sign with one key but lie about the issuer (different PeerId).
+        let (key, _vk, _real_peer) = issuer_key();
+        let mut bad = CapabilityToken::r1_root(AgentId::parse("peer/x").unwrap());
+        let fake_peer = PeerId::from_public_key(&[3u8; 32]).unwrap();
+        bad.sign(&key, fake_peer);
+        // Verifying against the real key: issuer PeerId won't match the key.
+        let real_vk = key.verifying_key();
+        assert!(matches!(
+            bad.verify(&real_vk),
+            Err(CapabilityTokenError::IssuerKeyMismatch)
+        ));
     }
 }

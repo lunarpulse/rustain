@@ -19,6 +19,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use rand_core::{OsRng, RngCore};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -27,6 +28,8 @@ use tokio_util::sync::CancellationToken;
 use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
+use crate::adapters::rap::{ReplayWindow, VerifyError, verify_attach_proof, verify_envelope};
+use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole, StopReason,
@@ -36,8 +39,8 @@ use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntime
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
 use super::protocol::{
-    AttachMode, AttachSnapshot, ClientFrame, DaemonFrame, PROTOCOL_VERSION, ProposalToken,
-    ProtocolError, read_frame, write_frame,
+    AttachMode, AttachSnapshot, ClientFrame, ConnectionTier, DaemonFrame, PROTOCOL_VERSION,
+    ProposalToken, ProtocolError, read_frame, write_frame,
 };
 use super::runtime::DaemonCore;
 
@@ -140,6 +143,15 @@ pub struct AttachServer {
     /// entry lands) checks this set so it does NOT spawn a duplicate
     /// `generate_proposals` call (G7: exactly one call per marker).
     generating_consolidations: Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// Server-wide peer replay window (Story 17.1a). Shared across ALL
+    /// connections so an envelope accepted on one connection cannot be replayed
+    /// on a reconnect. Locked only across the synchronous `verify_envelope`
+    /// call — never held across an await. tokio::sync per locks=4 discipline.
+    replay: Arc<Mutex<ReplayWindow>>,
+    /// Wall-clock source for peer-envelope TTL checks at the verify seam
+    /// (Story 17.1a). Defaults to `SystemClock` in production; tests inject a
+    /// `MockClock` via [`AttachServer::with_clock`] to drive TTL deterministically.
+    clock: Arc<dyn Clock>,
 }
 
 impl AttachServer {
@@ -147,6 +159,23 @@ impl AttachServer {
         core: Arc<DaemonCore>,
         conversation: Arc<Mutex<Conversation>>,
         domain_tx: mpsc::UnboundedSender<AppEvent>,
+    ) -> Arc<Self> {
+        Self::with_clock(
+            core,
+            conversation,
+            domain_tx,
+            Arc::new(SystemClock::default()),
+        )
+    }
+
+    /// Like [`AttachServer::new`] but with an injectable wall-clock source. Used
+    /// by tests to drive peer-envelope TTL past expiry deterministically; the
+    /// replay window is always fresh and server-shared regardless of clock.
+    pub fn with_clock(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
         Arc::new(Self {
             core,
@@ -163,6 +192,8 @@ impl AttachServer {
             pending_channel_response_tx: Arc::new(Mutex::new(None)),
             next_proposal_token: Arc::new(AtomicU64::new(1)),
             generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            replay: Arc::new(Mutex::new(ReplayWindow::default())),
+            clock,
         })
     }
 
@@ -344,12 +375,84 @@ impl AttachServer {
     async fn handle_connection(self: Arc<Self>, stream: UnixStream) {
         let (mut read_half, mut write_half) = stream.into_split();
 
-        // First frame MUST be Attach.
+        // ── Server-first challenge handshake (Story 17.1a) ──
+        // Mint a fresh, one-use challenge nonce and send it. The client must
+        // answer with an Ed25519 proof bound to this exact nonce before the
+        // connection is trusted — for BOTH TrustedLocal and Peer tiers.
+        let mut challenge = [0u8; 32];
+        OsRng.fill_bytes(&mut challenge);
+        let nonce = challenge.to_vec();
+        if write_frame(
+            &mut write_half,
+            &DaemonFrame::AttachChallenge {
+                nonce: nonce.clone(),
+            },
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+
+        // First frame MUST be the proof-bearing Attach.
         let attach = match read_frame::<_, ClientFrame>(&mut read_half).await {
             Ok(Some(ClientFrame::Attach {
                 protocol_version,
                 read_only_ok,
-            })) => (protocol_version, read_only_ok),
+                tier,
+                challenge_nonce,
+                identity,
+                proof,
+            })) => {
+                // Version negotiation (AC2): reject a mismatch with a clear Error
+                // BEFORE any proof work or side effect.
+                if protocol_version != PROTOCOL_VERSION {
+                    let _ = write_frame(
+                        &mut write_half,
+                        &DaemonFrame::Error(ProtocolError::VersionMismatch {
+                            daemon: PROTOCOL_VERSION,
+                            client: protocol_version,
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+                // Bind the proof to the exact challenge we issued for THIS
+                // connection. A proof captured elsewhere (a different nonce)
+                // cannot satisfy it — the core challenge-response replay defense.
+                if challenge_nonce != nonce {
+                    let _ = write_frame(
+                        &mut write_half,
+                        &DaemonFrame::Error(ProtocolError::AttachProof(
+                            "challenge nonce does not match the one issued".into(),
+                        )),
+                    )
+                    .await;
+                    return;
+                }
+                // Verify possession: identity↔key binding, tier tag, read-only
+                // flag, and the signature over the domain-separated transcript.
+                // The claimed tier's tag is used, so a proof minted for one tier
+                // fails verification for another. All checks precede registry
+                // mutation, the attach snapshot, the writer grant, app events,
+                // and dispatch — zero side effect on failure.
+                if let Err(e) = verify_attach_proof(
+                    &identity,
+                    &proof,
+                    &nonce,
+                    PROTOCOL_VERSION,
+                    tier.proof_tag(),
+                    read_only_ok,
+                ) {
+                    let _ = write_frame(
+                        &mut write_half,
+                        &DaemonFrame::Error(ProtocolError::AttachProof(e.to_string())),
+                    )
+                    .await;
+                    return;
+                }
+                (read_only_ok, tier)
+            }
             Ok(Some(_)) => {
                 let _ = write_frame(
                     &mut write_half,
@@ -366,20 +469,7 @@ impl AttachServer {
                 return;
             }
         };
-        let (client_version, read_only_ok) = attach;
-
-        // Version negotiation (AC2): reject a mismatch with a clear Error.
-        if client_version != PROTOCOL_VERSION {
-            let _ = write_frame(
-                &mut write_half,
-                &DaemonFrame::Error(ProtocolError::VersionMismatch {
-                    daemon: PROTOCOL_VERSION,
-                    client: client_version,
-                }),
-            )
-            .await;
-            return;
-        }
+        let (read_only_ok, tier) = attach;
 
         // Register the connection atomically with mode selection: the first
         // ReadWrite-capable client is the writer; later clients are read-only.
@@ -389,7 +479,7 @@ impl AttachServer {
         let (tx, mut rx) = mpsc::channel::<DaemonFrame>(CONN_QUEUE_DEPTH);
         let granted_mode = {
             let mut reg = self.registry.lock().await;
-            let granted = if read_only_ok || reg.has_writer() {
+            let granted = if tier == ConnectionTier::Peer || read_only_ok || reg.has_writer() {
                 AttachMode::ReadOnly
             } else {
                 AttachMode::ReadWrite
@@ -454,11 +544,15 @@ impl AttachServer {
             self.emit_session_queue_notices(conn_id).await;
         }
 
-        // Reader loop.
+        // Reader loop. Peer envelopes are verified against the SERVER-WIDE
+        // replay window held on `self` (shared across connections).
         loop {
             match read_frame::<_, ClientFrame>(&mut read_half).await {
                 Ok(Some(frame)) => {
-                    if self.handle_client_frame(frame, granted_mode, conn_id).await {
+                    if self
+                        .handle_client_frame_tiered(frame, granted_mode, tier, conn_id)
+                        .await
+                    {
                         break; // Detach
                     }
                 }
@@ -483,6 +577,17 @@ impl AttachServer {
         &self,
         frame: ClientFrame,
         mode: AttachMode,
+        conn_id: u64,
+    ) -> bool {
+        self.handle_client_frame_tiered(frame, mode, ConnectionTier::TrustedLocal, conn_id)
+            .await
+    }
+
+    async fn handle_client_frame_tiered(
+        &self,
+        frame: ClientFrame,
+        mode: AttachMode,
+        tier: ConnectionTier,
         conn_id: u64,
     ) -> bool {
         match frame {
@@ -525,6 +630,50 @@ impl AttachServer {
                 };
                 self.send_to(conn_id, DaemonFrame::History { messages, has_more })
                     .await;
+            }
+            ClientFrame::PeerEnvelope(envelope) => {
+                if tier != ConnectionTier::Peer {
+                    self.send_to(
+                        conn_id,
+                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                            "PeerEnvelope requires peer connection tier".into(),
+                        )),
+                    )
+                    .await;
+                    return false;
+                }
+                // Verify against the injectable wall clock and the SERVER-WIDE
+                // replay window (shared across connections — a replay on a
+                // reconnect is rejected). The tokio Mutex guard is scoped to the
+                // synchronous `verify_envelope` call only: there is no `.await`
+                // between `lock().await` and the guard's drop, so no async lock
+                // is held across an await point.
+                let outcome = {
+                    let mut replay = self.replay.lock().await;
+                    verify_envelope(&envelope, self.clock.wall_now_ms(), Some(&mut replay))
+                };
+                match outcome {
+                    Ok(()) => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::PeerAccepted {
+                                sequence: envelope.header.sequence,
+                            },
+                        )
+                        .await;
+                    }
+                    Err(VerifyError::FeedForkOrGap { .. }) => {
+                        self.send_to(conn_id, DaemonFrame::Error(ProtocolError::FeedForkOrGap))
+                            .await;
+                    }
+                    Err(e) => {
+                        self.send_to(
+                            conn_id,
+                            DaemonFrame::Error(ProtocolError::PeerVerification(e.to_string())),
+                        )
+                        .await;
+                    }
+                }
             }
             ClientFrame::Attach { .. } => {
                 // Re-Attach mid-session is a protocol error.
@@ -1160,7 +1309,9 @@ mod tests {
         NoOpApprovalPersistence, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet,
         NoOpUsageLedger,
     };
+    use crate::adapters::rap::AgentSigner;
     use crate::domain::errors::ProviderError;
+    use crate::domain::models::AgentEnvelope;
     use crate::domain::models::provider::ModelDescriptor;
     use crate::domain::models::{AppConfig, CompletionOptions, Message, StopReason};
     use crate::domain::ports::{SecurityPort, StoragePort, StreamingProvider, ToolSetPort};
@@ -1297,6 +1448,112 @@ mod tests {
         (Arc::new(core), storage)
     }
 
+    // ── Story 17.1a attach-proof test helpers ────────────────────────────────
+
+    /// A deterministic identity for tests: one signing key per `seed` byte, no
+    /// disk I/O or wall clock. Distinct seeds → distinct peer ids.
+    fn test_signer(seed: u8) -> AgentSigner {
+        AgentSigner::from_signing_key(ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
+    }
+
+    /// Read the server's `AttachChallenge` and return its nonce (server-first
+    /// handshake). Panics on any other frame so a test fails loudly.
+    async fn read_attach_challenge(stream: &mut UnixStream) -> Vec<u8> {
+        match read_frame::<_, DaemonFrame>(stream).await.unwrap() {
+            Some(DaemonFrame::AttachChallenge { nonce }) => nonce,
+            other => panic!("expected AttachChallenge, got {other:?}"),
+        }
+    }
+
+    /// Happy-path server-first attach over a single stream (lockstep, no split):
+    /// read the challenge, build a proof with `signer`, send the proof-bearing
+    /// `Attach`, and return the daemon's response frame.
+    async fn attach_with_proof(
+        stream: &mut UnixStream,
+        read_only_ok: bool,
+        tier: ConnectionTier,
+        signer: &AgentSigner,
+    ) -> Option<DaemonFrame> {
+        let nonce = read_attach_challenge(stream).await;
+        let proof = signer.attach_proof(&nonce, PROTOCOL_VERSION, tier.proof_tag(), read_only_ok);
+        write_frame(
+            stream,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok,
+                tier,
+                challenge_nonce: nonce,
+                identity: signer.identity().clone(),
+                proof,
+            },
+        )
+        .await
+        .unwrap();
+        read_frame::<_, DaemonFrame>(stream).await.unwrap()
+    }
+
+    /// Build a signed peer envelope rooted at `signer`'s PeerId (the peer-path
+    /// invariant the daemon enforces). `not_after` is in the SAME unit the
+    /// daemon's verify seam uses — wall milliseconds (driven by the injected
+    /// `Clock`) — so a `MockClock` controls expiry deterministically.
+    fn peer_envelope(
+        signer: &AgentSigner,
+        sequence: u64,
+        not_after: i64,
+    ) -> Box<AgentEnvelope<serde_json::Value>> {
+        use crate::domain::models::{AgentId, CorrelationId, MessageKind};
+        let sender =
+            AgentId::from_peer_path(&format!("{}/agent", signer.identity().peer_id.as_str()))
+                .expect("peer-rooted sender");
+        Box::new(
+            signer
+                .sign(
+                    sender,
+                    AgentId::parse("daemon").expect("valid recipient"),
+                    CorrelationId::new("corr"),
+                    MessageKind::PeerMessage,
+                    sequence,
+                    not_after,
+                    "env-nonce".to_string(),
+                    Vec::new(),
+                    serde_json::json!({"msg": "hello peer"}),
+                )
+                .expect("signing succeeds when sender is rooted at signer"),
+        )
+    }
+
+    /// Stand up an `AttachServer` on a temp socket. `clock = None` uses the
+    /// production `SystemClock`; `Some(clock)` injects it (deterministic TTL).
+    async fn spawn_proof_server(
+        ws: &Path,
+        socket_name: &str,
+        clock: Option<Arc<dyn Clock>>,
+    ) -> (
+        Arc<AttachServer>,
+        std::path::PathBuf,
+        CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (core, _storage) = mock_core(ws, vec![]);
+        let conversation = Arc::new(Mutex::new(Conversation {
+            id: "proof-conv".into(),
+            ..Default::default()
+        }));
+        let (bus, domain_rx) = EventBus::new(64);
+        let socket = ws.join(socket_name);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = match clock {
+            Some(c) => AttachServer::with_clock(core, conversation, bus.domain_tx.clone(), c),
+            None => AttachServer::new(core, conversation, bus.domain_tx.clone()),
+        };
+        let shutdown = CancellationToken::new();
+        let srv = server.clone();
+        let sd = shutdown.clone();
+        let handle =
+            tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
+        (server, socket, shutdown, handle)
+    }
+
     /// Test-only [`StoragePort`] that tallies how many *user-only* snapshots are
     /// persisted — a conversation that carries a user message but no assistant
     /// message.
@@ -1392,18 +1649,9 @@ mod tests {
 
         // ── Client side ──
         let mut stream = UnixStream::connect(&socket).await.unwrap();
-        write_frame(
-            &mut stream,
-            &ClientFrame::Attach {
-                protocol_version: PROTOCOL_VERSION,
-                read_only_ok: false,
-            },
-        )
-        .await
-        .unwrap();
-
-        // AttachAck (writer grant).
-        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+        // ── Client side ── server-first challenge handshake with a valid proof.
+        let signer = test_signer(1);
+        match attach_with_proof(&mut stream, false, ConnectionTier::TrustedLocal, &signer).await {
             Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
                 assert_eq!(
                     granted_mode,
@@ -1679,11 +1927,19 @@ mod tests {
         let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         let mut stream = UnixStream::connect(&socket).await.unwrap();
+        // Server issues a challenge first; the version check precedes proof work,
+        // so a wrong declared version is rejected before the proof is examined.
+        let signer = test_signer(1);
+        let _ = read_attach_challenge(&mut stream).await;
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
                 protocol_version: PROTOCOL_VERSION + 99,
                 read_only_ok: false,
+                tier: ConnectionTier::TrustedLocal,
+                challenge_nonce: vec![],
+                identity: signer.identity().clone(),
+                proof: crate::domain::models::Ed25519Sig(vec![0u8; 64]),
             },
         )
         .await
@@ -1729,16 +1985,8 @@ mod tests {
         let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         let mut stream = UnixStream::connect(&socket).await.unwrap();
-        write_frame(
-            &mut stream,
-            &ClientFrame::Attach {
-                protocol_version: PROTOCOL_VERSION,
-                read_only_ok: false,
-            },
-        )
-        .await
-        .unwrap();
-        let _ = read_frame::<_, DaemonFrame>(&mut stream).await.unwrap(); // AttachAck
+        let signer = test_signer(2);
+        let _ = attach_with_proof(&mut stream, false, ConnectionTier::TrustedLocal, &signer).await; // AttachAck
         write_frame(
             &mut stream,
             &ClientFrame::UserMessage {
@@ -2063,16 +2311,8 @@ mod tests {
 
         // Client 1 → writer.
         let mut c1 = UnixStream::connect(&socket).await.unwrap();
-        write_frame(
-            &mut c1,
-            &ClientFrame::Attach {
-                protocol_version: PROTOCOL_VERSION,
-                read_only_ok: false,
-            },
-        )
-        .await
-        .unwrap();
-        match read_frame::<_, DaemonFrame>(&mut c1).await.unwrap() {
+        let signer1 = test_signer(3);
+        match attach_with_proof(&mut c1, false, ConnectionTier::TrustedLocal, &signer1).await {
             Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
                 assert_eq!(
                     granted_mode,
@@ -2085,16 +2325,8 @@ mod tests {
 
         // Client 2 → read-only (a writer already holds the slot).
         let mut c2 = UnixStream::connect(&socket).await.unwrap();
-        write_frame(
-            &mut c2,
-            &ClientFrame::Attach {
-                protocol_version: PROTOCOL_VERSION,
-                read_only_ok: false,
-            },
-        )
-        .await
-        .unwrap();
-        match read_frame::<_, DaemonFrame>(&mut c2).await.unwrap() {
+        let signer2 = test_signer(4);
+        match attach_with_proof(&mut c2, false, ConnectionTier::TrustedLocal, &signer2).await {
             Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
                 assert_eq!(
                     granted_mode,
@@ -2163,16 +2395,8 @@ mod tests {
         let h = tokio::spawn(async move { srv.run(listener, domain_rx, None, None, sd).await });
 
         let mut c = UnixStream::connect(&socket).await.unwrap();
-        write_frame(
-            &mut c,
-            &ClientFrame::Attach {
-                protocol_version: PROTOCOL_VERSION,
-                read_only_ok: false,
-            },
-        )
-        .await
-        .unwrap();
-        let _ = read_frame::<_, DaemonFrame>(&mut c).await.unwrap(); // AttachAck
+        let signer = test_signer(5);
+        let _ = attach_with_proof(&mut c, false, ConnectionTier::TrustedLocal, &signer).await; // AttachAck
 
         // Collect emitted events. With NoOpMemory (empty recent), the
         // consolidation path emits "Nothing to consolidate yet" and clears
@@ -3068,5 +3292,382 @@ mod tests {
         shutdown.cancel();
         handle.abort();
         panic!("two cron completions were not injected");
+    }
+    // ── Story 17.1a attach-proof acceptance ──────────────────────────────────
+
+    /// AC: a valid TrustedLocal proof grants the writer slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn valid_trusted_local_proof_grants_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "tl.sock", None).await;
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let signer = test_signer(11);
+        match attach_with_proof(&mut stream, false, ConnectionTier::TrustedLocal, &signer).await {
+            Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
+                assert_eq!(granted_mode, AttachMode::ReadWrite);
+            }
+            other => panic!("valid TrustedLocal proof must be accepted, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: a valid Peer proof attaches (read-only) and a signed peer envelope is
+    /// accepted with PeerAccepted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn valid_peer_proof_accepts_signed_envelope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "peer.sock", None).await;
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let signer = test_signer(12);
+        match attach_with_proof(&mut stream, false, ConnectionTier::Peer, &signer).await {
+            Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
+                assert_eq!(granted_mode, AttachMode::ReadOnly, "peer tier is read-only");
+            }
+            other => panic!("valid Peer proof must be accepted, got {other:?}"),
+        }
+
+        // A properly signed envelope is verified and accepted.
+        let env = peer_envelope(&signer, 1, i64::MAX);
+        write_frame(&mut stream, &ClientFrame::PeerEnvelope(env))
+            .await
+            .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::PeerAccepted { sequence }) => assert_eq!(sequence, 1),
+            other => panic!("expected PeerAccepted, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: an unsigned application frame sent BEFORE any proof is rejected — the
+    /// server demands an Attach first. Local unsigned frames work ONLY after a
+    /// valid proof (the positive direction is exercised by
+    /// `attach_drives_a_turn_and_persists_origin_tagged_transcript`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsigned_frame_rejected_before_proof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "pre.sock", None).await;
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        // Consume the challenge, then send a raw unsigned UserMessage as the
+        // first frame instead of an Attach.
+        let _ = read_attach_challenge(&mut stream).await;
+        write_frame(
+            &mut stream,
+            &ClientFrame::UserMessage {
+                text: "no proof".into(),
+                images: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::Malformed(_))) => {}
+            other => panic!("expected Malformed (first frame must be Attach), got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: an absent (all-zero) proof is rejected before the connection is
+    /// registered — proven by a subsequent valid attach still winning the writer
+    /// slot (the rejected connection never registered).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn absent_proof_rejected_before_registration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "absent.sock", None).await;
+
+        // Connection 1: absent proof.
+        let mut bad = UnixStream::connect(&socket).await.unwrap();
+        let nonce = read_attach_challenge(&mut bad).await;
+        write_frame(
+            &mut bad,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok: false,
+                tier: ConnectionTier::TrustedLocal,
+                challenge_nonce: nonce,
+                identity: test_signer(21).identity().clone(),
+                proof: crate::domain::models::Ed25519Sig(vec![0u8; 64]),
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut bad).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::AttachProof(_))) => {}
+            other => panic!("expected AttachProof error, got {other:?}"),
+        }
+        drop(bad);
+
+        // Connection 2: a valid proof must still get ReadWrite — conn1 never
+        // registered, so it never claimed the writer slot.
+        let mut good = UnixStream::connect(&socket).await.unwrap();
+        match attach_with_proof(
+            &mut good,
+            false,
+            ConnectionTier::TrustedLocal,
+            &test_signer(22),
+        )
+        .await
+        {
+            Some(DaemonFrame::AttachAck { granted_mode, .. }) => {
+                assert_eq!(
+                    granted_mode,
+                    AttachMode::ReadWrite,
+                    "rejected attach must not have claimed the writer slot"
+                );
+            }
+            other => panic!("valid attach after a rejection must succeed, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: a tampered proof (one flipped signature byte) is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tampered_proof_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "tamper.sock", None).await;
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let signer = test_signer(23);
+        let nonce = read_attach_challenge(&mut stream).await;
+        let mut proof = signer.attach_proof(
+            &nonce,
+            PROTOCOL_VERSION,
+            ConnectionTier::TrustedLocal.proof_tag(),
+            false,
+        );
+        proof.0[0] ^= 0xff; // flip one signature byte
+        write_frame(
+            &mut stream,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok: false,
+                tier: ConnectionTier::TrustedLocal,
+                challenge_nonce: nonce,
+                identity: signer.identity().clone(),
+                proof,
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::AttachProof(_))) => {}
+            other => panic!("expected AttachProof error for tampered proof, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: a proof minted for the TrustedLocal tier but presented under a Peer
+    /// claim is rejected — the transcript's tier tag is bound, so it cannot be
+    /// silently swapped for another tier.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tier_mismatched_proof_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "tier.sock", None).await;
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let signer = test_signer(24);
+        let nonce = read_attach_challenge(&mut stream).await;
+        // Sign the transcript for TrustedLocal, but declare tier = Peer.
+        let proof = signer.attach_proof(
+            &nonce,
+            PROTOCOL_VERSION,
+            ConnectionTier::TrustedLocal.proof_tag(),
+            false,
+        );
+        write_frame(
+            &mut stream,
+            &ClientFrame::Attach {
+                protocol_version: PROTOCOL_VERSION,
+                read_only_ok: false,
+                tier: ConnectionTier::Peer,
+                challenge_nonce: nonce,
+                identity: signer.identity().clone(),
+                proof,
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::AttachProof(_))) => {}
+            other => panic!("expected AttachProof error for tier-mismatched proof, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: a captured attach cannot be replayed on a new connection. Connection 1
+    /// captures a (nonce, proof) pair; connection 2 receives a DIFFERENT nonce, so
+    /// replaying the old pair fails the nonce-binding check before the signature
+    /// is even examined.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replayed_attach_proof_rejected_on_reconnect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "replay.sock", None).await;
+
+        // Connection 1: capture the challenge nonce + build a proof for it.
+        let mut c1 = UnixStream::connect(&socket).await.unwrap();
+        let nonce1 = read_attach_challenge(&mut c1).await;
+        let signer = test_signer(25);
+        let proof1 = signer.attach_proof(
+            &nonce1,
+            PROTOCOL_VERSION,
+            ConnectionTier::TrustedLocal.proof_tag(),
+            false,
+        );
+        let captured = ClientFrame::Attach {
+            protocol_version: PROTOCOL_VERSION,
+            read_only_ok: false,
+            tier: ConnectionTier::TrustedLocal,
+            challenge_nonce: nonce1.clone(),
+            identity: signer.identity().clone(),
+            proof: proof1,
+        };
+        // (Don't complete conn1's handshake; the point is replaying the frame.)
+        drop(c1);
+
+        // Connection 2: a fresh challenge is issued.
+        let mut c2 = UnixStream::connect(&socket).await.unwrap();
+        let nonce2 = read_attach_challenge(&mut c2).await;
+        assert_ne!(nonce2, nonce1, "each connection must get a distinct nonce");
+        // Replay the captured frame verbatim — its nonce (nonce1) != nonce2.
+        write_frame(&mut c2, &captured).await.unwrap();
+        match read_frame::<_, DaemonFrame>(&mut c2).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::AttachProof(m))) => {
+                assert!(
+                    m.contains("nonce"),
+                    "rejection must cite the nonce mismatch: {m}"
+                );
+            }
+            other => panic!("expected AttachProof(nonce mismatch) on replay, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: the SERVER-WIDE replay window rejects an envelope replayed on a
+    /// reconnect (sequence <= highest seen on a prior connection).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_envelope_replay_rejected_across_reconnect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "penv.sock", None).await;
+        let signer = test_signer(26);
+
+        // Connection 1: attach + accept envelope seq=1.
+        let mut c1 = UnixStream::connect(&socket).await.unwrap();
+        let _ = attach_with_proof(&mut c1, false, ConnectionTier::Peer, &signer).await;
+        let env = peer_envelope(&signer, 1, i64::MAX);
+        write_frame(&mut c1, &ClientFrame::PeerEnvelope(env))
+            .await
+            .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut c1).await.unwrap() {
+            Some(DaemonFrame::PeerAccepted { sequence }) => assert_eq!(sequence, 1),
+            other => panic!("first envelope must be accepted, got {other:?}"),
+        }
+        drop(c1);
+
+        // Connection 2 (reconnect): the SAME envelope seq=1 is a replay.
+        let mut c2 = UnixStream::connect(&socket).await.unwrap();
+        let _ = attach_with_proof(&mut c2, false, ConnectionTier::Peer, &signer).await;
+        let replayed = peer_envelope(&signer, 1, i64::MAX);
+        write_frame(&mut c2, &ClientFrame::PeerEnvelope(replayed))
+            .await
+            .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut c2).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::PeerVerification(_))) => {}
+            other => panic!("replayed envelope must be rejected, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: the injectable wall clock drives peer-envelope TTL at the daemon verify
+    /// seam. With MockClock pinned at wall=1000ms, an envelope with not_after=
+    /// 60000 is accepted; advancing the clock to 120000 makes a fresh envelope
+    /// (same not_after) expire — proving the daemon reads the injected clock, not
+    /// the real wall time (which is ~1.7e12 ms and would reject both). The 60s
+    /// margin dwarfs any test runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mock_clock_drives_peer_ttl_at_verify_seam() {
+        use crate::domain::clock::MockClock;
+        let clock = Arc::new(MockClock::at_wall_ms(1_000));
+        let dyn_clock: Arc<dyn Clock> = clock.clone();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "ttl.sock", Some(dyn_clock)).await;
+        let signer = test_signer(27);
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let _ = attach_with_proof(&mut stream, false, ConnectionTier::Peer, &signer).await;
+
+        // not_after=60000 is in the future relative to wall≈1000 → accepted.
+        let fresh = peer_envelope(&signer, 1, 60_000);
+        write_frame(&mut stream, &ClientFrame::PeerEnvelope(fresh))
+            .await
+            .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::PeerAccepted { .. }) => {}
+            other => panic!("non-expired envelope must be accepted, got {other:?}"),
+        }
+
+        // Advance the injected clock past the TTL.
+        clock.set_wall_anchor_ms(120_000);
+
+        // A new envelope (seq=2, same not_after=60000) is now expired.
+        let expired = peer_envelope(&signer, 2, 60_000);
+        write_frame(&mut stream, &ClientFrame::PeerEnvelope(expired))
+            .await
+            .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::PeerVerification(_))) => {}
+            other => panic!("expired envelope must be rejected after clock advance, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
+    }
+
+    /// AC: a Peer-tier connection (always read-only) cannot send unsigned
+    /// mutation frames — a UserMessage is refused with ReadOnly. Peer accepts
+    /// ONLY PeerEnvelope.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peer_legacy_mutation_frame_stays_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_server, socket, shutdown, handle) =
+            spawn_proof_server(tmp.path(), "mut.sock", None).await;
+
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        let signer = test_signer(28);
+        let _ = attach_with_proof(&mut stream, false, ConnectionTier::Peer, &signer).await;
+
+        write_frame(
+            &mut stream,
+            &ClientFrame::UserMessage {
+                text: "peer cannot mutate".into(),
+                images: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+            Some(DaemonFrame::Error(ProtocolError::ReadOnly)) => {}
+            other => panic!("peer UserMessage must be refused ReadOnly, got {other:?}"),
+        }
+        shutdown.cancel();
+        handle.abort();
     }
 }

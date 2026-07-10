@@ -82,7 +82,7 @@ impl InvocationFingerprint {
         out.push(FORMAT_VERSION);
         push_str(&mut out, tool_name);
         canonical_value(&mut out, input)?;
-        push_str(&mut out, &scope.0);
+        push_str(&mut out, scope.as_str());
         let digest = Sha256::digest(&out);
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&digest);
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn deterministic_same_input() {
-        let scope = AgentId(String::from("agent-a"));
+        let scope = AgentId::from_validated(String::from("agent-a"));
         let input = json!({"command": "ls -la", "path": "/home"});
         let fp1 = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
         let fp2 = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn different_tool_name_different_fp() {
-        let scope = AgentId(String::from("agent-a"));
+        let scope = AgentId::from_validated(String::from("agent-a"));
         let input = json!({"command": "ls"});
         let fp_bash = InvocationFingerprint::of("Bash", &input, &scope).unwrap();
         let fp_read = InvocationFingerprint::of("Read", &input, &scope).unwrap();
@@ -194,14 +194,16 @@ mod tests {
     #[test]
     fn different_scope_different_fp() {
         let input = json!({"command": "rm -rf /"});
-        let fp_a = InvocationFingerprint::of("Bash", &input, &AgentId("a".into())).unwrap();
-        let fp_b = InvocationFingerprint::of("Bash", &input, &AgentId("b".into())).unwrap();
+        let fp_a =
+            InvocationFingerprint::of("Bash", &input, &AgentId::from_validated("a")).unwrap();
+        let fp_b =
+            InvocationFingerprint::of("Bash", &input, &AgentId::from_validated("b")).unwrap();
         assert_ne!(fp_a, fp_b, "approval for node A must not replay on node B");
     }
 
     #[test]
     fn different_input_different_fp() {
-        let scope = AgentId(String::from("agent-a"));
+        let scope = AgentId::from_validated(String::from("agent-a"));
         let fp1 = InvocationFingerprint::of("Bash", &json!({"command": "ls"}), &scope).unwrap();
         let fp2 =
             InvocationFingerprint::of("Bash", &json!({"command": "rm -rf /"}), &scope).unwrap();
@@ -211,7 +213,7 @@ mod tests {
     #[test]
     fn length_prefix_boundary_collision() {
         // ("ab", "c") ≠ ("a", "bc") — length-prefix discipline
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         let fp1 = InvocationFingerprint::of("ab", &json!("c"), &scope).unwrap();
         let fp2 = InvocationFingerprint::of("a", &json!("bc"), &scope).unwrap();
         assert_ne!(fp1, fp2);
@@ -224,7 +226,7 @@ mod tests {
         // for the u64-only range, these two DIFFERENT JSON numbers would
         // fingerprint identically — a real collision in a replay-guard
         // digest. The 0x02 vs 0x12 tag split (see canonical_value) prevents it.
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         let fp_neg_one = InvocationFingerprint::of("t", &json!(-1), &scope).unwrap();
         let fp_u64_max = InvocationFingerprint::of("t", &json!(u64::MAX), &scope).unwrap();
         assert_ne!(
@@ -247,7 +249,7 @@ mod tests {
         // the `json!` macro, confirming `from_f64` itself refuses NaN/Inf
         // (the first line of defense) and that a valid finite float still
         // fingerprints successfully (the guard does not over-reject).
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         assert!(
             serde_json::Number::from_f64(f64::NAN).is_none(),
             "serde_json::Number::from_f64 must refuse NaN — the guard's first line of defense"
@@ -272,7 +274,7 @@ mod tests {
         // `canonical_value` tag branches (0x02 vs 0x03) and MUST fingerprint
         // differently — this is a real, non-vacuous assertion, not a
         // documentation-only placeholder.
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         let fp_int = InvocationFingerprint::of("t", &json!(1), &scope).unwrap();
         let fp_float = InvocationFingerprint::of("t", &json!(1.0), &scope).unwrap();
         assert_ne!(
@@ -283,7 +285,7 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let scope = AgentId(String::from("agent-a"));
+        let scope = AgentId::from_validated(String::from("agent-a"));
         let fp = InvocationFingerprint::of("Bash", &json!({"cmd": "ls"}), &scope).unwrap();
         let json = serde_json::to_string(&fp).unwrap();
         let back: InvocationFingerprint = serde_json::from_str(&json).unwrap();
@@ -292,7 +294,7 @@ mod tests {
 
     #[test]
     fn nested_object_deterministic() {
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         let input = json!({
             "a": {"nested": true, "arr": [1, 2, 3]},
             "b": null,
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn empty_input_is_valid() {
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         let fp = InvocationFingerprint::of("tool", &json!({}), &scope).unwrap();
         assert_ne!(fp.0, [0u8; 32]);
     }
@@ -313,7 +315,7 @@ mod tests {
     #[test]
     fn whitespace_variation_in_command() {
         // "rm -rf /" vs "rm  -rf /" — byte-exact, different fps
-        let scope = AgentId(String::from("s"));
+        let scope = AgentId::from_validated(String::from("s"));
         let fp1 = InvocationFingerprint::of("Bash", &json!({"cmd": "rm -rf /"}), &scope).unwrap();
         let fp2 = InvocationFingerprint::of("Bash", &json!({"cmd": "rm  -rf /"}), &scope).unwrap();
         assert_ne!(

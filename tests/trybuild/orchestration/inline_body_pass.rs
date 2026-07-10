@@ -10,7 +10,7 @@ use rustain::infrastructure::orchestrator::SpokeHandle;
 
 fn main() {
     let handle = SpokeHandle {
-        agent_id: AgentId("a".into()),
+        agent_id: AgentId::parse("a").unwrap(),
         label: "alpha".into(),
         status: NodeState::Completed,
         salience: "found 3 races".into(),

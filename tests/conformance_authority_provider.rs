@@ -132,7 +132,7 @@ fn root_token() -> CapabilityToken {
 
 fn child_request(scope: &str, budget: Budget) -> DelegateRequest {
     DelegateRequest {
-        scope: AgentId(scope.to_string()),
+        scope: AgentId::parse(scope).unwrap(),
         capabilities: CapabilitySet::from_flags(&[CapabilityFlag::Spawn, CapabilityFlag::ReadFs]),
         constraint: DelegateConstraint {
             allowed: CapabilitySet::from_flags(&[CapabilityFlag::Spawn, CapabilityFlag::ReadFs]),
@@ -156,7 +156,7 @@ fn canonical_id_excludes_signature_and_uses_length_prefixes() {
     );
 
     let left = CapabilityToken::root(
-        AgentId("ab/c".into()),
+        AgentId::parse("ab/c").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 1,
@@ -167,7 +167,7 @@ fn canonical_id_excludes_signature_and_uses_length_prefixes() {
         None,
     );
     let right = CapabilityToken::root(
-        AgentId("a/bc".into()),
+        AgentId::parse("a/bc").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 1,
@@ -251,14 +251,22 @@ fn revoke_scope_denies_next_point_of_use() {
         .expect("valid subset delegates");
 
     ledger
-        .validate(&child, &CapabilityFlag::ReadFs, &AgentId("child-a".into()))
+        .validate(
+            &child,
+            &CapabilityFlag::ReadFs,
+            &AgentId::parse("child-a").unwrap(),
+        )
         .expect("pre-revoke validate succeeds");
     ledger
-        .revoke_scope(&AgentId("child-a".into()))
+        .revoke_scope(&AgentId::parse("child-a").unwrap())
         .expect("scope revoke succeeds");
 
     let err = ledger
-        .validate(&child, &CapabilityFlag::ReadFs, &AgentId("child-a".into()))
+        .validate(
+            &child,
+            &CapabilityFlag::ReadFs,
+            &AgentId::parse("child-a").unwrap(),
+        )
         .expect_err("post-revoke validate must deny next gated action");
     assert!(
         err.to_string().contains("revoked"),
@@ -672,7 +680,7 @@ fn delegate_rejects_non_subset_on_every_axis() {
 #[test]
 fn subset_algebra_is_antisymmetric() {
     let a = CapabilityToken::root(
-        AgentId("a".into()),
+        AgentId::parse("a").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 5,
@@ -683,7 +691,7 @@ fn subset_algebra_is_antisymmetric() {
         None,
     );
     let b = CapabilityToken::root(
-        AgentId("b".into()),
+        AgentId::parse("b").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::ReadFs]),
         Budget {
             requests: 5,
@@ -748,7 +756,7 @@ fn subset_algebra_is_transitive_via_delegate() {
 #[test]
 fn canonical_bytes_length_prefixes_scope() {
     let token = CapabilityToken::root(
-        AgentId("hi".into()),
+        AgentId::parse("hi").unwrap(),
         CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
         Budget {
             requests: 1,
@@ -790,7 +798,7 @@ fn validate_rejects_malformed_and_signed_tokens() {
         .unwrap();
 
     // issuer without signature ⇒ malformed (both-or-neither).
-    child.issuer = Some(PeerId("peer".into()));
+    child.issuer = Some(PeerId::from_public_key(&[7u8; 32]).expect("valid peer id"));
     let err = ledger
         .validate(&child, &CapabilityFlag::ReadFs, &child.scope)
         .expect_err("issuer⊕signature must be rejected");
@@ -1084,7 +1092,7 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
             ),
         )
         .expect("valid subset delegates");
-    let scope = AgentId("child-a".into());
+    let scope = AgentId::parse("child-a").unwrap();
     let want = CapabilityFlag::ReadFs;
 
     // Baseline: the token validates before revocation.

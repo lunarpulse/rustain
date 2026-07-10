@@ -3,6 +3,8 @@
 #[allow(unused_imports)]
 mod agent_message_bus;
 #[allow(unused_imports)]
+mod agent_transport;
+#[allow(unused_imports)]
 mod approval_persistence;
 #[allow(unused_imports)]
 mod auth_store;
@@ -72,6 +74,7 @@ pub use self_update::{BinaryReplacerPort, SelfUpdatePort};
 pub use agent_message_bus::{
     AgentMessageBus, DeliveryError, DeliveryPolicy, RelationshipDeliveryPolicy,
 };
+pub use agent_transport::{AgentTransport, AgentTransportError};
 pub use approval_persistence::ApprovalPersistencePort;
 pub use auth_store::AuthStorePort;
 pub use authority_provider::{AuthorityError, AuthorityProvider};

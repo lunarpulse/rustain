@@ -1015,9 +1015,9 @@ fn sanitize_failure(err: &OrchestrationError) -> String {
 /// second outcome and undercount coverage).
 fn agent_id_for(spec: &SpokeSpec, idx: usize) -> AgentId {
     if spec.label.is_empty() {
-        AgentId(format!("failed-spoke-{idx}"))
+        AgentId::from_validated(format!("failed-spoke-{idx}"))
     } else {
-        AgentId(format!("failed-spoke-{idx}-{}", spec.label))
+        AgentId::from_validated(format!("failed-spoke-{idx}-{}", spec.label))
     }
 }
 
@@ -1313,7 +1313,7 @@ mod tests {
         // 9MB. The window's handles carry NO body (the type-wall).
         let mut store_1mb = ResultStore::new();
         let mut store_10mb = ResultStore::new();
-        let aid = AgentId("spoke-A".into());
+        let aid = AgentId::from_validated("spoke-A");
         store_1mb.insert(NodeResult::ingest(
             aid.clone(),
             "alpha".into(),
@@ -1348,7 +1348,7 @@ mod tests {
             w.handles()
                 .iter()
                 .map(|h| {
-                    h.agent_id.0.len()
+                    h.agent_id.as_str().to_string().len()
                         + h.label.len()
                         + h.salience.len()
                         + std::mem::size_of_val(&h.status)
@@ -1384,7 +1384,7 @@ mod tests {
     #[test]
     fn ac7_symbolic_reference_resolves_to_full_output() {
         let full_payload = "PAYER_TXN_DETAIL:".to_string() + &"x".repeat(64 * 1024);
-        let aid = AgentId("spoke-A".into());
+        let aid = AgentId::from_validated("spoke-A");
         let mut store = ResultStore::new();
         store.insert(NodeResult::ingest(
             aid.clone(),

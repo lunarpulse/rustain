@@ -1,5 +1,6 @@
 pub mod adapter_health;
 pub mod agent;
+pub mod agent_envelope;
 pub mod agent_id;
 pub mod agent_message;
 pub mod agent_node;
@@ -155,7 +156,7 @@ pub use orchestration::{
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
 #[allow(unused_imports)]
-pub use peer_identity::{Ed25519Sig, PeerId};
+pub use peer_identity::{Ed25519Sig, PeerId, PeerIdentity, PeerIdentityError};
 #[allow(unused_imports)]
 pub use permission::{
     FileContextProvenance, FileOperation, PathAccessType, PermissionMode, PlanApprovalOutcome,
@@ -198,7 +199,9 @@ pub use crate::domain::services::reducer::{
     LivenessSnapshot, ReducerState, reduce, update_streaming_mirror,
 };
 pub use adapter_health::{HealthLevel, HealthSummary, McpHealthRow};
-pub use agent_id::AgentId;
+#[allow(unused_imports)]
+pub use agent_envelope::{AgentEnvelope, AgentEnvelopeHeader, RapTaskState, RapTaskStateError};
+pub use agent_id::{AgentId, AgentIdError};
 #[allow(unused_imports)]
 pub use assembled_context::{AssembledContext, AssemblyBudget};
 #[allow(unused_imports)]

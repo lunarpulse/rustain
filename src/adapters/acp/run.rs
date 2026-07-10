@@ -291,18 +291,20 @@ where
             let result = handle_io.await.map_err(anyhow::Error::from);
             let mut session_ids: Vec<String> = cleanup_sessions.borrow().keys().cloned().collect();
             for entry in cleanup_tree.list().await {
-                if crate::adapters::acp::is_acp_session_id(&entry.agent_id.0)
+                if crate::adapters::acp::is_acp_session_id(entry.agent_id.as_str())
                     && matches!(
                         entry.ownership,
                         crate::domain::models::subagent_view::OwnershipKind::Self_(_)
                     )
-                    && !session_ids.contains(&entry.agent_id.0)
+                    && !session_ids
+                        .iter()
+                        .any(|session_id| session_id == entry.agent_id.as_str())
                 {
-                    session_ids.push(entry.agent_id.0);
+                    session_ids.push(entry.agent_id.as_str().to_string());
                 }
             }
             for session_id in session_ids {
-                let agent_id = AgentId(session_id.clone());
+                let agent_id = AgentId::from_validated(session_id.clone());
                 let terminal_state = if cleanup_sessions
                     .borrow()
                     .get(&session_id)
