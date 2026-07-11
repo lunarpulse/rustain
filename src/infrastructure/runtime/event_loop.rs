@@ -2158,8 +2158,10 @@ pub async fn run(
                                             }
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
-                                    } else if cmd_name == "new" {
-                                        // /new command: save current, create fresh session
+                                    } else if cmd_name == "new" || cmd_name == "clear" {
+                                        // /new and /clear are true context resets. Unlike
+                                        // /compact, they discard context and therefore clear
+                                        // provenance taint by starting a fresh conversation.
                                         // AC7: save current conversation if it has messages
                                         if !conversation.messages.is_empty() {
                                             conversation.updated_at = crate::domain::models::session_meta::now_unix();

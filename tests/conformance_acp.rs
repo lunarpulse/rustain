@@ -921,6 +921,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
 
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws_for_factory = workspace.path().to_path_buf();
+    let allowed_workspace = workspace.path().to_path_buf();
 
     // In-memory duplex transport — NO network listener is bound.
     //   server_incoming : what the agent reads (client writes requests here)
@@ -947,6 +948,7 @@ async fn acp_eof_teardown_deregisters_self_rooted_session_node() {
         None,
         core_factory,
         node_tree,
+        allowed_workspace,
     ));
 
     // ── Phase A: drive initialize + session/new, confirm `acp-1` lands. ──
@@ -1786,6 +1788,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         0,
         None,
         "direct-test".into(),
+        rustain::domain::models::TurnOrigin::Interactive,
     ));
     // `tools`/`tool_scheduler` were moved (or cloned) into run_turn above; the
     // turn owns the only live ToolSetPort senders now, so event_tx closes when
@@ -1968,6 +1971,7 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
 
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let ws_for_factory = workspace.path().to_path_buf();
+    let allowed_workspace = workspace.path().to_path_buf();
     let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
     let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
 
@@ -1988,6 +1992,7 @@ async fn acp_session_node_spawned_at_reflects_mock_clock() {
         None,
         core_factory,
         node_tree,
+        allowed_workspace,
     ));
 
     // Drive the real dispatched initialize → session/new and confirm acp-1.

@@ -249,6 +249,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         // teardown block (the `event_bus` above is moved into `run_child`), so the
         // scratch cleanup is surfaced to the user — "never silently vanished".
         let notice_event_bus = self.event_bus.clone();
+        let registry_for_spawn = self.registry.clone();
         let _handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(run_child(
                 spec,
@@ -256,6 +257,7 @@ impl SubagentRunner for InProcessSubagentRunner {
                 scheduler,
                 approval,
                 event_bus,
+                registry_for_spawn,
                 spool,
                 tools,
                 security,
@@ -481,6 +483,7 @@ async fn run_child(
     scheduler: Arc<crate::domain::services::tool_scheduler::ToolScheduler>,
     _approval: Arc<crate::domain::services::approval_runtime::ApprovalRuntime>,
     event_bus: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
+    registry: Arc<NodeTree>,
     spool: Arc<SubagentSpool>,
     tools: Arc<dyn crate::domain::ports::ToolSetPort>,
     _security: Arc<dyn crate::domain::ports::SecurityPort>,
@@ -832,6 +835,7 @@ async fn run_child(
                                         delivery.envelope.header.sender.clone(),
                                         delivery.envelope.header.kind.clone(),
                                     ));
+                                    registry.mark_tainted(&agent_id).await;
                                     messages.push(Message {
                                         role: MessageRole::User,
                                         content: delivery.envelope.body.content,
@@ -899,6 +903,7 @@ async fn run_child(
                                                 delivery.envelope.header.sender.clone(),
                                                 delivery.envelope.header.kind.clone(),
                                             ));
+                                            registry.mark_tainted(&agent_id).await;
                                             messages.push(Message {
                                                 role: MessageRole::User,
                                                 content: delivery.envelope.body.content,
@@ -1133,6 +1138,7 @@ async fn run_child(
                                     delivery.envelope.header.sender.clone(),
                                     delivery.envelope.header.kind.clone(),
                                 ));
+                                registry.mark_tainted(&agent_id).await;
                                 messages.push(Message {
                                     role: MessageRole::User,
                                     content: delivery.envelope.body.content,
@@ -1339,6 +1345,7 @@ async fn run_child(
                                             delivery.envelope.header.sender.clone(),
                                             delivery.envelope.header.kind.clone(),
                                         ));
+                                        registry.mark_tainted(&agent_id).await;
                                         messages.push(Message {
                                             role: MessageRole::User,
                                             content: delivery.envelope.body.content,
@@ -1571,9 +1578,15 @@ async fn run_child(
                     subagent_type: "in-process".to_string(),
                 };
 
+                let provenance = if registry.is_tainted(&agent_id).await {
+                    crate::domain::models::ProvenanceTag::SelfOriginated
+                } else {
+                    crate::domain::models::ProvenanceTag::UserOriginated
+                };
+
                 let terminal = scheduler
                     .clone()
-                    .schedule(source, requests, cancel.clone(), None)
+                    .schedule_with_provenance(source, requests, cancel.clone(), None, provenance)
                     .await;
 
                 let mut tool_result_messages: Vec<ToolResultMessage> = Vec::new();
@@ -2200,6 +2213,11 @@ mod tests {
              MessageRefused{{Policy}} receipt through the PRODUCTION run_child path"
         );
 
+        assert!(
+            !registry.is_tainted(&agent_id).await,
+            "consent-refused data never entered context and must not taint it"
+        );
+
         // Clean up
         cancel.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -2210,6 +2228,55 @@ mod tests {
             }
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn accepted_cross_agent_ingest_marks_recipient_tainted() {
+        use crate::domain::models::*;
+        use crate::domain::ports::AgentMessageBus;
+
+        let (runner, registry, _event_rx, _tmp) = make_hanging_runner_observable().await;
+        let spec = AgentLaunchSpec {
+            prompt: "hello".into(),
+            effective_model: "test-model".into(),
+            tier: ModelTier::CheapAgentic,
+            tools_allow: ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: false,
+        };
+        let cancel = CancellationToken::new();
+        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let agent_id = handle.agent_id.clone();
+        let bus = crate::infrastructure::subagent::LocalMessageBus::new(
+            (*registry).clone(),
+            Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+        );
+        bus.deliver(
+            &agent_id,
+            Envelope::new(
+                MessageHeader {
+                    sender: AgentId::from_validated("sender"),
+                    recipient: agent_id.clone(),
+                    correlation_id: CorrelationId::new("taint-ingest"),
+                    kind: MessageKind::PeerMessage,
+                    sequence: None,
+                },
+                AgentMessage::new("cross-agent data"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !registry.is_tainted(&agent_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted ingest must taint recipient");
+        cancel.cancel();
     }
 
     async fn make_usage_runner() -> (InProcessSubagentRunner, tempfile::TempDir) {

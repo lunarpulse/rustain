@@ -255,6 +255,7 @@ async fn turn_scheduler_migration() {
         0,
         None,
         "sess-test".into(),
+        rustain::domain::models::TurnOrigin::Interactive,
     )
     .await;
 

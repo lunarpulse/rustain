@@ -475,8 +475,9 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 35); // 20 base + 7 port slash + 7 adapter palette + 1 /fanout (Story 14.3b)
+        assert_eq!(reg.all_entries().len(), 36); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout
         assert!(reg.all_entries().iter().any(|e| e.name == "/new"));
+        assert!(reg.all_entries().iter().any(|e| e.name == "/clear"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/export"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/deactivate"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/mode"));
@@ -492,7 +493,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 35); // 20 base + 7 port slash + 7 adapter palette + 1 /fanout (Story 14.3b)
+        assert_eq!(reg.all_entries().len(), 36); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout
     }
 
     #[test]
@@ -508,19 +509,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 35); // 20 base + 7 port slash + 7 adapter palette + 1 /fanout (Story 14.3b)
+        assert_eq!(reg.slash_entries.len(), 36); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 36);
+        assert_eq!(reg.all_entries().len(), 37);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 36);
+        assert_eq!(reg.all_entries().len(), 37);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 37);
+        assert_eq!(reg.all_entries().len(), 38);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 37);
+        assert_eq!(reg.all_entries().len(), 38);
     }
 }

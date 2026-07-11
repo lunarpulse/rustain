@@ -17,7 +17,7 @@ use serde_json;
 
 use crate::domain::models::{
     AppConfig, CompletionOptions, FileContextProvenance, MessageRole, Plan, SkillActivationSet,
-    StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, UsageInfo,
+    StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin, UsageInfo,
 };
 use crate::domain::ports::StreamingProvider;
 use crate::domain::services::message_builder::{self, ResolvedFileContext};
@@ -871,6 +871,7 @@ pub async fn run_ask_core(
         0,
         None,
         session_id,
+        TurnOrigin::Interactive,
     ));
     // Drop local Arc clones of tools/tool_scheduler so any event senders
     // held inside ToolSetPort adaptors are released. The spawned run_turn

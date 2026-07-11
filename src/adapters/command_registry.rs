@@ -55,6 +55,12 @@ impl CommandRegistry {
                 content: None,
             },
             SlashCommandDef {
+                name: "clear".to_string(),
+                description: "Start a clean conversation and clear provenance taint".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
                 name: "export".to_string(),
                 description: "Export conversation to markdown (optional filename arg)".to_string(),
                 source: CommandSource::BuiltIn,

@@ -11,7 +11,7 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{
     CompletionOptions, EscalationReason, Message, MessageRole, NoticeLevel, StepKind, StopReason,
-    StreamChunk, TokenUsage, ToolCall, ToolCallInfo, ToolResultMessage, ToolUseMessage,
+    StreamChunk, TokenUsage, ToolCall, ToolCallInfo, ToolResultMessage, ToolUseMessage, TurnOrigin,
     UsageLedgerEntry,
 };
 use crate::domain::ports::{
@@ -52,6 +52,7 @@ pub async fn run_turn(
     parent_ctx_tokens: u32,
     parent_trace: Option<crate::domain::models::TraceContext>,
     session_id: String,
+    turn_origin: TurnOrigin,
 ) {
     #[cfg(any(test, feature = "test-instrumentation"))]
     RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -366,16 +367,7 @@ pub async fn run_turn(
                                     )
                                 })
                                 .collect();
-                            let source = if crate::adapters::acp::is_acp_session_id(&session_id) {
-                                crate::domain::models::ApprovalSource::AcpSession {
-                                    session_id: session_id.clone(),
-                                    conversation_id: conversation_id.clone(),
-                                }
-                            } else {
-                                crate::domain::models::ApprovalSource::ForegroundTurn {
-                                    conversation_id: conversation_id.clone(),
-                                }
-                            };
+                            let source = turn_origin.approval_source(&conversation_id);
                             let active_skills = activation_set.as_ref().map(|s| s.active_skills());
                             let requests: Vec<crate::domain::models::ToolCallRequest> =
                                 batch_with_idx.iter().map(|(_, req)| req.clone()).collect();

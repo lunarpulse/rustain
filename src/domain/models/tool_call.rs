@@ -56,6 +56,10 @@ pub enum ApprovalSource {
         session_id: String,
         conversation_id: String,
     },
+    RemotePeer {
+        conversation_id: String,
+        peer_id: crate::domain::models::peer_identity::PeerId,
+    },
     BackgroundAgent {
         conversation_id: String,
         task_id: String,
@@ -72,6 +76,9 @@ impl ApprovalSource {
                 conversation_id, ..
             } => conversation_id,
             ApprovalSource::AcpSession {
+                conversation_id, ..
+            }
+            | ApprovalSource::RemotePeer {
                 conversation_id, ..
             } => conversation_id,
             ApprovalSource::BackgroundAgent {
@@ -113,6 +120,15 @@ impl ApprovalSource {
                 crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
                     conversation_id,
                     session_id,
+                ]))
+            }
+            ApprovalSource::RemotePeer {
+                conversation_id,
+                peer_id,
+            } => {
+                crate::domain::models::agent_id::AgentId::from_validated(length_prefixed_scope(&[
+                    conversation_id,
+                    peer_id.as_str(),
                 ]))
             }
             ApprovalSource::BackgroundAgent {

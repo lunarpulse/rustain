@@ -13,9 +13,9 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::agent_node::AgentMetrics;
 use crate::domain::models::session_meta::now_unix;
 use crate::domain::models::{
-    AgentId, AppConfig, CapabilityTokenId, ChatMessage, CompletionOptions, ImageAttachment,
-    MessageRole, NodeState, Op, SkillActivationSet, SkillSource, StopReason as DomainStopReason,
-    StreamChunk, ToolCallInfo, ToolResultInfo,
+    AgentId, AppConfig, CapabilityTokenId, ChatMessage, CompletionOptions, FileContextProvenance,
+    FileOperation, ImageAttachment, MessageRole, NodeState, Op, SkillActivationSet, SkillSource,
+    StopReason as DomainStopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin,
 };
 use crate::domain::ports::{
     AuthStorePort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
@@ -124,12 +124,35 @@ pub(crate) struct RustainAcpAgent {
     core_factory: AcpCoreFactory,
     model_override: Option<String>,
     default_workspace: PathBuf,
+    /// Canonical local policy root pinned at construction. `None` is a
+    /// fail-closed startup state; request handling never re-resolves the policy
+    /// path and therefore cannot be retargeted by symlink replacement.
+    allowed_workspace: Option<PathBuf>,
     session_updates: mpsc::UnboundedSender<SessionNotify>,
     permission_requests: mpsc::UnboundedSender<PermissionAsk>,
     sessions: SharedSessions,
     id_source: Rc<dyn Fn() -> String>,
     node_tree: NodeTree,
     auth_store: Arc<dyn AuthStorePort>,
+}
+
+fn canonical_remote_cwd(requested: &Path, allowed_root: &Path) -> Result<PathBuf, &'static str> {
+    if allowed_root.as_os_str().is_empty() || !allowed_root.is_dir() {
+        return Err("local ACP workspace is unavailable");
+    }
+    let gate = crate::adapters::security_adapter::SecurityAdapter::new(allowed_root.to_path_buf());
+    gate.check_workspace_access_with_provenance(
+        requested,
+        FileOperation::Read,
+        FileContextProvenance::RemoteProvided,
+    )
+    .map_err(|_| "remote ACP cwd must resolve within the local workspace")?;
+    let cwd = std::fs::canonicalize(requested)
+        .map_err(|_| "remote ACP cwd must exist and be canonicalizable")?;
+    if !cwd.is_dir() {
+        return Err("remote ACP cwd must be a directory within the local workspace");
+    }
+    Ok(cwd)
 }
 
 impl RustainAcpAgent {
@@ -145,11 +168,15 @@ impl RustainAcpAgent {
         auth_store: Arc<dyn AuthStorePort>,
         id_source: Rc<dyn Fn() -> String>,
     ) -> Self {
+        let allowed_workspace = std::fs::canonicalize(&default_workspace)
+            .ok()
+            .filter(|path| path.is_dir());
         Self {
             app_config,
             core_factory,
             model_override,
             default_workspace,
+            allowed_workspace,
             session_updates,
             permission_requests,
             sessions,
@@ -157,6 +184,18 @@ impl RustainAcpAgent {
             node_tree,
             auth_store,
         }
+    }
+
+    /// Canonicalize a peer-controlled ACP cwd against the executor's local
+    /// workspace before any node registration or adapter composition.
+    fn validate_remote_cwd(&self, requested: &Path) -> acp::Result<PathBuf> {
+        canonical_remote_cwd(
+            requested,
+            self.allowed_workspace
+                .as_deref()
+                .unwrap_or_else(|| Path::new("")),
+        )
+        .map_err(|message| acp::Error::invalid_params().data(message))
     }
 
     async fn send_session_update(
@@ -682,7 +721,10 @@ impl RustainAcpAgent {
             None,
             0,
             None,
-            session_key,
+            session_key.clone(),
+            TurnOrigin::Acp {
+                session_id: session_key.clone(),
+            },
         ));
         drop(tools);
         drop(tool_scheduler);
@@ -1068,10 +1110,8 @@ impl RustainAcpAgent {
             let Ok(Some(conversation)) = core.storage.load_conversation(&summary.id).await else {
                 continue;
             };
-            if conversation
-                .session_id
-                .as_deref()
-                .is_some_and(super::is_acp_session_id)
+            if conversation.session_id.as_deref()
+                == Some(super::format_acp_session_id(&conversation.id).as_str())
             {
                 summaries.push(summary);
             }
@@ -1200,6 +1240,7 @@ impl acp::Agent for RustainAcpAgent {
         let session_id = super::format_acp_session_id(&conversation_id);
         let cancel = CancellationToken::new();
         let agent_id = AgentId::from_validated(session_id.clone());
+        let cwd = self.validate_remote_cwd(&args.cwd)?;
         self.node_tree
             .register_self_session(
                 agent_id.clone(),
@@ -1207,7 +1248,6 @@ impl acp::Agent for RustainAcpAgent {
             )
             .await
             .map_err(|_| acp::Error::internal_error())?;
-        let cwd = args.cwd;
         let forwarded_mcp_servers = mcp_servers_from_acp(args.mcp_servers);
         let core = match (self.core_factory)(&cwd, &forwarded_mcp_servers) {
             Ok(c) => SessionCore::from(c),
@@ -1391,7 +1431,8 @@ impl acp::Agent for RustainAcpAgent {
         args: acp::CloseSessionRequest,
     ) -> Result<acp::CloseSessionResponse, acp::Error> {
         let session_id = args.session_id.0.to_string();
-        let agent_id = AgentId::from_validated(session_id.clone());
+        let agent_id = AgentId::parse(&session_id)
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
         let (cancel, was_cancelled) = {
             let sessions = self.sessions.borrow();
             let state = sessions
@@ -1413,5 +1454,58 @@ impl acp::Agent for RustainAcpAgent {
         self.node_tree.deregister(&agent_id).await;
         self.sessions.borrow_mut().remove(&session_id);
         Ok(acp::CloseSessionResponse::new())
+    }
+}
+
+#[cfg(test)]
+mod cwd_tests {
+    use super::canonical_remote_cwd;
+
+    #[test]
+    fn remote_cwd_is_canonical_and_scoped_to_local_root() {
+        let root = tempfile::tempdir().expect("local workspace");
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let canonical = canonical_remote_cwd(&child, root.path()).expect("in-root cwd");
+        assert_eq!(canonical, std::fs::canonicalize(&child).unwrap());
+
+        let outside = tempfile::tempdir().expect("outside");
+        assert!(canonical_remote_cwd(outside.path(), root.path()).is_err());
+        assert!(canonical_remote_cwd(&root.path().join("missing"), root.path()).is_err());
+        assert!(canonical_remote_cwd(&child, std::path::Path::new("")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_cwd_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("local workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        let escape = root.path().join("escape");
+        symlink(outside.path(), &escape).unwrap();
+
+        assert!(canonical_remote_cwd(&escape, root.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_workspace_root_cannot_be_retargeted_by_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let holder = tempfile::tempdir().expect("root holder");
+        let original = tempfile::tempdir().expect("original workspace");
+        let replacement = tempfile::tempdir().expect("replacement workspace");
+        let link = holder.path().join("workspace");
+        symlink(original.path(), &link).unwrap();
+        let pinned = std::fs::canonicalize(&link).unwrap();
+
+        std::fs::remove_file(&link).unwrap();
+        symlink(replacement.path(), &link).unwrap();
+        assert!(
+            canonical_remote_cwd(replacement.path(), &pinned).is_err(),
+            "replacing the configured symlink must not retarget the pinned policy root"
+        );
+        assert!(canonical_remote_cwd(original.path(), &pinned).is_ok());
     }
 }

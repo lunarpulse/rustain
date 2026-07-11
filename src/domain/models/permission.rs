@@ -77,6 +77,10 @@ pub enum FileContextProvenance {
     /// for reads, but blocklist/traversal checks still apply.
     #[default]
     UserProvided,
+    /// Path was supplied by a remote/cross-process peer. Session-root
+    /// validation must fail closed; it never inherits user-provided read
+    /// exemptions.
+    RemoteProvided,
     /// Path was suggested by the model (e.g. a Read tool argument); subject to
     /// workspace boundary checks.
     ModelSuggested,

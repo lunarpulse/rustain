@@ -2540,7 +2540,7 @@ fn submit_message(state: &mut TuiState) -> InputAction {
             };
 
             // Check if it's a built-in command
-            if cmd_name == "new" {
+            if cmd_name == "new" || cmd_name == "clear" {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args: None,
@@ -4264,6 +4264,16 @@ mod tests {
             "Expected normal SubmitMessage when @Agents/ is mid-buffer, got {:?}",
             action
         );
+    }
+
+    #[test]
+    fn slash_clear_is_a_first_class_true_context_reset() {
+        let mut state = make_state();
+        state.input_buffer = "/clear".to_string();
+        assert!(matches!(
+            submit_message(&mut state),
+            InputAction::ExecuteCommand { name, args: None } if name == "clear"
+        ));
     }
 
     // Story 11.4 (Task 5.2) — `/context <sub>` routes to ExecuteCommand (not the

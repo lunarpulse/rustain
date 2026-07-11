@@ -304,26 +304,39 @@ impl NodeTree {
         &self,
         agent_id: AgentId,
         parent: AgentId,
+        handle: AgentHandle,
+    ) -> Result<(), SubagentError> {
+        self.register_with_identity(
+            agent_id,
+            parent,
+            handle,
+            OwnershipKind::Owned,
+            NodeOrigin::Subagent,
+        )
+        .await
+    }
+
+    async fn register_with_identity(
+        &self,
+        agent_id: AgentId,
+        parent: AgentId,
         mut handle: AgentHandle,
+        ownership: OwnershipKind,
+        origin: NodeOrigin,
     ) -> Result<(), SubagentError> {
         let mut guard = self.inner.write().await;
-
         if guard.nodes.contains_key(&agent_id) {
             return Err(SubagentError::Internal(format!(
                 "duplicate agent_id: {:?}",
                 agent_id
             )));
         }
-
-        // The root sentinel is a parent-only marker; registering it as a node
-        // would corrupt parent_of/depth invariants.
         if agent_id == AgentId::root() {
             return Err(SubagentError::Internal(
                 "agent_id cannot be the root sentinel".into(),
             ));
         }
 
-        // 1. Compute depth = depth(parent) + 1 (root depth = 0)
         let depth = if parent == AgentId::root() {
             1
         } else if let Some(parent_node) = guard.nodes.get(&parent) {
@@ -334,8 +347,11 @@ impl NodeTree {
                 parent
             )));
         };
-
-        // 2. Reject if depth > MAX_DEPTH
+        let parent_tainted = guard
+            .nodes
+            .get(&parent)
+            .map(|node| node.tainted)
+            .unwrap_or(false);
         if depth > MAX_DEPTH {
             return Err(SubagentError::SpawnLimitExceeded {
                 kind: SpawnLimitKind::Depth,
@@ -343,8 +359,6 @@ impl NodeTree {
                 attempted: depth,
             });
         }
-
-        // 3. Count current children_of(parent); reject if >= MAX_CHILDREN
         let children_count = guard.parent_of.values().filter(|p| **p == parent).count();
         if children_count >= MAX_CHILDREN {
             return Err(SubagentError::SpawnLimitExceeded {
@@ -354,17 +368,12 @@ impl NodeTree {
             });
         }
 
-        // 4. Create watch channel for status broadcasting
         let (status_tx, status_rx) = watch::channel(NodeState::Created);
-
-        // 5. Set computed depth and spawn time on handle
         handle.depth = depth;
         if handle.spawned_at == 0 {
             handle.spawned_at = (self.now_fn)();
         }
         handle.status = status_tx.clone();
-
-        // Build AgentNode from legacy AgentHandle
         let node = AgentNode {
             id: agent_id.clone(),
             token: handle.token,
@@ -373,9 +382,9 @@ impl NodeTree {
             } else {
                 Some(parent.clone())
             },
-            ownership: OwnershipKind::Owned,
+            ownership,
             state: NodeState::Created,
-            origin: NodeOrigin::Subagent,
+            origin,
             foreground: true,
             effective_model: String::new(),
             tokens_in: 0,
@@ -384,14 +393,8 @@ impl NodeTree {
             subagent_type: handle.subagent_type.clone(),
             spawned_at: handle.spawned_at,
             depth,
+            tainted: parent_tainted,
         };
-
-        // Build NodeHandle from legacy AgentHandle. The cancel token is the
-        // child task's REAL token (carried on the handle from `launch()`), so
-        // `cascade_kill`'s `handle.cancel()` interrupts the task at any await
-        // point it selects on `cancel.cancelled()` — not an orphan minted here.
-        // `cascade_kill` walks every descendant and cancels each explicitly, so
-        // per-node storage is sufficient for the cascade (AC10 child-cascade).
         let node_handle = NodeHandle::Local {
             cancel_token: handle.cancel_token.clone(),
             command_tx: handle.command_tx.clone(),
@@ -412,30 +415,35 @@ impl NodeTree {
             .mailbox_budgets
             .insert(agent_id.clone(), handle.mailbox_budget.clone());
 
-        // Release write guard BEFORE any subsequent .await (CLAUDE.md async-lock policy)
+        // The event is sent while the mutation-ordering lock is still held.
+        // Unbounded send never awaits, so a concurrent cascade cannot publish a
+        // deregistration before this registration.
+        self.emit_capability_event(CapabilityEvent::Registered {
+            capability: self.capability_for(&agent_id),
+        });
         drop(guard);
-
-        // 6. Emit registration event
-        if let Some(tx) = &self.event_tx {
-            let cap = RegisteredCapability {
-                id: CapabilityId {
-                    protocol: "subagent".into(),
-                    server: String::new(),
-                    tool: agent_id.as_str().to_string(),
-                },
-                protocol: "subagent".into(),
-                provider_id: "subagent".into(),
-                name: agent_id.as_str().to_string(),
-                description: String::new(),
-                input_schema: serde_json::Value::Object(Default::default()),
-                parallel_safe: false,
-            };
-            let _ = tx.send(AppEvent::CapabilityEvent(CapabilityEvent::Registered {
-                capability: cap,
-            }));
-        }
-
         Ok(())
+    }
+
+    /// Register a local mailbox representing a verified remote peer.
+    ///
+    /// The handle remains local because the existing `LocalMessageBus` must
+    /// perform reserve-and-send admission. Ownership and origin distinguish it
+    /// from an owned subagent; a transport-backed `NodeHandle::Remote` remains
+    /// an R3 concern.
+    pub async fn register_peer(
+        &self,
+        agent_id: AgentId,
+        handle: AgentHandle,
+    ) -> Result<(), SubagentError> {
+        self.register_with_identity(
+            agent_id,
+            AgentId::root(),
+            handle,
+            OwnershipKind::Peer,
+            NodeOrigin::Remote,
+        )
+        .await
     }
 
     /// Register a live ACP/editor attachment as a non-durable `Self` session root.
@@ -449,70 +457,45 @@ impl NodeTree {
     pub async fn register_self_session(
         &self,
         agent_id: AgentId,
-        mut handle: AgentHandle,
+        handle: AgentHandle,
     ) -> Result<(), SubagentError> {
-        let mut guard = self.inner.write().await;
+        self.register_with_identity(
+            agent_id,
+            AgentId::root(),
+            handle,
+            OwnershipKind::self_root(),
+            NodeOrigin::Interactive,
+        )
+        .await
+    }
 
-        if guard.nodes.contains_key(&agent_id) {
-            return Err(SubagentError::Internal(format!(
-                "duplicate agent_id: {:?}",
-                agent_id
-            )));
+    fn capability_for(&self, agent_id: &AgentId) -> RegisteredCapability {
+        RegisteredCapability {
+            id: CapabilityId {
+                protocol: "subagent".into(),
+                server: String::new(),
+                tool: agent_id.as_str().to_string(),
+            },
+            protocol: "subagent".into(),
+            provider_id: "subagent".into(),
+            name: agent_id.as_str().to_string(),
+            description: String::new(),
+            input_schema: serde_json::Value::Object(Default::default()),
+            parallel_safe: false,
         }
+    }
 
-        if agent_id == AgentId::root() {
-            return Err(SubagentError::Internal(
-                "agent_id cannot be the root sentinel".into(),
-            ));
-        }
-
-        let (status_tx, status_rx) = watch::channel(NodeState::Created);
-        handle.depth = 1;
-        if handle.spawned_at == 0 {
-            handle.spawned_at = (self.now_fn)();
-        }
-        handle.status = status_tx.clone();
-
-        let node = AgentNode {
-            id: agent_id.clone(),
-            token: handle.token,
-            parent: None,
-            ownership: OwnershipKind::self_root(),
-            state: NodeState::Created,
-            origin: NodeOrigin::Interactive,
-            foreground: true,
-            effective_model: String::new(),
-            tokens_in: 0,
-            tokens_out: 0,
-            turns: 0,
-            subagent_type: handle.subagent_type.clone(),
-            spawned_at: handle.spawned_at,
-            depth: 1,
+    fn emit_capability_event(&self, event: CapabilityEvent) -> bool {
+        let Some(tx) = &self.event_tx else {
+            return false;
         };
-
-        let node_handle = NodeHandle::Local {
-            cancel_token: handle.cancel_token.clone(),
-            command_tx: handle.command_tx.clone(),
-        };
-
-        guard.nodes.insert(agent_id.clone(), node);
-        guard.handles.insert(agent_id.clone(), node_handle);
-        guard.parent_of.insert(agent_id.clone(), AgentId::root());
-        guard.status_rx.insert(agent_id.clone(), status_rx);
-        guard.status_senders.insert(agent_id.clone(), status_tx);
-        guard
-            .metrics_rx
-            .insert(agent_id.clone(), handle.metrics.clone());
-        guard
-            .isolated_agents
-            .insert(agent_id.clone(), handle.isolated);
-        guard
-            .mailbox_budgets
-            .insert(agent_id.clone(), handle.mailbox_budget.clone());
-
-        drop(guard);
-
-        Ok(())
+        if tx.send(AppEvent::CapabilityEvent(event)).is_err() {
+            tracing::warn!(
+                "NodeTree lifecycle event receiver closed; capability observability is unavailable"
+            );
+            return false;
+        }
+        true
     }
 
     #[cfg(any(test, feature = "test-instrumentation"))]
@@ -524,16 +507,24 @@ impl NodeTree {
     /// Remove a single node from every map. No cascade, no event emission.
     /// Used internally by `cascade_kill` (which walks the subtree in kill
     /// order itself) and as the per-node primitive of [`Self::deregister`].
-    async fn deregister_one(&self, agent_id: &AgentId) {
+    async fn deregister_one(&self, agent_id: &AgentId) -> bool {
         let mut guard = self.inner.write().await;
-        guard.nodes.remove(agent_id);
+        let removed = guard.nodes.remove(agent_id).is_some();
+        if !removed {
+            return false;
+        }
         guard.handles.remove(agent_id);
         guard.parent_of.remove(agent_id);
         guard.status_rx.remove(agent_id);
         guard.status_senders.remove(agent_id);
         guard.metrics_rx.remove(agent_id);
         guard.mailbox_budgets.remove(agent_id);
+        guard.isolated_agents.remove(agent_id);
+        self.emit_capability_event(CapabilityEvent::Deregistered {
+            capability: self.capability_for(agent_id),
+        });
         drop(guard);
+        true
     }
 
     /// Remove `agent_id` **and its entire subtree** from the tree.
@@ -564,28 +555,6 @@ impl NodeTree {
 
         for id in &to_remove {
             self.deregister_one(id).await;
-        }
-
-        // Emit a deregistration event per removed node.
-        if let Some(tx) = &self.event_tx {
-            for id in &to_remove {
-                let cap = RegisteredCapability {
-                    id: CapabilityId {
-                        protocol: "subagent".into(),
-                        server: String::new(),
-                        tool: id.as_str().to_string(),
-                    },
-                    protocol: "subagent".into(),
-                    provider_id: "subagent".into(),
-                    name: id.as_str().to_string(),
-                    description: String::new(),
-                    input_schema: serde_json::Value::Object(Default::default()),
-                    parallel_safe: false,
-                };
-                let _ = tx.send(AppEvent::CapabilityEvent(CapabilityEvent::Deregistered {
-                    capability: cap,
-                }));
-            }
         }
     }
 
@@ -631,6 +600,35 @@ impl NodeTree {
         }
     }
 
+    /// Mark a node tainted after a cross-agent message is actually ingested.
+    /// This operation is monotone; repeated ingest is idempotent.
+    pub async fn mark_tainted(&self, agent_id: &AgentId) -> bool {
+        let mut guard = self.inner.write().await;
+        if let Some(node) = guard.nodes.get_mut(agent_id) {
+            let changed = !node.tainted;
+            node.tainted = true;
+            changed
+        } else {
+            false
+        }
+    }
+
+    /// Clear integrity taint only for a true context reset (`/clear`/new conversation).
+    pub async fn clear_taint(&self, agent_id: &AgentId) {
+        let mut guard = self.inner.write().await;
+        if let Some(node) = guard.nodes.get_mut(agent_id) {
+            node.tainted = false;
+        }
+    }
+
+    pub async fn is_tainted(&self, agent_id: &AgentId) -> bool {
+        let guard = self.inner.read().await;
+        guard
+            .nodes
+            .get(agent_id)
+            .map(|n| n.tainted)
+            .unwrap_or(false)
+    }
     pub async fn depth(&self, agent_id: &AgentId) -> usize {
         let guard = self.inner.read().await;
         guard.nodes.get(agent_id).map(|n| n.depth).unwrap_or(0)
@@ -918,7 +916,7 @@ impl NodeTree {
                         }
                     }
                     NodeHandle::Remote { .. } => {
-                        // Remote kill not supported in R1
+                        // Remote kill not supported in R1.
                         self.deregister_one(id).await;
                         killed.push(id.clone());
                         continue;
@@ -926,7 +924,7 @@ impl NodeTree {
                 };
 
                 if send_result.is_err() {
-                    // Channel closed or send timed out — treat as already terminal
+                    // Channel closed or send timed out — treat as already terminal.
                     self.deregister_one(id).await;
                     killed.push(id.clone());
                     continue;
@@ -948,6 +946,12 @@ impl NodeTree {
                     } else {
                         let mut rx = sender.subscribe();
                         tokio::time::timeout(timeout_per_node, async {
+                            if matches!(
+                                *rx.borrow(),
+                                NodeState::Completed | NodeState::Failed | NodeState::Cancelled
+                            ) {
+                                return;
+                            }
                             loop {
                                 if rx.changed().await.is_err() {
                                     return;
@@ -1822,6 +1826,201 @@ mod tests {
             }
             _ => panic!("expected Deliver"),
         }
+    }
+
+    #[tokio::test]
+    async fn taint_is_monotone_inherited_on_spawn_and_cleared_only_explicitly() {
+        let tree = NodeTree::new();
+        let parent = AgentId::from_validated("tainted-parent");
+        let child = AgentId::from_validated("inheriting-child");
+        tree.register(
+            parent.clone(),
+            AgentId::root(),
+            dummy_handle(parent.clone(), 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(!tree.is_tainted(&parent).await);
+        assert!(tree.mark_tainted(&parent).await);
+        assert!(
+            !tree.mark_tainted(&parent).await,
+            "second mark is idempotent"
+        );
+        tree.register(
+            child.clone(),
+            parent.clone(),
+            dummy_handle(child.clone(), 2),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tree.is_tainted(&child).await,
+            "spawn must inherit parent integrity taint"
+        );
+
+        // Ordinary reads/turn boundaries do not mutate the bit.
+        assert!(tree.is_tainted(&parent).await);
+        tree.clear_taint(&parent).await;
+        assert!(
+            !tree.is_tainted(&parent).await,
+            "only an explicit true-context reset clears taint"
+        );
+        assert!(
+            tree.is_tainted(&child).await,
+            "resetting one context must not launder a child context"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_cover_self_registration_and_cascade_removal() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let tree = NodeTree::with_event_tx(event_tx, Arc::new(|| 1_700_000_000_000));
+        let agent = AgentId::from_validated("acp-1");
+        let expected_id = tree.capability_for(&agent).id;
+
+        tree.register_self_session(agent.clone(), dummy_handle(agent.clone(), 1))
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("registered event timeout")
+            .expect("registered event")
+        {
+            AppEvent::CapabilityEvent(CapabilityEvent::Registered { capability }) => {
+                assert_eq!(capability.id, expected_id);
+            }
+            event => panic!("expected exact Registered event, got {event:?}"),
+        }
+
+        tree.cascade_kill(&agent, Duration::ZERO).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("deregistered event timeout")
+            .expect("deregistered event")
+        {
+            AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
+                assert_eq!(capability.id, expected_id);
+            }
+            event => panic!("expected exact Deregistered event, got {event:?}"),
+        }
+        assert!(event_rx.try_recv().is_err(), "exactly one removal event");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_cover_normal_terminal_cascade_arm() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let tree = NodeTree::with_event_tx(event_tx, Arc::new(|| 1_700_000_000_000));
+        let agent = AgentId::from_validated("normal-terminal");
+        let expected_id = tree.capability_for(&agent).id;
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (status_tx, _) = watch::channel(NodeState::Running);
+        let (_, metrics_rx) = watch::channel(AgentMetrics::default());
+        tree.register(
+            agent.clone(),
+            AgentId::root(),
+            AgentHandle {
+                agent_id: agent.clone(),
+                token: CapabilityTokenId::nil(),
+                command_tx,
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+                depth: 1,
+                subagent_type: "test".into(),
+                spawned_at: 0,
+                status: status_tx,
+                metrics: metrics_rx,
+                isolated: false,
+                mailbox_budget: MailboxBudget::new(),
+            },
+        )
+        .await
+        .unwrap();
+        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("registered event timeout")
+            .expect("registered event")
+        {
+            AppEvent::CapabilityEvent(CapabilityEvent::Registered { capability }) => {
+                assert_eq!(capability.id, expected_id);
+            }
+            event => panic!("expected exact Registered event, got {event:?}"),
+        }
+        tree.set_state(&agent, NodeState::Running).await;
+        let tree_for_task = tree.clone();
+        let agent_for_task = agent.clone();
+        tokio::spawn(async move {
+            if matches!(command_rx.recv().await, Some(Op::Kill)) {
+                tree_for_task
+                    .set_state(&agent_for_task, NodeState::Completed)
+                    .await;
+            }
+        });
+
+        tree.cascade_kill(&agent, Duration::from_secs(1))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match event_rx.recv().await.expect("lifecycle event stream") {
+                    AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
+                        assert_eq!(capability.id, expected_id);
+                        break;
+                    }
+                    AppEvent::CapabilityEvent(CapabilityEvent::Updated { id, .. }) => {
+                        assert_eq!(id, expected_id);
+                    }
+                    event => panic!("unexpected lifecycle event before removal: {event:?}"),
+                }
+            }
+        })
+        .await
+        .expect("deregistered event timeout");
+        assert!(event_rx.try_recv().is_err(), "exactly one removal event");
+    }
+
+    #[tokio::test]
+    async fn concurrent_cascades_emit_one_deregistration_for_one_removal() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let tree = NodeTree::with_event_tx(event_tx, Arc::new(|| 1_700_000_000_000));
+        let agent = AgentId::from_validated("concurrent-cascade");
+        tree.register_self_session(agent.clone(), dummy_handle(agent.clone(), 1))
+            .await
+            .unwrap();
+        let _ = event_rx.recv().await.expect("registered event");
+
+        let left = tree.clone();
+        let right = tree.clone();
+        let left_id = agent.clone();
+        let right_id = agent.clone();
+        let (left_result, right_result) = tokio::join!(
+            left.cascade_kill(&left_id, Duration::ZERO),
+            right.cascade_kill(&right_id, Duration::ZERO),
+        );
+        left_result.unwrap();
+        right_result.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("deregistered event timeout")
+            .expect("deregistered event");
+        assert!(matches!(
+            first,
+            AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { .. })
+        ));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "concurrent removal emitted duplicate"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_are_silent_without_transmitter() {
+        let tree = NodeTree::new();
+        let agent = AgentId::from_validated("acp-quiet");
+        tree.register_self_session(agent.clone(), dummy_handle(agent.clone(), 1))
+            .await
+            .unwrap();
+        tree.cascade_kill(&agent, Duration::ZERO).await.unwrap();
     }
 
     // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)

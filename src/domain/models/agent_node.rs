@@ -80,6 +80,8 @@ pub struct AgentNode {
     pub spawned_at: i64,
     /// Tree depth (root = 0), carried from `RegistryEntry`.
     pub depth: usize,
+    /// Monotone local integrity bit: cross-agent data has entered this context.
+    pub tainted: bool,
 }
 
 /// Live runtime metrics surfaced by a node for owner-facing inspection.
@@ -135,6 +137,19 @@ pub struct NodeCheckpoint {
     pub spawned_at: i64,
     /// Tree depth (root = 0).
     pub depth: usize,
+    /// Monotone local integrity bit persisted for local checkpoint/restore.
+    /// Peer-supplied values MUST be ignored and recomputed at the local boundary.
+    #[serde(default)]
+    pub tainted: bool,
+}
+
+/// Trust boundary applied when rehydrating a serialized node checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointTrust {
+    /// Local durable state written by [`AgentNode::checkpoint`].
+    TrustedLocal,
+    /// Peer-controlled wire data. Authority and taint are recomputed locally.
+    RemotePeer,
 }
 
 impl AgentNode {
@@ -158,6 +173,47 @@ impl AgentNode {
             subagent_type: self.subagent_type.clone(),
             spawned_at: self.spawned_at,
             depth: self.depth,
+            tainted: self.tainted,
+        }
+    }
+}
+
+impl NodeCheckpoint {
+    /// Rehydrate a checkpoint through an explicit trust boundary.
+    ///
+    /// Local persistence preserves monotone taint. Peer input cannot clear
+    /// taint or supply delegated authority: it is forced to Remote/Peer with a
+    /// nil token for subsequent local authorization.
+    pub fn into_node(self, trust: CheckpointTrust) -> AgentNode {
+        let remote = trust == CheckpointTrust::RemotePeer;
+        AgentNode {
+            id: self.id,
+            token: if remote {
+                CapabilityTokenId::nil()
+            } else {
+                self.token
+            },
+            parent: self.parent,
+            ownership: if remote {
+                OwnershipKind::Peer
+            } else {
+                self.ownership.into()
+            },
+            state: self.state,
+            origin: if remote {
+                NodeOrigin::Remote
+            } else {
+                self.origin
+            },
+            foreground: self.foreground,
+            effective_model: self.effective_model,
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            turns: self.turns,
+            subagent_type: self.subagent_type,
+            spawned_at: self.spawned_at,
+            depth: self.depth,
+            tainted: remote || self.tainted,
         }
     }
 }
@@ -260,6 +316,7 @@ mod tests {
             subagent_type: "code-reviewer".into(),
             spawned_at: 1_700_000_000_000,
             depth: 2,
+            tainted: true,
         }
     }
 
@@ -302,6 +359,7 @@ mod tests {
             "subagent_type",
             "spawned_at",
             "depth",
+            "tainted",
         ]
         .into_iter()
         .collect();
@@ -367,6 +425,29 @@ mod tests {
         assert_eq!(cp.subagent_type, node.subagent_type);
         assert_eq!(cp.spawned_at, node.spawned_at);
         assert_eq!(cp.depth, node.depth);
+    }
+
+    #[test]
+    fn trusted_local_restore_preserves_taint() {
+        let mut node = sample_node();
+        node.tainted = true;
+        let restored = node.checkpoint().into_node(CheckpointTrust::TrustedLocal);
+        assert!(restored.tainted);
+        assert_eq!(restored.token, node.token);
+        assert_eq!(restored.origin, node.origin);
+    }
+
+    #[test]
+    fn peer_checkpoint_cannot_clear_taint_or_supply_authority() {
+        let mut checkpoint = sample_node().checkpoint();
+        checkpoint.tainted = false;
+        checkpoint.origin = NodeOrigin::Interactive;
+        checkpoint.ownership = crate::domain::models::subagent_view::WireOwnershipKind::Owned;
+        let restored = checkpoint.into_node(CheckpointTrust::RemotePeer);
+        assert!(restored.tainted);
+        assert_eq!(restored.token, CapabilityTokenId::nil());
+        assert_eq!(restored.origin, NodeOrigin::Remote);
+        assert_eq!(restored.ownership, OwnershipKind::Peer);
     }
 
     // ---- AC3 abandonment protocol tests -------------------------------------

@@ -98,7 +98,8 @@ pub use agent_message::{
 };
 #[allow(unused_imports)]
 pub use agent_node::{
-    AbandonmentAction, AgentMetrics, AgentNode, NodeCheckpoint, NodeOrigin, abandonment_action,
+    AbandonmentAction, AgentMetrics, AgentNode, CheckpointTrust, NodeCheckpoint, NodeOrigin,
+    abandonment_action,
 };
 #[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope};
@@ -259,7 +260,7 @@ pub use tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use turn::{
-    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnPart, generate_turn_id,
+    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart, generate_turn_id,
     migrate_chat_message_to_turn, tool_call_id_for,
 };
 #[allow(unused_imports)]

@@ -7,7 +7,7 @@
 //! ## Keystone tests
 //!
 //! AC1 — Inline gate-await: behavioral exactly-once counter + sibling independence
-//! AC2 — Provenance-taint: wired + load-bearing + inert
+//! AC2 — Provenance-taint: narrow policy, wired and load-bearing
 //! AC3 — Fingerprint match/mismatch keystone
 //! AC4 — Unforgeable `Self` tier
 //! AC5 — Synchronous revocation ordering
@@ -460,18 +460,14 @@ async fn ac1_sibling_independence_positive_control() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// AC2 — Provenance-taint: wired + load-bearing + inert (DD4, Murat)
+// AC2 — Provenance-taint: narrow policy, wired + load-bearing (DD4, Murat)
 // ═══════════════════════════════════════════════════════════════════════
 //
 // Requires `--features test-instrumentation` to access `TAINT_GATE_CALLS`
-// and `TAINT_GATE_FORCE_DENY` (test-only statics; unreachable in production
-// builds). Three non-vacuous proofs, none of which the earlier `taint.rs`
-// unit tests (mere `taint_gate(...) == Allow` assertions) established:
-// (a) the gate fires exactly once per real dispatch through the actual
-// `ToolScheduler` — mutant #1 (deleting the call site) would starve the
-// counter; (b) forcing a real `Deny` verdict actually blocks the dispatch —
-// mutant #2 (a Deny that changes nothing) proves the seam isn't theater;
-// (c) the untouched default still proceeds (inert).
+// and `TAINT_GATE_FORCE_DENY`. Three non-vacuous proofs establish that:
+// (a) the gate fires exactly once per real scheduler dispatch;
+// (b) forcing `Deny` blocks the actual tool side effect; and
+// (c) user-originated safe traffic remains silent.
 
 #[cfg(feature = "test-instrumentation")]
 #[tokio::test]
@@ -575,12 +571,12 @@ async fn ac2_taint_gate_deny_mutant_blocks_dispatch() {
     );
 }
 
-/// Inert-Allow proof (c): the untouched default (no force-deny) still
-/// proceeds — R1's seam does not accidentally block real traffic.
+/// Silent-path proof (c): user-originated traffic remains executable when the
+/// test-only forced-deny switch is disabled.
 #[cfg(feature = "test-instrumentation")]
 #[tokio::test]
 #[serial_test::serial(taint_gate_global_state)]
-async fn ac2_taint_gate_default_allow_is_inert() {
+async fn ac2_user_originated_default_remains_silent() {
     use rustain::domain::services::permission_chain::TAINT_GATE_FORCE_DENY;
     TAINT_GATE_FORCE_DENY.store(false, Ordering::SeqCst);
 
@@ -605,7 +601,7 @@ async fn ac2_taint_gate_default_allow_is_inert() {
         input: serde_json::json!({}),
     }];
     let source = ApprovalSource::ForegroundTurn {
-        conversation_id: "c-ac2-inert".into(),
+        conversation_id: "c-ac2-user-originated".into(),
     };
     let results = scheduler
         .schedule(source, batch, CancellationToken::new(), None)
@@ -614,25 +610,62 @@ async fn ac2_taint_gate_default_allow_is_inert() {
     assert_eq!(results.len(), 1);
     assert!(
         matches!(results[0], ToolCall::Success { .. }),
-        "default Allow must proceed (R1 inert) — got {:?}",
+        "user-originated traffic must remain silent — got {:?}",
         results[0]
     );
     assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn taint_approval_never_bypasses_a_hard_blocklist_denial() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let tools: Arc<dyn ToolSetPort> = Arc::new(CountedToolSet {
+        counter: counter.clone(),
+        delay_ms: 0,
+        parallel_safe: true,
+    });
+    let scheduler = ToolScheduler::new(
+        Arc::new(DenyingSecurity),
+        tools,
+        ApprovalRuntime::new(
+            16,
+            Arc::new(rustain::adapters::noop::NoOpApprovalPersistence),
+        ),
+        16,
+    );
+    let results = scheduler
+        .schedule_with_provenance(
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "tainted-hard-deny".into(),
+            },
+            vec![ToolCallRequest {
+                id: "blocked-tainted-command".into(),
+                tool_name: "Bash".into(),
+                input: serde_json::json!({"command": "forbidden"}),
+            }],
+            CancellationToken::new(),
+            None,
+            rustain::domain::models::ProvenanceTag::SelfOriginated,
+        )
+        .await;
+    assert!(matches!(results.as_slice(), [ToolCall::Error { .. }]));
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "taint approval must not convert a hard denial into executable work"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // AC6 — Testability invariants
 // ═══════════════════════════════════════════════════════════════════════
 
-// ApprovalSource stays #[non_exhaustive] with no RemotePeer (R2).
+// ApprovalSource keeps #[non_exhaustive] and exposes typed RemotePeer (R2).
 //
 // Real enforcement lives in `conformance_agent_message_bus.rs`
-// (`ac6_approval_source_has_no_remote_peer_and_stays_non_exhaustive`), which
-// source-scans `tool_call.rs` for the `#[non_exhaustive]` attribute and the
-// absence of a `RemotePeer` variant. The prior version of this test here
-// (`ac6_approval_source_non_exhaustive_no_remote_peer`) constructed a value
-// and discarded it, asserting nothing — removed as a vacuous duplicate
-// (AI-12.3 post-review closure 2026-07-02).
+// (`ac6_approval_source_has_typed_remote_peer_and_stays_non_exhaustive`), which
+// source-scans `tool_call.rs` for the `#[non_exhaustive]` attribute, the
+// RemotePeer variant, and its RAP `PeerId` field.
 
 // Zero new `.launch(` sites — this story constructs no nodes.
 //
@@ -652,6 +685,29 @@ async fn ac2_taint_gate_default_allow_is_inert() {
 // ═══════════════════════════════════════════════════════════════════════
 // Test helpers
 // ═══════════════════════════════════════════════════════════════════════
+
+struct DenyingSecurity;
+
+#[async_trait]
+impl SecurityPort for DenyingSecurity {
+    fn check_blocklist(&self, _command: &str) -> Result<(), PermissionError> {
+        Err(PermissionError::Blocked("test hard denial".into()))
+    }
+
+    fn check_workspace_access(
+        &self,
+        _path: &std::path::Path,
+        _op: FileOperation,
+    ) -> Result<PathAccessType, PermissionError> {
+        Ok(PathAccessType::Workspace)
+    }
+
+    fn current_mode(&self) -> PermissionMode {
+        PermissionMode::Yolo
+    }
+
+    fn set_mode(&self, _mode: PermissionMode) {}
+}
 
 struct MockSecurity {
     mode: PermissionMode,

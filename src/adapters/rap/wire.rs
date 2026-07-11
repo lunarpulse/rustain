@@ -146,10 +146,44 @@ pub fn verify_envelope<T: Serialize>(
     now_unix: i64,
     replay: Option<&mut ReplayWindow>,
 ) -> Result<(), VerifyError> {
+    verify_envelope_crypto(envelope, now_unix)?;
+    if let Some(replay) = replay {
+        replay.accept(
+            &envelope.signer.peer_id,
+            envelope.header.sequence,
+            &envelope.header.prev_hash,
+            &envelope.header.nonce,
+            entry_hash(&envelope.header)?,
+        )?;
+    }
+    Ok(())
+}
+
+/// Verify and reserve a replay/feed position without committing it.
+///
+/// The caller performs semantic delivery without holding the replay lock, then
+/// calls [`ReplayWindow::commit`] on success or [`ReplayWindow::rollback`] on
+/// failure. A pending reservation rejects concurrent frames for the same peer.
+pub fn verify_envelope_reserved<T: Serialize>(
+    envelope: &AgentEnvelope<T>,
+    now_unix: i64,
+    replay: &mut ReplayWindow,
+) -> Result<ReplayReservation, VerifyError> {
+    verify_envelope_crypto(envelope, now_unix)?;
+    replay.reserve(
+        &envelope.signer.peer_id,
+        envelope.header.sequence,
+        &envelope.header.prev_hash,
+        &envelope.header.nonce,
+        entry_hash(&envelope.header)?,
+    )
+}
+
+fn verify_envelope_crypto<T: Serialize>(
+    envelope: &AgentEnvelope<T>,
+    now_unix: i64,
+) -> Result<(), VerifyError> {
     envelope.signer.verify_binding()?;
-    // Peer-path invariant (verification side): the signed sender must be rooted
-    // at the signer's PeerId. Checked before the crypto check so a spoofed
-    // envelope is rejected without needing a valid signature.
     if !sender_bound_to_signer(&envelope.header.sender, &envelope.signer.peer_id) {
         return Err(VerifyError::SenderSignerMismatch);
     }
@@ -181,15 +215,6 @@ pub fn verify_envelope<T: Serialize>(
     verifying_key
         .verify(&signing_bytes, &signature)
         .map_err(|_| VerifyError::BadSignature)?;
-    if let Some(replay) = replay {
-        replay.accept(
-            &envelope.signer.peer_id,
-            envelope.header.sequence,
-            &envelope.header.prev_hash,
-            &envelope.header.nonce,
-            entry_hash(&envelope.header)?,
-        )?;
-    }
     Ok(())
 }
 
@@ -203,23 +228,36 @@ struct PeerFeed {
     nonce_order: VecDeque<String>,
 }
 
-/// Single-process verification state. Both the sequence/head chain and nonce
-/// window intentionally reset on daemon restart; 17.1b owns durable replay
-/// storage and durable per-sender heads.
+/// A verified replay/feed update held pending until semantic ingest succeeds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayReservation {
+    peer_id: PeerId,
+    sequence: u64,
+    nonce: String,
+    entry_hash: Vec<u8>,
+}
+
+/// Single-process verification state. Committed feed state is separate from
+/// pending reservations so no replay lock is held across asynchronous ingest.
 #[derive(Clone, Debug, Default)]
 pub struct ReplayWindow {
     feeds: HashMap<PeerId, PeerFeed>,
+    pending: HashMap<PeerId, ReplayReservation>,
 }
 
 impl ReplayWindow {
-    fn accept(
-        &mut self,
+    fn validate_candidate(
+        &self,
         peer_id: &PeerId,
         sequence: u64,
         prev_hash: &[u8],
         nonce: &str,
-        entry_hash: Vec<u8>,
     ) -> Result<(), VerifyError> {
+        if self.pending.contains_key(peer_id) {
+            return Err(VerifyError::ReplayPending {
+                peer_id: peer_id.to_string(),
+            });
+        }
         if let Some(feed) = self.feeds.get(peer_id) {
             if sequence <= feed.highest {
                 return Err(VerifyError::Replay {
@@ -244,25 +282,72 @@ impl ReplayWindow {
                 peer_id: peer_id.to_string(),
             });
         }
+        Ok(())
+    }
 
+    fn reserve(
+        &mut self,
+        peer_id: &PeerId,
+        sequence: u64,
+        prev_hash: &[u8],
+        nonce: &str,
+        entry_hash: Vec<u8>,
+    ) -> Result<ReplayReservation, VerifyError> {
+        self.validate_candidate(peer_id, sequence, prev_hash, nonce)?;
+        let reservation = ReplayReservation {
+            peer_id: peer_id.clone(),
+            sequence,
+            nonce: nonce.to_owned(),
+            entry_hash,
+        };
+        self.pending.insert(peer_id.clone(), reservation.clone());
+        Ok(reservation)
+    }
+
+    pub fn commit(&mut self, reservation: ReplayReservation) -> bool {
+        if self.pending.get(&reservation.peer_id) != Some(&reservation) {
+            return false;
+        }
+        self.pending.remove(&reservation.peer_id);
         let feed = self
             .feeds
-            .entry(peer_id.clone())
+            .entry(reservation.peer_id)
             .or_insert_with(|| PeerFeed {
                 highest: 0,
                 head: Vec::new(),
                 nonces: HashSet::new(),
                 nonce_order: VecDeque::new(),
             });
-        feed.highest = sequence;
-        feed.head = entry_hash;
-        feed.nonces.insert(nonce.to_owned());
-        feed.nonce_order.push_back(nonce.to_owned());
+        feed.highest = reservation.sequence;
+        feed.head = reservation.entry_hash;
+        feed.nonces.insert(reservation.nonce.clone());
+        feed.nonce_order.push_back(reservation.nonce);
         if feed.nonce_order.len() > MAX_NONCES_PER_PEER {
             if let Some(expired) = feed.nonce_order.pop_front() {
                 feed.nonces.remove(&expired);
             }
         }
+        true
+    }
+
+    pub fn rollback(&mut self, reservation: &ReplayReservation) -> bool {
+        if self.pending.get(&reservation.peer_id) != Some(reservation) {
+            return false;
+        }
+        self.pending.remove(&reservation.peer_id);
+        true
+    }
+
+    fn accept(
+        &mut self,
+        peer_id: &PeerId,
+        sequence: u64,
+        prev_hash: &[u8],
+        nonce: &str,
+        entry_hash: Vec<u8>,
+    ) -> Result<(), VerifyError> {
+        let reservation = self.reserve(peer_id, sequence, prev_hash, nonce, entry_hash)?;
+        debug_assert!(self.commit(reservation));
         Ok(())
     }
 }
@@ -293,6 +378,8 @@ pub enum VerifyError {
         sequence: u64,
         highest: u64,
     },
+    #[error("peer feed already has a delivery pending from {peer_id}")]
+    ReplayPending { peer_id: String },
     #[error("peer feed fork or gap from {peer_id}")]
     FeedForkOrGap { peer_id: String },
     #[error("reused nonce from {peer_id}: {nonce}")]
@@ -482,6 +569,27 @@ mod tests {
         assert!(matches!(
             verify_envelope(&envelope(4, 2_000), 2_001, None),
             Err(VerifyError::Expired { .. })
+        ));
+    }
+
+    #[test]
+    fn reserved_replay_state_rolls_back_on_failed_ingest_and_commits_once() {
+        let env = envelope(1, 2_000);
+        let mut replay = ReplayWindow::default();
+        let reservation = verify_envelope_reserved(&env, 1_000, &mut replay)
+            .expect("cryptographic verification reserves feed position");
+        assert!(matches!(
+            verify_envelope_reserved(&env, 1_000, &mut replay),
+            Err(VerifyError::ReplayPending { .. })
+        ));
+        assert!(replay.rollback(&reservation));
+
+        let retry = verify_envelope_reserved(&env, 1_000, &mut replay)
+            .expect("rolled-back delivery remains retriable");
+        assert!(replay.commit(retry));
+        assert!(matches!(
+            verify_envelope_reserved(&env, 1_000, &mut replay),
+            Err(VerifyError::Replay { .. })
         ));
     }
     #[test]

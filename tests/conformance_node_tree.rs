@@ -520,10 +520,10 @@ fn test_remote_handle_not_used_in_r1() {
 /// graph.
 #[test]
 fn test_import_site_count_pinned() {
-    /// Story 14.7 intentionally adds two `NodeTree` consumers: the ACP stdio
-    /// server registers editor sessions as Self roots, and its conformance test
-    /// guards that contract.
-    const EXPECTED: usize = 11;
+    /// Story 14.7 added the ACP Self-session consumers. Story 17.1b adds two
+    /// deliberate RemotePeer consumers: the transport-agnostic verified-frame
+    /// handler and the daemon composition path that instantiates it.
+    const EXPECTED: usize = 13;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

@@ -51,7 +51,7 @@ use crate::domain::events::AppEvent;
 use crate::domain::models::{
     ActiveAgent, AppConfig, ChatMessage, CompletionOptions, Conversation, ImageAttachment,
     MessageRole, PermissionMode, SessionManager, SkillActivationSet, StatusState, StreamingState,
-    generate_conversation_id,
+    TurnOrigin, generate_conversation_id,
 };
 use crate::domain::ports::{
     ContextAssemblerPort, ContextPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider,
@@ -568,6 +568,7 @@ impl LocalTurnDriver {
             parent_ctx_tokens,
             parent_trace,
             session_id,
+            TurnOrigin::Interactive,
         ));
         *active_turn = Some(handle);
 

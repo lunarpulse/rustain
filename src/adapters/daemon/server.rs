@@ -28,12 +28,14 @@ use tokio_util::sync::CancellationToken;
 use crate::adapters::scheduler::cron::CronCompletion;
 #[cfg(not(feature = "cron"))]
 pub struct CronCompletion;
-use crate::adapters::rap::{ReplayWindow, VerifyError, verify_attach_proof, verify_envelope};
+use crate::adapters::rap::{
+    ReplayWindow, VerifyError, verify_attach_proof, verify_envelope_reserved,
+};
 use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
-    ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole, StopReason,
-    StreamChunk, ToolRisk, generate_message_id,
+    AgentId, AgentMessage, ChannelKind, ChannelTurnRequest, ChatMessage, Conversation, MessageRole,
+    PeerId, StopReason, StreamChunk, ToolRisk, TurnOrigin, generate_message_id,
 };
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
@@ -152,6 +154,33 @@ pub struct AttachServer {
     /// (Story 17.1a). Defaults to `SystemClock` in production; tests inject a
     /// `MockClock` via [`AttachServer::with_clock`] to drive TTL deterministically.
     clock: Arc<dyn Clock>,
+    /// Post-verification peer-frame delivery seam. It is configured only by
+    /// the daemon composition root; test servers remain deliberately inert
+    /// unless they opt in.
+    peer_delivery:
+        Arc<tokio::sync::RwLock<Option<Arc<crate::adapters::rap::VerifiedPeerFrameHandler>>>>,
+}
+
+struct DaemonPeerConsumer {
+    server: std::sync::Weak<AttachServer>,
+}
+
+#[async_trait::async_trait]
+impl crate::adapters::rap::VerifiedPeerConsumer for DaemonPeerConsumer {
+    async fn ingest(
+        &self,
+        _recipient: &AgentId,
+        content: AgentMessage,
+        peer_id: &PeerId,
+    ) -> Result<(), String> {
+        let server = self
+            .server
+            .upgrade()
+            .ok_or_else(|| "daemon peer consumer is shutting down".to_string())?;
+        server
+            .enqueue_verified_peer_turn(content.content, peer_id.clone())
+            .await
+    }
 }
 
 impl AttachServer {
@@ -177,24 +206,54 @@ impl AttachServer {
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            core,
-            conversation,
-            registry: Arc::new(Mutex::new(ConnRegistry::default())),
-            domain_tx,
-            blocked_waiting: Arc::new(AtomicUsize::new(0)),
-            next_conn_id: AtomicU64::new(1),
-            approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            turn_serial: Arc::new(Mutex::new(())),
-            turn_complete: Arc::new(Notify::new()),
-            retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
-            pending_channel_response_tx: Arc::new(Mutex::new(None)),
-            next_proposal_token: Arc::new(AtomicU64::new(1)),
-            generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            replay: Arc::new(Mutex::new(ReplayWindow::default())),
-            clock,
+        Arc::new_cyclic(|weak| {
+            let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
+                domain_tx.clone(),
+                Arc::new(|| chrono::Utc::now().timestamp_millis()),
+            );
+            let bus = Arc::new(
+                crate::infrastructure::agent_message_bus::LocalMessageBus::new(
+                    node_tree.clone(),
+                    Arc::new(crate::domain::ports::RelationshipDeliveryPolicy),
+                ),
+            ) as Arc<dyn crate::domain::ports::AgentMessageBus>;
+            let bus_slot = Arc::new(arc_swap::ArcSwap::from_pointee(bus));
+            let consumer = Arc::new(DaemonPeerConsumer {
+                server: weak.clone(),
+            });
+            let peer_delivery = Arc::new(crate::adapters::rap::VerifiedPeerFrameHandler::new(
+                node_tree,
+                bus_slot,
+                domain_tx.clone(),
+                consumer,
+            ));
+            Self {
+                core,
+                conversation,
+                registry: Arc::new(Mutex::new(ConnRegistry::default())),
+                domain_tx,
+                blocked_waiting: Arc::new(AtomicUsize::new(0)),
+                next_conn_id: AtomicU64::new(1),
+                approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                turn_serial: Arc::new(Mutex::new(())),
+                turn_complete: Arc::new(Notify::new()),
+                retained_consolidations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                active_channel_origin: Arc::new(Mutex::new(ChannelKind::Terminal)),
+                pending_channel_response_tx: Arc::new(Mutex::new(None)),
+                next_proposal_token: Arc::new(AtomicU64::new(1)),
+                generating_consolidations: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                replay: Arc::new(Mutex::new(ReplayWindow::default())),
+                clock,
+                peer_delivery: Arc::new(tokio::sync::RwLock::new(Some(peer_delivery))),
+            }
         })
+    }
+
+    pub async fn configure_peer_delivery(
+        &self,
+        handler: Arc<crate::adapters::rap::VerifiedPeerFrameHandler>,
+    ) {
+        *self.peer_delivery.write().await = Some(handler);
     }
 
     /// Current count of connected channels for honest `status` reporting (AC4).
@@ -642,25 +701,63 @@ impl AttachServer {
                     .await;
                     return false;
                 }
-                // Verify against the injectable wall clock and the SERVER-WIDE
-                // replay window (shared across connections — a replay on a
-                // reconnect is rejected). The tokio Mutex guard is scoped to the
-                // synchronous `verify_envelope` call only: there is no `.await`
-                // between `lock().await` and the guard's drop, so no async lock
-                // is held across an await point.
-                let outcome = {
+                // Cryptographic verification reserves, but does not commit,
+                // this peer's replay/feed position. The reservation rejects a
+                // concurrent duplicate while semantic delivery runs without a
+                // replay lock. Successful local ingest commits; every failure
+                // rolls back and remains retriable.
+                let reservation = {
                     let mut replay = self.replay.lock().await;
-                    verify_envelope(&envelope, self.clock.wall_now_ms(), Some(&mut replay))
+                    verify_envelope_reserved(&envelope, self.clock.wall_now_ms(), &mut replay)
                 };
-                match outcome {
-                    Ok(()) => {
-                        self.send_to(
-                            conn_id,
-                            DaemonFrame::PeerAccepted {
-                                sequence: envelope.header.sequence,
-                            },
-                        )
-                        .await;
+                match reservation {
+                    Ok(reservation) => {
+                        let Some(handler) = self.peer_delivery.read().await.clone() else {
+                            self.replay.lock().await.rollback(&reservation);
+                            self.send_to(
+                                conn_id,
+                                DaemonFrame::Error(ProtocolError::PeerVerification(
+                                    "peer delivery is not configured".into(),
+                                )),
+                            )
+                            .await;
+                            return false;
+                        };
+                        let peer_id = envelope.signer.peer_id.clone();
+                        match handler
+                            .handle_verified_peer_frame(*envelope.clone(), peer_id)
+                            .await
+                        {
+                            Ok(()) => {
+                                if !self.replay.lock().await.commit(reservation) {
+                                    self.send_to(
+                                        conn_id,
+                                        DaemonFrame::Error(ProtocolError::PeerVerification(
+                                            "peer replay reservation was lost".into(),
+                                        )),
+                                    )
+                                    .await;
+                                    return false;
+                                }
+                                self.send_to(
+                                    conn_id,
+                                    DaemonFrame::PeerAccepted {
+                                        sequence: envelope.header.sequence,
+                                    },
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                self.replay.lock().await.rollback(&reservation);
+                                self.send_to(
+                                    conn_id,
+                                    DaemonFrame::Error(ProtocolError::PeerVerification(
+                                        error.to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                        }
                     }
                     Err(VerifyError::FeedForkOrGap { .. }) => {
                         self.send_to(conn_id, DaemonFrame::Error(ProtocolError::FeedForkOrGap))
@@ -825,15 +922,89 @@ impl AttachServer {
         false
     }
 
+    async fn enqueue_verified_peer_turn(
+        self: Arc<Self>,
+        text: String,
+        peer_id: PeerId,
+    ) -> Result<(), String> {
+        let (ingested_tx, ingested_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _turn_guard = self.turn_serial.lock().await;
+            *self.active_channel_origin.lock().await = ChannelKind::Terminal;
+            let rt = match self.core.ensure_runtime().await {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = ingested_tx.send(Err(error.to_string()));
+                    return;
+                }
+            };
+            self.ensure_approval_gate(rt.approval.clone());
+
+            let turn_complete = self.turn_complete.notified();
+            let handle = {
+                let mut conversation = self.conversation.lock().await;
+                conversation.messages.push(ChatMessage {
+                    id: generate_message_id(),
+                    role: MessageRole::User,
+                    content: text,
+                    content_blocks: vec![],
+                    tool_calls: vec![],
+                    created_at: crate::domain::models::session_meta::now_unix(),
+                    token_count: None,
+                    stop_reason: None,
+                    synthetic: false,
+                    images: vec![],
+                    origin: ChannelKind::Terminal,
+                });
+                rt.drive_preloaded_turn(
+                    &mut conversation,
+                    &self.domain_tx,
+                    TurnOrigin::RemotePeer { peer_id },
+                    CancellationToken::new(),
+                )
+            };
+            let _ = ingested_tx.send(Ok(()));
+
+            if let Err(error) = handle.await {
+                tracing::warn!(error = ?error, "daemon verified-peer turn failed");
+            } else if tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    "verified-peer turn completed but assistant commit was not observed"
+                );
+            }
+            *self.active_channel_origin.lock().await = ChannelKind::Terminal;
+        });
+        ingested_rx
+            .await
+            .map_err(|_| "verified-peer ingest task closed".to_string())?
+    }
+
     /// Build the runtime (first activity), spawn the approval gate once, drive
     /// the turn. The turn emits to the daemon bus; the forwarder fans out + folds.
     async fn drive_user_turn(&self, text: String) {
-        self.drive_user_turn_inner(text, ChannelKind::Terminal, None)
+        if text.trim() == "/clear" {
+            if let Some(handler) = self.peer_delivery.read().await.clone() {
+                handler.clear_all_taint().await;
+            }
+            self.conversation.lock().await.messages.clear();
+            return;
+        }
+        let _ = self
+            .drive_user_turn_inner(text, ChannelKind::Terminal, None, TurnOrigin::Interactive)
             .await;
     }
 
     async fn drive_channel_turn(&self, req: ChannelTurnRequest) {
-        self.drive_user_turn_inner(req.text, req.origin, Some(req.response_tx))
+        let _ = self
+            .drive_user_turn_inner(
+                req.text,
+                req.origin,
+                Some(req.response_tx),
+                TurnOrigin::Channel,
+            )
             .await;
     }
 
@@ -842,10 +1013,8 @@ impl AttachServer {
         text: String,
         origin: ChannelKind,
         response_tx: Option<tokio::sync::oneshot::Sender<String>>,
-    ) {
-        // Serialize submitted turns FIFO. The forwarder has one assistant
-        // accumulator, and each turn's context must include the prior assistant
-        // response before the next user message is assembled.
+        turn_origin: TurnOrigin,
+    ) -> Result<(), String> {
         let _turn_guard = self.turn_serial.lock().await;
         *self.active_channel_origin.lock().await = origin;
         *self.pending_channel_response_tx.lock().await = response_tx;
@@ -853,14 +1022,11 @@ impl AttachServer {
         let rt = match self.core.ensure_runtime().await {
             Ok(rt) => rt,
             Err(e) => {
-                // Log only — emitting an AppEvent here would bypass `emit_domain`
-                // (the daemon owns a bare bus; the EventBus-bypass ratchet stays
-                // locked). A client surfaces runtime-build failures in 12.2c.
                 tracing::error!(error = %e, "daemon: building turn runtime failed");
                 self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
                     .await;
                 *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-                return;
+                return Err(e.to_string());
             }
         };
         self.ensure_approval_gate(rt.approval.clone());
@@ -873,24 +1039,18 @@ impl AttachServer {
                 origin,
                 &mut conv,
                 &self.domain_tx,
+                turn_origin,
                 CancellationToken::new(),
             )
-        }; // lock dropped before awaiting the spawned turn
-
-        // `run_turn` persists this user-message snapshot before the provider call.
-        // Saving another user-only snapshot here races the forwarder and can
-        // overwrite the completed assistant commit on fast provider paths.
+        };
 
         if let Err(e) = handle.await {
             tracing::warn!(error = ?e, "daemon turn task failed");
             self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
                 .await;
             *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-            return;
+            return Err(e.to_string());
         }
-        // Ensure the forwarder has folded the completed assistant message before
-        // accepting the next queued turn. If a provider path ends without a
-        // TurnComplete event, do not wedge the queue forever.
         let folded = tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
         if folded.is_err() {
             tracing::warn!(
@@ -900,6 +1060,7 @@ impl AttachServer {
         self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
             .await;
         *self.active_channel_origin.lock().await = ChannelKind::Terminal;
+        Ok(())
     }
 
     async fn resolve_pending_channel_response(&self, fallback: &str) {
@@ -3633,9 +3794,14 @@ mod tests {
         write_frame(&mut stream, &ClientFrame::PeerEnvelope(expired))
             .await
             .unwrap();
-        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
-            Some(DaemonFrame::Error(ProtocolError::PeerVerification(_))) => {}
-            other => panic!("expired envelope must be rejected after clock advance, got {other:?}"),
+        loop {
+            match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+                Some(DaemonFrame::Event(_)) => continue,
+                Some(DaemonFrame::Error(ProtocolError::PeerVerification(_))) => break,
+                other => {
+                    panic!("expired envelope must be rejected after clock advance, got {other:?}")
+                }
+            }
         }
         shutdown.cancel();
         handle.abort();

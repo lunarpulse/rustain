@@ -49,6 +49,61 @@ use super::conversation::ChatMessage;
 use super::message::MessageRole;
 use super::tools::ToolCallInfo;
 
+/// Per-turn routing provenance.
+///
+/// This is intentionally separate from [`NodeOrigin`]: a node's origin is
+/// fixed at creation while a turn can carry routing-specific payloads such as
+/// an ACP session or a verified peer identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TurnOrigin {
+    Interactive,
+    Acp {
+        session_id: String,
+    },
+    RemotePeer {
+        peer_id: super::peer_identity::PeerId,
+    },
+    Subagent,
+    Cron,
+    Channel,
+}
+
+impl TurnOrigin {
+    /// Map every turn route to the corresponding node-birth origin.
+    pub fn node_origin(&self) -> super::agent_node::NodeOrigin {
+        match self {
+            Self::Interactive => super::agent_node::NodeOrigin::Interactive,
+            Self::Acp { .. } => super::agent_node::NodeOrigin::Interactive,
+            Self::RemotePeer { .. } => super::agent_node::NodeOrigin::Remote,
+            Self::Subagent => super::agent_node::NodeOrigin::Subagent,
+            Self::Cron => super::agent_node::NodeOrigin::Cron,
+            Self::Channel => super::agent_node::NodeOrigin::Channel,
+        }
+    }
+    /// Derive the approval source for the typed route.
+    ///
+    /// The currently generic turn loop has no distinct approval policy for
+    /// cron, channel, or subagent origins. Those routes remain explicit here
+    /// so introducing a policy cannot silently fall through a wildcard.
+    pub fn approval_source(&self, conversation_id: &str) -> super::tool_call::ApprovalSource {
+        match self {
+            Self::Interactive | Self::Subagent | Self::Cron | Self::Channel => {
+                super::tool_call::ApprovalSource::ForegroundTurn {
+                    conversation_id: conversation_id.to_owned(),
+                }
+            }
+            Self::Acp { session_id } => super::tool_call::ApprovalSource::AcpSession {
+                session_id: session_id.clone(),
+                conversation_id: conversation_id.to_owned(),
+            },
+            Self::RemotePeer { peer_id } => super::tool_call::ApprovalSource::RemotePeer {
+                conversation_id: conversation_id.to_owned(),
+                peer_id: peer_id.clone(),
+            },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PartId
 // ---------------------------------------------------------------------------

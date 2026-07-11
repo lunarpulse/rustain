@@ -12,6 +12,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt 
 
 use crate::adapters::cli::commands::AcpClientProfile;
 use crate::domain::clock::{Clock, SystemClock};
+use crate::domain::events::AppEvent;
 use crate::domain::models::{AgentId, AppConfig, NodeState};
 use crate::domain::ports::AuthStorePort;
 use crate::infrastructure::subagent::node_tree::NodeTree;
@@ -100,6 +101,12 @@ where
 /// This is the deterministic harness seam: tests can provide a `CliCore` backed
 /// by a scripted provider while still driving real ACP JSON-RPC dispatch and the
 /// real `turn::run_turn` call inside `RustainAcpAgent::prompt`.
+async fn observe_acp_events(mut events: mpsc::UnboundedReceiver<AppEvent>) {
+    while let Some(event) = events.recv().await {
+        tracing::info!(?event, "ACP local lifecycle event");
+    }
+}
+
 pub async fn serve_acp_with_acp_core_factory<W, R>(
     outgoing: W,
     incoming: R,
@@ -117,8 +124,10 @@ where
         let clock = clock.clone();
         Arc::new(move || clock.wall_now_ms())
     };
-    let node_tree = NodeTree::with_now_fn(now_fn);
-    serve_acp_with_acp_core_factory_and_node_tree(
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let event_observer = tokio::spawn(observe_acp_events(event_rx));
+    let node_tree = NodeTree::with_event_tx(event_tx, now_fn);
+    let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
         app_config,
@@ -128,7 +137,9 @@ where
         workspace,
         default_acp_id_source(),
     )
-    .await
+    .await;
+    event_observer.abort();
+    result
 }
 
 pub async fn serve_acp_with_core_factory<W, R>(
@@ -148,11 +159,13 @@ where
         let clock = clock.clone();
         Arc::new(move || clock.wall_now_ms())
     };
-    let node_tree = NodeTree::with_now_fn(now_fn);
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let event_observer = tokio::spawn(observe_acp_events(event_rx));
+    let node_tree = NodeTree::with_event_tx(event_tx, now_fn);
     let acp_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
         core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });
-    serve_acp_with_acp_core_factory_and_node_tree(
+    let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
         app_config,
@@ -162,7 +175,9 @@ where
         workspace,
         deterministic_acp_id_source(),
     )
-    .await
+    .await;
+    event_observer.abort();
+    result
 }
 
 pub async fn serve_acp_with_core_factory_and_node_tree<W, R>(
@@ -172,6 +187,7 @@ pub async fn serve_acp_with_core_factory_and_node_tree<W, R>(
     model_override: Option<String>,
     core_factory: CoreFactory,
     node_tree: NodeTree,
+    default_workspace: PathBuf,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + 'static,
@@ -187,7 +203,7 @@ where
         model_override,
         acp_factory,
         node_tree,
-        PathBuf::new(),
+        default_workspace,
         deterministic_acp_id_source(),
     )
     .await
@@ -289,20 +305,10 @@ where
             });
 
             let result = handle_io.await.map_err(anyhow::Error::from);
-            let mut session_ids: Vec<String> = cleanup_sessions.borrow().keys().cloned().collect();
-            for entry in cleanup_tree.list().await {
-                if crate::adapters::acp::is_acp_session_id(entry.agent_id.as_str())
-                    && matches!(
-                        entry.ownership,
-                        crate::domain::models::subagent_view::OwnershipKind::Self_(_)
-                    )
-                    && !session_ids
-                        .iter()
-                        .any(|session_id| session_id == entry.agent_id.as_str())
-                {
-                    session_ids.push(entry.agent_id.as_str().to_string());
-                }
-            }
+            // The session map is the ownership ledger for this ACP server.
+            // Never infer transport membership from NodeTree ownership: the
+            // tree may be shared with unrelated Self-rooted runtimes.
+            let session_ids: Vec<String> = cleanup_sessions.borrow().keys().cloned().collect();
             for session_id in session_ids {
                 let agent_id = AgentId::from_validated(session_id.clone());
                 let terminal_state = if cleanup_sessions

@@ -101,24 +101,67 @@ fn peer_envelope(
     )
 }
 
+/// Capability and delivery receipts are asynchronous observability frames.
+/// Protocol assertions consume them so each helper checks the response to the
+/// frame it just sent rather than a queued event from the prior frame.
+async fn read_non_event(stream: &mut UnixStream) -> Option<DaemonFrame> {
+    loop {
+        match read_frame::<_, DaemonFrame>(stream)
+            .await
+            .expect("read response")
+        {
+            Some(DaemonFrame::Event(_)) => continue,
+            frame => return frame,
+        }
+    }
+}
+
 /// Send a signed `PeerEnvelope` and assert the daemon replies `PeerAccepted`
 /// with the echoed `sequence`.
 async fn expect_accepted(stream: &mut UnixStream, env: Box<AgentEnvelope<Value>>, want_seq: u64) {
     write_frame(stream, &ClientFrame::PeerEnvelope(env))
         .await
         .expect("write PeerEnvelope");
-    match read_frame::<_, DaemonFrame>(stream)
-        .await
-        .expect("read response")
-    {
-        Some(DaemonFrame::PeerAccepted { sequence }) => {
-            assert_eq!(
-                sequence, want_seq,
-                "PeerAccepted must echo the envelope sequence"
-            );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut accepted = false;
+        let mut delivered = false;
+        while !(accepted && delivered) {
+            match read_frame::<_, DaemonFrame>(stream)
+                .await
+                .expect("read peer acceptance/receipt")
+            {
+                Some(DaemonFrame::PeerAccepted { sequence }) => {
+                    assert_eq!(
+                        sequence, want_seq,
+                        "PeerAccepted must echo the envelope sequence"
+                    );
+                    accepted = true;
+                }
+                Some(DaemonFrame::Event(event))
+                    if matches!(
+                        event.kind,
+                        rustain::infrastructure::runtime::event_bus::RawEventKind::Subagent(
+                            rustain::domain::models::SubagentEnvelope {
+                                event:
+                                    rustain::domain::models::SubagentEvent::MessageDelivered {
+                                        ..
+                                    },
+                                ..
+                            }
+                        )
+                    ) =>
+                {
+                    delivered = true;
+                }
+                Some(DaemonFrame::Event(_)) => {}
+                other => panic!(
+                    "expected PeerAccepted and MessageDelivered in either order, got {other:?}"
+                ),
+            }
         }
-        other => panic!("expected PeerAccepted{{sequence:{want_seq}}}, got {other:?}"),
-    }
+    })
+    .await
+    .expect("peer acceptance/receipt sequence timed out");
 }
 
 /// Send a `PeerEnvelope` and assert the daemon rejects it with
@@ -132,10 +175,7 @@ async fn expect_peer_verification(
     write_frame(stream, &ClientFrame::PeerEnvelope(env))
         .await
         .expect("write PeerEnvelope");
-    match read_frame::<_, DaemonFrame>(stream)
-        .await
-        .expect("read response")
-    {
+    match read_non_event(stream).await {
         Some(DaemonFrame::Error(ProtocolError::PeerVerification(_))) => {}
         other => panic!("expected PeerVerification rejection for {label}, got {other:?}"),
     }
@@ -146,9 +186,7 @@ async fn expect_feed_fork(stream: &mut UnixStream, env: Box<AgentEnvelope<Value>
         .await
         .expect("write PeerEnvelope");
     assert!(matches!(
-        read_frame::<_, DaemonFrame>(stream)
-            .await
-            .expect("read response"),
+        read_non_event(stream).await,
         Some(DaemonFrame::Error(ProtocolError::FeedForkOrGap))
     ));
 }
@@ -273,6 +311,23 @@ async fn real_daemon_accepts_signed_envelope_and_rejects_mutations() {
     );
     bad_sig.signature.0[0] ^= 0xFF;
     expect_peer_verification(&mut stream, bad_sig, "flipped signature byte").await;
+
+    // Cryptographically valid but semantically invalid content must also roll
+    // back its pending replay reservation. Otherwise an authenticated peer can
+    // poison the feed with an undeliverable body and make seq=2 non-retriable.
+    expect_peer_verification(
+        &mut stream,
+        peer_envelope(
+            &signer,
+            2,
+            i64::MAX,
+            "n2-invalid-body",
+            first_hash.clone(),
+            json!({"unexpected": true}),
+        ),
+        "verified frame rejected by semantic translation",
+    )
+    .await;
 
     // Zero side effect: the rejected seq=2 is still acceptable when validly
     // re-signed with the same predecessor.

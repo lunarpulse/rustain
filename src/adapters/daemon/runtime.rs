@@ -29,7 +29,7 @@ use crate::domain::errors::AdapterCompositionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{
     AppConfig, AssemblyBudget, ChannelKind, ChatMessage, CompletionOptions, Conversation,
-    MessageRole, SkillActivationSet, generate_message_id,
+    MessageRole, SkillActivationSet, TurnOrigin, generate_message_id,
 };
 use crate::domain::ports::{
     ContextAssemblerPort, MemoryPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider,
@@ -160,6 +160,7 @@ impl DaemonTurnRuntime {
         origin: ChannelKind,
         conversation: &mut Conversation,
         domain_tx: &mpsc::UnboundedSender<AppEvent>,
+        turn_origin: TurnOrigin,
         turn_cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         // Append the user message tagged with its origin channel (AC5).
@@ -177,6 +178,20 @@ impl DaemonTurnRuntime {
             origin,
         });
 
+        self.drive_preloaded_turn(conversation, domain_tx, turn_origin, turn_cancel)
+    }
+
+    /// Drive a turn whose user message was already appended by a verified
+    /// transport ingest. This keeps receipt/replay commit tied to local context
+    /// mutation while still routing the resulting tools through the typed
+    /// [`TurnOrigin::RemotePeer`] path.
+    pub fn drive_preloaded_turn(
+        &self,
+        conversation: &mut Conversation,
+        domain_tx: &mpsc::UnboundedSender<AppEvent>,
+        turn_origin: TurnOrigin,
+        turn_cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         // Assemble the API message list via the Message-tier assembler (same seam
         // as `LocalTurnDriver::submit`), falling back to `build_api_messages`.
         let mut messages = match self.context_assembler.load().as_ref() {
@@ -249,6 +264,7 @@ impl DaemonTurnRuntime {
             0,
             None,
             session_id,
+            turn_origin,
         ))
     }
 }
@@ -342,6 +358,7 @@ mod tests {
             ChannelKind::Telegram,
             &mut conversation,
             &bus.domain_tx,
+            TurnOrigin::Interactive,
             CancellationToken::new(),
         );
         handle.abort();
