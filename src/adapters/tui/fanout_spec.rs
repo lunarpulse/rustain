@@ -67,6 +67,7 @@ pub fn to_request(spec: &FanOutSpec, model: &str) -> ForkJoinRequest {
         FanOutSpec::Identical { count, prompt } => {
             let spokes = (0..*count)
                 .map(|slot| SpokeSpec {
+                    id: AgentId::new(),
                     label: format!("SPOKE-{slot}"),
                     prompt: prompt.clone(),
                     // The spoke runs on the caller's ACTIVE model. The runner

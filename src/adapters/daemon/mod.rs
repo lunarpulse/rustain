@@ -489,6 +489,86 @@ async fn run_daemon_foreground(
 async fn arm_node_recovery_harness(
     server: &std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
 ) -> Result<()> {
+    if let Some(raw) =
+        crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_ARM_CASCADE_RECOVERY")
+    {
+        let (parent_raw, child_raw) = raw
+            .split_once(',')
+            .ok_or_else(|| anyhow::anyhow!("cascade recovery arm requires parent,child"))?;
+        let parent = crate::domain::models::AgentId::parse(parent_raw)
+            .map_err(|error| anyhow::anyhow!("invalid cascade parent id: {error}"))?;
+        let child = crate::domain::models::AgentId::parse(child_raw)
+            .map_err(|error| anyhow::anyhow!("invalid cascade child id: {error}"))?;
+        let tree = server.node_tree();
+
+        let (parent_tx, parent_rx) = tokio::sync::mpsc::channel(1);
+        parent_tx
+            .try_send(crate::domain::models::Op::ReportFull)
+            .map_err(|error| anyhow::anyhow!("arming blocked parent channel: {error}"))?;
+        tokio::spawn(async move {
+            let _parent_rx = parent_rx;
+            std::future::pending::<()>().await;
+        });
+        let (parent_status, _) =
+            tokio::sync::watch::channel(crate::domain::models::NodeState::Created);
+        let (_, parent_metrics) =
+            tokio::sync::watch::channel(crate::domain::models::AgentMetrics::default());
+        tree.register(
+            parent.clone(),
+            crate::domain::models::AgentId::root(),
+            crate::infrastructure::subagent::AgentHandle {
+                isolated: false,
+                agent_id: parent.clone(),
+                token: crate::domain::models::CapabilityTokenId::root(),
+                command_tx: parent_tx,
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+                depth: 1,
+                subagent_type: "cascade-recovery-parent".into(),
+                spawned_at: chrono::Utc::now().timestamp_millis(),
+                status: parent_status,
+                metrics: parent_metrics,
+                mailbox_budget: crate::infrastructure::subagent::MailboxBudget::new(),
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("registering cascade parent: {error}"))?;
+
+        let (child_tx, child_rx) = tokio::sync::mpsc::channel(1);
+        drop(child_rx);
+        let (child_status, _) =
+            tokio::sync::watch::channel(crate::domain::models::NodeState::Created);
+        let (_, child_metrics) =
+            tokio::sync::watch::channel(crate::domain::models::AgentMetrics::default());
+        tree.register(
+            child.clone(),
+            parent.clone(),
+            crate::infrastructure::subagent::AgentHandle {
+                isolated: false,
+                agent_id: child.clone(),
+                token: crate::domain::models::CapabilityTokenId::root(),
+                command_tx: child_tx,
+                cancel_token: tokio_util::sync::CancellationToken::new(),
+                depth: 2,
+                subagent_type: "cascade-recovery-child".into(),
+                spawned_at: chrono::Utc::now().timestamp_millis(),
+                status: child_status,
+                metrics: child_metrics,
+                mailbox_budget: crate::infrastructure::subagent::MailboxBudget::new(),
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("registering cascade child: {error}"))?;
+        tree.set_state(&parent, crate::domain::models::NodeState::Running)
+            .await;
+        tree.set_state(&child, crate::domain::models::NodeState::Running)
+            .await;
+        tokio::spawn(async move {
+            let _ = tree
+                .cascade_kill(&parent, std::time::Duration::from_secs(30))
+                .await;
+        });
+        return Ok(());
+    }
     let Some(raw_id) =
         crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_ARM_NODE_RECOVERY")
     else {

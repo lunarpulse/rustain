@@ -11,7 +11,7 @@ use crate::adapters::mcp::client::McpClientAdapter;
 ///
 /// Backoff schedule: 1s, 2s, 4s, 8s, 16s, 32s (capped at 32s).
 /// Max 5 attempts per disconnect event.
-pub fn spawn_reconnect_task(client: Arc<McpClientAdapter>) {
+pub fn spawn_reconnect_task(client: Arc<McpClientAdapter>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let max_attempts: u32 = 5;
         let ct = client.cancel_token();
@@ -49,5 +49,5 @@ pub fn spawn_reconnect_task(client: Arc<McpClientAdapter>) {
             server = %client.server_id(),
             "MCP server connection failed after {max_attempts} attempts. Use /mcp reconnect <name> to retry (Story 9.2) or restart rustain."
         );
-    });
+    })
 }

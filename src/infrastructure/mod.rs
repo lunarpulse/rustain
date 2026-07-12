@@ -17,6 +17,7 @@ pub mod signals;
 pub mod skill_cache;
 pub mod startup;
 pub mod subagent;
+pub mod supervisor;
 pub mod telemetry;
 pub mod terminal_info;
 pub mod utils;

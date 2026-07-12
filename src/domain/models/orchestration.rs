@@ -79,10 +79,12 @@ impl WaitPolicy {
 /// coordinator hands to `run_fork_join`; the executor converts each spoke into
 /// an `AgentLaunchSpec` + a delegated child token before dispatching.
 ///
-/// `waits_for` is INERT (DD2): default-empty, asserted-empty, never read for
-/// scheduling. It exists so R2's readiness predicate is additive.
+/// `id` and `waits_for` form the active dependency DAG consumed by the
+/// multi-wave scheduler.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpokeSpec {
+    /// Stable logical node id used by `waits_for` dependency edges.
+    pub id: AgentId,
     /// Short human label rendered in the coverage line / WaveStrip.
     pub label: String,
     /// Instruction text for the spoke (becomes the launch prompt).
@@ -93,15 +95,8 @@ pub struct SpokeSpec {
     pub tier: ModelTier,
     /// Tool policy for this spoke (narrowing-only inheritance).
     pub tools_allow: ToolPolicy,
-    /// INERT in R1 — default-empty, asserted-empty, never scheduled on.
+    /// Stable logical ids of prerequisite spokes.
     pub waits_for: Vec<AgentId>,
-}
-
-impl SpokeSpec {
-    /// R1 invariant (AC2): a fork-join spoke has no sibling dependencies.
-    pub const fn waits_for_is_empty(&self) -> bool {
-        self.waits_for.is_empty()
-    }
 }
 
 /// The declarative fork-join request handed to `run_fork_join`.
@@ -320,13 +315,15 @@ pub enum WaitReason {
     AwaitingSpoke,
     /// Wave auto-paused at the budget ceiling (reserve untouched, AC10).
     BudgetPaused,
+    /// Downstream node parked until durable upstream artifact handles land.
+    AwaitingUpstreamArtifact,
 }
 
 impl WaitReason {
     /// `true` for reasons that should escalate to a hazard after the threshold.
     /// `BudgetPaused` does NOT escalate (it is a deliberate, recoverable pause).
     pub const fn escalates(&self) -> bool {
-        matches!(self, Self::AwaitingSpoke)
+        matches!(self, Self::AwaitingSpoke | Self::AwaitingUpstreamArtifact)
     }
 }
 
@@ -336,12 +333,15 @@ impl WaitReason {
 #[non_exhaustive]
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrationError {
-    /// A spoke's `waits_for` was non-empty — R1 is single-level only (AC2).
-    #[error(
-        "R1 fork-join is single-level: spoke `{spoke}` has {} sibling dependency/dependencies",
-        deps
-    )]
-    NotSingleLevel { spoke: String, deps: usize },
+    /// Dependency names a spoke outside this fork-join request.
+    #[error("spoke {spoke} waits for unknown dependency {dependency}")]
+    MissingDependency { spoke: AgentId, dependency: AgentId },
+    /// Logical spoke ids must be unique inside one request.
+    #[error("duplicate spoke id {0}")]
+    DuplicateSpoke(AgentId),
+    /// The waits-for graph is cyclic and therefore cannot dispatch.
+    #[error("fork-join dependency cycle detected")]
+    DependencyCycle,
     /// Fan-out above the static spawn cap (AC4 invariant). Exactly-at-cap is
     /// permitted (`attempted > cap`); the doc on [`FORK_JOIN_SPAWN_CAP`] is the
     /// authority.
@@ -385,6 +385,7 @@ mod tests {
 
     fn spoke(label: &str) -> SpokeSpec {
         SpokeSpec {
+            id: AgentId::new(),
             label: label.into(),
             prompt: format!("explore {label}"),
             effective_model: "test-model".into(),
@@ -409,7 +410,7 @@ mod tests {
 
     #[test]
     fn spoke_waits_for_default_empty() {
-        assert!(spoke("a").waits_for_is_empty());
+        assert!(spoke("a").waits_for.is_empty());
     }
 
     #[test]
@@ -517,12 +518,7 @@ mod tests {
 
     #[test]
     fn orchestration_error_is_non_exhaustive_friendly() {
-        // Constructing each variant compiles; non_exhaustive prevents
-        // exhaustive matches outside this crate from compiling.
-        let e = OrchestrationError::NotSingleLevel {
-            spoke: "x".into(),
-            deps: 1,
-        };
-        assert!(e.to_string().contains("single-level"));
+        let error = OrchestrationError::DependencyCycle;
+        assert!(error.to_string().contains("cycle"));
     }
 }

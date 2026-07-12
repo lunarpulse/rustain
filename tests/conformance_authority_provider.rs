@@ -1075,8 +1075,8 @@ fn point_of_use_use_count_denies_after_limit() {
 // mutation path (it reuses only `validate` / `revoke_scope`).
 #[test]
 fn revoke_happens_before_subsequent_validates_under_concurrency() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
 
     let root = root_token();
@@ -1102,55 +1102,76 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
         .expect("pre-revoke validate succeeds");
 
     const WORKERS: usize = 8;
-    const ITERS: usize = 4_096;
-    // Barrier 1 releases every worker into the validate storm at the same
-    // instant the main thread begins revoking (guarantees real interleaving).
-    // Barrier 2 releases workers to their definitive post-revoke validate only
-    // after the main thread has observed revoke() return.
-    let b1 = Arc::new(Barrier::new(WORKERS + 1));
-    let b2 = Arc::new(Barrier::new(WORKERS + 1));
+    let start = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+    // Relaxed deliberately: this flag announces only that revoke returned; it
+    // does NOT establish the happens-before edge under test. The ledger Mutex
+    // must order the state mutation against each subsequent validate.
+    let revoke_returned = Arc::new(AtomicBool::new(false));
     let interleavings = Arc::new(AtomicUsize::new(0));
     let post_revoke_ok = Arc::new(AtomicUsize::new(0));
+    let post_revoke_observations = Arc::new(AtomicUsize::new(0));
 
     let mut handles = Vec::new();
     for _ in 0..WORKERS {
-        let (ledger, child, scope, b1, b2, interleavings, post_revoke_ok) = (
+        let (
+            ledger,
+            child,
+            scope,
+            start,
+            revoke_returned,
+            interleavings,
+            post_revoke_ok,
+            post_revoke_observations,
+        ) = (
             ledger.clone(),
             child.clone(),
             scope.clone(),
-            b1.clone(),
-            b2.clone(),
+            start.clone(),
+            revoke_returned.clone(),
             interleavings.clone(),
             post_revoke_ok.clone(),
+            post_revoke_observations.clone(),
         );
         handles.push(thread::spawn(move || {
-            // Phase 1 — spin validates concurrently with the revoke. Results
-            // are legitimately mixed (Ok before revoke linearizes, Revoked
-            // after); we only need to stress the lock interleaving.
-            b1.wait();
-            for _ in 0..ITERS {
-                let _ = ledger.validate(&child, &want, &scope);
+            start.wait();
+            loop {
+                if revoke_returned.load(Ordering::Relaxed) {
+                    // Definitive post-revoke validate: a FRESH call performed
+                    // AFTER observing that revoke returned. The ledger Mutex is
+                    // therefore the sole happens-before ordering this validate
+                    // against the revocation — never a stale pre-observation
+                    // result counted as post-revoke (the old bug). Drop the
+                    // Mutex (the mandated mutant) and this validate can observe
+                    // unsynchronized state → Ok → the assertion below goes RED.
+                    let accepted = ledger.validate(&child, &want, &scope).is_ok();
+                    post_revoke_observations.fetch_add(1, Ordering::Relaxed);
+                    if accepted {
+                        post_revoke_ok.fetch_add(1, Ordering::Relaxed);
+                    }
+                    break;
+                }
+                // Interleaving stress: hammer validate concurrently with the
+                // in-flight revoke to create real contention on the lock.
+                let _ = ledger.validate(&child, &want, &scope).is_ok();
                 interleavings.fetch_add(1, Ordering::Relaxed);
-            }
-            // Phase 2 — the main thread revoked between b1 and b2. By the
-            // barrier synchronization its revoke happens-before each worker's
-            // b2 release, and (independently) the shared Mutex orders this
-            // validate's acquire after revoke's release. So it MUST be Revoked.
-            b2.wait();
-            if ledger.validate(&child, &want, &scope).is_ok() {
-                post_revoke_ok.fetch_add(1, Ordering::Relaxed);
+                thread::yield_now();
             }
         }));
     }
 
-    b1.wait(); // release workers + main together
+    start.wait();
     ledger.revoke_scope(&scope).expect("scope revoke succeeds");
-    b2.wait(); // release workers to their definitive validate
+    revoke_returned.store(true, Ordering::Relaxed);
 
     for h in handles {
         h.join().expect("worker thread panicked");
     }
 
+    assert_eq!(
+        post_revoke_observations.load(Ordering::Relaxed),
+        WORKERS,
+        "every worker must validate after revoke returned without a barrier"
+    );
     assert_eq!(
         post_revoke_ok.load(Ordering::Relaxed),
         0,
@@ -1212,6 +1233,7 @@ async fn terminal_prune_requires_journal_proof_and_preserves_conservation() {
         depth: 1,
         tainted: false,
         waiting_since: None,
+        wait_reason: None,
     };
     journal
         .append_checkpoint(checkpoint.clone())

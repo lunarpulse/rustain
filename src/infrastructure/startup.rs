@@ -1595,17 +1595,54 @@ pub async fn run() -> Result<()> {
             // loop invokes `run_fork_join` when it fans out (the trigger — a
             // model fan-out intent — is the connection point wired with the
             // turn-loop integration).
+            let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
+                as Arc<dyn crate::domain::clock::Clock>;
+            let supervisor = Arc::new(
+                crate::infrastructure::supervisor::Supervisor::new(
+                    crate::domain::models::FORK_JOIN_SPAWN_CAP,
+                    crate::domain::models::FORK_JOIN_SPAWN_CAP,
+                    authority_ledger.clone(),
+                    root_authority.clone(),
+                    orchestration_clock.clone(),
+                    event_bus.clone(),
+                )
+                .with_journal(node_journal.clone()),
+            );
+            let recovered_occupancy = subagent_registry
+                .list()
+                .await
+                .into_iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.current_status,
+                        crate::domain::models::NodeState::Running
+                            | crate::domain::models::NodeState::Waiting
+                    )
+                })
+                .count();
+            supervisor
+                .derive_recovered_occupancy(recovered_occupancy)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let artifact_store: Arc<dyn crate::domain::ports::ArtifactStore> = Arc::new(
+                crate::adapters::artifact::FileSystemArtifactStore::new(&workspace_path),
+            );
+            let artifact_host = crate::domain::models::HostBinding::new(
+                "local",
+                format!("workspace:{}", workspace_path.display()),
+            );
             let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> = Arc::new(
                 crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
                     authority_provider.clone(),
                     authority_ledger.clone(),
                     event_bus.clone(),
-                    Arc::new(crate::domain::clock::SystemClock::default())
-                        as Arc<dyn crate::domain::clock::Clock>,
+                    orchestration_clock,
                     root_authority.clone(),
                 )
-                .with_journal(node_journal.clone()),
+                .with_journal(node_journal.clone())
+                .with_supervisor(supervisor)
+                .with_artifact_store(artifact_store, artifact_host),
             );
             orchestrator = Some(orchestrator_inner);
 

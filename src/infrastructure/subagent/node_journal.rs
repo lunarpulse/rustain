@@ -233,6 +233,21 @@ impl NodeJournal {
         .expect("journal append task panicked")
     }
 
+    /// Append a group of records as ONE atomic journal line (`JournalRecord::
+    /// Batch`). Unlike `append_batch` (N lines), a crash mid-write leaves an
+    /// incomplete final line that the torn-tail repair discards WHOLE — so a
+    /// cascade's terminal checkpoints are all-or-nothing on recovery (R7). The
+    /// records are transparently flattened back on `load`.
+    pub async fn append_atomic_batch(
+        &self,
+        records: Vec<JournalRecord>,
+    ) -> Result<JournalEntry, JournalError> {
+        if records.is_empty() {
+            return Err(JournalError::EmptyBatch);
+        }
+        self.append(JournalRecord::Batch(records)).await
+    }
+
     /// Load the canonical prefix. A torn or malformed trailing line is ignored;
     /// corruption anywhere before the tail fails closed.
     pub async fn load(&self) -> Result<Vec<JournalEntry>, JournalError> {
@@ -242,7 +257,7 @@ impl NodeJournal {
         tokio::task::spawn_blocking(move || {
             let _lock = FileLock::acquire_shared(&lock_path)?;
             let (entries, _, _) = parse_journal(&path)?;
-            Ok(entries)
+            Ok(flatten_batches(entries))
         })
         .await
         .expect("journal load task panicked")
@@ -404,6 +419,30 @@ fn sync_directory(directory: &Path) -> Result<(), JournalError> {
         handle.sync_all()?;
     }
     Ok(())
+}
+
+/// Expand any atomic `JournalRecord::Batch` line into its individual records,
+/// each inheriting the batch line's sequence number. Downstream folds (room
+/// projection, recovery, terminal-proof, obligations) then see a flat stream
+/// and need no batch awareness; the atomicity was already enforced at write
+/// time (one line = all-or-nothing under the torn-tail repair).
+fn flatten_batches(entries: Vec<JournalEntry>) -> Vec<JournalEntry> {
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry.record {
+            JournalRecord::Batch(records) => {
+                for record in records {
+                    out.push(JournalEntry {
+                        schema_version: entry.schema_version,
+                        seq: entry.seq,
+                        record,
+                    });
+                }
+            }
+            _ => out.push(entry),
+        }
+    }
+    out
 }
 
 fn parse_journal(path: &Path) -> Result<(Vec<JournalEntry>, usize, usize), JournalError> {

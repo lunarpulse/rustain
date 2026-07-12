@@ -149,6 +149,10 @@ pub struct NodeCheckpoint {
     /// [`AgentNode::waiting_since`]). `None` for any non-waiting state.
     #[serde(default)]
     pub waiting_since: Option<i64>,
+    /// Supervisor-owned park policy. `Suspended` remains the FSM state; this
+    /// side reason explains which durable readiness signal may revive it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reason: Option<crate::domain::models::WaitReason>,
 }
 
 /// Trust boundary applied when rehydrating a serialized node checkpoint.
@@ -183,6 +187,7 @@ impl AgentNode {
             depth: self.depth,
             tainted: self.tainted,
             waiting_since: self.waiting_since,
+            wait_reason: None,
         }
     }
 }

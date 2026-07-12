@@ -48,6 +48,7 @@ fn root_token() -> CapabilityToken {
 
 fn spoke(label: &str) -> SpokeSpec {
     SpokeSpec {
+        id: AgentId::new(),
         label: label.into(),
         prompt: format!("explore {label}"),
         effective_model: "test-model".into(),
@@ -83,6 +84,7 @@ struct FakeRunner {
     /// cancelled. A `tokio::sync::Mutex`-guarded `u32` (no `std::sync` lock —
     /// the ratchet stays at 4).
     launch_count: Arc<Mutex<u32>>,
+    launch_prompts: Arc<Mutex<Vec<String>>>,
     /// When `true`, every launched child is TRULY STUCK: it holds its status
     /// channel open but NEVER emits a terminal (and never closes it). Drives
     /// the collector's timeout → `Terminal::Stuck` → `StuckWaiting` escalation
@@ -97,6 +99,7 @@ impl FakeRunner {
             terminals: Arc::new(Mutex::new(terminals.into_iter().collect())),
             yields: None,
             launch_count: Arc::new(Mutex::new(0)),
+            launch_prompts: Arc::new(Mutex::new(Vec::new())),
             never_emits: false,
         }
     }
@@ -112,6 +115,7 @@ impl FakeRunner {
             terminals: Arc::new(Mutex::new(terminals.into_iter().collect())),
             yields: Some(Arc::new(Mutex::new(yields.into_iter().collect()))),
             launch_count: Arc::new(Mutex::new(0)),
+            launch_prompts: Arc::new(Mutex::new(Vec::new())),
             never_emits: false,
         }
     }
@@ -127,6 +131,7 @@ impl FakeRunner {
             yields: None,
             launch_count: Arc::new(Mutex::new(0)),
             never_emits: true,
+            launch_prompts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -135,13 +140,17 @@ impl FakeRunner {
     async fn launch_count(&self) -> u32 {
         *self.launch_count.lock().await
     }
+
+    async fn launch_prompts(&self) -> Vec<String> {
+        self.launch_prompts.lock().await.clone()
+    }
 }
 
 #[async_trait]
 impl SubagentRunner for FakeRunner {
     async fn launch(
         &self,
-        _spec: AgentLaunchSpec,
+        spec: AgentLaunchSpec,
         cancel: CancellationToken,
     ) -> Result<TaskHandle, SubagentError> {
         // Bump the launch counter BEFORE popping the terminal so the spec-named
@@ -150,6 +159,7 @@ impl SubagentRunner for FakeRunner {
             let mut cnt = self.launch_count.lock().await;
             *cnt += 1;
         }
+        self.launch_prompts.lock().await.push(spec.prompt);
         if self.never_emits {
             // TRULY STUCK child: hold the status channel OPEN but NEVER emit a
             // terminal (and never close it). The collector's
@@ -293,23 +303,71 @@ fn build_executor(
     (exe, ledger)
 }
 
-// ─── AC2 — waits_for inert + single-level ─────────────────────────────────
+// ─── AC5 — dependency DAG scheduling ──────────────────────────────────────
 
 #[tokio::test]
-async fn ac2_waits_for_non_empty_is_rejected_as_not_single_level() {
-    let (exe, _ledger) = build_executor(
-        Arc::new(FakeRunner::new(vec![NodeState::Completed])) as Arc<dyn SubagentRunner>,
-        root_token(),
-    );
+async fn waits_for_unknown_spoke_is_rejected_before_dispatch() {
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, _ledger) = build_executor(runner.clone(), root_token());
     let mut spoke_with_dep = spoke("a");
-    spoke_with_dep.waits_for = vec![AgentId::parse("sibling").unwrap()];
-    let mut req = request(AgentId::root(), vec![spoke_with_dep]);
-    req.spokes.push(spoke("b"));
-    let err = exe.run_fork_join(req).await.unwrap_err();
-    assert!(
-        matches!(err, OrchestrationError::NotSingleLevel { .. }),
-        "R1 rejects any non-empty waits_for: {err:?}"
+    spoke_with_dep.waits_for = vec![AgentId::parse("missing").unwrap()];
+    let err = exe
+        .run_fork_join(request(AgentId::root(), vec![spoke_with_dep]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OrchestrationError::MissingDependency { .. }));
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+#[tokio::test]
+async fn waits_for_dispatches_true_topological_waves() {
+    let runner = Arc::new(FakeRunner::new(vec![
+        NodeState::Completed,
+        NodeState::Completed,
+        NodeState::Completed,
+    ]));
+    let (exe, _ledger) = build_executor(runner.clone(), root_token());
+    let workspace = tempfile::tempdir().unwrap();
+    let artifact_store = Arc::new(rustain::adapters::artifact::FileSystemArtifactStore::new(
+        workspace.path(),
+    ));
+    let journal = Arc::new(
+        rustain::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+            .await
+            .unwrap(),
     );
+    let exe = exe.with_journal(journal).with_artifact_store(
+        artifact_store,
+        rustain::domain::models::HostBinding::new("host-a", "test"),
+    );
+    let a = spoke("a");
+    let b = spoke("b");
+    let mut c = spoke("c");
+    c.waits_for = vec![a.id.clone(), b.id.clone()];
+    exe.run_fork_join(request(AgentId::root(), vec![a, b, c]))
+        .await
+        .unwrap();
+    let launches = runner.launch_prompts().await;
+    assert_eq!(launches.len(), 3);
+    assert!(launches[..2].contains(&"explore a".to_string()));
+    assert!(launches[..2].contains(&"explore b".to_string()));
+    assert_eq!(launches[2], "explore c");
+}
+
+#[tokio::test]
+async fn waits_for_cycle_is_rejected_before_dispatch() {
+    let runner = Arc::new(FakeRunner::new(vec![]));
+    let (exe, _ledger) = build_executor(runner.clone(), root_token());
+    let mut a = spoke("a");
+    let mut b = spoke("b");
+    a.waits_for = vec![b.id.clone()];
+    b.waits_for = vec![a.id.clone()];
+    let err = exe
+        .run_fork_join(request(AgentId::root(), vec![a, b]))
+        .await
+        .unwrap_err();
+    assert_eq!(err, OrchestrationError::DependencyCycle);
+    assert_eq!(runner.launch_count().await, 0);
 }
 
 #[tokio::test]

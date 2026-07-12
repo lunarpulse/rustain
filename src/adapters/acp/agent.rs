@@ -69,7 +69,7 @@ pub(crate) struct PermissionAsk {
 pub(crate) struct SessionCore {
     provider: Arc<dyn StreamingProvider>,
     security: Arc<dyn SecurityPort>,
-    tools: Arc<dyn ToolSetPort>,
+    pub(crate) tools: Arc<dyn ToolSetPort>,
     tool_scheduler: Arc<ToolScheduler>,
     approval: Arc<ApprovalRuntime>,
     storage: Arc<dyn StoragePort>,
@@ -1433,17 +1433,23 @@ impl acp::Agent for RustainAcpAgent {
         let session_id = args.session_id.0.to_string();
         let agent_id = AgentId::parse(&session_id)
             .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
-        let (cancel, was_cancelled) = {
+        let (cancel, was_cancelled, tools) = {
             let sessions = self.sessions.borrow();
             let state = sessions
                 .get(&session_id)
                 .ok_or_else(|| acp::Error::resource_not_found(None))?;
-            (state.cancel.clone(), state.cancel.is_cancelled())
+            (
+                state.cancel.clone(),
+                state.cancel.is_cancelled(),
+                Arc::clone(&state.core.tools),
+            )
         };
-        // Teardown order (mirrors run.rs EOF cleanup 244-257): fire cancel →
-        // set terminal state → deregister → evict the map entry. The persisted
-        // conversation is RETAINED — close is teardown, not archival; the
-        // session stays listable/resumable (AC5).
+        // Teardown order (Task 4): fire cancel → set terminal state → deregister
+        // → reap MCP children → evict the map entry. The MCP reap runs AFTER the
+        // node is terminal + deregistered (and is itself time-bounded), so a
+        // hung child shutdown can never leave a non-terminal registered node.
+        // The persisted conversation is RETAINED — close is teardown, not
+        // archival; the session stays listable/resumable (AC5).
         cancel.cancel();
         let terminal = if was_cancelled {
             NodeState::Cancelled
@@ -1452,6 +1458,12 @@ impl acp::Agent for RustainAcpAgent {
         };
         self.node_tree.set_state(&agent_id, terminal).await;
         self.node_tree.deregister(&agent_id).await;
+        if let Some(composite) = tools
+            .as_any()
+            .downcast_ref::<crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter>(
+        ) {
+            composite.stop_mcp_connections().await;
+        }
         self.sessions.borrow_mut().remove(&session_id);
         Ok(acp::CloseSessionResponse::new())
     }

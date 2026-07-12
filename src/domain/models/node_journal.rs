@@ -92,4 +92,10 @@ pub enum JournalRecord {
         waiting_since: i64,
         dwell_ms: i64,
     },
+    /// An atomic multi-record group written as ONE journal line. Because a torn
+    /// write of a single JSONL line is discarded by the torn-tail repair, a
+    /// crash can never persist a PARTIAL group — the whole cascade of terminal
+    /// checkpoints is all-or-nothing (R7: no half-killed subtree resurrects a
+    /// phantom). Flattened back to individual records at `NodeJournal::load`.
+    Batch(Vec<JournalRecord>),
 }

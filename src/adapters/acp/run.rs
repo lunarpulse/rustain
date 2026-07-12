@@ -318,20 +318,35 @@ where
             // The session map is the ownership ledger for this ACP server.
             // Never infer transport membership from NodeTree ownership: the
             // tree may be shared with unrelated Self-rooted runtimes.
-            let session_ids: Vec<String> = cleanup_sessions.borrow().keys().cloned().collect();
-            for session_id in session_ids {
-                let agent_id = AgentId::from_validated(session_id.clone());
-                let terminal_state = if cleanup_sessions
+            let cleanup: Vec<(String, bool, Arc<dyn crate::domain::ports::ToolSetPort>)> =
+                cleanup_sessions
                     .borrow()
-                    .get(&session_id)
-                    .is_some_and(|s| s.cancel.is_cancelled())
-                {
+                    .iter()
+                    .map(|(session_id, state)| {
+                        (
+                            session_id.clone(),
+                            state.cancel.is_cancelled(),
+                            Arc::clone(&state.core.tools),
+                        )
+                    })
+                    .collect();
+            for (session_id, was_cancelled, tools) in cleanup {
+                // Task 4 teardown order: terminal + deregister BEFORE the
+                // (time-bounded) MCP reap, so a hung child cannot leave a
+                // non-terminal registered node.
+                let agent_id = AgentId::from_validated(session_id);
+                let terminal_state = if was_cancelled {
                     NodeState::Cancelled
                 } else {
                     NodeState::Completed
                 };
                 cleanup_tree.set_state(&agent_id, terminal_state).await;
                 cleanup_tree.deregister(&agent_id).await;
+                if let Some(composite) = tools.as_any().downcast_ref::<
+                    crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter,
+                >() {
+                    composite.stop_mcp_connections().await;
+                }
             }
             result
         })

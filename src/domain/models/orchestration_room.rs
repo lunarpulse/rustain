@@ -133,6 +133,13 @@ pub enum RoomEvent {
         wave: WaveId,
         outcome: WaveOutcome,
     },
+    /// Host-local admission refusal/defer. This event is durable for operator
+    /// observability but is never carried by a signed peer envelope.
+    AdmissionDeferred {
+        coordinator: AgentId,
+        spoke: String,
+        gate: String,
+    },
     ArtifactCreated {
         artifact: ArtifactRef,
     },
@@ -301,6 +308,7 @@ impl OrchestrationRoom {
                     view.outcome = Some(outcome);
                 }
             }
+            RoomEvent::AdmissionDeferred { .. } => {}
             RoomEvent::ArtifactCreated { artifact } => {
                 self.artifacts.insert(artifact.id.clone(), artifact);
             }

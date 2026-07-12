@@ -135,6 +135,9 @@ struct NodeTreeInner {
     /// one on resume). Delivery to these is honestly refused rather than
     /// silently queued into the unconsumed recovered inbox.
     awaiting_resume: std::collections::HashSet<AgentId>,
+    /// Nodes whose subtree teardown has linearized. Registration checks this
+    /// tombstone while holding the same write lock, closing snapshot-then-act.
+    tearing_down: std::collections::HashSet<AgentId>,
     /// agent → parent (root sentinel for top-level).
     parent_of: HashMap<AgentId, AgentId>,
     /// Keeps watch channel alive for status broadcasting.
@@ -239,6 +242,8 @@ pub enum CascadeKillError {
         killed: Vec<AgentId>,
         unresponsive: Vec<AgentId>,
     },
+    #[error("cascade terminal checkpoint failed: {0}")]
+    Durability(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -276,6 +281,7 @@ impl NodeTree {
             handles: HashMap::new(),
             recovered_inboxes: HashMap::new(),
             awaiting_resume: std::collections::HashSet::new(),
+            tearing_down: std::collections::HashSet::new(),
             parent_of: HashMap::new(),
             status_rx: HashMap::new(),
             status_senders: HashMap::new(),
@@ -638,6 +644,11 @@ impl NodeTree {
         origin: NodeOrigin,
     ) -> Result<(), SubagentError> {
         let mut guard = self.inner.write().await;
+        if guard.tearing_down.contains(&parent) {
+            return Err(SubagentError::Internal(format!(
+                "parent is being torn down: {parent}"
+            )));
+        }
         if guard.nodes.contains_key(&agent_id) {
             return Err(SubagentError::Internal(format!(
                 "duplicate agent_id: {:?}",
@@ -946,6 +957,7 @@ impl NodeTree {
         guard.status_senders.remove(agent_id);
         guard.metrics_rx.remove(agent_id);
         guard.mailbox_budgets.remove(agent_id);
+        guard.tearing_down.remove(agent_id);
         guard.isolated_agents.remove(agent_id);
         self.emit_capability_event(CapabilityEvent::Deregistered {
             capability: self.capability_for(agent_id),
@@ -962,6 +974,20 @@ impl NodeTree {
     /// [`Self::deregister_one`] directly; external callers get the safe
     /// cascading semantics here.
     pub async fn deregister(&self, agent_id: &AgentId) {
+        {
+            let mut guard = self.inner.write().await;
+            let mut queue = std::collections::VecDeque::from([agent_id.clone()]);
+            while let Some(current) = queue.pop_front() {
+                guard.tearing_down.insert(current.clone());
+                let children = guard
+                    .parent_of
+                    .iter()
+                    .filter(|(_, parent)| **parent == current)
+                    .map(|(child, _)| child.clone())
+                    .collect::<Vec<_>>();
+                queue.extend(children);
+            }
+        }
         // Collect the subtree under a short read lock. Removal is
         // order-independent, so descendant ordering does not matter.
         let to_remove = {
@@ -1245,6 +1271,88 @@ impl NodeTree {
         entries
     }
 
+    /// Atomically checkpoint an entire cascade as terminal before any node is
+    /// deregistered. One journal batch closes the crash-between-nodes window.
+    async fn checkpoint_cancelled_batch(&self, ids: &[AgentId]) -> Result<(), CascadeKillError> {
+        let mut guard = self.inner.write().await;
+        let mut previous = Vec::new();
+        let mut records = Vec::new();
+        let mut updates = Vec::new();
+
+        for id in ids {
+            let Some(node) = guard.nodes.get_mut(id) else {
+                continue;
+            };
+            if node.state.is_terminal() {
+                continue;
+            }
+            if node.state.transition_or_err(NodeState::Cancelled).is_err() {
+                continue;
+            }
+            let old_state = node.state;
+            let old_waiting_since = node.waiting_since;
+            previous.push((id.clone(), old_state, old_waiting_since));
+            node.state = NodeState::Cancelled;
+            node.waiting_since = None;
+            let durable = !matches!(node.ownership, OwnershipKind::Self_(_));
+            let checkpoint = node.checkpoint();
+            let room_event = RoomEvent::NodeStateChanged {
+                node: id.clone(),
+                from: old_state,
+                to: NodeState::Cancelled,
+            };
+            if durable {
+                records.push(JournalRecord::Checkpoint(checkpoint));
+                records.push(JournalRecord::Room(room_event.clone()));
+                let mut obligations = guard
+                    .pending_obligations
+                    .get(id)
+                    .map(|pending| pending.iter().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                obligations.sort_by(|left, right| left.0.cmp(&right.0));
+                records.extend(obligations.into_iter().map(|correlation_id| {
+                    JournalRecord::ObligationViolation {
+                        node: id.clone(),
+                        correlation_id,
+                    }
+                }));
+            }
+            updates.push((
+                id.clone(),
+                guard.status_senders.get(id).cloned(),
+                durable,
+                room_event,
+            ));
+        }
+
+        if let Some(journal) = &self.journal
+            && !records.is_empty()
+            && let Err(error) = journal.append_atomic_batch(records).await
+        {
+            for (id, state, waiting_since) in previous {
+                if let Some(node) = guard.nodes.get_mut(&id) {
+                    node.state = state;
+                    node.waiting_since = waiting_since;
+                }
+            }
+            return Err(CascadeKillError::Durability(error.to_string()));
+        }
+        for (id, _, durable, _) in &updates {
+            if *durable && self.journal.is_some() {
+                guard.pending_obligations.remove(id);
+            }
+        }
+        drop(guard);
+
+        for (id, _sender, durable, room_event) in updates {
+            self.emit_status_updated(&id).await;
+            if durable && self.journal.is_some() {
+                self.emit_room_event(room_event);
+            }
+        }
+        Ok(())
+    }
+
     /// Return a clone of the watch sender for a given agent_id, if registered.
     pub async fn status_sender(&self, agent_id: &AgentId) -> Option<watch::Sender<NodeState>> {
         let guard = self.inner.read().await;
@@ -1268,6 +1376,7 @@ impl NodeTree {
     /// `transition_or_err` → `can_transition_to` only (no ad-hoc predicate).
     pub async fn set_state(&self, agent_id: &AgentId, target: NodeState) {
         let mut guard = self.inner.write().await;
+        let idempotent_sender = guard.status_senders.get(agent_id).cloned();
         let current;
         let prev_waiting_since;
         let checkpoint;
@@ -1278,6 +1387,9 @@ impl NodeTree {
             };
             current = node.state;
             if current == target {
+                if let Some(sender) = idempotent_sender {
+                    let _ = sender.send(target);
+                }
                 return;
             }
             if let Err(error) = node.state.transition_or_err(target) {
@@ -1329,7 +1441,7 @@ impl NodeTree {
         }));
         if durable
             && let Some(journal) = &self.journal
-            && let Err(error) = journal.append_batch(records).await
+            && let Err(error) = journal.append_atomic_batch(records).await
         {
             // The runtime state must never outrun its durable source of truth.
             if let Some(node) = guard.nodes.get_mut(agent_id) {
@@ -1413,19 +1525,34 @@ impl NodeTree {
         agent_id: &AgentId,
         timeout_per_node: Duration,
     ) -> Result<Vec<AgentId>, CascadeKillError> {
-        // Verify agent exists
-        {
-            let guard = self.inner.read().await;
+        // Linearize teardown under the same write lock used by registration.
+        // The tombstones remain while cooperative cancellation awaits, so a
+        // late child cannot attach beneath any node in this subtree.
+        let mut descendants = {
+            let mut guard = self.inner.write().await;
             if !guard.nodes.contains_key(agent_id) {
                 return Err(CascadeKillError::NotFound(agent_id.clone()));
             }
-        }
-
-        // Build kill order: subtree (BFS) → reverse → append self, so every
-        // descendant precedes its parent (reversed-BFS, not DFS).
-        let mut descendants = self.subtree(agent_id).await;
+            let mut descendants = Vec::new();
+            let mut queue = std::collections::VecDeque::from([agent_id.clone()]);
+            while let Some(current) = queue.pop_front() {
+                guard.tearing_down.insert(current.clone());
+                let children = guard
+                    .parent_of
+                    .iter()
+                    .filter(|(_, parent)| **parent == current)
+                    .map(|(child, _)| child.clone())
+                    .collect::<Vec<_>>();
+                for child in children {
+                    descendants.push(child.clone());
+                    queue.push_back(child);
+                }
+            }
+            descendants
+        };
         descendants.reverse();
         descendants.push(agent_id.clone());
+        self.checkpoint_cancelled_batch(&descendants).await?;
 
         let mut killed = Vec::new();
         let mut unresponsive = Vec::new();
@@ -1465,6 +1592,7 @@ impl NodeTree {
                     }
                     NodeHandle::Remote { .. } => {
                         // Remote kill not supported in R1.
+                        self.set_state(id, NodeState::Cancelled).await;
                         self.deregister_one(id).await;
                         killed.push(id.clone());
                         continue;
@@ -1473,6 +1601,7 @@ impl NodeTree {
 
                 if send_result.is_err() {
                     // Channel closed or send timed out — treat as already terminal.
+                    self.set_state(id, NodeState::Cancelled).await;
                     self.deregister_one(id).await;
                     killed.push(id.clone());
                     continue;
@@ -1526,8 +1655,11 @@ impl NodeTree {
                 }
 
                 // Deregister this node only — the loop handles each descendant.
+                self.set_state(id, NodeState::Cancelled).await;
                 self.deregister_one(id).await;
             } else {
+                self.set_state(id, NodeState::Cancelled).await;
+                self.deregister_one(id).await;
                 // Already gone — skip
                 killed.push(id.clone());
             }
@@ -2484,17 +2616,23 @@ mod tests {
         }
 
         tree.cascade_kill(&agent, Duration::ZERO).await.unwrap();
-        match tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .expect("deregistered event timeout")
-            .expect("deregistered event")
-        {
-            AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
-                assert_eq!(capability.id, expected_id);
+        let mut saw_terminal_update = false;
+        let mut saw_deregistered = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AppEvent::CapabilityEvent(CapabilityEvent::Updated { .. }) => {
+                    saw_terminal_update = true;
+                }
+                AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { capability }) => {
+                    assert_eq!(capability.id, expected_id);
+                    assert!(!saw_deregistered, "exactly one removal event");
+                    saw_deregistered = true;
+                }
+                event => panic!("unexpected cascade lifecycle event: {event:?}"),
             }
-            event => panic!("expected exact Deregistered event, got {event:?}"),
         }
-        assert!(event_rx.try_recv().is_err(), "exactly one removal event");
+        assert!(saw_terminal_update, "terminal checkpoint precedes removal");
+        assert!(saw_deregistered, "deregistration remains observable");
     }
 
     #[tokio::test]
@@ -2541,7 +2679,7 @@ mod tests {
         tokio::spawn(async move {
             if matches!(command_rx.recv().await, Some(Op::Kill)) {
                 tree_for_task
-                    .set_state(&agent_for_task, NodeState::Completed)
+                    .set_state(&agent_for_task, NodeState::Cancelled)
                     .await;
             }
         });
@@ -2596,18 +2734,19 @@ mod tests {
             "the loser may observe the already-completed removal"
         );
 
-        let first = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .expect("deregistered event timeout")
-            .expect("deregistered event");
-        assert!(matches!(
-            first,
-            AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { .. })
-        ));
-        assert!(
-            event_rx.try_recv().is_err(),
-            "concurrent removal emitted duplicate"
-        );
+        let mut updated = 0;
+        let mut deregistered = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AppEvent::CapabilityEvent(CapabilityEvent::Updated { .. }) => updated += 1,
+                AppEvent::CapabilityEvent(CapabilityEvent::Deregistered { .. }) => {
+                    deregistered += 1;
+                }
+                event => panic!("unexpected concurrent cascade event: {event:?}"),
+            }
+        }
+        assert_eq!(updated, 1, "terminal transition linearizes exactly once");
+        assert_eq!(deregistered, 1, "concurrent removal emits exactly once");
     }
 
     #[tokio::test]
@@ -2618,6 +2757,55 @@ mod tests {
             .await
             .unwrap();
         tree.cascade_kill(&agent, Duration::ZERO).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_cannot_attach_beneath_inflight_cascade() {
+        let tree = NodeTree::new();
+        let parent = AgentId::parse("cascade-parent").unwrap();
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let (status_tx, _status_rx) = watch::channel(NodeState::Running);
+        let (_metrics_tx, metrics_rx) = watch::channel(AgentMetrics::default());
+        let handle = AgentHandle {
+            isolated: false,
+            agent_id: parent.clone(),
+            token: CapabilityTokenId::nil(),
+            command_tx,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            depth: 1,
+            subagent_type: String::from("test"),
+            spawned_at: 0,
+            status: status_tx,
+            metrics: metrics_rx,
+            mailbox_budget: MailboxBudget::new(),
+        };
+        tree.register(parent.clone(), AgentId::root(), handle)
+            .await
+            .unwrap();
+        tree.set_state(&parent, NodeState::Running).await;
+
+        let kill_tree = tree.clone();
+        let kill_parent = parent.clone();
+        let cascade = tokio::spawn(async move {
+            kill_tree
+                .cascade_kill(&kill_parent, Duration::from_secs(5))
+                .await
+        });
+        assert!(matches!(command_rx.recv().await, Some(Op::Kill)));
+
+        let child = AgentId::parse("late-child").unwrap();
+        let result = tree
+            .register(
+                child.clone(),
+                parent.clone(),
+                dummy_handle(child.clone(), 2),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "registration under a tombstoned cascade root must be refused"
+        );
+        cascade.abort();
     }
 
     // t4 (release-on-turn-dispatch) and t6 (consent-receipt correlation)

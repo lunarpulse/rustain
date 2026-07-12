@@ -226,6 +226,9 @@ impl NodeRecovery {
                     resolved.entry(node).or_default().insert(correlation_id);
                 }
                 JournalRecord::HazardRaised { .. } => {}
+                // `load()` flattens atomic batches into individual records, so
+                // a `Batch` never reaches this fold; the arm is defensive.
+                JournalRecord::Batch(_) => {}
             }
         }
 

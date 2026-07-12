@@ -626,4 +626,145 @@ async fn build_acp_core_composite_branch_makes_forwarded_mcp_tool_callable() {
         "the forwarded echo tool must echo the input text; got content: {}",
         result.content
     );
+    let composite = tools
+        .as_any()
+        .downcast_ref::<rustain::adapters::composite_toolset_adapter::CompositeToolsetAdapter>()
+        .expect("production MCP branch uses the composite adapter");
+    composite.stop_mcp_connections().await;
+    composite.stop_mcp_connections().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[cfg(all(feature = "mcp", target_os = "linux"))]
+async fn close_session_reaps_real_forwarded_mcp_child() {
+    use rustain::adapters::acp::run::{
+        deterministic_acp_id_source, serve_acp_with_acp_core_factory_and_node_tree,
+    };
+    use rustain::domain::models::AppConfig;
+    use rustain::infrastructure::composition::build_acp_core;
+
+    fn matching_pids(token: &str) -> Vec<u32> {
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+            .filter(|pid| {
+                std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .is_some_and(|cmdline| String::from_utf8_lossy(&cmdline).contains(token))
+            })
+            .collect()
+    }
+
+    let binary_name = "fake-mcp-server";
+    let exe_dir = std::env::current_exe()
+        .expect("current exe")
+        .parent()
+        .expect("parent")
+        .to_path_buf();
+    let command = [
+        exe_dir.join(binary_name),
+        exe_dir.parent().unwrap().join(binary_name),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .expect("compiled fake-mcp-server");
+    let token = format!("reap-probe-{}", std::process::id());
+    let workspace = tempfile::tempdir().expect("workspace");
+    let config = AppConfig::default();
+    let factory: AcpCoreFactory = Rc::new(move |cwd, specs| {
+        build_acp_core(&config, cwd, false, specs)
+            .map_err(|_| agent_client_protocol::Error::internal_error())
+    });
+    let (server_incoming, mut client_write) = tokio::io::duplex(16 * 1024);
+    let (mut client_read, server_outgoing) = tokio::io::duplex(16 * 1024);
+    let server = serve_acp_with_acp_core_factory_and_node_tree(
+        server_outgoing.compat_write(),
+        server_incoming.compat(),
+        AppConfig::default(),
+        None,
+        factory,
+        NodeTree::new(),
+        workspace.path().to_path_buf(),
+        deterministic_acp_id_source(),
+    );
+    let wire_servers = serde_json::json!([{
+        "name": "reap-server",
+        "command": command,
+        "args": [token.clone()],
+        "env": []
+    }]);
+
+    let drive = async {
+        client_write
+            .write_all(line(ACP_INITIALIZE_REQ.to_string()).as_bytes())
+            .await
+            .unwrap();
+        let new = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "session/new",
+            "params": { "cwd": workspace.path(), "mcpServers": wire_servers },
+        });
+        client_write
+            .write_all(line(new.to_string()).as_bytes())
+            .await
+            .unwrap();
+        client_write.flush().await.unwrap();
+        let reader = tokio::io::BufReader::new(&mut client_read);
+        let mut lines = reader.lines();
+        loop {
+            let raw = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("session/new timeout")
+                .unwrap()
+                .expect("session/new response");
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if value["id"] == 2 {
+                break;
+            }
+        }
+        let mut poll = tokio::time::interval(Duration::from_millis(10));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                poll.tick().await;
+                if !matching_pids(&token).is_empty() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("positive control: real MCP child never appeared");
+
+        let close = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/close",
+            "params": { "sessionId": "acp-1" },
+        });
+        client_write
+            .write_all(line(close.to_string()).as_bytes())
+            .await
+            .unwrap();
+        client_write.flush().await.unwrap();
+        loop {
+            let raw = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+                .await
+                .expect("session/close timeout")
+                .unwrap()
+                .expect("session/close response");
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if value["id"] == 3 {
+                assert!(value["error"].is_null(), "close failed: {value}");
+                break;
+            }
+        }
+        drop(client_write);
+        assert!(
+            matching_pids(&token).is_empty(),
+            "session/close returned while the MCP child was still alive"
+        );
+    };
+
+    tokio::select! {
+        () = drive => {}
+        result = server => panic!("ACP server exited before close: {result:?}"),
+    }
 }

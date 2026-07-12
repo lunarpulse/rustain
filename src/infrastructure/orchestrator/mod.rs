@@ -22,6 +22,7 @@
 //! own delegated token at the spawn gate (Murat vacuity-closer — the 14.2-AC9
 //! defeat was validating the root token, which always passes).
 
+mod dag;
 mod result_contract;
 mod result_store;
 mod window;
@@ -36,7 +37,6 @@ pub use window::{SpokeHandle, Window};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::clock::Clock;
@@ -51,12 +51,18 @@ use crate::domain::models::orchestration::{
     CoverageLine, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, OrchestrationError, SpokeCitation,
     SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
 };
-use crate::domain::models::{ModelTier, RoomEvent, SubagentError, WaveId, WaveOutcome};
+use crate::domain::models::{
+    ArtifactId, ArtifactKind, ArtifactRef, EvidenceArtifactDraft, HostBinding, ModelTier,
+    RoomEvent, SubagentError, WaveId, WaveOutcome,
+};
 use crate::domain::ports::SubagentRunner;
 use crate::domain::ports::wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
-use crate::domain::ports::{AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator};
+use crate::domain::ports::{
+    ArtifactStore, AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator,
+};
 use crate::domain::services::authority_ledger::AuthorityLedger;
 use crate::infrastructure::runtime::event_bus::EventBus;
+use crate::infrastructure::supervisor::Supervisor;
 
 /// Ambient cost-meter escalation threshold: a wave whose cumulative cost micros
 /// crosses this triggers a `$burn ↑` surfacing on the WaveStrip (config-
@@ -109,7 +115,7 @@ pub fn record_sibling_triggered_transition() {
     SIBLING_TRIGGERED_TRANSITIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The single-level fork-join executor. Drives children through the
+/// The bounded multi-wave fork-join executor. Drives children through the
 /// [`SubagentRunner`] port (AC8), never a concrete runner.
 pub struct ForkJoinExecutor {
     runner: Arc<dyn SubagentRunner>,
@@ -118,6 +124,9 @@ pub struct ForkJoinExecutor {
     event_bus: Arc<EventBus>,
     clock: Arc<dyn Clock>,
     journal: Option<Arc<crate::infrastructure::subagent::NodeJournal>>,
+    supervisor: Arc<Supervisor>,
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
+    artifact_host: Option<HostBinding>,
     /// The root/coordinator authority token — the mint point for per-spoke
     /// gate-tokens. In R1 the coordinator IS the root agent.
     root_authority: CapabilityToken,
@@ -149,15 +158,26 @@ impl ForkJoinExecutor {
         clock: Arc<dyn Clock>,
         root_authority: CapabilityToken,
     ) -> Self {
+        let supervisor = Arc::new(Supervisor::new(
+            FORK_JOIN_SPAWN_CAP,
+            FORK_JOIN_SPAWN_CAP,
+            Arc::clone(&ledger),
+            root_authority.clone(),
+            Arc::clone(&clock),
+            Arc::clone(&event_bus),
+        ));
         Self {
             runner,
             authority,
             ledger,
             event_bus,
             clock,
+            supervisor,
             root_authority,
             current_run: tokio::sync::Mutex::new(None),
             journal: None,
+            artifact_store: None,
+            artifact_host: None,
             wave_generation: std::sync::atomic::AtomicU64::new(0),
             rerun_reservations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
@@ -170,6 +190,24 @@ impl ForkJoinExecutor {
         journal: Arc<crate::infrastructure::subagent::NodeJournal>,
     ) -> Self {
         self.journal = Some(journal);
+        self
+    }
+
+    /// Bind the composition-root supervisor. Tests and legacy constructors use
+    /// the equivalent default created by `new`; production wiring supplies the
+    /// shared lifecycle owner explicitly.
+    #[must_use]
+    pub fn with_supervisor(mut self, supervisor: Arc<Supervisor>) -> Self {
+        self.supervisor = supervisor;
+        self
+    }
+
+    /// Bind durable result persistence. Dependency waves are refused without
+    /// this handle; transcript completion alone is never a readiness signal.
+    #[must_use]
+    pub fn with_artifact_store(mut self, store: Arc<dyn ArtifactStore>, host: HostBinding) -> Self {
+        self.artifact_store = Some(store);
+        self.artifact_host = Some(host);
         self
     }
 
@@ -230,9 +268,11 @@ impl ForkJoinExecutor {
         Ok(())
     }
 
-    /// Validate a fork-join request at the boundary (AC2 single-level, AC4 cap,
-    /// AC9 WaitPolicy).
-    fn validate_request(&self, request: &ForkJoinRequest) -> Result<(), OrchestrationError> {
+    /// Validate and partition a fork-join request before any child dispatch.
+    fn validate_request(
+        &self,
+        request: &ForkJoinRequest,
+    ) -> Result<Vec<Vec<usize>>, OrchestrationError> {
         if let Some(reason) = request.wait_policy.r1_unsupported_reason() {
             return Err(OrchestrationError::WaitPolicyUnsupported(reason));
         }
@@ -248,21 +288,69 @@ impl ForkJoinExecutor {
                 attempted,
             });
         }
-        for (idx, spoke) in request.spokes.iter().enumerate() {
-            if !spoke.waits_for_is_empty() {
-                let label = if spoke.label.is_empty() {
-                    format!("spoke #{idx}")
-                } else {
-                    spoke.label.clone()
-                };
-                return Err(OrchestrationError::NotSingleLevel {
-                    spoke: label,
-                    deps: spoke.waits_for.len(),
-                });
+        let graph = dag::DependencyGraph::new(
+            request
+                .spokes
+                .iter()
+                .map(|spoke| (spoke.id.clone(), spoke.waits_for.clone())),
+        )
+        .map_err(|error| match error {
+            dag::GraphError::Duplicate(id) => OrchestrationError::DuplicateSpoke(id),
+            dag::GraphError::Missing { node, dependency } => {
+                OrchestrationError::MissingDependency {
+                    spoke: node,
+                    dependency,
+                }
             }
-        }
-        Ok(())
+            dag::GraphError::Cycle => OrchestrationError::DependencyCycle,
+        })?;
+        let waves = graph
+            .topological_waves()
+            .map_err(|_| OrchestrationError::DependencyCycle)?;
+        let index_by_id = request
+            .spokes
+            .iter()
+            .enumerate()
+            .map(|(index, spoke)| (spoke.id.clone(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        Ok(waves
+            .into_iter()
+            .map(|wave| {
+                let mut indices = wave
+                    .into_iter()
+                    .map(|id| index_by_id[&id])
+                    .collect::<Vec<_>>();
+                indices.sort_unstable();
+                indices
+            })
+            .collect())
     }
+}
+
+/// Compute the minimal transitive rerun set after one content-addressed
+/// artifact version changes. Unrelated branches are absent by construction.
+pub fn transitive_artifact_dependents(
+    artifacts: &[ArtifactRef],
+    changed: &ArtifactId,
+) -> Result<Vec<ArtifactId>, OrchestrationError> {
+    let graph = dag::DependencyGraph::new(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.id.clone(), artifact.depends_on.clone())),
+    )
+    .map_err(|error| match error {
+        dag::GraphError::Duplicate(id) => {
+            OrchestrationError::Internal(format!("duplicate artifact id {id}"))
+        }
+        dag::GraphError::Missing { node, dependency } => OrchestrationError::Internal(format!(
+            "artifact {node} depends on missing artifact {dependency}"
+        )),
+        dag::GraphError::Cycle => OrchestrationError::Internal("artifact dependency cycle".into()),
+    })?;
+    Ok(graph
+        .transitive_dependents([changed.clone()])
+        .into_iter()
+        .collect())
 }
 
 /// Build an [`AgentLaunchSpec`] from a spoke (no authority concerns here).
@@ -431,7 +519,7 @@ impl ForkJoinExecutor {
         request: ForkJoinRequest,
         wave_cancel: CancellationToken,
     ) -> Result<ForkJoinRun, OrchestrationError> {
-        self.validate_request(&request)?;
+        let topological_waves = self.validate_request(&request)?;
 
         // P13: the coordinator that owns this wave must own the authority the
         // executor mints child tokens from. A mismatched coordinator would
@@ -446,6 +534,19 @@ impl ForkJoinExecutor {
         let spokes = request.spokes.clone();
         let coordinator = request.coordinator.clone();
         let n = spokes.len();
+        if spokes.iter().any(|spoke| !spoke.waits_for.is_empty()) && self.artifact_store.is_none() {
+            return Err(OrchestrationError::Internal(
+                "dependency scheduling requires a durable artifact store".into(),
+            ));
+        }
+        // [F7] Collect dependency-bearing spokes now, but DEFER parking until
+        // after the budget/mint preflight below — registering readiness before
+        // an early refusal orphans the registration in the shared supervisor.
+        let parked_nodes: Vec<AgentId> = spokes
+            .iter()
+            .filter(|spoke| !spoke.waits_for.is_empty())
+            .map(|spoke| spoke.id.clone())
+            .collect();
 
         // ── Reserve-the-HERO + aggregate gate-token cost (AC10, P5/P11). ──
         // Fan-out may mint up to `n` gate tokens, each `GATE_TOKEN_BUDGET`; a
@@ -472,155 +573,293 @@ impl ForkJoinExecutor {
         }
 
         let concurrency = request.concurrency.clamp(1, n).min(FORK_JOIN_SPAWN_CAP);
-        let semaphore = Arc::new(Semaphore::new(concurrency));
 
         // P2: pre-mint ALL gate tokens up front. If a mint fails on spoke k,
         // the already-minted tokens (0..k) are refunded — no ledger leak from
         // a partial mint failure stranding reservations.
         let mut gate_tokens: Vec<CapabilityToken> = Vec::with_capacity(n);
         for _ in &spokes {
-            // Fresh non-root LOCAL scope per spoke (delegate rejects path/root
-            // + duplicate scopes).
             let scope = AgentId::new();
             let gate_caps = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
             match self.mint_gate_token(scope, gate_caps) {
-                Ok(tok) => gate_tokens.push(tok),
-                Err(e) => {
-                    for tok in gate_tokens {
-                        let _ = self.authority.settle(&tok.id).await;
+                Ok(token) => gate_tokens.push(token),
+                Err(error) => {
+                    for token in gate_tokens {
+                        let _ = self.authority.settle(&token.id).await;
                     }
-                    return Err(e);
+                    return Err(error);
                 }
             }
         }
-        let wave_id = WaveId::new();
-        self.persist_room_event(RoomEvent::WaveStarted {
-            wave: wave_id.clone(),
-            coordinator: coordinator.clone(),
-            spokes: gate_tokens
-                .iter()
-                .map(|token| token.scope.clone())
-                .collect(),
-        })
-        .await?;
+        let mut gate_tokens = gate_tokens.into_iter().map(Some).collect::<Vec<_>>();
         self.emit(AppEvent::ForkJoinStarted {
             coordinator: coordinator.clone(),
             spoke_count: n,
         });
-        // P5 (N1 fix — re-review round-2): DEBIT the synthesis reserve AFTER
-        // the gate-token pre-mint succeeds. `consume` is irreversible — the
-        // ledger has no `unconsume` — so debiting the reserve before a pre-
-        // mint failure would leak it: the already-minted tokens (0..k) ARE
-        // refunded by the settle loop above, but the reserve was not. Ordering
-        // consume AFTER pre-mint keeps conservation on every exit path. The
-        // upfront `needed` check (reserve + gate aggregate) still guarantees
-        // enough headroom here — pre-mint consumed exactly `gate_aggregate`
-        // (single-threaded; no concurrent fan-out yet), so `available` still
-        // covers `SYNTHESIS_RESERVE`.
         self.ledger
             .consume(&self.root_authority.id, SYNTHESIS_RESERVE)
-            .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
 
-        // P3: collect via mpsc so a panicking spoke still produces a terminal
-        // outcome (G7: exactly N, none missing). The fallback after the drain
-        // fills any idx that never sent (belt-and-suspenders for an aborted
-        // task). The semaphore permit is held across the child's whole
-        // lifetime (run-concurrency bound, not launch-rate).
-        let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<SpokeOutcome>(n);
-        let mut join_set = tokio::task::JoinSet::new();
-        for (idx, (spoke, gate_token)) in spokes.iter().cloned().zip(gate_tokens).enumerate() {
-            let runner = self.runner.clone();
-            let authority = self.authority.clone();
-            let wave_cancel_child = wave_cancel.clone();
-            let permit_sem = semaphore.clone();
-            let tx = result_tx.clone();
-            let clock = self.clock.clone();
-            join_set.spawn(async move {
-                let _permit = match permit_sem.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        let _ = tx
-                            .send(failed_outcome(idx, &spoke, "semaphore closed"))
-                            .await;
-                        return;
-                    }
-                };
-                let dispatched_at_ms = clock.wall_now_ms();
-                let launched =
-                    dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child).await;
-                let (agent_id, label, result, body, isolation_diff) = match launched {
-                    Ok(mut handle) => {
-                        let agent_id = handle.agent_id.clone();
-                        let label = spoke.label.clone();
-                        let (terminal, raw, isolation_diff) =
-                            collect_terminal(&mut handle, clock.as_ref(), dispatched_at_ms).await;
-                        let (result, body) = structured_result(&terminal, raw.as_deref(), &label);
-                        (agent_id, label, result, body, isolation_diff)
-                    }
-                    Err(e) => {
-                        let agent_id = agent_id_for(&spoke, idx);
-                        let label = spoke.label.clone();
-                        // P21: do not surface raw internal error strings; map
-                        // to a stable, sanitized SpokeResult::Failed reason.
-                        let result = SpokeResult::Failed {
-                            reason: sanitize_failure(&e),
-                        };
-                        (agent_id, label, result, String::new(), None)
-                    }
-                };
-                let _ = tx
-                    .send(SpokeOutcome {
-                        idx,
-                        agent_id,
-                        label,
-                        result,
-                        body,
-                        isolation_diff,
-                    })
-                    .await;
-            });
+        // [F7] Park downstream nodes now that every early-exit gate (budget,
+        // mint, reserve) has passed — a refusal above can no longer orphan a
+        // readiness registration.
+        for spoke in spokes.iter().filter(|spoke| !spoke.waits_for.is_empty()) {
+            self.supervisor
+                .park_on_dependencies(spoke.id.clone(), spoke.waits_for.clone())
+                .await;
         }
-        drop(result_tx); // close after all spawns so recv() terminates.
 
         let mut store = ResultStore::new();
-        let mut spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec> =
-            std::collections::HashMap::new();
+        let mut spec_by_agent = std::collections::HashMap::<AgentId, SpokeSpec>::new();
         let mut outcomes: Vec<Option<(AgentId, SpokeResult)>> = (0..n).map(|_| None).collect();
-        // P1 (DD3 / NFR68): collect isolated children's captured deltas here,
-        // then hand the map to the `ForkJoinRun` (write-only in R1; R2 reads).
-        let mut delta_store: std::collections::HashMap<
-            AgentId,
-            crate::domain::models::UnifiedDiff,
-        > = std::collections::HashMap::new();
-        while let Some(outcome) = result_rx.recv().await {
-            let SpokeOutcome {
-                idx,
-                agent_id,
-                label,
-                result,
-                body,
-                isolation_diff,
-            } = outcome;
-            store.insert(NodeResult::ingest(
-                agent_id.clone(),
-                label.clone(),
-                result.clone(),
-                body,
-            ));
-            outcomes[idx] = Some((agent_id.clone(), result.clone()));
-            spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
-            if let Some(d) = isolation_diff {
-                delta_store.insert(agent_id.clone(), d);
+        let mut delta_store =
+            std::collections::HashMap::<AgentId, crate::domain::models::UnifiedDiff>::new();
+        let mut artifact_by_spoke =
+            std::collections::HashMap::<AgentId, crate::domain::models::ArtifactRef>::new();
+
+        'waves: for wave_indices in &topological_waves {
+            if wave_cancel.is_cancelled() {
+                break;
             }
-            self.emit(AppEvent::SpokeCompleted { agent_id, label });
+            for &idx in wave_indices {
+                if spokes[idx].waits_for.is_empty() {
+                    continue;
+                }
+                if !self
+                    .supervisor
+                    .wait_for_artifact(&spokes[idx].id, wave_cancel.clone())
+                    .await
+                {
+                    break 'waves;
+                }
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                record_sibling_triggered_transition();
+                let artifact_store = self.artifact_store.as_ref().expect("validated above");
+                for dependency in &spokes[idx].waits_for {
+                    let handle = artifact_by_spoke.get(dependency).ok_or_else(|| {
+                        OrchestrationError::Internal(format!(
+                            "terminal dependency {dependency} has no durable artifact handle"
+                        ))
+                    })?;
+                    artifact_store
+                        .head(&handle.id)
+                        .await
+                        .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+                }
+            }
+            let wave_id = WaveId::new();
+            self.persist_room_event(RoomEvent::WaveStarted {
+                wave: wave_id.clone(),
+                coordinator: coordinator.clone(),
+                spokes: wave_indices
+                    .iter()
+                    .filter_map(|index| gate_tokens[*index].as_ref())
+                    .map(|token| token.scope.clone())
+                    .collect(),
+            })
+            .await?;
+
+            let wave_concurrency = concurrency.min(wave_indices.len()).max(1);
+            let admission = Arc::new(
+                self.supervisor
+                    .for_wave(wave_concurrency, FORK_JOIN_SPAWN_CAP),
+            );
+            let (result_tx, mut result_rx) =
+                tokio::sync::mpsc::channel::<SpokeOutcome>(wave_indices.len());
+            let mut join_set = tokio::task::JoinSet::new();
+            for &idx in wave_indices {
+                let spoke = spokes[idx].clone();
+                let gate_token = gate_tokens[idx]
+                    .take()
+                    .expect("validated wave dispatches each spoke exactly once");
+                let runner = self.runner.clone();
+                let authority = self.authority.clone();
+                let wave_cancel_child = wave_cancel.clone();
+                let admission = Arc::clone(&admission);
+                let admission_coordinator = coordinator.clone();
+                let tx = result_tx.clone();
+                let clock = self.clock.clone();
+                join_set.spawn(async move {
+                    let admitted = tokio::select! {
+                        _ = wave_cancel_child.cancelled() => {
+                            let _ = authority.settle(&gate_token.id).await;
+                            let _ = tx.send(SpokeOutcome {
+                                idx,
+                                agent_id: agent_id_for(&spoke, idx),
+                                label: spoke.label.clone(),
+                                result: SpokeResult::Cancelled,
+                                body: String::new(),
+                                isolation_diff: None,
+                            }).await;
+                            return;
+                        }
+                        result = admission.admit(
+                            &admission_coordinator,
+                            &spoke.label,
+                            GATE_TOKEN_BUDGET,
+                        ) => result,
+                    };
+                    let _permit = match admitted {
+                        Ok(Some(permit)) => permit,
+                        Ok(None) => {
+                            let _ = authority.settle(&gate_token.id).await;
+                            let _ = tx
+                                .send(failed_outcome(idx, &spoke, "admission deferred"))
+                                .await;
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = authority.settle(&gate_token.id).await;
+                            let _ = tx
+                                .send(failed_outcome(idx, &spoke, &sanitize_failure(&error)))
+                                .await;
+                            return;
+                        }
+                    };
+                    let dispatched_at_ms = clock.wall_now_ms();
+                    let launched =
+                        dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child)
+                            .await;
+                    let (agent_id, label, result, body, isolation_diff) = match launched {
+                        Ok(mut handle) => {
+                            let agent_id = handle.agent_id.clone();
+                            let label = spoke.label.clone();
+                            let (terminal, raw, isolation_diff) =
+                                collect_terminal(&mut handle, clock.as_ref(), dispatched_at_ms)
+                                    .await;
+                            let (result, body) =
+                                structured_result(&terminal, raw.as_deref(), &label);
+                            (agent_id, label, result, body, isolation_diff)
+                        }
+                        Err(error) => {
+                            admission
+                                .refund_failed_spawn(&admission_coordinator, _permit.recorded_at())
+                                .await;
+                            (
+                                agent_id_for(&spoke, idx),
+                                spoke.label.clone(),
+                                SpokeResult::Failed {
+                                    reason: sanitize_failure(&error),
+                                },
+                                String::new(),
+                                None,
+                            )
+                        }
+                    };
+                    let _ = tx
+                        .send(SpokeOutcome {
+                            idx,
+                            agent_id,
+                            label,
+                            result,
+                            body,
+                            isolation_diff,
+                        })
+                        .await;
+                });
+            }
+            drop(result_tx);
+            while let Some(outcome) = result_rx.recv().await {
+                let SpokeOutcome {
+                    idx,
+                    agent_id,
+                    label,
+                    result,
+                    body,
+                    isolation_diff,
+                } = outcome;
+                if let Some(artifact_store) = &self.artifact_store {
+                    let depends_on = spokes[idx]
+                        .waits_for
+                        .iter()
+                        .map(|dependency| {
+                            artifact_by_spoke
+                                .get(dependency)
+                                .map(|artifact| artifact.id.clone())
+                                .ok_or_else(|| {
+                                    OrchestrationError::Internal(format!(
+                                        "dependency {dependency} has no durable artifact handle"
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let artifact_body = format!(
+                        "spoke_id: {}\nproducer: {agent_id}\nlabel: {label}\nresult: {result:?}\n\n{body}",
+                        spokes[idx].id
+                    );
+                    let artifact = artifact_store
+                        .put(
+                            EvidenceArtifactDraft {
+                                kind: ArtifactKind::Evidence,
+                                producer: agent_id.clone(),
+                                authority: self.root_authority.id,
+                                provenance: Vec::new(),
+                                depends_on,
+                                review: None,
+                                host: self
+                                    .artifact_host
+                                    .clone()
+                                    .expect("artifact store always has a host binding"),
+                            },
+                            artifact_body.as_bytes(),
+                        )
+                        .await
+                        .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+                    self.persist_room_event(RoomEvent::ArtifactCreated {
+                        artifact: artifact.clone(),
+                    })
+                    .await?;
+                    artifact_by_spoke.insert(spokes[idx].id.clone(), artifact);
+                    self.supervisor.artifact_created(&spokes[idx].id).await;
+                }
+                store.insert(NodeResult::ingest(
+                    agent_id.clone(),
+                    label.clone(),
+                    result.clone(),
+                    body,
+                ));
+                outcomes[idx] = Some((agent_id.clone(), result.clone()));
+                spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
+                if let Some(diff) = isolation_diff {
+                    delta_store.insert(agent_id.clone(), diff);
+                }
+                self.emit(AppEvent::SpokeCompleted { agent_id, label });
+            }
+            while join_set.join_next().await.is_some() {}
+
+            let wave_outcome = if wave_cancel.is_cancelled() {
+                WaveOutcome::Cancelled
+            } else if wave_indices
+                .iter()
+                .any(|index| matches!(outcomes[*index], Some((_, SpokeResult::Failed { .. }))))
+            {
+                WaveOutcome::Failed
+            } else {
+                WaveOutcome::Completed
+            };
+            self.persist_room_event(RoomEvent::WaveCompleted {
+                wave: wave_id,
+                outcome: wave_outcome,
+            })
+            .await?;
         }
-        // P3 fallback: a task that panicked/aborted before sending still gets a
-        // terminal outcome (G7 — exactly N, none missing, none silently dropped).
+
+        // [F7] Clear any readiness registrations that never reached their wave
+        // (cancellation break above). Idempotent for nodes already revived.
+        self.supervisor.clear_parked(parked_nodes.iter()).await;
+
+        for token in gate_tokens.into_iter().flatten() {
+            let _ = self.authority.settle(&token.id).await;
+        }
         for (idx, slot) in outcomes.iter_mut().enumerate() {
             if slot.is_none() {
                 let agent_id = agent_id_for(&spokes[idx], idx);
-                let result = SpokeResult::Failed {
-                    reason: "spoke task did not produce a terminal result".into(),
+                let result = if wave_cancel.is_cancelled() {
+                    SpokeResult::Cancelled
+                } else {
+                    SpokeResult::Failed {
+                        reason: "spoke task did not produce a terminal result".into(),
+                    }
                 };
                 store.insert(NodeResult::ingest(
                     agent_id.clone(),
@@ -654,21 +893,6 @@ impl ForkJoinExecutor {
             coordinator: coordinator.clone(),
             honest_empty: synthesis.honest_empty,
         });
-        let wave_outcome = if wave_cancel.is_cancelled() {
-            WaveOutcome::Cancelled
-        } else if outcomes
-            .iter()
-            .any(|outcome| matches!(outcome, Some((_, SpokeResult::Failed { .. }))))
-        {
-            WaveOutcome::Failed
-        } else {
-            WaveOutcome::Completed
-        };
-        self.persist_room_event(RoomEvent::WaveCompleted {
-            wave: wave_id,
-            outcome: wave_outcome,
-        })
-        .await?;
 
         let final_outcomes: Vec<(AgentId, SpokeResult)> = outcomes.into_iter().flatten().collect();
 
@@ -689,6 +913,7 @@ impl ForkJoinExecutor {
             store: Arc::new(store),
             spec_by_agent,
             delta_store,
+            artifact_by_spoke,
             slots,
             resolve_count: AtomicUsize::new(0),
             // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
@@ -751,6 +976,28 @@ impl ForkJoinExecutor {
             }
         };
 
+        // [F2] Route the rerun through the SAME admission cascade as an initial
+        // dispatch — a hot failed-rerun loop must be churn-rate-refused, not
+        // exempt from flood-control. Admit-before-spawn; the permit is held
+        // across the dispatch and the spoke's run.
+        let admission_permit = match self
+            .supervisor
+            .admit(&self.root_authority.scope, &spec.label, GATE_TOKEN_BUDGET)
+            .await
+        {
+            Ok(Some(permit)) => permit,
+            Ok(None) => {
+                let _ = self.authority.settle(&gate_token.id).await;
+                self.release_rerun_reservation(slot).await;
+                return Ok(RerunOutcome::Reverted { slot });
+            }
+            Err(error) => {
+                let _ = self.authority.settle(&gate_token.id).await;
+                self.release_rerun_reservation(slot).await;
+                return Err(error);
+            }
+        };
+
         // Dispatch through the sealed chokepoint (AC3 — no new `.launch(`).
         // Story 14.3a (F3): use the provided cancel token (child of wave root),
         // NOT a fresh orphan `CancellationToken::new()`.
@@ -758,12 +1005,20 @@ impl ForkJoinExecutor {
 
         let mut handle = match launched {
             Ok(h) => h,
-            // Dispatch failed → Reverted (prior untouched — DD-B6). Release reservation.
+            // Dispatch failed → Reverted (prior untouched — DD-B6). Refund the
+            // churn ticket (the spawn failed after admission) and release the
+            // rerun reservation.
             Err(_) => {
+                self.supervisor
+                    .refund_failed_spawn(&self.root_authority.scope, admission_permit.recorded_at())
+                    .await;
                 self.release_rerun_reservation(slot).await;
                 return Ok(RerunOutcome::Reverted { slot });
             }
         };
+        // Hold the admission permit for the spoke's full run — it occupies a
+        // running slot until terminal, released by RAII when this rerun ends.
+        let _admission_permit = admission_permit;
 
         let new_agent_id = handle.agent_id.clone();
         let dispatched_at_ms = self.clock.wall_now_ms();
@@ -779,9 +1034,80 @@ impl ForkJoinExecutor {
                     new_agent_id.clone(),
                     spec.label.clone(),
                     result.clone(),
-                    body,
+                    body.clone(),
                 );
                 next_store.replace_at_slot(slot, old_id, new_agent_id.clone(), new_node);
+
+                let mut next_artifacts = prev.artifact_by_spoke.clone();
+                let artifact_update: Result<(), OrchestrationError> = async {
+                    if let Some(artifact_store) = &self.artifact_store {
+                        let depends_on = spec
+                            .waits_for
+                            .iter()
+                            .map(|dependency| {
+                                next_artifacts
+                                    .get(dependency)
+                                    .map(|artifact| artifact.id.clone())
+                                    .ok_or_else(|| {
+                                        OrchestrationError::Internal(format!(
+                                            "rerun dependency {dependency} has no durable artifact"
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let artifact_body = format!(
+                            "spoke_id: {}\nproducer: {new_agent_id}\nlabel: {}\nresult: {result:?}\n\n{}",
+                            spec.id, spec.label, body
+                        );
+                        let artifact = artifact_store
+                            .put(
+                                EvidenceArtifactDraft {
+                                    kind: ArtifactKind::Evidence,
+                                    producer: new_agent_id.clone(),
+                                    authority: self.root_authority.id,
+                                    provenance: Vec::new(),
+                                    depends_on,
+                                    review: None,
+                                    host: self
+                                        .artifact_host
+                                        .clone()
+                                        .expect("artifact store always has a host binding"),
+                                },
+                                artifact_body.as_bytes(),
+                            )
+                            .await
+                            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+                        self.persist_room_event(RoomEvent::ArtifactCreated {
+                            artifact: artifact.clone(),
+                        })
+                        .await?;
+                        // [D6] Invalidate dependents through the DURABLE artifact
+                        // graph (`ArtifactRef.depends_on`) — the AC6 contract —
+                        // not the logical `SpokeSpec.waits_for` edges. BFS from
+                        // the OLD content-addressed `ArtifactId` the reran spoke
+                        // replaces, reusing the shared topo-traversal machinery
+                        // (`transitive_artifact_dependents`), deduped for free by
+                        // content-addressed id. Only true dependents drop; an
+                        // unrelated branch is untouched; a diamond join once.
+                        if let Some(old_artifact) = next_artifacts.get(&spec.id) {
+                            let changed = old_artifact.id.clone();
+                            let existing: Vec<crate::domain::models::ArtifactRef> =
+                                next_artifacts.values().cloned().collect();
+                            let stale: std::collections::HashSet<_> =
+                                transitive_artifact_dependents(&existing, &changed)?
+                                    .into_iter()
+                                    .collect();
+                            next_artifacts.retain(|_, artifact| !stale.contains(&artifact.id));
+                        }
+                        next_artifacts.insert(spec.id.clone(), artifact);
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = artifact_update {
+                    self.release_rerun_reservation(slot).await;
+                    return Err(error);
+                }
 
                 let mut next_spec = prev.spec_by_agent.clone();
                 next_spec.remove(old_id);
@@ -809,6 +1135,7 @@ impl ForkJoinExecutor {
                         }
                         m
                     },
+                    artifact_by_spoke: next_artifacts,
                     slots: next_slots,
                     resolve_count: AtomicUsize::new(0),
                     rerun_counts: {
@@ -886,6 +1213,10 @@ pub struct ForkJoinRun {
     pub(crate) delta_store: std::collections::HashMap<AgentId, crate::domain::models::UnifiedDiff>,
     /// Per-port spec map — `pub(crate)`.
     pub(crate) spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec>,
+    /// Durable result handles keyed by stable logical spoke id. A rerun replaces
+    /// its own version and removes only transitive dependent handles.
+    pub(crate) artifact_by_spoke:
+        std::collections::HashMap<AgentId, crate::domain::models::ArtifactRef>,
     /// Dispatch-ordered slot AgentIds — `pub(crate)`.
     pub(crate) slots: Vec<AgentId>,
     resolve_count: AtomicUsize,
@@ -1526,7 +1857,7 @@ mod tests {
                     _ = cancel_for_task.cancelled() => {
                         let _ = status_tx.send(crate::domain::models::node_state::NodeState::Cancelled).await;
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                    _ = tokio::task::yield_now() => {
                         let _ = status_tx.send(crate::domain::models::node_state::NodeState::Completed).await;
                         let _ = yield_tx.send(r#"{"summary":"ok","detail":"d"}"#.to_string()).await;
                     }
@@ -1557,6 +1888,7 @@ mod tests {
         let req_a = crate::domain::ports::ForkJoinRequest {
             coordinator: AgentId::root(),
             spokes: vec![SpokeSpec {
+                id: AgentId::new(),
                 label: "a".into(),
                 prompt: "explore a".into(),
                 effective_model: "m".into(),
@@ -1581,6 +1913,7 @@ mod tests {
         let req_b = crate::domain::ports::ForkJoinRequest {
             coordinator: AgentId::root(),
             spokes: vec![SpokeSpec {
+                id: AgentId::new(),
                 label: "b".into(),
                 prompt: "explore b".into(),
                 effective_model: "m".into(),
@@ -1622,32 +1955,214 @@ mod tests {
                 .await
                 .expect("open room journal"),
         );
-        let exe = build_exe_for_rerun().with_journal(journal.clone());
+        let exe = build_exe_for_rerun()
+            .with_journal(journal.clone())
+            .with_artifact_store(
+                Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+                    workspace.path(),
+                )),
+                HostBinding::new("host-a", "canonical-wave-test"),
+            );
+        let a = SpokeSpec {
+            id: AgentId::new(),
+            label: "a".into(),
+            prompt: "prove wave a".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: Vec::new(),
+        };
+        let b = SpokeSpec {
+            id: AgentId::new(),
+            label: "b".into(),
+            prompt: "prove wave b".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: Vec::new(),
+        };
+        let c = SpokeSpec {
+            id: AgentId::new(),
+            label: "c".into(),
+            prompt: "prove dependent wave".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![a.id.clone(), b.id.clone()],
+        };
         let request = crate::domain::ports::ForkJoinRequest {
             coordinator: AgentId::root(),
-            spokes: vec![SpokeSpec {
-                label: "canonical".into(),
-                prompt: "prove canonical wave events".into(),
-                effective_model: "m".into(),
-                tier: crate::domain::models::ModelTier::Flagship,
-                tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
-                waits_for: Vec::new(),
-            }],
+            spokes: vec![a, b, c],
             wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
-            concurrency: 1,
+            concurrency: 2,
         };
 
         exe.run_wave(request, CancellationToken::new())
             .await
             .expect("wave completes");
         let projected = journal.project_room("host-a").await.expect("project room");
-        assert_eq!(projected.waves().len(), 1);
+        assert_eq!(projected.waves().len(), 2);
         assert_eq!(
             projected.waves()[0].outcome,
             Some(WaveOutcome::Completed),
-            "canonical WaveCompleted event must bite"
+            "each topological wave must persist its completion event"
         );
+        assert_eq!(projected.waves()[1].outcome, Some(WaveOutcome::Completed));
     }
+    #[tokio::test]
+    async fn rerun_replaces_source_artifact_and_invalidates_only_dependents() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store: Arc<dyn ArtifactStore> = Arc::new(
+            crate::adapters::artifact::FileSystemArtifactStore::new(workspace.path()),
+        );
+        let exe = build_exe_for_rerun()
+            .with_journal(journal)
+            .with_artifact_store(store.clone(), HostBinding::new("host-a", "rerun-test"));
+        let a = SpokeSpec {
+            id: AgentId::parse("logical-a").unwrap(),
+            label: "a".into(),
+            prompt: "a".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![],
+        };
+        let c = SpokeSpec {
+            id: AgentId::parse("logical-c").unwrap(),
+            label: "c".into(),
+            prompt: "c".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![a.id.clone()],
+        };
+        let d = SpokeSpec {
+            id: AgentId::parse("logical-d").unwrap(),
+            label: "d".into(),
+            prompt: "d".into(),
+            effective_model: "m".into(),
+            tier: ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            waits_for: vec![],
+        };
+        let request = ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![a.clone(), c.clone(), d.clone()],
+            wait_policy: WaitPolicy::All,
+            concurrency: 2,
+        };
+        let _ = exe
+            .run_wave(request, CancellationToken::new())
+            .await
+            .unwrap();
+        let prev = exe.current_run.lock().await.clone().unwrap();
+        let old_a = prev.artifact_by_spoke[&a.id].id.clone();
+        let old_d = prev.artifact_by_spoke[&d.id].id.clone();
+
+        let outcome = exe
+            .rerun_spoke_run(&prev, 0, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RerunOutcome::Replaced(_)));
+        let next = exe.current_run.lock().await.clone().unwrap();
+        assert_ne!(next.artifact_by_spoke[&a.id].id, old_a);
+        assert!(
+            !next.artifact_by_spoke.contains_key(&c.id),
+            "transitive dependent handle must be invalidated"
+        );
+        assert_eq!(
+            next.artifact_by_spoke[&d.id].id, old_d,
+            "unrelated durable handle remains valid"
+        );
+        store
+            .head(&next.artifact_by_spoke[&a.id].id)
+            .await
+            .expect("new rerun version is durable");
+    }
+
+    #[tokio::test]
+    async fn rerun_creates_new_version_and_invalidates_only_diamond_dependents() {
+        async fn put(
+            store: &crate::adapters::artifact::FileSystemArtifactStore,
+            label: &str,
+            producer: AgentId,
+            depends_on: Vec<ArtifactId>,
+        ) -> ArtifactRef {
+            store
+                .put(
+                    EvidenceArtifactDraft {
+                        kind: ArtifactKind::Evidence,
+                        producer,
+                        authority: crate::domain::models::CapabilityTokenId::root(),
+                        provenance: Vec::new(),
+                        depends_on,
+                        review: None,
+                        host: HostBinding::new("host-a", "diamond-test"),
+                    },
+                    label.as_bytes(),
+                )
+                .await
+                .unwrap()
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let store = crate::adapters::artifact::FileSystemArtifactStore::new(workspace.path());
+        let a1 = put(&store, "a-v1", AgentId::parse("a").unwrap(), vec![]).await;
+        let c = put(
+            &store,
+            "c",
+            AgentId::parse("c").unwrap(),
+            vec![a1.id.clone()],
+        )
+        .await;
+        let d = put(
+            &store,
+            "d",
+            AgentId::parse("d").unwrap(),
+            vec![a1.id.clone()],
+        )
+        .await;
+        let e = put(
+            &store,
+            "e",
+            AgentId::parse("e").unwrap(),
+            vec![c.id.clone(), d.id.clone()],
+        )
+        .await;
+        let unrelated = put(
+            &store,
+            "unrelated",
+            AgentId::parse("unrelated").unwrap(),
+            vec![],
+        )
+        .await;
+        let a2 = put(&store, "a-v2", AgentId::parse("a").unwrap(), vec![]).await;
+        assert_ne!(a1.id, a2.id, "rerun content must create a new version");
+
+        let artifacts = vec![
+            a1.clone(),
+            c.clone(),
+            d.clone(),
+            e.clone(),
+            unrelated.clone(),
+        ];
+        let affected = transitive_artifact_dependents(&artifacts, &a1.id)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            affected,
+            [c.id, d.id, e.id].into_iter().collect(),
+            "diamond join is deduplicated and unrelated branch remains valid"
+        );
+        assert!(!affected.contains(&unrelated.id));
+    }
+
     // A no-op runner used only by the ambient-cost unit test (does not launch).
     struct NoopRunner;
     #[async_trait::async_trait]

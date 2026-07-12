@@ -82,11 +82,18 @@ fn latest_node_state(dirs: &Dirs, node_id: &str) -> Option<NodeState> {
         let body = std::fs::read_to_string(entry.path()).ok()?;
         for line in body.lines() {
             let entry: JournalEntry = serde_json::from_str(line).ok()?;
-            match entry.record {
-                JournalRecord::Checkpoint(checkpoint) if checkpoint.id.as_str() == node_id => {
+            // D2: checkpoints may be grouped in one atomic `Batch` line — flatten
+            // so this raw-journal reader still sees the individual checkpoints.
+            let records = match entry.record {
+                JournalRecord::Batch(inner) => inner,
+                other => vec![other],
+            };
+            for record in records {
+                if let JournalRecord::Checkpoint(checkpoint) = record
+                    && checkpoint.id.as_str() == node_id
+                {
                     latest = Some(checkpoint.state);
                 }
-                _ => {}
             }
         }
     }
@@ -339,6 +346,64 @@ fn node_journal_real_sigkill_restart_recovers_running_to_suspended() {
         Some(NodeState::Running),
         "mutant: restart must never leave a phantom Running node"
     );
+    d.cmd().args(["daemon", "stop"]).assert().success();
+}
+
+#[test]
+fn cascade_terminal_batch_survives_sigkill_between_subtree_nodes() {
+    let d = dirs();
+    let parent = "cascade-recovery-parent";
+    let child = "cascade-recovery-child";
+    d.cmd()
+        .env(
+            "RUSTAIN_TEST_ARM_CASCADE_RECOVERY",
+            format!("{parent},{child}"),
+        )
+        .env("RUSTAIN_HOST_ID", "host-a")
+        .args(["daemon", "start"])
+        .assert()
+        .success()
+        .stdout(contains("Daemon started"));
+    let pid = wait_for_pid(&d.pid_path(), std::time::Duration::from_secs(10))
+        .expect("armed daemon must publish its PID");
+    assert!(
+        wait_for_node_state(
+            &d,
+            parent,
+            NodeState::Cancelled,
+            std::time::Duration::from_secs(10)
+        ),
+        "the whole subtree must be terminal in one journal batch before removal"
+    );
+    assert_eq!(latest_node_state(&d, child), Some(NodeState::Cancelled));
+
+    let status = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("send SIGKILL between subtree removals");
+    assert!(status.success());
+    assert!(wait_for_process_exit(
+        pid,
+        std::time::Duration::from_secs(10)
+    ));
+
+    d.cmd()
+        .env("RUSTAIN_HOST_ID", "host-a")
+        .args(["daemon", "start"])
+        .assert()
+        .success()
+        .stdout(contains("Daemon started"));
+    for node in [parent, child] {
+        assert_eq!(
+            latest_node_state(&d, node),
+            Some(NodeState::Cancelled),
+            "terminal-is-terminal: {node} must not resurrect after restart"
+        );
+        assert!(!matches!(
+            latest_node_state(&d, node),
+            Some(NodeState::Running | NodeState::Suspended)
+        ));
+    }
     d.cmd().args(["daemon", "stop"]).assert().success();
 }
 

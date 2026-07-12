@@ -29,6 +29,7 @@ fn checkpoint(id: &str, state: NodeState) -> NodeCheckpoint {
         depth: 1,
         tainted: false,
         waiting_since: None,
+        wait_reason: None,
     }
 }
 

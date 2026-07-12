@@ -1169,6 +1169,14 @@ pub async fn run(
                                                             state.agent_panel_state.inspector_scroll_offset = 0;
                                                             state.agent_panel_state.pending_kill_confirm = None;
                                                         }
+                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: NoticeLevel::Error,
+                                                                message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
+                                                            });
+                                                            state.agent_panel_state.pending_kill_confirm = None;
+                                                        }
                                                         Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => {
                                                             state.agent_panel_state.drill_down_agent = None;
                                                             state.agent_panel_state.inspector_scroll_offset = 0;
