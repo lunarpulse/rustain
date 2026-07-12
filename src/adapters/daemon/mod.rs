@@ -243,6 +243,9 @@ async fn run_daemon_foreground(
     // parent path entirely). This is THE crash-detection seam (AC-12-1b-4): when the
     // supervisor relaunches us after an unclean exit, the leftover PID file shows up
     // here as `Stale`.
+    let singleton = crate::infrastructure::subagent::DaemonSingletonLock::try_acquire(&workspace)
+        .await
+        .map_err(|error| anyhow::anyhow!("acquiring daemon singleton: {error}"))?;
     match pidfile::check_running(&pid_path) {
         GuardOutcome::Running(pf) => {
             eprintln!(
@@ -273,6 +276,53 @@ async fn run_daemon_foreground(
     let domain_tx = event_bus.domain_tx.clone();
     let (channel_turn_tx, channel_turn_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::domain::models::ChannelTurnRequest>();
+    let node_journal = std::sync::Arc::new(
+        crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace)
+            .await
+            .map_err(|error| anyhow::anyhow!("opening node journal: {error}"))?,
+    );
+    let now_fn = {
+        use crate::domain::clock::Clock;
+        let clock = std::sync::Arc::new(crate::domain::clock::SystemClock::default());
+        std::sync::Arc::new(move || clock.wall_now_ms())
+    };
+    let node_tree =
+        crate::infrastructure::subagent::NodeTree::with_event_tx(domain_tx.clone(), now_fn)
+            .with_journal(node_journal.clone())
+            .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+                &workspace,
+            ));
+    let recovery = crate::infrastructure::subagent::NodeRecovery::reconcile(
+        &node_journal,
+        &node_tree,
+        &singleton,
+        &crate::infrastructure::subagent::current_host_id(&workspace),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("recovering durable nodes: {error}"))?;
+    tracing::info!(
+        restored = recovery.restored.len(),
+        suspended = recovery.suspended.len(),
+        failed = recovery.failed.len(),
+        "durable node recovery complete"
+    );
+    // Periodically escalate `Waiting` nodes whose persisted wall-clock dwell
+    // crosses the hazard threshold. The dwell rides the injected clock; this
+    // interval is only the polling cadence. The 17.2b supervisor will own the
+    // richer scheduling and consume the journaled hazard markers.
+    {
+        let hazard_tree = node_tree.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let _ = hazard_tree
+                    .raise_due_hazards(crate::domain::models::WAITING_HAZARD_THRESHOLD_MS)
+                    .await;
+            }
+        });
+    }
     let core = std::sync::Arc::new(
         crate::infrastructure::composition::build_daemon_core(
             &workspace,
@@ -363,11 +413,13 @@ async fn run_daemon_foreground(
         }
     };
 
-    let server = crate::adapters::daemon::server::AttachServer::new(
+    let server = crate::adapters::daemon::server::AttachServer::new_with_node_tree(
         core.clone(),
         conversation.clone(),
         domain_tx,
+        node_tree,
     );
+    arm_node_recovery_harness(&server).await?;
 
     let rt = DaemonRuntime {
         config: config.clone(),
@@ -426,7 +478,53 @@ async fn run_daemon_foreground(
     // Belt-and-suspenders: ensure the PID file is gone even if the loop errored
     // before its own cleanup ran.
     pidfile::remove(&pid_path);
+    drop(singleton);
     result
+}
+
+/// Real-process crash arming seam used by the Story 17.2a L2 harness. The
+/// environment variable is intentionally undocumented and byte-exact; absent
+/// in production, this is a zero-cost no-op.
+#[cfg(unix)]
+async fn arm_node_recovery_harness(
+    server: &std::sync::Arc<crate::adapters::daemon::server::AttachServer>,
+) -> Result<()> {
+    let Some(raw_id) =
+        crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_ARM_NODE_RECOVERY")
+    else {
+        return Ok(());
+    };
+    let agent_id = crate::domain::models::AgentId::parse(&raw_id)
+        .map_err(|error| anyhow::anyhow!("invalid recovery harness node id: {error}"))?;
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(1);
+    let (status, _status_rx) =
+        tokio::sync::watch::channel(crate::domain::models::NodeState::Created);
+    let (_metrics_tx, metrics) =
+        tokio::sync::watch::channel(crate::domain::models::AgentMetrics::default());
+    let handle = crate::infrastructure::subagent::AgentHandle {
+        isolated: false,
+        agent_id: agent_id.clone(),
+        token: crate::domain::models::CapabilityTokenId::root(),
+        command_tx,
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+        depth: 1,
+        subagent_type: "node-recovery-harness".into(),
+        spawned_at: chrono::Utc::now().timestamp_millis(),
+        status,
+        metrics,
+        mailbox_budget: crate::infrastructure::subagent::MailboxBudget::new(),
+    };
+    let tree = server.node_tree();
+    tree.register(
+        agent_id.clone(),
+        crate::domain::models::AgentId::root(),
+        handle,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("registering recovery harness node: {error}"))?;
+    tree.set_state(&agent_id, crate::domain::models::NodeState::Running)
+        .await;
+    Ok(())
 }
 
 /// `daemon stop` — SIGTERM, wait up to 5s for exit + PID-file removal (NFR48),

@@ -121,6 +121,7 @@ pub struct AttachServer {
     conversation: Arc<Mutex<Conversation>>,
     registry: Arc<Mutex<ConnRegistry>>,
     domain_tx: mpsc::UnboundedSender<AppEvent>,
+    node_tree: crate::infrastructure::subagent::NodeTree,
     /// Tool actions denied while unattended, awaiting the user to resume (AC6 #5).
     blocked_waiting: Arc<AtomicUsize>,
     next_conn_id: AtomicU64,
@@ -206,11 +207,36 @@ impl AttachServer {
         domain_tx: mpsc::UnboundedSender<AppEvent>,
         clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
+        let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
+            domain_tx.clone(),
+            Arc::new(|| chrono::Utc::now().timestamp_millis()),
+        );
+        Self::with_clock_and_node_tree(core, conversation, domain_tx, clock, node_tree)
+    }
+
+    pub fn new_with_node_tree(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+    ) -> Arc<Self> {
+        Self::with_clock_and_node_tree(
+            core,
+            conversation,
+            domain_tx,
+            Arc::new(SystemClock::default()),
+            node_tree,
+        )
+    }
+
+    fn with_clock_and_node_tree(
+        core: Arc<DaemonCore>,
+        conversation: Arc<Mutex<Conversation>>,
+        domain_tx: mpsc::UnboundedSender<AppEvent>,
+        clock: Arc<dyn Clock>,
+        node_tree: crate::infrastructure::subagent::NodeTree,
+    ) -> Arc<Self> {
         Arc::new_cyclic(|weak| {
-            let node_tree = crate::infrastructure::subagent::NodeTree::with_event_tx(
-                domain_tx.clone(),
-                Arc::new(|| chrono::Utc::now().timestamp_millis()),
-            );
             let bus = Arc::new(
                 crate::infrastructure::agent_message_bus::LocalMessageBus::new(
                     node_tree.clone(),
@@ -222,7 +248,7 @@ impl AttachServer {
                 server: weak.clone(),
             });
             let peer_delivery = Arc::new(crate::adapters::rap::VerifiedPeerFrameHandler::new(
-                node_tree,
+                node_tree.clone(),
                 bus_slot,
                 domain_tx.clone(),
                 consumer,
@@ -232,6 +258,7 @@ impl AttachServer {
                 conversation,
                 registry: Arc::new(Mutex::new(ConnRegistry::default())),
                 domain_tx,
+                node_tree,
                 blocked_waiting: Arc::new(AtomicUsize::new(0)),
                 next_conn_id: AtomicU64::new(1),
                 approval_gate_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -247,6 +274,10 @@ impl AttachServer {
                 peer_delivery: Arc::new(tokio::sync::RwLock::new(Some(peer_delivery))),
             }
         })
+    }
+
+    pub fn node_tree(&self) -> crate::infrastructure::subagent::NodeTree {
+        self.node_tree.clone()
     }
 
     pub async fn configure_peer_delivery(
@@ -1651,6 +1682,17 @@ mod tests {
         .await
         .unwrap();
         read_frame::<_, DaemonFrame>(stream).await.unwrap()
+    }
+
+    /// Read the next protocol response, skipping domain-event broadcasts that
+    /// can race the response on the same connection.
+    async fn read_control_frame(stream: &mut UnixStream) -> Option<DaemonFrame> {
+        loop {
+            match read_frame::<_, DaemonFrame>(stream).await.unwrap() {
+                Some(DaemonFrame::Event(_)) => continue,
+                frame => return frame,
+            }
+        }
     }
 
     /// Build a signed peer envelope rooted at `signer`'s PeerId (the peer-path
@@ -3497,7 +3539,7 @@ mod tests {
         write_frame(&mut stream, &ClientFrame::PeerEnvelope(env))
             .await
             .unwrap();
-        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+        match read_control_frame(&mut stream).await {
             Some(DaemonFrame::PeerAccepted { sequence }) => assert_eq!(sequence, 1),
             other => panic!("expected PeerAccepted, got {other:?}"),
         }
@@ -3735,7 +3777,7 @@ mod tests {
         write_frame(&mut c1, &ClientFrame::PeerEnvelope(env))
             .await
             .unwrap();
-        match read_frame::<_, DaemonFrame>(&mut c1).await.unwrap() {
+        match read_control_frame(&mut c1).await {
             Some(DaemonFrame::PeerAccepted { sequence }) => assert_eq!(sequence, 1),
             other => panic!("first envelope must be accepted, got {other:?}"),
         }
@@ -3781,7 +3823,7 @@ mod tests {
         write_frame(&mut stream, &ClientFrame::PeerEnvelope(fresh))
             .await
             .unwrap();
-        match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
+        match read_control_frame(&mut stream).await {
             Some(DaemonFrame::PeerAccepted { .. }) => {}
             other => panic!("non-expired envelope must be accepted, got {other:?}"),
         }

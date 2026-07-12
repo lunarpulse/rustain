@@ -17,7 +17,7 @@ pub enum AgentIdError {
 }
 
 /// Newtype for an agent identifier.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct AgentId(String);
 
 impl Default for AgentId {

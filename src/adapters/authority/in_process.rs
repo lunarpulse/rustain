@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::domain::models::{
     AgentId, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest,
+    JournaledTerminalCheckpoint,
 };
 use crate::domain::ports::{AuthorityError, AuthorityProvider};
 use crate::domain::services::authority_ledger::AuthorityLedger;
@@ -79,6 +80,13 @@ impl AuthorityProvider for InProcessAuthorityProvider {
 
     async fn settle(&self, token: &CapabilityTokenId) -> Result<(), AuthorityError> {
         self.ledger.settle(token)
+    }
+
+    async fn prune_terminal(
+        &self,
+        terminal: &JournaledTerminalCheckpoint,
+    ) -> Result<bool, AuthorityError> {
+        self.ledger.prune_terminal(terminal)
     }
 
     async fn spend_use(&self, token: &CapabilityTokenId) -> Result<(), AuthorityError> {

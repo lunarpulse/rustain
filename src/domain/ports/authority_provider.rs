@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::domain::models::{
     AgentId, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest,
+    JournaledTerminalCheckpoint,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -50,6 +51,13 @@ pub trait AuthorityProvider: Send + Sync {
     /// Settle a delegated token on terminal (AC4): refund the unused
     /// reservation to the parent, idempotently. Synchronous in R1.
     async fn settle(&self, token: &CapabilityTokenId) -> Result<(), AuthorityError>;
+
+    /// Reclaim a settled or revoked terminal grant only after the caller has
+    /// obtained durable journal proof for the same node/token.
+    async fn prune_terminal(
+        &self,
+        terminal: &JournaledTerminalCheckpoint,
+    ) -> Result<bool, AuthorityError>;
 
     /// Charge one use at the point of use (AC4/AC9 budget-spend). `validate()`
     /// is the check; this is the commit — each authority-gated action consumes

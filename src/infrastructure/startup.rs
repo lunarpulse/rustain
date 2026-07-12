@@ -1430,19 +1430,30 @@ pub async fn run() -> Result<()> {
                     root_authority.clone(),
                 ),
             );
+            let node_journal = Arc::new(
+                crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace_path)
+                    .await
+                    .expect("NodeJournal creation failed"),
+            );
             // Construct subagent infrastructure first so trust-drop revoke can
             // route into cascade_kill (AC5): the provider holds an Arc<NodeTree>.
+            let now_fn = {
+                use crate::domain::clock::Clock;
+                let clock = Arc::new(crate::domain::clock::SystemClock::default());
+                Arc::new(move || clock.wall_now_ms())
+            };
             let subagent_registry = Arc::new(
-                crate::infrastructure::subagent::NodeTree::with_event_tx(
-                    domain_tx.clone(),
-                    Arc::new(|| chrono::Utc::now().timestamp_millis()),
-                )
-                .with_on_cascade_kill({
-                    let authority_ledger = authority_ledger.clone();
-                    Arc::new(move |id| {
-                        let _ = authority_ledger.revoke_scope(id);
-                    })
-                }),
+                crate::infrastructure::subagent::NodeTree::with_event_tx(domain_tx.clone(), now_fn)
+                    .with_journal(node_journal.clone())
+                    .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+                        &workspace_path,
+                    ))
+                    .with_on_cascade_kill({
+                        let authority_ledger = authority_ledger.clone();
+                        Arc::new(move |id| {
+                            let _ = authority_ledger.revoke_scope(id);
+                        })
+                    }),
             );
             let authority_provider: Arc<dyn crate::domain::ports::AuthorityProvider> = Arc::new(
                 crate::adapters::authority::InProcessAuthorityProvider::new(
@@ -1584,8 +1595,8 @@ pub async fn run() -> Result<()> {
             // loop invokes `run_fork_join` when it fans out (the trigger — a
             // model fan-out intent — is the connection point wired with the
             // turn-loop integration).
-            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> =
-                Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> = Arc::new(
+                crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
                     authority_provider.clone(),
                     authority_ledger.clone(),
@@ -1593,7 +1604,9 @@ pub async fn run() -> Result<()> {
                     Arc::new(crate::domain::clock::SystemClock::default())
                         as Arc<dyn crate::domain::clock::Clock>,
                     root_authority.clone(),
-                ));
+                )
+                .with_journal(node_journal.clone()),
+            );
             orchestrator = Some(orchestrator_inner);
 
             let subagent_provider = Arc::new(crate::adapters::subagent::SubagentProvider::new(

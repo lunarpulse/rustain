@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
 use crate::domain::models::{
-    AgentId, Budget, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest, PeerId,
-    PeerIdentity,
+    AgentId, Budget, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest,
+    JournaledTerminalCheckpoint, PeerId, PeerIdentity,
 };
 use crate::domain::ports::AuthorityError;
 
@@ -40,6 +40,10 @@ struct AuthorityState {
     scope_to_token: HashMap<AgentId, CapabilityTokenId>,
     children: BTreeMap<CapabilityTokenId, BTreeSet<CapabilityTokenId>>,
     trusted_issuers: HashMap<PeerId, VerifyingKey>,
+    /// Terminal entries that are settled/revoked but still have children: their
+    /// proof is stashed so the last child's prune retries the parent. Without
+    /// this, a parent settled before its children leaks in the map forever.
+    pending_prune: BTreeMap<CapabilityTokenId, JournaledTerminalCheckpoint>,
 }
 
 /// Synchronous authority ledger for Story 14.2.
@@ -385,6 +389,80 @@ impl AuthorityLedger {
     pub fn settle(&self, id: &CapabilityTokenId) -> Result<(), AuthorityError> {
         let mut state = self.lock_state();
         Self::settle_locked(&mut state, id)
+    }
+
+    /// Bounded-memory GC guarded by an fsynced terminal-checkpoint proof.
+    /// Settlement performs the conservation transfer; pruning only removes the
+    /// now-inert maps and never creates another refund.
+    pub fn prune_terminal(
+        &self,
+        terminal: &JournaledTerminalCheckpoint,
+    ) -> Result<bool, AuthorityError> {
+        let checkpoint = terminal.checkpoint();
+        debug_assert!(checkpoint.state.is_terminal());
+        let mut state = self.lock_state();
+        Self::try_prune_locked(&mut state, &checkpoint.token, terminal)
+    }
+
+    /// Prune one settled/revoked terminal entry, cascading to a parent whose
+    /// last child this was. A terminal entry that still has children stashes its
+    /// proof so a later child prune retries it (P7 — a parent settled before its
+    /// children no longer leaks forever).
+    fn try_prune_locked(
+        state: &mut AuthorityState,
+        token: &CapabilityTokenId,
+        proof: &JournaledTerminalCheckpoint,
+    ) -> Result<bool, AuthorityError> {
+        let checkpoint = proof.checkpoint();
+        let Some(entry) = state.entries.get(token) else {
+            state.pending_prune.remove(token);
+            return Ok(false);
+        };
+        if entry.token.parent.is_none() {
+            return Ok(false);
+        }
+        if entry.token.scope != checkpoint.id {
+            return Err(AuthorityError::Malformed {
+                reason: "terminal checkpoint scope/token mismatch",
+            });
+        }
+        if !entry.settled && !entry.revoked {
+            return Ok(false);
+        }
+        if state
+            .children
+            .get(token)
+            .is_some_and(|children| !children.is_empty())
+        {
+            // Terminal + settled but children remain: remember the proof so the
+            // last child's prune can retry this parent.
+            state.pending_prune.insert(*token, proof.clone());
+            return Ok(false);
+        }
+
+        let entry = state
+            .entries
+            .remove(token)
+            .expect("entry existence checked above");
+        state.scope_to_token.remove(&entry.token.scope);
+        state.children.remove(token);
+        state.pending_prune.remove(token);
+        if let Some(parent) = entry.token.parent {
+            let parent_now_empty = if let Some(siblings) = state.children.get_mut(&parent) {
+                siblings.remove(token);
+                siblings.is_empty()
+            } else {
+                false
+            };
+            if parent_now_empty {
+                state.children.remove(&parent);
+                // The parent may have been terminal-but-blocked on this child.
+                if let Some(parent_proof) = state.pending_prune.remove(&parent) {
+                    Self::try_prune_locked(state, &parent, &parent_proof)?;
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// AC4/AC9: consume one use at the point of use. `validate()` checks the

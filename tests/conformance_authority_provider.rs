@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use proptest::prelude::*;
 use rustain::domain::models::{
     AgentId, Budget, CapabilityFlag, CapabilitySet, CapabilityToken, DelegateConstraint,
-    DelegateRequest, Op,
+    DelegateRequest, NodeCheckpoint, NodeOrigin, NodeState, Op, WireOwnershipKind,
 };
 use rustain::domain::ports::{AuthorityError, AuthorityProvider};
 use rustain::domain::services::authority_ledger::{AuthorityLedger, ConservationSnapshot};
+use rustain::infrastructure::subagent::NodeJournal;
 
 const MAX_KNOWN_DISCOVERY_CAPABILITY_REFS: usize = 0;
 
@@ -1160,5 +1161,95 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
     assert!(
         interleavings.load(Ordering::Relaxed) > 0,
         "probe never ran concurrent validates — no interleaving stress",
+    );
+}
+
+#[tokio::test]
+async fn terminal_prune_requires_journal_proof_and_preserves_conservation() {
+    let root = root_token();
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(root.clone()));
+    let provider =
+        rustain::adapters::authority::in_process::InProcessAuthorityProvider::new(ledger.clone());
+    let child = ledger
+        .delegate(
+            &root,
+            child_request(
+                "prune-child",
+                Budget {
+                    requests: 10,
+                    cost_micros: 10_000,
+                },
+            ),
+        )
+        .expect("delegate child");
+    ledger
+        .consume(
+            &child.id,
+            Budget {
+                requests: 2,
+                cost_micros: 500,
+            },
+        )
+        .expect("consume child budget");
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let journal = NodeJournal::open_workspace(workspace.path())
+        .await
+        .expect("open journal");
+    let mut checkpoint = NodeCheckpoint {
+        id: child.scope.clone(),
+        token: child.id,
+        parent: None,
+        ownership: WireOwnershipKind::Owned,
+        state: NodeState::Running,
+        origin: NodeOrigin::Subagent,
+        foreground: true,
+        effective_model: "test".into(),
+        tokens_in: 0,
+        tokens_out: 0,
+        turns: 0,
+        subagent_type: "test".into(),
+        spawned_at: 1,
+        depth: 1,
+        tainted: false,
+        waiting_since: None,
+    };
+    journal
+        .append_checkpoint(checkpoint.clone())
+        .await
+        .expect("append nonterminal checkpoint");
+    assert!(
+        journal
+            .journaled_terminal(&child.scope)
+            .await
+            .expect("scan journal")
+            .is_none(),
+        "crash window: no terminal proof means pruning is impossible"
+    );
+
+    ledger.settle(&child.id).expect("settle child");
+    let before = ledger.conservation(&root.id).expect("conservation before");
+    checkpoint.state = NodeState::Completed;
+    journal
+        .append_checkpoint(checkpoint)
+        .await
+        .expect("append terminal checkpoint");
+    let proof = journal
+        .journaled_terminal(&child.scope)
+        .await
+        .expect("scan journal")
+        .expect("terminal checkpoint is durably proven");
+
+    assert!(provider.prune_terminal(&proof).await.expect("prune child"));
+    assert_eq!(
+        ledger.token_for_scope(&child.scope),
+        Err(AuthorityError::NotFound)
+    );
+    assert_eq!(ledger.conservation(&root.id).unwrap(), before);
+    assert!(
+        !provider
+            .prune_terminal(&proof)
+            .await
+            .expect("idempotent prune"),
+        "second prune must be a no-op"
     );
 }

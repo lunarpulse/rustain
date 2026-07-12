@@ -5,6 +5,7 @@ pub mod agent_id;
 pub mod agent_message;
 pub mod agent_node;
 pub mod approval;
+pub mod artifact;
 pub mod assembled_context;
 pub mod autocomplete;
 pub mod budget;
@@ -37,9 +38,11 @@ pub mod mcp_server_state;
 pub mod memory_entry;
 pub mod memory_fact;
 mod message;
+pub mod node_journal;
 pub mod node_state;
 mod notice;
 pub mod orchestration;
+pub mod orchestration_room;
 pub mod palette;
 pub mod peer_identity;
 mod permission;
@@ -82,6 +85,7 @@ pub mod usage;
 pub mod view_state;
 #[allow(dead_code)]
 pub mod visual;
+pub mod waiting_hazard;
 
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
@@ -103,6 +107,11 @@ pub use agent_node::{
 };
 #[allow(unused_imports)]
 pub use approval::{ApprovalOutcome, ApprovalScope};
+#[allow(unused_imports)]
+pub use artifact::{
+    ArtifactId, ArtifactKind, ArtifactRef, ContentHash, ContentHashError, EvidenceArtifact,
+    EvidenceArtifactDraft, ReviewStatus,
+};
 #[allow(unused_imports)]
 pub use capability_token::{
     Budget, CapabilityFlag, CapabilitySet, CapabilityToken, CapabilityTokenId, DelegateConstraint,
@@ -144,6 +153,10 @@ pub use message::{
     ImageAttachment, Message, MessageRole, ToolResultMessage, ToolUseMessage, UserMessage,
 };
 #[allow(unused_imports)]
+pub use node_journal::{
+    JournalEntry, JournalRecord, JournaledTerminalCheckpoint, NODE_JOURNAL_SCHEMA_VERSION,
+};
+#[allow(unused_imports)]
 pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
     FeedbackAction, FeedbackBlock, FeedbackLevel, NoticeLevel, RetryState, StatusState, next_delay,
@@ -153,6 +166,11 @@ pub use orchestration::{
     CoverageLine, DrillBody, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, ForkJoinSpec,
     OrchestrationError, SpokeCitation, SpokeResult, SpokeSpec, SynthesisView, WaitPolicy,
     WaitReason,
+};
+#[allow(unused_imports)]
+pub use orchestration_room::{
+    ApprovalView, HostBinding, NodeView, OrchestrationRoom, OrchestrationRoomId, RejectReason,
+    ReviewVerdict, RoomEvent, RoomIdError, WaveId, WaveOutcome, WaveView,
 };
 #[allow(unused_imports)]
 pub use palette::{PaletteAction, PaletteEntry, PaletteScope};
@@ -194,6 +212,8 @@ pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};
 pub use tool_policy::ToolPolicy;
 pub use trace_context::TraceContext;
+#[allow(unused_imports)]
+pub use waiting_hazard::{WAITING_HAZARD_THRESHOLD_MS, WaitingHazard, waiting_hazard};
 // TODO(S16.4): remove these upward re-exports once consumers migrate to domain::services::reducer
 #[allow(unused_imports)]
 pub use crate::domain::services::reducer::{

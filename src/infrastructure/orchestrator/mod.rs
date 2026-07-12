@@ -51,7 +51,7 @@ use crate::domain::models::orchestration::{
     CoverageLine, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, OrchestrationError, SpokeCitation,
     SpokeResult, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
 };
-use crate::domain::models::{ModelTier, SubagentError};
+use crate::domain::models::{ModelTier, RoomEvent, SubagentError, WaveId, WaveOutcome};
 use crate::domain::ports::SubagentRunner;
 use crate::domain::ports::wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 use crate::domain::ports::{AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator};
@@ -117,6 +117,7 @@ pub struct ForkJoinExecutor {
     ledger: Arc<AuthorityLedger>,
     event_bus: Arc<EventBus>,
     clock: Arc<dyn Clock>,
+    journal: Option<Arc<crate::infrastructure::subagent::NodeJournal>>,
     /// The root/coordinator authority token — the mint point for per-spoke
     /// gate-tokens. In R1 the coordinator IS the root agent.
     root_authority: CapabilityToken,
@@ -156,9 +157,20 @@ impl ForkJoinExecutor {
             clock,
             root_authority,
             current_run: tokio::sync::Mutex::new(None),
+            journal: None,
             wave_generation: std::sync::atomic::AtomicU64::new(0),
             rerun_reservations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Bind the canonical durable room-event sink.
+    #[must_use]
+    pub fn with_journal(
+        mut self,
+        journal: Arc<crate::infrastructure::subagent::NodeJournal>,
+    ) -> Self {
+        self.journal = Some(journal);
+        self
     }
 
     /// Read the ambient cost meter (WaveStrip `$burn`). Returns the cumulative
@@ -204,6 +216,18 @@ impl ForkJoinExecutor {
     /// Emit a wave lifecycle event (the 14.3a seam — purely additive variants).
     fn emit(&self, event: AppEvent) {
         let _ = self.event_bus.emit_domain(event);
+    }
+
+    async fn persist_room_event(&self, event: RoomEvent) -> Result<(), OrchestrationError> {
+        let Some(journal) = &self.journal else {
+            return Ok(());
+        };
+        journal
+            .append_room(event.clone())
+            .await
+            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+        self.emit(AppEvent::DomainEvent(event.into()));
+        Ok(())
     }
 
     /// Validate a fork-join request at the boundary (AC2 single-level, AC4 cap,
@@ -450,11 +474,6 @@ impl ForkJoinExecutor {
         let concurrency = request.concurrency.clamp(1, n).min(FORK_JOIN_SPAWN_CAP);
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        self.emit(AppEvent::ForkJoinStarted {
-            coordinator: coordinator.clone(),
-            spoke_count: n,
-        });
-
         // P2: pre-mint ALL gate tokens up front. If a mint fails on spoke k,
         // the already-minted tokens (0..k) are refunded — no ledger leak from
         // a partial mint failure stranding reservations.
@@ -474,6 +493,20 @@ impl ForkJoinExecutor {
                 }
             }
         }
+        let wave_id = WaveId::new();
+        self.persist_room_event(RoomEvent::WaveStarted {
+            wave: wave_id.clone(),
+            coordinator: coordinator.clone(),
+            spokes: gate_tokens
+                .iter()
+                .map(|token| token.scope.clone())
+                .collect(),
+        })
+        .await?;
+        self.emit(AppEvent::ForkJoinStarted {
+            coordinator: coordinator.clone(),
+            spoke_count: n,
+        });
         // P5 (N1 fix — re-review round-2): DEBIT the synthesis reserve AFTER
         // the gate-token pre-mint succeeds. `consume` is irreversible — the
         // ledger has no `unconsume` — so debiting the reserve before a pre-
@@ -621,6 +654,21 @@ impl ForkJoinExecutor {
             coordinator: coordinator.clone(),
             honest_empty: synthesis.honest_empty,
         });
+        let wave_outcome = if wave_cancel.is_cancelled() {
+            WaveOutcome::Cancelled
+        } else if outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, Some((_, SpokeResult::Failed { .. }))))
+        {
+            WaveOutcome::Failed
+        } else {
+            WaveOutcome::Completed
+        };
+        self.persist_room_event(RoomEvent::WaveCompleted {
+            wave: wave_id,
+            outcome: wave_outcome,
+        })
+        .await?;
 
         let final_outcomes: Vec<(AgentId, SpokeResult)> = outcomes.into_iter().flatten().collect();
 
@@ -1563,6 +1611,41 @@ mod tests {
         assert_ne!(
             current.generation, gen_a,
             "the newer wave B must NOT be clobbered by a stale rerun commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_wave_events_are_journaled_and_projectable() {
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .expect("open room journal"),
+        );
+        let exe = build_exe_for_rerun().with_journal(journal.clone());
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![SpokeSpec {
+                label: "canonical".into(),
+                prompt: "prove canonical wave events".into(),
+                effective_model: "m".into(),
+                tier: crate::domain::models::ModelTier::Flagship,
+                tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                waits_for: Vec::new(),
+            }],
+            wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
+            concurrency: 1,
+        };
+
+        exe.run_wave(request, CancellationToken::new())
+            .await
+            .expect("wave completes");
+        let projected = journal.project_room("host-a").await.expect("project room");
+        assert_eq!(projected.waves().len(), 1);
+        assert_eq!(
+            projected.waves()[0].outcome,
+            Some(WaveOutcome::Completed),
+            "canonical WaveCompleted event must bite"
         );
     }
     // A no-op runner used only by the ambient-cost unit test (does not launch).

@@ -82,6 +82,10 @@ pub struct AgentNode {
     pub depth: usize,
     /// Monotone local integrity bit: cross-agent data has entered this context.
     pub tainted: bool,
+    /// Epoch-millis wall clock at which this node entered `Waiting`, else
+    /// `None`. Persisted so hazard dwell survives a restart; monotonic
+    /// `Instant` is deliberately NOT used (its origin resets per process).
+    pub waiting_since: Option<i64>,
 }
 
 /// Live runtime metrics surfaced by a node for owner-facing inspection.
@@ -141,6 +145,10 @@ pub struct NodeCheckpoint {
     /// Peer-supplied values MUST be ignored and recomputed at the local boundary.
     #[serde(default)]
     pub tainted: bool,
+    /// Epoch-millis wall clock at which this node entered `Waiting` (see
+    /// [`AgentNode::waiting_since`]). `None` for any non-waiting state.
+    #[serde(default)]
+    pub waiting_since: Option<i64>,
 }
 
 /// Trust boundary applied when rehydrating a serialized node checkpoint.
@@ -174,6 +182,7 @@ impl AgentNode {
             spawned_at: self.spawned_at,
             depth: self.depth,
             tainted: self.tainted,
+            waiting_since: self.waiting_since,
         }
     }
 }
@@ -214,6 +223,7 @@ impl NodeCheckpoint {
             spawned_at: self.spawned_at,
             depth: self.depth,
             tainted: remote || self.tainted,
+            waiting_since: self.waiting_since,
         }
     }
 }
@@ -317,6 +327,7 @@ mod tests {
             spawned_at: 1_700_000_000_000,
             depth: 2,
             tainted: true,
+            waiting_since: None,
         }
     }
 
@@ -360,6 +371,7 @@ mod tests {
             "spawned_at",
             "depth",
             "tainted",
+            "waiting_since",
         ]
         .into_iter()
         .collect();

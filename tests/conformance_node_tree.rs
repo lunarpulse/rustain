@@ -522,8 +522,9 @@ fn test_remote_handle_not_used_in_r1() {
 fn test_import_site_count_pinned() {
     /// Story 14.7 added the ACP Self-session consumers. Story 17.1b adds two
     /// deliberate RemotePeer consumers: the transport-agnostic verified-frame
-    /// handler and the daemon composition path that instantiates it.
-    const EXPECTED: usize = 13;
+    /// handler and the daemon composition path that instantiates it. Story
+    /// 17.2a adds daemon startup recovery and the recovery fold itself.
+    const EXPECTED: usize = 15;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

@@ -5,6 +5,8 @@
 //! state and the pure gate returns [`TaintDecision`]. The gate never performs
 //! live revocation.
 
+use serde::{Deserialize, Serialize};
+
 /// Provenance/taint tag for the data flowing into a tool call.
 ///
 /// `Default` remains `UserOriginated` for call sites without node context.
@@ -12,7 +14,8 @@
 /// `#[non_exhaustive]` keeps the door open for future provenance classes
 /// (e.g. a distinct `ToolOriginated` tag) without breaking exhaustive matches.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProvenanceTag {
     /// Data originated directly from the human user.
     #[default]

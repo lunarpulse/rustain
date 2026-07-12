@@ -507,12 +507,18 @@ pub enum CompactionPurpose {
     },
 }
 
-/// Payload for domain-originated events (placeholder for future stories).
-#[allow(dead_code)]
+/// Live reactivity payload derived from the canonical durable room event.
+/// Persistence always goes through `NodeJournal`; this bus payload is never a
+/// second writable store.
 #[derive(Debug, Clone)]
 pub enum DomainEventPayload {
-    /// Placeholder — streaming events, tool results, etc. added in later stories
-    Noop,
+    Room(crate::domain::models::RoomEvent),
+}
+
+impl From<crate::domain::models::RoomEvent> for DomainEventPayload {
+    fn from(event: crate::domain::models::RoomEvent) -> Self {
+        Self::Room(event)
+    }
 }
 
 /// Tool progress event emitted by the bash adapter during long-running execution.

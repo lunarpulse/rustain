@@ -373,6 +373,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         let child_token_id_for_bridge = child_token.id;
         tokio::spawn(async move {
             let mut rx = bridge_rx;
+            let mut terminal_durability_failed = false;
             while let Some(s) = rx.recv().await {
                 // Apply + broadcast happen inside set_state, gated on FSM
                 // acceptance so the watch never exposes a rejected transition.
@@ -381,16 +382,40 @@ impl SubagentRunner for InProcessSubagentRunner {
                     s,
                     NodeState::Completed | NodeState::Failed | NodeState::Cancelled
                 ) {
-                    // AC4: settle the child's reservation on ANY terminal (idempotent)
-                    // so the parent reclaims reserved − consumed. Cancelled-via-cascade
-                    // also settles via revoke_scope; the `settled` latch collapses the
-                    // double-fire to a single credit.
+                    let proof = match registry.journaled_terminal(&agent_id_for_bridge).await {
+                        Ok(proof) => proof,
+                        Err(error) => {
+                            tracing::error!(
+                                agent_id = %agent_id_for_bridge,
+                                %error,
+                                "terminal checkpoint proof could not be loaded"
+                            );
+                            terminal_durability_failed = true;
+                            break;
+                        }
+                    };
+                    if registry.has_journal() && proof.is_none() {
+                        tracing::error!(
+                            agent_id = %agent_id_for_bridge,
+                            "refusing authority settlement and prune without terminal journal proof"
+                        );
+                        terminal_durability_failed = true;
+                        break;
+                    }
+                    // Settlement transfers conservation exactly once; pruning
+                    // then removes only inert maps guarded by the durable proof.
                     let _ = authority_for_bridge
                         .settle(&child_token_id_for_bridge)
                         .await;
+                    if let Some(proof) = &proof {
+                        let _ = authority_for_bridge.prune_terminal(proof).await;
+                    }
                     registry.deregister(&agent_id_for_bridge).await;
                     break;
                 }
+            }
+            if terminal_durability_failed {
+                return;
             }
             // Safety net: if bridge_rx closed without a terminal state (e.g.
             // panic where bridge_tx.send also failed), ensure the registry
@@ -1731,6 +1756,7 @@ mod tests {
     use crate::domain::services::approval_runtime::ApprovalRuntime;
     use crate::domain::services::tool_scheduler::ToolScheduler;
     use crate::infrastructure::runtime::event_bus::EventBus;
+    use crate::infrastructure::subagent::NodeJournal;
     use arc_swap::ArcSwap;
     use futures::{StreamExt, stream::BoxStream};
     use std::path::PathBuf;
@@ -1970,7 +1996,10 @@ mod tests {
         let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
         let (event_bus, event_rx) = EventBus::new(1024);
         let event_bus = Arc::new(event_bus);
-        let registry = Arc::new(NodeTree::new());
+        let journal = Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let registry = Arc::new(NodeTree::new().with_journal(journal).with_host_binding(
+            crate::infrastructure::subagent::current_host_binding(tmp.path()),
+        ));
         let parent_sandbox = Arc::new(tokio::sync::RwLock::new(
             crate::domain::models::SandboxPolicy::Permissive,
         ));
@@ -3911,5 +3940,80 @@ mod tests {
             "RED MUTANT: MayRefuse delivery must be consent-refused \
              (the AI-14.4-A defect is re-discarding disposition)"
         );
+    }
+
+    #[tokio::test]
+    async fn owned_abandonment_self_destruct_is_journaled_cancelled() {
+        tokio::time::pause();
+        let (runner, _registry, _event_rx, tmp) = make_hanging_runner_observable().await;
+        let spec = AgentLaunchSpec {
+            prompt: "wait for owner disconnect".into(),
+            effective_model: "test-model".into(),
+            tier: crate::domain::models::ModelTier::CheapAgentic,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: false,
+        };
+        let mut handle = runner
+            .launch(spec, CancellationToken::new())
+            .await
+            .expect("launch owned child");
+        let agent_id = handle.agent_id.clone();
+        let mut saw_running = false;
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+            while let Ok(status) = handle.status_rx.try_recv() {
+                saw_running |= status == NodeState::Running;
+            }
+            if saw_running {
+                break;
+            }
+        }
+        assert!(saw_running, "positive control: child entered Running");
+        drop(handle.parent_disconnect);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let mut terminal = None;
+        let mut observed = Vec::new();
+        for _ in 0..64 {
+            tokio::time::advance(std::time::Duration::from_millis(100)).await;
+            for _ in 0..32 {
+                tokio::task::yield_now().await;
+            }
+            while let Ok(status) = handle.status_rx.try_recv() {
+                observed.push(status);
+                if status.is_terminal() {
+                    terminal = Some(status);
+                }
+            }
+            if terminal.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            terminal,
+            Some(NodeState::Cancelled),
+            "Owned disconnect exhausts retries then self-destructs; observed={observed:?}"
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|state| **state == NodeState::Waiting)
+                .count(),
+            3,
+            "exactly three deterministic retries precede self-destruct"
+        );
+        let journal = NodeJournal::open_workspace(tmp.path())
+            .await
+            .expect("reopen journal");
+        let proof = journal
+            .journaled_terminal(&agent_id)
+            .await
+            .expect("read terminal proof")
+            .expect("Cancelled checkpoint must be durable before bridge teardown");
+        assert_eq!(proof.checkpoint().state, NodeState::Cancelled);
     }
 }

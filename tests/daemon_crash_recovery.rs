@@ -22,6 +22,7 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use predicates::str::contains;
+use rustain::domain::models::{JournalEntry, JournalRecord, NodeState};
 
 struct Dirs {
     ws: tempfile::TempDir,
@@ -71,6 +72,65 @@ impl Dirs {
             }
         }
         out
+    }
+}
+
+fn latest_node_state(dirs: &Dirs, node_id: &str) -> Option<NodeState> {
+    let rooms = std::fs::read_dir(dirs.ws.path().join(".rustain").join("rooms")).ok()?;
+    let mut latest = None;
+    for entry in rooms.flatten() {
+        let body = std::fs::read_to_string(entry.path()).ok()?;
+        for line in body.lines() {
+            let entry: JournalEntry = serde_json::from_str(line).ok()?;
+            match entry.record {
+                JournalRecord::Checkpoint(checkpoint) if checkpoint.id.as_str() == node_id => {
+                    latest = Some(checkpoint.state);
+                }
+                _ => {}
+            }
+        }
+    }
+    latest
+}
+
+fn wait_for_node_state(
+    dirs: &Dirs,
+    node_id: &str,
+    expected: NodeState,
+    budget: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if latest_node_state(dirs, node_id) == Some(expected) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn wait_for_process_exit(pid: u32, budget: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        // SAFETY: signal 0 performs existence/permission probing only.
+        let mut alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+        #[cfg(target_os = "linux")]
+        if alive {
+            alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(')').map(|(_, tail)| tail.to_string()))
+                .and_then(|tail| tail.split_whitespace().next().map(str::to_string))
+                .is_some_and(|state| state != "Z");
+        }
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
@@ -224,6 +284,62 @@ fn crash_recovery_cycle_records_and_surfaces_then_starts_normally() {
         d.read_all_logs().contains("recovered from unclean exit"),
         "recovery line must be logged to the daemon log"
     );
+}
+
+#[test]
+fn node_journal_real_sigkill_restart_recovers_running_to_suspended() {
+    let d = dirs();
+    let node_id = "sigkill-recovery-node";
+    d.cmd()
+        .env("RUSTAIN_TEST_ARM_NODE_RECOVERY", node_id)
+        .env("RUSTAIN_HOST_ID", "host-a")
+        .args(["daemon", "start"])
+        .assert()
+        .success()
+        .stdout(contains("Daemon started"));
+    let pid = wait_for_pid(&d.pid_path(), std::time::Duration::from_secs(10))
+        .expect("armed daemon must publish its PID");
+    assert!(
+        wait_for_node_state(
+            &d,
+            node_id,
+            NodeState::Running,
+            std::time::Duration::from_secs(10)
+        ),
+        "positive control: real composition must durably publish Running before SIGKILL"
+    );
+
+    let status = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status()
+        .expect("send SIGKILL");
+    assert!(status.success(), "SIGKILL command must succeed");
+    assert!(
+        wait_for_process_exit(pid, std::time::Duration::from_secs(10)),
+        "killed daemon must exit and release the singleton"
+    );
+
+    d.cmd()
+        .env("RUSTAIN_HOST_ID", "host-a")
+        .args(["daemon", "start"])
+        .assert()
+        .success()
+        .stdout(contains("Daemon started"));
+    assert!(
+        wait_for_node_state(
+            &d,
+            node_id,
+            NodeState::Suspended,
+            std::time::Duration::from_secs(10)
+        ),
+        "restart under singleton must recover the crashed node to Suspended"
+    );
+    assert_ne!(
+        latest_node_state(&d, node_id),
+        Some(NodeState::Running),
+        "mutant: restart must never leave a phantom Running node"
+    );
+    d.cmd().args(["daemon", "stop"]).assert().success();
 }
 
 #[test]

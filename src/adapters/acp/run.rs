@@ -15,7 +15,7 @@ use crate::domain::clock::{Clock, SystemClock};
 use crate::domain::events::AppEvent;
 use crate::domain::models::{AgentId, AppConfig, NodeState};
 use crate::domain::ports::AuthStorePort;
-use crate::infrastructure::subagent::node_tree::NodeTree;
+use crate::infrastructure::subagent::{NodeJournal, NodeTree};
 
 use super::agent::{
     AcpCoreFactory, CoreFactory, PermissionAsk, RustainAcpAgent, SessionNotify, SharedSessions,
@@ -126,7 +126,12 @@ where
     };
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_observer = tokio::spawn(observe_acp_events(event_rx));
-    let node_tree = NodeTree::with_event_tx(event_tx, now_fn);
+    let node_journal = Arc::new(NodeJournal::open_workspace(&workspace).await?);
+    let node_tree = NodeTree::with_event_tx(event_tx, now_fn)
+        .with_journal(node_journal)
+        .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+            &workspace,
+        ));
     let result = serve_acp_with_acp_core_factory_and_node_tree(
         outgoing,
         incoming,
@@ -161,7 +166,12 @@ where
     };
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let event_observer = tokio::spawn(observe_acp_events(event_rx));
-    let node_tree = NodeTree::with_event_tx(event_tx, now_fn);
+    let node_journal = Arc::new(NodeJournal::open_workspace(&workspace).await?);
+    let node_tree = NodeTree::with_event_tx(event_tx, now_fn)
+        .with_journal(node_journal)
+        .with_host_binding(crate::infrastructure::subagent::current_host_binding(
+            &workspace,
+        ));
     let acp_factory: AcpCoreFactory = Rc::new(move |cwd, mcp_servers| {
         core_factory(cwd, mcp_servers).map(crate::infrastructure::composition::AcpCore::from)
     });

@@ -206,15 +206,10 @@ pub async fn check_with_source_and_provenance(
         }
     }
 
+    let plan_file_exception = is_plan_file_write(tool_name, input, plan_file);
+
     // Step 3: Workspace restriction (file tools)
     if let Some((path_str, op)) = extract_file_path(tool_name, input) {
-        let plan_file_exception = plan_file.is_some_and(|plan| {
-            matches!(tool_name, "Write" | "Edit")
-                && input
-                    .get("file_path")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|path| std::path::Path::new(path) == plan)
-        });
         if !plan_file_exception
             && let Err(e) = security.check_workspace_access(std::path::Path::new(&path_str), op)
         {
@@ -241,12 +236,58 @@ pub async fn check_with_source_and_provenance(
     // Step 3.5: Mode × risk gating (AC1, AC7)
     let risk = risk_for_tool(tool_name, tools_port);
     let mode = security.current_mode();
+    mode_risk_decision(
+        mode,
+        risk,
+        plan_file_exception,
+        taint_requires_approval,
+        tool_name,
+        server_id,
+        path_hint,
+    )
+}
+
+/// Whether this is the permitted Write/Edit operation for the active plan file.
+fn is_plan_file_write(
+    tool_name: &str,
+    input: &serde_json::Value,
+    plan_file: Option<&std::path::Path>,
+) -> bool {
+    plan_file.is_some_and(|plan| {
+        matches!(tool_name, "Write" | "Edit")
+            && input
+                .get("file_path")
+                .and_then(|value| value.as_str())
+                .is_some_and(|path| std::path::Path::new(path) == plan)
+    })
+}
+
+/// Resolve the mode and risk gate after all hard-deny checks have passed.
+fn mode_risk_decision(
+    mode: PermissionMode,
+    risk: ToolRisk,
+    plan_file_exception: bool,
+    taint_requires_approval: bool,
+    tool_name: &str,
+    server_id: Option<String>,
+    path_hint: Option<String>,
+) -> PermissionDecision {
     match mode_risk_outcome(mode, risk) {
         Some(true) if taint_requires_approval => PermissionDecision::Prompt {
             server_id,
             path_hint,
         },
         Some(true) => PermissionDecision::Allow,
+        Some(false) if plan_file_exception && risk != ToolRisk::Blocked => {
+            if taint_requires_approval {
+                PermissionDecision::Prompt {
+                    server_id,
+                    path_hint,
+                }
+            } else {
+                PermissionDecision::Allow
+            }
+        }
         Some(false) => {
             let reason = match (mode, risk) {
                 (_, ToolRisk::Blocked) => format!("Tool '{}' is blocked", tool_name),
@@ -440,3 +481,62 @@ fn check_allowed_tools(tool_name: &str, active_skills: Option<&[ActiveSkill]>) -
 }
 
 // Tests moved to tests/security.rs to satisfy domain purity conformance test.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_file_write_decision_table_preserves_taint_and_blocked_denials() {
+        let plan_path = std::path::Path::new("/tmp/rustain-plan.md");
+        let input = serde_json::json!({
+            "file_path": plan_path.to_str().unwrap(),
+            "content": "updated plan",
+        });
+        let plan_file_exception = is_plan_file_write("Write", &input, Some(plan_path));
+        assert!(
+            plan_file_exception,
+            "the test input must target the plan file"
+        );
+
+        let cases = [
+            (
+                "untainted standard write",
+                ToolRisk::Standard,
+                false,
+                PermissionDecision::Allow,
+            ),
+            (
+                "tainted standard write",
+                ToolRisk::Standard,
+                true,
+                PermissionDecision::Prompt {
+                    server_id: None,
+                    path_hint: Some(plan_path.display().to_string()),
+                },
+            ),
+            (
+                "blocked file tool",
+                ToolRisk::Blocked,
+                false,
+                PermissionDecision::Deny("Tool 'Write' is blocked".to_string()),
+            ),
+        ];
+
+        for (name, risk, taint_requires_approval, expected) in cases {
+            assert_eq!(
+                mode_risk_decision(
+                    PermissionMode::Plan,
+                    risk,
+                    plan_file_exception,
+                    taint_requires_approval,
+                    "Write",
+                    None,
+                    Some(plan_path.display().to_string()),
+                ),
+                expected,
+                "{name}"
+            );
+        }
+    }
+}
