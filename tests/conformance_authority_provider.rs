@@ -1275,3 +1275,184 @@ async fn terminal_prune_requires_journal_proof_and_preserves_conservation() {
         "second prune must be a no-op"
     );
 }
+
+// ─── Story 17.2c (D4): durable ledger conservation head ───────────────────
+// Two crash keystones for the write-ahead conservation head. The rebuild+
+// recover models the ledger's restart transition (fresh ledger + replay from
+// the journal); the journal's own cross-process crash durability (fsync/flock/
+// torn-tail repair) is the 17-2a harness's job.
+
+struct FailOnceLedgerJournalSink {
+    fail_once: std::sync::atomic::AtomicBool,
+    records: tokio::sync::Mutex<Vec<rustain::domain::models::LedgerConservationRecord>>,
+}
+
+impl FailOnceLedgerJournalSink {
+    fn new() -> Self {
+        Self {
+            fail_once: std::sync::atomic::AtomicBool::new(true),
+            records: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn has_record(&self) -> bool {
+        !self.records.lock().await.is_empty()
+    }
+}
+
+#[async_trait::async_trait]
+impl rustain::domain::ports::LedgerJournalSink for FailOnceLedgerJournalSink {
+    async fn journal_conservation(
+        &self,
+        record: rustain::domain::models::LedgerConservationRecord,
+    ) -> Result<(), rustain::domain::ports::LedgerJournalError> {
+        if self
+            .fail_once
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(rustain::domain::ports::LedgerJournalError(
+                "injected flush failure".to_owned(),
+            ));
+        }
+        self.records.lock().await.push(record);
+        Ok(())
+    }
+}
+
+async fn journaled_conservation(
+    journal: &NodeJournal,
+) -> Vec<rustain::domain::models::LedgerConservationRecord> {
+    journal
+        .load()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.record {
+            rustain::domain::models::JournalRecord::LedgerConservation(record) => Some(record),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ledger_head_survives_crash_after_flush() {
+    // Keystone (b): a debit whose conservation head was flushed write-ahead
+    // SURVIVES a restart — spent budget does not reappear.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = CapabilityToken::r1_root(AgentId::root());
+    let root_id = root.id;
+    let full = root.budget;
+    {
+        let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let ledger =
+            AuthorityLedger::new(root.clone())
+                .with_journal_sink(journal.clone()
+                    as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>);
+        ledger
+            .consume(
+                &root_id,
+                Budget {
+                    requests: 3,
+                    cost_micros: 300,
+                },
+            )
+            .unwrap();
+        ledger
+            .journal_head()
+            .await
+            .expect("write-ahead flush before the would-be spawn");
+    } // ledger dropped == process death
+
+    let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+    let recovered = AuthorityLedger::new(root.clone());
+    recovered.recover_conservation(journaled_conservation(&journal).await);
+    let available = recovered.available(&root_id).unwrap();
+    assert_eq!(
+        available.requests,
+        full.requests - 3,
+        "flushed debit survives"
+    );
+    assert_eq!(
+        available.cost_micros,
+        full.cost_micros - 300,
+        "flushed debit survives"
+    );
+    // RED mutant: dropping the recovery replay leaves `available == full` — the
+    // spent budget resurrects.
+}
+
+#[tokio::test]
+async fn ledger_head_crash_before_flush_does_not_resurrect() {
+    // Keystone (a): a debit applied in memory but NOT flushed (crash between the
+    // in-memory apply and the write-ahead flush) leaves the recovered head
+    // consistent with what was externally observable — nothing was dispatched,
+    // so `available` is full. The debit simply never became durable.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = CapabilityToken::r1_root(AgentId::root());
+    let root_id = root.id;
+    let full = root.budget;
+    {
+        let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let ledger =
+            AuthorityLedger::new(root.clone())
+                .with_journal_sink(journal.clone()
+                    as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>);
+        ledger
+            .consume(
+                &root_id,
+                Budget {
+                    requests: 3,
+                    cost_micros: 300,
+                },
+            )
+            .unwrap();
+        // CRASH before journal_head(): the delta is staged, never flushed.
+    }
+
+    let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+    let recovered = AuthorityLedger::new(root.clone());
+    recovered.recover_conservation(journaled_conservation(&journal).await);
+    let available = recovered.available(&root_id).unwrap();
+    assert_eq!(
+        available.requests, full.requests,
+        "unflushed debit does not persist — consistent with no observable spawn"
+    );
+    assert_eq!(available.cost_micros, full.cost_micros);
+}
+
+#[tokio::test]
+async fn ledger_flush_failure_requeues_conservation_head() {
+    let root = CapabilityToken::r1_root(AgentId::root());
+    let root_id = root.id;
+    let sink = std::sync::Arc::new(FailOnceLedgerJournalSink::new());
+    let ledger = AuthorityLedger::new(root).with_journal_sink(
+        sink.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+    );
+
+    ledger
+        .consume(
+            &root_id,
+            Budget {
+                requests: 3,
+                cost_micros: 300,
+            },
+        )
+        .expect("stage a conservation head");
+    assert!(
+        ledger.journal_head().await.is_err(),
+        "a failed sink must block the write-ahead boundary"
+    );
+    assert!(
+        !sink.has_record().await,
+        "the injected failure must not falsely report persistence"
+    );
+
+    ledger
+        .journal_head()
+        .await
+        .expect("an unflushed head must remain available for retry");
+    assert!(
+        sink.has_record().await,
+        "the retry must persist the snapshot that the failed flush retained"
+    );
+}

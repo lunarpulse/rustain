@@ -1425,16 +1425,36 @@ pub async fn run() -> Result<()> {
             let root_authority = crate::domain::models::CapabilityToken::r1_root(
                 crate::domain::models::AgentId::root(),
             );
-            let authority_ledger = Arc::new(
-                crate::domain::services::authority_ledger::AuthorityLedger::new(
-                    root_authority.clone(),
-                ),
-            );
             let node_journal = Arc::new(
                 crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace_path)
                     .await
                     .expect("NodeJournal creation failed"),
             );
+            let authority_ledger = Arc::new(
+                crate::domain::services::authority_ledger::AuthorityLedger::new(
+                    root_authority.clone(),
+                )
+                .with_journal_sink(
+                    node_journal.clone() as Arc<dyn crate::domain::ports::LedgerJournalSink>
+                ),
+            );
+            // Story 17.2c (D4): restore the ledger conservation head from the
+            // durable journal so spent budget cannot silently reappear and a
+            // grant cannot be double-counted across a restart.
+            {
+                let records = node_journal
+                    .load()
+                    .await
+                    .expect("NodeJournal load for ledger recovery failed")
+                    .into_iter()
+                    .filter_map(|entry| match entry.record {
+                        crate::domain::models::JournalRecord::LedgerConservation(record) => {
+                            Some(record)
+                        }
+                        _ => None,
+                    });
+                authority_ledger.recover_conservation(records);
+            }
             // Construct subagent infrastructure first so trust-drop revoke can
             // route into cascade_kill (AC5): the provider holds an Arc<NodeTree>.
             let now_fn = {
@@ -1606,7 +1626,10 @@ pub async fn run() -> Result<()> {
                     orchestration_clock.clone(),
                     event_bus.clone(),
                 )
-                .with_journal(node_journal.clone()),
+                .with_journal(node_journal.clone())
+                .with_nodes(
+                    subagent_registry.clone() as Arc<dyn crate::domain::ports::SupervisedNodes>
+                ),
             );
             let recovered_occupancy = subagent_registry
                 .list()

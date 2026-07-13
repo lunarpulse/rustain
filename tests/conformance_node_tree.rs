@@ -523,8 +523,15 @@ fn test_import_site_count_pinned() {
     /// Story 14.7 added the ACP Self-session consumers. Story 17.1b adds two
     /// deliberate RemotePeer consumers: the transport-agnostic verified-frame
     /// handler and the daemon composition path that instantiates it. Story
-    /// 17.2a adds daemon startup recovery and the recovery fold itself.
-    const EXPECTED: usize = 15;
+    /// 17.2a adds daemon startup recovery and the recovery fold itself. Story
+    /// 17.2c adds the `SupervisedNodes` lifecycle seam: +1 for the
+    /// `domain/ports/supervised_nodes.rs` port (a `dyn` trait — its doc names
+    /// the type it fronts, NO concrete coupling) and +1 for `supervisor.rs`
+    /// (the AC2 keystone test constructs a real `NodeTree`; production still
+    /// holds only `Arc<dyn SupervisedNodes>`). The REAL boundary — domain/
+    /// executor import NO concrete `NodeTree` — is proven by
+    /// `test_domain_no_adapter_or_infra_imports` + `test_no_cross_adapter_imports`.
+    const EXPECTED: usize = 17;
 
     let src_files = collect_rs_files("src");
     assert!(!src_files.is_empty());

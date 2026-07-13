@@ -226,6 +226,10 @@ impl NodeRecovery {
                     resolved.entry(node).or_default().insert(correlation_id);
                 }
                 JournalRecord::HazardRaised { .. } => {}
+                // Ledger conservation head is recovered separately by
+                // `AuthorityLedger::recover_from_journal` (17-2c D4); this fold
+                // rebuilds node/room state only.
+                JournalRecord::LedgerConservation(_) => {}
                 // `load()` flattens atomic batches into individual records, so
                 // a `Batch` never reaches this fold; the arm is defensive.
                 JournalRecord::Batch(_) => {}

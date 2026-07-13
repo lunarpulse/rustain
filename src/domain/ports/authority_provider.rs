@@ -29,6 +29,8 @@ pub enum AuthorityError {
     NotFound,
     #[error("authority token malformed: {reason}")]
     Malformed { reason: &'static str },
+    #[error("authority ledger durability failure: {reason}")]
+    Durability { reason: String },
 }
 
 #[async_trait]

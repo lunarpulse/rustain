@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
 use crate::domain::models::{
     AgentId, Budget, CapabilityFlag, CapabilityToken, CapabilityTokenId, DelegateRequest,
-    JournaledTerminalCheckpoint, PeerId, PeerIdentity,
+    JournaledTerminalCheckpoint, LedgerConservationRecord, PeerId, PeerIdentity,
 };
 use crate::domain::ports::AuthorityError;
 
@@ -44,6 +44,10 @@ struct AuthorityState {
     /// proof is stashed so the last child's prune retries the parent. Without
     /// this, a parent settled before its children leaks in the map forever.
     pending_prune: BTreeMap<CapabilityTokenId, JournaledTerminalCheckpoint>,
+    /// Story 17.2c (D4): conservation-head snapshots staged under the lock,
+    /// awaiting a write-ahead flush through the `LedgerJournalSink`. Drained by
+    /// `journal_head`. Never pushed when no sink is attached.
+    outbox: Vec<LedgerConservationRecord>,
 }
 
 /// Synchronous authority ledger for Story 14.2.
@@ -57,6 +61,10 @@ struct AuthorityState {
 ///   node is terminated synchronously via `cascade_kill` in the same extent.
 pub struct AuthorityLedger {
     state: Mutex<AuthorityState>, // CONFORMANCE_EXCEPTION_STD_SYNC_LOCK: AuthorityState single-writer map; ADR-14-2-01
+    /// Story 17.2c (D4): durable conservation-head recorder. `Some` only after
+    /// `with_journal_sink` at the composition root. A `domain/ports` trait, so
+    /// `domain/services` still imports nothing from `infrastructure/`.
+    sink: Option<Arc<dyn crate::domain::ports::LedgerJournalSink>>,
 }
 impl AuthorityLedger {
     /// Construct a ledger for a signed authority root and register the sole
@@ -139,6 +147,101 @@ impl AuthorityLedger {
         );
         Self {
             state: Mutex::new(state),
+            sink: None,
+        }
+    }
+
+    /// Bind the durable conservation-head recorder (Story 17.2c / D4). Mirrors
+    /// `Supervisor::with_journal`; called at the composition root before the
+    /// ledger is shared. The ledger stays synchronous — the sink is touched only
+    /// by the async `journal_head` flush, never under the state lock.
+    #[must_use]
+    pub fn with_journal_sink(
+        mut self,
+        sink: Arc<dyn crate::domain::ports::LedgerJournalSink>,
+    ) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    fn snapshot_of(entry: &LedgerEntry) -> LedgerConservationRecord {
+        LedgerConservationRecord {
+            token: entry.token.id,
+            total: entry.total,
+            available: entry.available,
+            consumed: entry.consumed,
+            uses_remaining: entry.uses_remaining,
+            settled: entry.settled,
+            revoked: entry.revoked,
+        }
+    }
+
+    /// Stage the conservation head of `id` and its ancestor chain into the
+    /// outbox for a later write-ahead flush (17-2c D4). Walking to the root
+    /// captures the settle-propagation that rolls a child's consumption up to
+    /// its parents, so the ROOT head (always present after a restart) reflects
+    /// every settled descendant. No-op unless a sink is attached, so the
+    /// 49-assertion conservation matrix (no sink) is behaviorally untouched.
+    fn stage_head_locked(state: &mut AuthorityState, id: &CapabilityTokenId) {
+        let mut current = Some(*id);
+        while let Some(token_id) = current {
+            let (snapshot, parent) = match state.entries.get(&token_id) {
+                Some(entry) => (Self::snapshot_of(entry), entry.token.parent),
+                None => break,
+            };
+            current = parent;
+            state.outbox.push(snapshot);
+        }
+    }
+
+    /// Write-ahead flush (17-2c D4). Drains the staged conservation records and
+    /// journals each through the sink OUTSIDE the state lock (so
+    /// `clippy::await_holding_lock` stays clean and the leaf lock never
+    /// `.await`s). Callers invoke this after a budget/grant mutation, BEFORE the
+    /// side-effect (spawn/settle) is externally observable. NOT a background
+    /// drain — the caller awaits it (party ruling fork 2: a drain window would
+    /// resurrect spent budget / double-count a grant on recovery).
+    pub async fn journal_head(&self) -> Result<(), crate::domain::ports::LedgerJournalError> {
+        let Some(sink) = self.sink.clone() else {
+            return Ok(());
+        };
+        let mut pending = {
+            let mut state = self.lock_state();
+            std::mem::take(&mut state.outbox).into_iter()
+        };
+        while let Some(record) = pending.next() {
+            if let Err(error) = sink.journal_conservation(record.clone()).await {
+                let mut unflushed = Vec::with_capacity(pending.len() + 1);
+                unflushed.push(record);
+                unflushed.extend(pending);
+                let mut state = self.lock_state();
+                unflushed.append(&mut state.outbox);
+                state.outbox = unflushed;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Recovery replay (17-2c D4): restore each token's conservation head from
+    /// the journaled snapshots (latest per token wins — records arrive in
+    /// journal order). Idempotent; a snapshot for a token absent from the fresh
+    /// ledger (a dead child never re-delegated) is skipped — its budget is
+    /// reclaimed, which fails safe. The root head, always present, is restored
+    /// so spent budget cannot silently reappear across a restart.
+    pub fn recover_conservation(
+        &self,
+        records: impl IntoIterator<Item = LedgerConservationRecord>,
+    ) {
+        let mut state = self.lock_state();
+        for record in records {
+            if let Some(entry) = state.entries.get_mut(&record.token) {
+                entry.available = record.available;
+                entry.consumed = record.consumed;
+                entry.uses_remaining = record.uses_remaining;
+                entry.settled = record.settled;
+                entry.revoked = record.revoked;
+            }
         }
     }
 
@@ -249,6 +352,9 @@ impl AuthorityLedger {
             },
         );
 
+        if self.sink.is_some() {
+            Self::stage_head_locked(&mut state, &child.id);
+        }
         Ok(child)
     }
 
@@ -359,6 +465,9 @@ impl AuthorityLedger {
         if let Some(ref mut uses) = entry.uses_remaining {
             *uses = uses.saturating_sub(1);
         }
+        if self.sink.is_some() {
+            Self::stage_head_locked(&mut state, id);
+        }
         Ok(())
     }
 
@@ -388,7 +497,11 @@ impl AuthorityLedger {
 
     pub fn settle(&self, id: &CapabilityTokenId) -> Result<(), AuthorityError> {
         let mut state = self.lock_state();
-        Self::settle_locked(&mut state, id)
+        Self::settle_locked(&mut state, id)?;
+        if self.sink.is_some() {
+            Self::stage_head_locked(&mut state, id);
+        }
+        Ok(())
     }
 
     /// Bounded-memory GC guarded by an fsynced terminal-checkpoint proof.
@@ -479,6 +592,9 @@ impl AuthorityLedger {
         }
         if let Some(ref mut uses) = entry.uses_remaining {
             *uses -= 1;
+        }
+        if self.sink.is_some() {
+            Self::stage_head_locked(&mut state, id);
         }
         Ok(())
     }

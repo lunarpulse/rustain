@@ -246,6 +246,25 @@ pub enum CascadeKillError {
     Durability(String),
 }
 
+/// Story 17.2c: the narrow lifecycle seam the `Supervisor` reaches through
+/// (see `domain/ports/supervised_nodes.rs` + ADR-17-2c-01). A thin forward
+/// onto the existing `cascade_kill` — NO second cascade path.
+#[async_trait::async_trait]
+impl crate::domain::ports::SupervisedNodes for NodeTree {
+    async fn cascade_kill(
+        &self,
+        root: &AgentId,
+        timeout_per_node: Duration,
+    ) -> Result<Vec<AgentId>, crate::domain::ports::SupervisedNodesError> {
+        use crate::domain::ports::SupervisedNodesError;
+        match NodeTree::cascade_kill(self, root, timeout_per_node).await {
+            Ok(killed) => Ok(killed),
+            Err(CascadeKillError::NotFound(id)) => Err(SupervisedNodesError::NotFound(id)),
+            Err(error) => Err(SupervisedNodesError::Internal(error.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OwnerCommandError {
     #[error("agent not found: {0:?}")]

@@ -599,6 +599,13 @@ impl ForkJoinExecutor {
         self.ledger
             .consume(&self.root_authority.id, SYNTHESIS_RESERVE)
             .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
+        // [17-2c / D4] Write-ahead: the reserve debit's conservation head is
+        // flushed to the journal BEFORE any spoke is dispatched (the observable
+        // side-effect), so a crash cannot resurrect the reserved budget.
+        self.ledger
+            .journal_head()
+            .await
+            .map_err(|error| OrchestrationError::Internal(error.to_string()))?;
 
         // [F7] Park downstream nodes now that every early-exit gate (budget,
         // mint, reserve) has passed — a refusal above can no longer orphan a
@@ -826,6 +833,34 @@ impl ForkJoinExecutor {
                 self.emit(AppEvent::SpokeCompleted { agent_id, label });
             }
             while join_set.join_next().await.is_some() {}
+
+            // [17-2c / D7 / R10] Deterministic whole-fan-out cancel. Once this
+            // wave's spoke tasks have joined, if the wave was aborted drive
+            // every LAUNCHED spoke's subtree terminal-`Cancelled` + deregistered
+            // through the supervisor seam (R6: executor → `abort_wave` → port,
+            // NEVER executor → port). The cooperative wave-cancel already freed
+            // capacity by cancel-by-drop; this makes the running subtree terminal
+            // deterministic + awaited, so no running child (or transitive
+            // descendant) is left non-terminal or registered after the abort.
+            // `NotFound` (never launched, or already reaped by the runner bridge)
+            // is benign — that node is already terminal-journaled.
+            if wave_cancel.is_cancelled() {
+                let running_roots: Vec<AgentId> = wave_indices
+                    .iter()
+                    .filter_map(|&index| {
+                        outcomes[index]
+                            .as_ref()
+                            .map(|(agent_id, _)| agent_id.clone())
+                    })
+                    .collect();
+                self.supervisor
+                    .abort_wave(
+                        &wave_cancel,
+                        running_roots,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await;
+            }
 
             let wave_outcome = if wave_cancel.is_cancelled() {
                 WaveOutcome::Cancelled

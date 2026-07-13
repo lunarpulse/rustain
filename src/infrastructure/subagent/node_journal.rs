@@ -308,6 +308,24 @@ impl NodeJournal {
     }
 }
 
+/// Story 17.2c (D4): the ledger's durable conservation-head recorder. Each
+/// snapshot is written as its OWN single-record atomic batch (fsynced under the
+/// cross-process flock, torn-tail-safe like every other record), so a caller's
+/// write-ahead flush is all-or-nothing. Reuses the D2 batch primitive — no
+/// second log.
+#[async_trait::async_trait]
+impl crate::domain::ports::LedgerJournalSink for NodeJournal {
+    async fn journal_conservation(
+        &self,
+        record: crate::domain::models::LedgerConservationRecord,
+    ) -> Result<(), crate::domain::ports::LedgerJournalError> {
+        self.append_atomic_batch(vec![JournalRecord::LedgerConservation(record)])
+            .await
+            .map(|_| ())
+            .map_err(|error| crate::domain::ports::LedgerJournalError(error.to_string()))
+    }
+}
+
 /// Repair a torn trailing record (only the last line can be partial in an
 /// append log), then append `records` with a freshly re-derived sequence.
 /// The caller MUST hold the exclusive file lock.

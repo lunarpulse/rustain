@@ -154,7 +154,8 @@ pub use message::{
 };
 #[allow(unused_imports)]
 pub use node_journal::{
-    JournalEntry, JournalRecord, JournaledTerminalCheckpoint, NODE_JOURNAL_SCHEMA_VERSION,
+    JournalEntry, JournalRecord, JournaledTerminalCheckpoint, LedgerConservationRecord,
+    NODE_JOURNAL_SCHEMA_VERSION,
 };
 #[allow(unused_imports)]
 pub use node_state::{NodeState, NodeStateError};

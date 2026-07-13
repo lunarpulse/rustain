@@ -108,6 +108,12 @@ pub struct Supervisor {
     /// the recovered nodes reach terminal — the fix for the permanent shrink.
     /// Permit state itself is never journaled (ruling R3).
     recovered: Arc<Mutex<Vec<OwnedSemaphorePermit>>>,
+    /// Story 17.2c (D7): the narrow lifecycle seam. `Some` only after
+    /// `with_nodes` at the composition root; whole-fan-out cancel drives
+    /// `cascade_kill` through this `dyn` port, NEVER a concrete `NodeTree`
+    /// (ADR-17-2c-01). Injected into the supervisor
+    /// only, never the read projection (NFR70d).
+    nodes: Option<Arc<dyn crate::domain::ports::SupervisedNodes>>,
     #[cfg(any(test, feature = "test-instrumentation"))]
     revive_wakes: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -137,6 +143,7 @@ impl Supervisor {
             rate: Arc::new(Mutex::new(RateState::default())),
             readiness: Arc::new(Mutex::new(ReadinessState::default())),
             recovered: Arc::new(Mutex::new(Vec::new())),
+            nodes: None,
             #[cfg(any(test, feature = "test-instrumentation"))]
             revive_wakes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -150,6 +157,14 @@ impl Supervisor {
         journal: Arc<crate::infrastructure::subagent::NodeJournal>,
     ) -> Self {
         self.journal = Some(journal);
+        self
+    }
+
+    /// Bind the lifecycle seam (Story 17.2c / D7). Called before the supervisor
+    /// is wrapped in `Arc` at the composition root, mirroring `with_journal`.
+    #[must_use]
+    pub fn with_nodes(mut self, nodes: Arc<dyn crate::domain::ports::SupervisedNodes>) -> Self {
+        self.nodes = Some(nodes);
         self
     }
 
@@ -175,6 +190,7 @@ impl Supervisor {
             rate: Arc::clone(&self.rate),
             readiness: Arc::clone(&self.readiness),
             recovered: Arc::clone(&self.recovered),
+            nodes: self.nodes.clone(),
             #[cfg(any(test, feature = "test-instrumentation"))]
             revive_wakes: Arc::clone(&self.revive_wakes),
         }
@@ -469,6 +485,34 @@ impl Supervisor {
     pub async fn release_recovered_occupancy(&self) {
         self.recovered.lock().await.clear();
     }
+
+    /// Abort a whole fan-out wave (Story 17.2c / D7 / R10). Fires the wave-cancel
+    /// root token — every parked `acquire()` future drops (queue slots free) and
+    /// every child token in the tree is cancelled (native cancel-by-drop) — then
+    /// drives each RUNNING subtree root terminal-`Cancelled` through the seam so
+    /// every node lands journaled-`Cancelled` + deregistered (17-2b R7). Awaited,
+    /// so the caller knows the subtree is terminal before it returns. `NotFound`
+    /// is benign (a root that was never launched / already reaped). The executor
+    /// calls THIS, never the port directly (17-2b R6).
+    pub async fn abort_wave(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+        running_roots: impl IntoIterator<Item = AgentId>,
+        timeout_per_node: std::time::Duration,
+    ) {
+        cancel.cancel();
+        let Some(nodes) = &self.nodes else {
+            return;
+        };
+        for root in running_roots {
+            match nodes.cascade_kill(&root, timeout_per_node).await {
+                Ok(_) | Err(crate::domain::ports::SupervisedNodesError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %root, "abort_wave cascade_kill failed");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -506,6 +550,130 @@ mod tests {
             Arc::new(EventBus::new(32).0),
         );
         (supervisor, clock, coordinator)
+    }
+
+    /// AC2 integrated keystone (17-2c / D7 / R10): a wave-abort drives every
+    /// RUNNING subtree node terminal-`Cancelled` (journaled) + deregistered
+    /// THROUGH the `SupervisedNodes` seam, AND the parked acquirer's queue slot
+    /// is reclaimed — the two halves 17-2b proved separately, now in ONE flow.
+    /// RED mutant: an `abort_wave` that fires the cancel but never cascades
+    /// leaves the running node non-terminal / still registered (both asserted).
+    #[tokio::test]
+    async fn abort_wave_cancels_running_subtree_and_reclaims_capacity() {
+        use crate::domain::models::{CapabilityTokenId, NodeState};
+        use crate::infrastructure::subagent::{
+            AgentHandle, MailboxBudget, NodeJournal, NodeTree, current_host_binding,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let tree = Arc::new(
+            NodeTree::new()
+                .with_journal(journal.clone())
+                .with_host_binding(current_host_binding(tmp.path())),
+        );
+
+        // A wave-1 "running" node registered in the tree. A closed command
+        // channel makes cascade_kill take its already-terminal arm: journal
+        // Cancelled + deregister (node_tree.rs channel-closed path).
+        let running = AgentId::new();
+        let handle = {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            let (status_tx, _srx) = tokio::sync::watch::channel(NodeState::Created);
+            let (_mtx, metrics_rx) = tokio::sync::watch::channel(
+                crate::domain::models::agent_node::AgentMetrics::default(),
+            );
+            AgentHandle {
+                isolated: false,
+                agent_id: running.clone(),
+                token: CapabilityTokenId::nil(),
+                command_tx: tx,
+                cancel_token: CancellationToken::new(),
+                depth: 1,
+                subagent_type: "wave1".into(),
+                spawned_at: 0,
+                status: status_tx,
+                metrics: metrics_rx,
+                mailbox_budget: MailboxBudget::new(),
+            }
+        };
+        tree.register(running.clone(), AgentId::root(), handle)
+            .await
+            .unwrap();
+        tree.set_state(&running, NodeState::Running).await;
+
+        let (supervisor, _clock, coordinator) = supervisor(1, 1);
+        let supervisor = Arc::new(
+            supervisor
+                .with_journal(journal.clone())
+                .with_nodes(tree.clone() as Arc<dyn crate::domain::ports::SupervisedNodes>),
+        );
+
+        // Wave-1 holds the single running permit.
+        let held = supervisor
+            .admit(&coordinator, "wave1", Budget::default())
+            .await
+            .unwrap()
+            .expect("wave1 admits");
+        assert_eq!(supervisor.available_running_permits(), 0);
+
+        // A parked wave-2 acquirer blocks in admit() holding the one queue slot.
+        let cancel = CancellationToken::new();
+        let (sup2, coord2, cancel2) =
+            (Arc::clone(&supervisor), coordinator.clone(), cancel.clone());
+        let parked = tokio::spawn(async move {
+            tokio::select! {
+                r = sup2.admit(&coord2, "wave2", Budget::default()) => { let _ = r; }
+                _ = cancel2.cancelled() => {}
+            }
+        });
+        // Deterministically wait until the parked acquirer has taken the slot.
+        for _ in 0..1_000 {
+            if supervisor.available_wait_slots() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            supervisor.available_wait_slots(),
+            0,
+            "parked acquirer holds the queue slot"
+        );
+
+        // ── ABORT the whole fan-out through the seam ──
+        supervisor
+            .abort_wave(
+                &cancel,
+                vec![running.clone()],
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        parked.await.unwrap();
+        drop(held); // wave-1's permit drops (cancel-by-drop, as the real spoke task would)
+
+        // (a) running subtree node is terminal-Cancelled IN THE JOURNAL.
+        let terminal = journal
+            .journaled_terminal(&running)
+            .await
+            .unwrap()
+            .expect("running node has a terminal checkpoint after abort");
+        assert_eq!(
+            terminal.checkpoint().state,
+            NodeState::Cancelled,
+            "abort_wave drove the running node terminal-Cancelled"
+        );
+        // (b) deregistered from the tree.
+        assert!(
+            tree.list()
+                .await
+                .iter()
+                .all(|entry| entry.agent_id != running),
+            "cascaded node is deregistered"
+        );
+        // (c) all capacity reclaimed (queue slot + running permit back to baseline).
+        assert_eq!(supervisor.available_wait_slots(), 1);
+        assert_eq!(supervisor.available_running_permits(), 1);
     }
 
     #[tokio::test]

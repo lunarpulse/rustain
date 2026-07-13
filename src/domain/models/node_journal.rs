@@ -49,6 +49,24 @@ impl JournaledTerminalCheckpoint {
     }
 }
 
+/// Story 17.2c (D4): a durable snapshot of one capability token's conservation
+/// head — the budget/grant state that must survive a restart so spent budget
+/// cannot silently reappear and a grant cannot be double-counted. Journaled
+/// write-ahead (before the causing mutation's side-effect is observable) and
+/// replayed idempotently on recovery (latest snapshot per token wins). The
+/// ledger stays synchronous (ADR-14-2-01); durability lives in the caller's
+/// write-ahead flush + this record, not in the lock.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LedgerConservationRecord {
+    pub token: crate::domain::models::CapabilityTokenId,
+    pub total: crate::domain::models::Budget,
+    pub available: crate::domain::models::Budget,
+    pub consumed: crate::domain::models::Budget,
+    pub uses_remaining: Option<u32>,
+    pub settled: bool,
+    pub revoked: bool,
+}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "payload")]
@@ -92,6 +110,10 @@ pub enum JournalRecord {
         waiting_since: i64,
         dwell_ms: i64,
     },
+    /// Story 17.2c (D4): a durable ledger conservation-head snapshot for one
+    /// token, journaled write-ahead on each budget/grant mutation so the head
+    /// survives a restart. Replayed idempotently on recovery.
+    LedgerConservation(LedgerConservationRecord),
     /// An atomic multi-record group written as ONE journal line. Because a torn
     /// write of a single JSONL line is discarded by the torn-tail repair, a
     /// crash can never persist a PARTIAL group — the whole cascade of terminal

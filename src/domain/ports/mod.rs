@@ -28,6 +28,7 @@ mod context_assembler;
 mod event_emitter;
 #[allow(unused_imports)]
 mod isolation_provider;
+mod ledger_journal_sink;
 #[allow(unused_imports)]
 mod memory;
 #[allow(unused_imports)]
@@ -60,6 +61,7 @@ mod skill_exposure;
 mod storage;
 #[allow(unused_imports)]
 mod subagent_runner;
+mod supervised_nodes;
 #[allow(unused_imports)]
 mod tool_exposure;
 #[allow(unused_imports)]
@@ -91,6 +93,7 @@ pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
 pub use isolation_provider::IsolationProvider;
+pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
 pub use memory::MemoryPort;
 pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
 pub use persona::PersonaPort;
@@ -104,6 +107,7 @@ pub use security::SecurityPort;
 pub use session_holder::{HeldSession, HolderState, SessionHolderPort};
 pub use session_port::SessionPort;
 pub use subagent_runner::SubagentRunner;
+pub use supervised_nodes::{SupervisedNodes, SupervisedNodesError};
 pub use wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 pub mod search;
 pub use search::{IndexableItem, MetaSearchEngine, MetaSearchError};
