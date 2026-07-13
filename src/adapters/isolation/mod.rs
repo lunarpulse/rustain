@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -11,6 +12,7 @@ use crate::domain::ports::IsolationProvider;
 #[derive(Clone)]
 pub struct CowIsolationProvider {
     clock: Arc<dyn Clock>,
+    periodic_reaper_started: Arc<AtomicBool>,
 }
 
 impl Default for CowIsolationProvider {
@@ -21,7 +23,10 @@ impl Default for CowIsolationProvider {
 
 impl CowIsolationProvider {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
-        Self { clock }
+        Self {
+            clock,
+            periodic_reaper_started: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// Wall clock read through the injected `Clock`, converted to `u64` ms at
@@ -41,6 +46,29 @@ impl CowIsolationProvider {
     fn select_backend(&self) -> Result<ProvisioningTier, IsolationError> {
         Ok(ProvisioningTier::ScratchCopy)
     }
+
+    fn ensure_periodic_reaper(&self) {
+        if self
+            .periodic_reaper_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let started = self.periodic_reaper_started.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if tokio::task::spawn_blocking(reap_dead_owned_scratch)
+                    .await
+                    .is_err()
+                {
+                    started.store(false, Ordering::Release);
+                    break;
+                }
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -57,17 +85,30 @@ impl IsolationProvider for CowIsolationProvider {
             Err(err) => return Err(err),
         };
 
-        // §3.7 #8 (orphan-cleanup): R1 ships NO reaper — a crashed/killed run
-        // can leak `rustain-isolation-*` dirs. Orphan hygiene (reap stale dirs
-        // by nonce/age on `start`, with a sibling NON-owned dir surviving the
-        // sweep) is deferred to R2; `TempDir`'s own `Drop` covers the normal +
-        // panic-terminal teardown paths. (DD4 #8 — accepted R1 residual.)
+        // Liveness-scoped orphan hygiene: only directories carrying our
+        // ownership marker are considered, and a live PID is never age-reaped.
+        tokio::task::spawn_blocking(reap_dead_owned_scratch)
+            .await
+            .map_err(|join_err| IsolationError::FailClosed {
+                reason: format!("orphan reaper task failed: {join_err}"),
+            })?;
+        self.ensure_periodic_reaper();
         let temp_dir = tempfile::Builder::new()
             .prefix("rustain-isolation-")
             .tempdir()
             .map_err(|source| IsolationError::FailClosed {
                 reason: format!("failed to create scratch dir: {source}"),
             })?;
+        // Publish ownership immediately after allocation, before any expensive
+        // copy work: a SIGKILL at any later point leaves a reapable record.
+        tokio::fs::write(
+            temp_dir.path().join(OWNER_MARKER),
+            format!("{}\n{}\n", std::process::id(), PROCESS_NONCE.as_str()),
+        )
+        .await
+        .map_err(|source| IsolationError::FailClosed {
+            reason: format!("failed to write scratch ownership marker: {source}"),
+        })?;
 
         // Copy on a blocking thread — `copy_dir_recursive` is fully recursive
         // sync I/O and must not stall a tokio worker on a real workspace
@@ -110,21 +151,15 @@ impl IsolationProvider for CowIsolationProvider {
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
-        // R1 fidelity bar is low (the delta is inert — never applied). We keep
-        // a `String` body for serde round-trip; invalid UTF-8 (binary diffs,
-        // raw-byte filenames with `core.quotePath` off) is lossy-converted and
-        // WARNED so it is never SILENTLY corrupted. R2 should move `UnifiedDiff`
-        // to `Vec<u8>` for true byte-fidelity. (P13)
-        let stdout = output.stdout;
-        if std::str::from_utf8(&stdout).is_err() {
-            tracing::warn!(
-                "isolation diff contained non-UTF-8 bytes; lossy-converted (R1 inert delta; R2 -> Vec<u8>)"
-            );
-        }
-        Ok(UnifiedDiff::new(
-            h.backend(),
-            String::from_utf8_lossy(&stdout).into_owned(),
-        ))
+        // Merge-back is write-capable, so lossy conversion is forbidden:
+        // corrupting a path or hunk and then applying it would violate the
+        // reviewed artifact. Git quotes non-UTF-8 paths by default; if a caller
+        // disables that protection and raw bytes remain, fail closed.
+        let diff =
+            String::from_utf8(output.stdout).map_err(|error| IsolationError::FailClosed {
+                reason: format!("git diff output was not valid UTF-8: {error}"),
+            })?;
+        Ok(UnifiedDiff::new(h.backend(), diff))
     }
 
     async fn stop(&self, h: IsolationHandle) -> Result<(), IsolationError> {
@@ -158,6 +193,60 @@ impl IsolationProvider for CowIsolationProvider {
     }
 }
 
+const SCRATCH_PREFIX: &str = "rustain-isolation-";
+const OWNER_MARKER: &str = ".rustain-isolation-owner";
+static PROCESS_NONCE: LazyLock<String> = LazyLock::new(|| nanoid::nanoid!(24));
+
+fn reap_dead_owned_scratch() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with(SCRATCH_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(marker) = std::fs::read_to_string(path.join(OWNER_MARKER)) else {
+            continue;
+        };
+        let mut lines = marker.lines();
+        let Some(pid) = lines.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(nonce) = lines.next() else {
+            continue;
+        };
+        let same_live_process = pid == std::process::id() && nonce == PROCESS_NONCE.as_str();
+        if same_live_process || (pid != std::process::id() && process_is_live(pid)) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            tracing::warn!(path = %path.display(), %error, "failed to reap dead owned isolation scratch");
+        } else {
+            tracing::info!(path = %path.display(), pid, "reaped dead owned isolation scratch");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn process_is_live(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 performs no mutation; it only asks the kernel whether
+    // the process exists and whether this process may signal it.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_is_live(_pid: u32) -> bool {
+    // Conservative fallback: unsupported platforms never delete another
+    // process's owned workspace.
+    true
+}
+
 /// Directories never copied into the scratch clone (build output, heavy vendor
 /// trees, editor cruft). Keeps the clone proportional to what the child edits
 /// and bounds copy cost (P14).
@@ -188,9 +277,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path, root: &Path) -> Result<(), Isolati
         })?;
         let path = entry.path();
         let name = entry.file_name();
-        // Exclude `.git` (the clone gets its own fresh repo) and build-output
-        // dirs (P14).
-        if name == ".git" || path == root.join(".git") {
+        // Exclude `.git` (the clone gets its own fresh repo; excluded at every
+        // depth), the source ROOT's ownership marker only (the destination
+        // publishes its own; a nested user file of the same name is preserved),
+        // and build-output dirs (P14).
+        if name == ".git" || path == root.join(OWNER_MARKER) || path == root.join(".git") {
             continue;
         }
         if path.is_dir() && SKIP_DIR_NAMES.iter().any(|d| *d == name.to_string_lossy()) {
@@ -391,6 +482,37 @@ mod tests {
         assert!(
             diff.diff.contains("brand_new.txt"),
             "new file missing from delta (P2 regression)"
+        );
+        provider.stop(handle).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_capable_diff_fails_closed_on_non_utf8_output() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let parent = tempfile::TempDir::new().unwrap();
+        std::fs::write(parent.path().join("tracked.txt"), "one\n").unwrap();
+        let provider = CowIsolationProvider::new(Arc::new(MockClock::at_wall_ms(1)));
+        let handle = provider.start(parent.path()).await.unwrap();
+        let config = Command::new("git")
+            .args(["config", "core.quotePath", "false"])
+            .current_dir(handle.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(config.status.success());
+        std::fs::write(
+            handle.path().join(OsStr::from_bytes(b"invalid-\xff.txt")),
+            "body\n",
+        )
+        .unwrap();
+
+        let error = provider.diff(&handle).await.unwrap_err();
+        assert!(
+            matches!(error, IsolationError::FailClosed { ref reason } if reason.contains("not valid UTF-8")),
+            "write-capable merge-back must reject, never lossy-convert, an invalid diff: {error}"
         );
         provider.stop(handle).await.unwrap();
     }

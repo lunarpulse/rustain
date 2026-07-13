@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 /// Ephemeral in-process scratch workspace handle.
 ///
 /// The live temporary directory is intentionally not serializable and never
-/// persisted. R2 merge-back consumes the durable [`UnifiedDiff`], not this
-/// handle.
+/// persisted. Merge-back consumes the durable, review-gated [`UnifiedDiff`],
+/// not this handle.
 pub struct IsolationHandle {
     temp_dir: Option<tempfile::TempDir>,
     path: PathBuf,

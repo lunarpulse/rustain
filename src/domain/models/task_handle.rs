@@ -28,13 +28,21 @@ pub struct TaskHandle {
     /// collector then records an honest `Empty` for a "completed" spoke that
     /// produced no capturable yield.
     pub yield_rx: Option<mpsc::Receiver<String>>,
-    /// Optional isolation-delta channel (Story 14.5 AC2 / DD3). When `Some`,
-    /// the runner captured the isolated child's `UnifiedDiff` on terminal and
-    /// sends it here; the fork-join collector drains it (bounded await) and
-    /// inserts into `ForkJoinRun::delta_store[agent_id]` — the NFR68
-    /// capturable-but-inert seam (write-only in R1; read by nobody until R2).
-    /// `None` for non-isolated children.
+    /// Optional isolation-delta channel. When `Some`, the runner captured the
+    /// isolated child's `UnifiedDiff` on terminal and sends it here; the
+    /// fork-join collector drains it into `ForkJoinRun::delta_store[agent_id]`.
+    /// Story 17.3b promotes every non-empty delta to a pending, review-gated
+    /// `ArtifactKind::Patch`. `None` for non-isolated children.
     pub isolation_diff_rx: Option<oneshot::Receiver<UnifiedDiff>>,
+    /// Effective filesystem root visible to this child. Nested isolated
+    /// launches clone this path, never the process-wide One-Ring root.
+    pub effective_workspace: std::path::PathBuf,
+    /// Capability identity of the producing child; patch artifacts reuse it as
+    /// their filesystem-sandbox authority.
+    pub authority: crate::domain::models::CapabilityTokenId,
+    /// Provenance derived by the real launch seam: direct root launches are
+    /// user-originated, nested agent launches are self-originated/tainted.
+    pub patch_provenance: crate::domain::models::ProvenanceTag,
 }
 
 /// Owner-issued operations on a running subagent. Story 10.4 consumes this; Story 10.2 wires panel keybinds.

@@ -47,6 +47,9 @@ impl SubagentRunner for StubSubagentRunner {
             parent_disconnect,
             yield_rx: None,
             isolation_diff_rx: None,
+            effective_workspace: std::path::PathBuf::from("."),
+            authority: rustain::domain::models::CapabilityTokenId::root(),
+            patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
         })
     }
 }

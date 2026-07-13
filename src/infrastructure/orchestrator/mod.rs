@@ -23,10 +23,12 @@
 //! defeat was validating the root token, which always passes).
 
 mod dag;
+mod merge_back;
 mod result_contract;
 mod result_store;
 mod window;
 
+pub use merge_back::{MergeBackError, PatchMergeBack};
 pub use result_contract::{
     SPOKE_SUMMARY_MAX_BYTES, SpokeYield, YieldError, first_paragraph, retry_on_schema_failure,
     salvage_on_cancel, spoke_summary, validate_yield,
@@ -127,6 +129,9 @@ pub struct ForkJoinExecutor {
     supervisor: Arc<Supervisor>,
     artifact_store: Option<Arc<dyn ArtifactStore>>,
     artifact_host: Option<HostBinding>,
+    /// First durable consumer of isolated-child deltas. When bound, every
+    /// non-empty delta is promoted to a pending Patch artifact.
+    patch_merge_back: Option<Arc<PatchMergeBack>>,
     /// The root/coordinator authority token — the mint point for per-spoke
     /// gate-tokens. In R1 the coordinator IS the root agent.
     root_authority: CapabilityToken,
@@ -178,6 +183,7 @@ impl ForkJoinExecutor {
             journal: None,
             artifact_store: None,
             artifact_host: None,
+            patch_merge_back: None,
             wave_generation: std::sync::atomic::AtomicU64::new(0),
             rerun_reservations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
@@ -208,6 +214,13 @@ impl ForkJoinExecutor {
     pub fn with_artifact_store(mut self, store: Arc<dyn ArtifactStore>, host: HostBinding) -> Self {
         self.artifact_store = Some(store);
         self.artifact_host = Some(host);
+        self
+    }
+
+    /// Bind the write-capable CoW merge-back service.
+    #[must_use]
+    pub fn with_patch_merge_back(mut self, service: Arc<PatchMergeBack>) -> Self {
+        self.patch_merge_back = Some(service);
         self
     }
 
@@ -623,6 +636,8 @@ impl ForkJoinExecutor {
             std::collections::HashMap::<AgentId, crate::domain::models::UnifiedDiff>::new();
         let mut artifact_by_spoke =
             std::collections::HashMap::<AgentId, crate::domain::models::ArtifactRef>::new();
+        let mut patch_by_agent =
+            std::collections::HashMap::<AgentId, crate::domain::models::ArtifactRef>::new();
 
         'waves: for wave_indices in &topological_waves {
             if wave_cancel.is_cancelled() {
@@ -697,6 +712,8 @@ impl ForkJoinExecutor {
                                 result: SpokeResult::Cancelled,
                                 body: String::new(),
                                 isolation_diff: None,
+                                patch_authority: None,
+                                patch_provenance: None,
                             }).await;
                             return;
                         }
@@ -727,16 +744,34 @@ impl ForkJoinExecutor {
                     let launched =
                         dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child)
                             .await;
-                    let (agent_id, label, result, body, isolation_diff) = match launched {
+                    let (
+                        agent_id,
+                        label,
+                        result,
+                        body,
+                        isolation_diff,
+                        patch_authority,
+                        patch_provenance,
+                    ) = match launched {
                         Ok(mut handle) => {
                             let agent_id = handle.agent_id.clone();
                             let label = spoke.label.clone();
+                            let patch_authority = handle.authority;
+                            let patch_provenance = handle.patch_provenance;
                             let (terminal, raw, isolation_diff) =
                                 collect_terminal(&mut handle, clock.as_ref(), dispatched_at_ms)
                                     .await;
                             let (result, body) =
                                 structured_result(&terminal, raw.as_deref(), &label);
-                            (agent_id, label, result, body, isolation_diff)
+                            (
+                                agent_id,
+                                label,
+                                result,
+                                body,
+                                isolation_diff,
+                                Some(patch_authority),
+                                Some(patch_provenance),
+                            )
                         }
                         Err(error) => {
                             admission
@@ -750,6 +785,8 @@ impl ForkJoinExecutor {
                                 },
                                 String::new(),
                                 None,
+                                None,
+                                None,
                             )
                         }
                     };
@@ -761,6 +798,8 @@ impl ForkJoinExecutor {
                             result,
                             body,
                             isolation_diff,
+                            patch_authority,
+                            patch_provenance,
                         })
                         .await;
                 });
@@ -774,6 +813,8 @@ impl ForkJoinExecutor {
                     result,
                     body,
                     isolation_diff,
+                    patch_authority,
+                    patch_provenance,
                 } = outcome;
                 if let Some(artifact_store) = &self.artifact_store {
                     let depends_on = spokes[idx]
@@ -828,6 +869,46 @@ impl ForkJoinExecutor {
                 outcomes[idx] = Some((agent_id.clone(), result.clone()));
                 spec_by_agent.insert(agent_id.clone(), spokes[idx].clone());
                 if let Some(diff) = isolation_diff {
+                    if !diff.is_empty()
+                        && let Some(merge_back) = &self.patch_merge_back
+                    {
+                        // P3/P9: a missing piece or a capture failure is a
+                        // per-spoke outcome, never a wave-level abort — the
+                        // delta is still stored and detached siblings keep
+                        // running. No `expect`/`?` that could abort the wave.
+                        let evidence = artifact_by_spoke
+                            .get(&spokes[idx].id)
+                            .map(|artifact| artifact.id.clone());
+                        let captured = match (
+                            patch_authority,
+                            patch_provenance,
+                            self.artifact_host.clone(),
+                        ) {
+                            (Some(authority), Some(provenance), Some(host)) => merge_back
+                                .capture(
+                                    agent_id.clone(),
+                                    authority,
+                                    vec![provenance],
+                                    evidence.into_iter().collect(),
+                                    host,
+                                    &diff,
+                                )
+                                .await
+                                .ok(),
+                            _ => None,
+                        };
+                        match captured {
+                            Some(patch) => {
+                                patch_by_agent.insert(agent_id.clone(), patch);
+                            }
+                            None => {
+                                tracing::warn!(
+                                    %agent_id,
+                                    "patch capture skipped (missing metadata or capture error); delta stored without artifact"
+                                );
+                            }
+                        }
+                    }
                     delta_store.insert(agent_id.clone(), diff);
                 }
                 self.emit(AppEvent::SpokeCompleted { agent_id, label });
@@ -949,6 +1030,7 @@ impl ForkJoinExecutor {
             spec_by_agent,
             delta_store,
             artifact_by_spoke,
+            patch_by_agent,
             slots,
             resolve_count: AtomicUsize::new(0),
             // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
@@ -1056,6 +1138,8 @@ impl ForkJoinExecutor {
         let _admission_permit = admission_permit;
 
         let new_agent_id = handle.agent_id.clone();
+        let patch_authority = handle.authority;
+        let patch_provenance = handle.patch_provenance;
         let dispatched_at_ms = self.clock.wall_now_ms();
         let (terminal, raw, isolation_diff) =
             collect_terminal(&mut handle, self.clock.as_ref(), dispatched_at_ms).await;
@@ -1143,6 +1227,44 @@ impl ForkJoinExecutor {
                     self.release_rerun_reservation(slot).await;
                     return Err(error);
                 }
+                let mut next_patches = prev.patch_by_agent.clone();
+                // P6: the rerun supersedes the old producer's patch — drop it so
+                // a reviewer cannot merge stale work alongside the replacement.
+                next_patches.remove(old_id);
+                if let Some(diff) = isolation_diff.as_ref()
+                    && !diff.is_empty()
+                    && let Some(merge_back) = &self.patch_merge_back
+                {
+                    // P3/P9: per-spoke capture, never a rerun abort.
+                    let evidence = next_artifacts
+                        .get(&spec.id)
+                        .map(|artifact| artifact.id.clone());
+                    let captured = match self.artifact_host.clone() {
+                        Some(host) => merge_back
+                            .capture(
+                                new_agent_id.clone(),
+                                patch_authority,
+                                vec![patch_provenance],
+                                evidence.into_iter().collect(),
+                                host,
+                                diff,
+                            )
+                            .await
+                            .ok(),
+                        None => None,
+                    };
+                    match captured {
+                        Some(patch) => {
+                            next_patches.insert(new_agent_id.clone(), patch);
+                        }
+                        None => {
+                            tracing::warn!(
+                                %new_agent_id,
+                                "rerun patch capture skipped; delta stored without artifact"
+                            );
+                        }
+                    }
+                }
 
                 let mut next_spec = prev.spec_by_agent.clone();
                 next_spec.remove(old_id);
@@ -1171,6 +1293,7 @@ impl ForkJoinExecutor {
                         m
                     },
                     artifact_by_spoke: next_artifacts,
+                    patch_by_agent: next_patches,
                     slots: next_slots,
                     resolve_count: AtomicUsize::new(0),
                     rerun_counts: {
@@ -1243,14 +1366,17 @@ pub struct ForkJoinRun {
     pub outcome: ForkJoinOutcome,
     /// Crate-private — `ResultStore` is `pub(crate)`, so the field is too.
     pub(crate) store: Arc<ResultStore>,
-    /// Story 14.5 — durable inert isolated-child deltas, keyed by AgentId.
-    /// Lock-free: ForkJoinRun is single-owner until wrapped in Arc after construction.
+    /// Durable isolated-child deltas keyed by AgentId. Story 17.3b consumes
+    /// each non-empty delta into the sibling `patch_by_agent` artifact map.
     pub(crate) delta_store: std::collections::HashMap<AgentId, crate::domain::models::UnifiedDiff>,
     /// Per-port spec map — `pub(crate)`.
     pub(crate) spec_by_agent: std::collections::HashMap<AgentId, SpokeSpec>,
     /// Durable result handles keyed by stable logical spoke id. A rerun replaces
     /// its own version and removes only transitive dependent handles.
     pub(crate) artifact_by_spoke:
+        std::collections::HashMap<AgentId, crate::domain::models::ArtifactRef>,
+    /// Review-gated patch handles keyed by their isolated producer.
+    pub(crate) patch_by_agent:
         std::collections::HashMap<AgentId, crate::domain::models::ArtifactRef>,
     /// Dispatch-ordered slot AgentIds — `pub(crate)`.
     pub(crate) slots: Vec<AgentId>,
@@ -1396,6 +1522,8 @@ struct SpokeOutcome {
     /// non-isolated spokes or failed dispatches). Collected into
     /// `ForkJoinRun::delta_store` — write-only in R1.
     isolation_diff: Option<crate::domain::models::UnifiedDiff>,
+    patch_authority: Option<crate::domain::models::CapabilityTokenId>,
+    patch_provenance: Option<crate::domain::models::ProvenanceTag>,
 }
 
 /// Build a `SpokeOutcome` for a spoke that failed before producing a result.
@@ -1409,6 +1537,8 @@ fn failed_outcome(idx: usize, spec: &SpokeSpec, reason: &str) -> SpokeOutcome {
         },
         body: String::new(),
         isolation_diff: None,
+        patch_authority: None,
+        patch_provenance: None,
     }
 }
 
@@ -1880,6 +2010,11 @@ mod tests {
                 tokio::sync::mpsc::channel::<crate::domain::models::Op>(8);
             let (parent_disc_tx, _) = tokio::sync::mpsc::unbounded_channel::<()>();
             let (yield_tx, yield_rx) = tokio::sync::mpsc::channel::<String>(4);
+            let (diff_tx, diff_rx) = tokio::sync::oneshot::channel();
+            let _ = diff_tx.send(crate::domain::models::UnifiedDiff::new(
+                crate::domain::models::ProvisioningTier::ScratchCopy,
+                "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+x\n".into(),
+            ));
             let agent_id = AgentId::new();
             let task_id = nanoid::nanoid!(12);
             let child_cancel = cancel.child_token();
@@ -1911,7 +2046,10 @@ mod tests {
                 spawned_at: 0,
                 parent_disconnect: parent_disc_tx,
                 yield_rx: Some(yield_rx),
-                isolation_diff_rx: None,
+                isolation_diff_rx: Some(diff_rx),
+                effective_workspace: std::path::PathBuf::from("."),
+                authority: crate::domain::models::CapabilityTokenId([9; 32]),
+                patch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
             })
         }
     }
@@ -2043,6 +2181,312 @@ mod tests {
             "each topological wave must persist its completion event"
         );
         assert_eq!(projected.waves()[1].outcome, Some(WaveOutcome::Completed));
+    }
+
+    #[tokio::test]
+    async fn isolated_delta_store_is_promoted_to_pending_patch_artifact() {
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            workspace.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(16);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(PatchMergeBack::new(
+            workspace.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let exe = build_exe_for_rerun()
+            .with_journal(journal.clone())
+            .with_artifact_store(store, HostBinding::new("host-a", "delta-consumer-test"))
+            .with_patch_merge_back(merge_back);
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![SpokeSpec {
+                id: AgentId::new(),
+                label: "isolated".into(),
+                prompt: "produce a patch".into(),
+                effective_model: "m".into(),
+                tier: crate::domain::models::ModelTier::Flagship,
+                tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                waits_for: Vec::new(),
+            }],
+            wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
+            concurrency: 1,
+        };
+
+        let run = exe
+            .run_fork_join_run(request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(run.delta_store.len(), 1);
+        assert_eq!(run.patch_by_agent.len(), 1);
+        let patch = run.patch_by_agent.values().next().unwrap();
+        assert_eq!(patch.kind, ArtifactKind::Patch);
+        assert_eq!(
+            patch.review,
+            Some(crate::domain::models::ReviewStatus::Pending)
+        );
+        assert_eq!(
+            patch.authority,
+            crate::domain::models::CapabilityTokenId([9; 32])
+        );
+        assert_eq!(
+            patch.provenance,
+            vec![crate::domain::models::ProvenanceTag::UserOriginated]
+        );
+        assert_eq!(
+            patch.depends_on.len(),
+            1,
+            "patch must link its spoke evidence"
+        );
+        let room = journal.project_room("host-a").await.unwrap();
+        assert_eq!(
+            room.artifacts().get(&patch.id).unwrap().review,
+            Some(crate::domain::models::ReviewStatus::Pending)
+        );
+    }
+
+    /// `run_git` helper for composition tests that need a real git workspace.
+    fn run_git_test(workspace: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .expect("git must execute");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A runner whose launched child emits a Completed terminal and a diff that
+    /// edits `file.txt` from `old` to the spoke's `prompt`. Two such spokes
+    /// produce conflicting patches over the real composition root (P11).
+    #[derive(Default)]
+    struct ConflictingDiffRunner;
+    #[async_trait::async_trait]
+    impl SubagentRunner for ConflictingDiffRunner {
+        async fn launch(
+            &self,
+            spec: AgentLaunchSpec,
+            cancel: CancellationToken,
+        ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
+            let (status_tx, status_rx) =
+                tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
+            let (command_tx, mut command_rx) =
+                tokio::sync::mpsc::channel::<crate::domain::models::Op>(8);
+            let (parent_disc_tx, _) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let (yield_tx, yield_rx) = tokio::sync::mpsc::channel::<String>(4);
+            let (diff_tx, diff_rx) = tokio::sync::oneshot::channel();
+            let new_content = spec.prompt.clone();
+            let _ = diff_tx.send(crate::domain::models::UnifiedDiff::new(
+                crate::domain::models::ProvisioningTier::ScratchCopy,
+                format!(
+                    "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+{new_content}\n"
+                ),
+            ));
+            let agent_id = AgentId::new();
+            let task_id = nanoid::nanoid!(12);
+            let child_cancel = cancel.child_token();
+            let cancel_for_task = child_cancel.clone();
+            tokio::spawn(async move {
+                let _ = status_tx
+                    .send(crate::domain::models::node_state::NodeState::Running)
+                    .await;
+                tokio::select! {
+                    _ = cancel_for_task.cancelled() => { let _ = status_tx.send(crate::domain::models::node_state::NodeState::Cancelled).await; }
+                    _ = tokio::task::yield_now() => {
+                        let _ = status_tx.send(crate::domain::models::node_state::NodeState::Completed).await;
+                        let _ = yield_tx.send(r#"{"summary":"ok","detail":"d"}"#.to_string()).await;
+                    }
+                    _ = command_rx.recv() => { let _ = status_tx.send(crate::domain::models::node_state::NodeState::Cancelled).await; }
+                }
+            });
+            Ok(crate::domain::models::TaskHandle {
+                agent_id,
+                status_rx,
+                command_tx,
+                cancel: child_cancel,
+                task_id,
+                subagent_type: "conflicting".into(),
+                spawned_at: 0,
+                parent_disconnect: parent_disc_tx,
+                yield_rx: Some(yield_rx),
+                isolation_diff_rx: Some(diff_rx),
+                effective_workspace: std::path::PathBuf::from("."),
+                authority: crate::domain::models::CapabilityTokenId([9; 32]),
+                patch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
+            })
+        }
+    }
+
+    /// P11 / N2: race two conflicting merge-backs through the REAL composition
+    /// root (executor → capture → PatchMergeBack → review → apply → real git),
+    /// not synthetic patches handed directly to the service. Exactly one patch
+    /// applies; the conflicting one is classified as a review conflict.
+    #[tokio::test]
+    async fn n2_mergeback_race_through_real_composition_serializes_and_one_conflicts() {
+        let workspace = tempfile::tempdir().unwrap();
+        run_git_test(workspace.path(), &["init", "-q"]);
+        std::fs::write(workspace.path().join("file.txt"), "old\n").unwrap();
+        run_git_test(workspace.path(), &["add", "file.txt"]);
+        run_git_test(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            workspace.path(),
+        ));
+        let host = HostBinding::new("host-a", "n2-race");
+        let (merge_bus, merge_rx) = EventBus::new(16);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(PatchMergeBack::new(
+            workspace.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+
+        let root = CapabilityToken::r1_root(AgentId::root());
+        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+        let exe = ForkJoinExecutor::new(
+            Arc::new(ConflictingDiffRunner) as Arc<dyn SubagentRunner>,
+            Arc::new(
+                crate::adapters::authority::in_process::InProcessAuthorityProvider::new(
+                    ledger.clone(),
+                ),
+            ),
+            ledger,
+            {
+                let (bus, rx) = EventBus::new(16);
+                std::mem::forget(rx);
+                Arc::new(bus)
+            },
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root,
+        )
+        .with_journal(journal.clone())
+        .with_artifact_store(store, host)
+        .with_patch_merge_back(merge_back.clone());
+
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![
+                SpokeSpec {
+                    id: AgentId::new(),
+                    label: "first".into(),
+                    prompt: "first".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    waits_for: Vec::new(),
+                },
+                SpokeSpec {
+                    id: AgentId::new(),
+                    label: "second".into(),
+                    prompt: "second".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    waits_for: Vec::new(),
+                },
+            ],
+            wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
+            concurrency: 2,
+        };
+        let run = exe
+            .run_fork_join_run(request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            run.patch_by_agent.len(),
+            2,
+            "both isolated deltas must be captured as patches through the real composition root"
+        );
+
+        let reviewer = AgentId::new();
+        let mut patches: Vec<_> = run.patch_by_agent.values().cloned().collect();
+        let p0 = merge_back
+            .review(
+                patches.remove(0),
+                reviewer.clone(),
+                crate::domain::models::ReviewVerdict::Approved,
+            )
+            .await
+            .unwrap();
+        let p1 = merge_back
+            .review(
+                patches.remove(0),
+                reviewer,
+                crate::domain::models::ReviewVerdict::Approved,
+            )
+            .await
+            .unwrap();
+
+        let mb_a = merge_back.clone();
+        let a = tokio::spawn(async move {
+            mb_a.apply(
+                &p0,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &crate::domain::services::patch_review::MergeBackPolicy::default(),
+            )
+            .await
+        });
+        let mb_b = merge_back.clone();
+        let b = tokio::spawn(async move {
+            mb_b.apply(
+                &p1,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &crate::domain::services::patch_review::MergeBackPolicy::default(),
+            )
+            .await
+        });
+        let results = [a.await.unwrap(), b.await.unwrap()];
+        assert_eq!(
+            results.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "exactly one patch must apply"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(MergeBackError::Conflict(_))))
+                .count(),
+            1,
+            "the conflicting patch must be classified as a review conflict, never silently lost"
+        );
+        let body = std::fs::read_to_string(workspace.path().join("file.txt")).unwrap();
+        assert!(
+            body == "first\n" || body == "second\n",
+            "the winner's edit must be applied: {body}"
+        );
     }
     #[tokio::test]
     async fn rerun_replaces_source_artifact_and_invalidates_only_dependents() {

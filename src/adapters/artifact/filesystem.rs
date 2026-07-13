@@ -4,7 +4,9 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
-use crate::domain::models::{ArtifactId, ContentHash, EvidenceArtifact, EvidenceArtifactDraft};
+use crate::domain::models::{
+    ArtifactId, ArtifactKind, ContentHash, EvidenceArtifact, EvidenceArtifactDraft,
+};
 use crate::domain::ports::{ArtifactError, ArtifactStore};
 
 pub const MAX_ARTIFACT_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -76,7 +78,16 @@ impl ArtifactStore for FileSystemArtifactStore {
             });
         }
         let content_hash = content_hash(body);
-        let id = ArtifactId::from(content_hash);
+        let id = if meta.kind == ArtifactKind::Patch {
+            // P2: namespace patch identity by producer + authority so two
+            // isolated spokes that independently produce the same diff each
+            // get a distinct, reviewable artifact instead of colliding on the
+            // body-only content hash and aborting the wave. The body
+            // `content_hash` (for integrity verification) is unchanged.
+            patch_artifact_id(body, &meta.producer, meta.authority)
+        } else {
+            ArtifactId::from(content_hash)
+        };
         let artifact = EvidenceArtifact {
             id: id.clone(),
             kind: meta.kind,
@@ -150,12 +161,24 @@ impl ArtifactStore for FileSystemArtifactStore {
             .map_err(|error| map_read_error(id, "read metadata", error))?;
         let artifact = serde_json::from_slice::<EvidenceArtifact>(&encoded)
             .map_err(|error| ArtifactError::Serialization(error.to_string()))?;
-        let expected = id.content_hash();
-        if artifact.id != *id || artifact.content_hash != expected {
+        // P2: patch identities are namespaced by producer+authority, so the id
+        // is no longer the body content hash. Body integrity is still enforced
+        // by `verify_body` (called by `get`/`put`). Other kinds keep the
+        // strict id == content_hash invariant.
+        if artifact.id != *id {
             return Err(ArtifactError::IntegrityMismatch {
-                expected,
+                expected: id.content_hash(),
                 actual: artifact.content_hash,
             });
+        }
+        if artifact.kind != ArtifactKind::Patch {
+            let expected = id.content_hash();
+            if artifact.content_hash != expected {
+                return Err(ArtifactError::IntegrityMismatch {
+                    expected,
+                    actual: artifact.content_hash,
+                });
+            }
         }
         Ok(artifact)
     }
@@ -164,6 +187,23 @@ impl ArtifactStore for FileSystemArtifactStore {
 fn content_hash(body: &[u8]) -> ContentHash {
     let digest: [u8; 32] = Sha256::digest(body).into();
     ContentHash::from_bytes(digest)
+}
+/// P2: per-production identity for `Patch` artifacts. Two isolated children
+/// that produce the same diff body must remain distinct reviewable artifacts;
+/// keying on the body hash alone made them collide. The body's integrity
+/// `content_hash` is still the body-only digest — this only names the slot.
+fn patch_artifact_id(
+    body: &[u8],
+    producer: &crate::domain::models::AgentId,
+    authority: crate::domain::models::CapabilityTokenId,
+) -> ArtifactId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rustain.patch.v1");
+    hasher.update(body);
+    hasher.update(producer.as_str().as_bytes());
+    hasher.update(authority.0);
+    let digest: [u8; 32] = hasher.finalize().into();
+    ArtifactId::from(ContentHash::from_bytes(digest))
 }
 
 async fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ArtifactError> {

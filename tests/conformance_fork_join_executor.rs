@@ -196,6 +196,9 @@ impl SubagentRunner for FakeRunner {
                 // No structured yield from a stuck child (it never terminates).
                 yield_rx: None,
                 isolation_diff_rx: None,
+                effective_workspace: std::path::PathBuf::from("."),
+                authority: rustain::domain::models::CapabilityTokenId::root(),
+                patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
             });
         }
         let terminal = self
@@ -260,6 +263,9 @@ impl SubagentRunner for FakeRunner {
             parent_disconnect: parent_disc_tx,
             yield_rx: Some(yield_rx),
             isolation_diff_rx: None,
+            effective_workspace: std::path::PathBuf::from("."),
+            authority: rustain::domain::models::CapabilityTokenId::root(),
+            patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
         })
     }
 }

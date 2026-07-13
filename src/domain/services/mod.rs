@@ -21,6 +21,7 @@ pub mod pricing_resolver;
 pub use meta_search::compute_terse;
 pub mod delegation_decider;
 pub mod model_router;
+pub mod patch_review;
 pub mod permission_chain;
 pub mod plan_effort;
 pub mod plan_manager;

@@ -36,6 +36,8 @@ mod memory;
 #[allow(unused_imports)]
 mod node_orchestrator;
 #[allow(unused_imports)]
+mod patch_applier;
+#[allow(unused_imports)]
 mod persona;
 #[allow(unused_imports)]
 mod profile_resolver;
@@ -99,6 +101,7 @@ pub use isolation_provider::IsolationProvider;
 pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
 pub use memory::MemoryPort;
 pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
+pub use patch_applier::{PatchApplier, PatchApplyError};
 pub use persona::PersonaPort;
 pub use profile_resolver::ProfileResolver;
 pub use provider::{ProbeOutcome, StreamingProvider};

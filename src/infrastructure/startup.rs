@@ -1654,6 +1654,14 @@ pub async fn run() -> Result<()> {
                 "local",
                 format!("workspace:{}", workspace_path.display()),
             );
+            let patch_merge_back =
+                Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+                    workspace_path.clone(),
+                    artifact_store.clone(),
+                    node_journal.clone(),
+                    event_bus.clone(),
+                    Arc::new(crate::adapters::merge_back::GitPatchApplier),
+                ));
             let orchestrator_inner: Arc<dyn crate::domain::ports::Orchestrator> = Arc::new(
                 crate::infrastructure::orchestrator::ForkJoinExecutor::new(
                     runner.clone(),
@@ -1665,7 +1673,8 @@ pub async fn run() -> Result<()> {
                 )
                 .with_journal(node_journal.clone())
                 .with_supervisor(supervisor)
-                .with_artifact_store(artifact_store, artifact_host),
+                .with_artifact_store(artifact_store, artifact_host)
+                .with_patch_merge_back(patch_merge_back),
             );
             orchestrator = Some(orchestrator_inner);
 

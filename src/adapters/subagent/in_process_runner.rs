@@ -13,6 +13,7 @@ use crate::domain::ports::{AuthorityProvider, IsolationProvider, SubagentRunner,
 use crate::domain::services::sandbox_narrowing::validate_narrowing;
 use crate::infrastructure::subagent::{NodeTree, SpoolMeta, SubagentSpool};
 
+#[derive(Clone)]
 pub struct InProcessSubagentRunner {
     provider: Arc<dyn crate::domain::ports::StreamingProvider>,
     storage: Arc<dyn crate::domain::ports::StoragePort>,
@@ -34,6 +35,7 @@ pub struct InProcessSubagentRunner {
     spool: Arc<SubagentSpool>,
     authority: Arc<dyn AuthorityProvider>,
     root_authority: CapabilityToken,
+    launch_provenance: crate::domain::models::ProvenanceTag,
 }
 
 impl InProcessSubagentRunner {
@@ -73,6 +75,7 @@ impl InProcessSubagentRunner {
             spool,
             authority,
             root_authority,
+            launch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
         }
     }
 
@@ -235,6 +238,11 @@ impl SubagentRunner for InProcessSubagentRunner {
                 self.scheduler.clone(),
             )
         };
+        let effective_workspace = isolation_handle
+            .as_ref()
+            .map(|handle| handle.path().to_path_buf())
+            .unwrap_or_else(|| self.workspace_path.clone());
+        let child_authority = child_token.id;
         let authority_for_spawn = self.authority.clone();
         let child_token_for_spawn = child_token.clone();
         let spec_isolated = spec.isolated;
@@ -288,33 +296,53 @@ impl SubagentRunner for InProcessSubagentRunner {
             // orchestrator for `delta_store` (NFR68 seam; write-only in R1).
             // Best-effort: capture/teardown failures are logged, never fatal.
             if let Some(handle) = isolation_handle.take() {
+                let scratch_path = handle.path().to_path_buf();
                 match isolation_provider.diff(&handle).await {
                     Ok(d) => {
                         if let Some(tx) = diff_deliver {
                             let _ = tx.send(d);
                         }
+                        if let Err(e) = isolation_provider.stop(handle).await {
+                            tracing::warn!(
+                                error = %e,
+                                "isolation stop failed; TempDir Drop still cleans the scratch dir"
+                            );
+                        }
+                        // Story 14.5 Task 7: surface the cleanup so it is never
+                        // silently vanished.
+                        let _ = notice_event_bus.emit_domain(
+                            crate::domain::events::AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: crate::domain::models::NoticeLevel::Info,
+                                message: "Scratch for this isolated run was cleaned up."
+                                    .to_string(),
+                            },
+                        );
                     }
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "isolation diff capture failed; delta not stored"
-                    ),
+                    Err(e) => {
+                        // P7: a diff-capture failure (disk/git, or the new
+                        // fail-closed non-UTF-8 path) must NOT silently vanish a
+                        // write-producing child. Surface it to the user and RETAIN
+                        // the scratch dir (forget the handle) so its edits stay
+                        // recoverable instead of being cleaned away; the liveness
+                        // reaper reclaims the orphan after this process exits.
+                        tracing::error!(
+                            error = %e,
+                            path = %scratch_path.display(),
+                            "isolation diff capture failed; delta not stored, scratch retained for recovery"
+                        );
+                        let _ = notice_event_bus
+                            .emit_domain(crate::domain::events::AppEvent::SystemNotice {
+                                conversation_id: None,
+                                level: crate::domain::models::NoticeLevel::Warning,
+                                message: format!(
+                                    "An isolated child completed but its edits could not be captured for review ({e}); scratch retained at {} for manual recovery.",
+                                    scratch_path.display()
+                                ),
+                            });
+                        std::mem::forget(handle);
+                    }
                 }
-                if let Err(e) = isolation_provider.stop(handle).await {
-                    tracing::warn!(
-                        error = %e,
-                        "isolation stop failed; TempDir Drop still cleans the scratch dir"
-                    );
-                }
-                // Story 14.5 Task 7: surface the cleanup so it is never silently
-                // vanished. Event-scoped ("for THIS run"); on completion the
-                // synthesis is the keepable artifact, on cancel/fail this tells
-                // the user the scratch was reclaimed (no leak, no theft).
-                let _ =
-                    notice_event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
-                        conversation_id: None, // global → active tab (the runner lacks the parent conversation id; SystemNotice routing treats None as "show in active tab")
-                        level: crate::domain::models::NoticeLevel::Info,
-                        message: "Scratch for this isolated run was cleaned up.".to_string(),
-                    });
             }
 
             if let Err(panic_payload) = result {
@@ -458,7 +486,22 @@ impl SubagentRunner for InProcessSubagentRunner {
             // collect_terminal drains this channel to populate the ResultStore.
             yield_rx: Some(yield_rx),
             isolation_diff_rx,
+            effective_workspace,
+            authority: child_authority,
+            patch_provenance: self.launch_provenance,
         })
+    }
+
+    async fn launch_nested(
+        &self,
+        parent: &TaskHandle,
+        spec: AgentLaunchSpec,
+        cancel: CancellationToken,
+    ) -> Result<TaskHandle, SubagentError> {
+        let mut nested = self.clone();
+        nested.workspace_path = parent.effective_workspace.clone();
+        nested.launch_provenance = crate::domain::models::ProvenanceTag::SelfOriginated;
+        nested.launch(spec, cancel).await
     }
 }
 
@@ -3800,6 +3843,16 @@ mod tests {
             .launch(spec_iso, CancellationToken::new())
             .await
             .expect("isolated launch (with_isolation configured)");
+        assert_eq!(
+            h2.patch_provenance,
+            crate::domain::models::ProvenanceTag::UserOriginated,
+            "a direct root launch must make the policy-eligible provenance arm reachable"
+        );
+        assert_ne!(
+            h2.authority,
+            crate::domain::models::CapabilityTokenId::root(),
+            "direct patch identity must use the producing child's derived capability"
+        );
         let terminal2 = await_terminal(&mut h2).await;
         assert_eq!(
             terminal2,
@@ -3815,6 +3868,87 @@ mod tests {
             "s\n",
             "AC4: pre-existing real-tree files must be untouched by an isolated child"
         );
+    }
+
+    #[tokio::test]
+    async fn depth_three_isolated_launch_clones_immediate_parent_workspace() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("root-only.txt"), "root\n").unwrap();
+        let isolation = crate::adapters::isolation::CowIsolationProvider::default();
+        let parent_clone = isolation.start(real.path()).await.unwrap();
+        std::fs::write(parent_clone.path().join("parent-only.txt"), "parent\n").unwrap();
+        let second_clone = isolation.start(parent_clone.path()).await.unwrap();
+        std::fs::write(second_clone.path().join("second-only.txt"), "second\n").unwrap();
+
+        let (status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+        let (command_tx, _) = tokio::sync::mpsc::channel(1);
+        let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
+        let parent = TaskHandle {
+            agent_id: AgentId::new(),
+            status_rx,
+            command_tx,
+            cancel: CancellationToken::new(),
+            task_id: "parent".into(),
+            subagent_type: "test".into(),
+            spawned_at: 0,
+            parent_disconnect,
+            yield_rx: None,
+            isolation_diff_rx: None,
+            effective_workspace: second_clone.path().to_path_buf(),
+            authority: crate::domain::models::CapabilityTokenId::root(),
+            patch_provenance: crate::domain::models::ProvenanceTag::SelfOriginated,
+        };
+        drop(status_tx);
+
+        let runner = make_write_runner(real.path(), true).await;
+        let spec = AgentLaunchSpec {
+            prompt: "nested".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        };
+        let mut nested = runner
+            .launch_nested(&parent, spec, CancellationToken::new())
+            .await
+            .expect("nested isolated launch");
+        assert_eq!(
+            nested.patch_provenance,
+            crate::domain::models::ProvenanceTag::SelfOriginated,
+            "a nested agent launch must derive tainted provenance at the real launch seam"
+        );
+        assert_ne!(
+            nested.authority,
+            crate::domain::models::CapabilityTokenId::root(),
+            "patch sandbox identity must be the producing child's derived authority"
+        );
+
+        assert_ne!(nested.effective_workspace, real.path());
+        assert_ne!(nested.effective_workspace, parent.effective_workspace);
+        assert_eq!(
+            std::fs::read_to_string(nested.effective_workspace.join("parent-only.txt")).unwrap(),
+            "parent\n",
+            "depth-2 clone must inherit the depth-1 parent delta"
+        );
+        assert_eq!(
+            std::fs::read_to_string(nested.effective_workspace.join("second-only.txt")).unwrap(),
+            "second\n",
+            "depth-3 clone must inherit the immediate depth-2 parent delta"
+        );
+        assert!(
+            !real.path().join("parent-only.txt").exists(),
+            "parent delta must never leak into the One-Ring workspace"
+        );
+        assert!(
+            !real.path().join("second-only.txt").exists(),
+            "depth-2 delta must never leak into the One-Ring workspace"
+        );
+        assert_eq!(await_terminal(&mut nested).await, NodeState::Completed);
+        isolation.stop(second_clone).await.unwrap();
+        isolation.stop(parent_clone).await.unwrap();
     }
 
     // ── Story 14-4a (AMELIA-1): Recipient-side consent enforcement behavioral tests ──
