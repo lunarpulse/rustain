@@ -1715,6 +1715,22 @@ pub async fn run() -> Result<()> {
         .await
     };
 
+    // Story 17.3a (Tasks 6 + 7) — composition-root opt-in point for the WASM
+    // execution sandbox (`WasmIsolationBackend`, the sole file that may name the
+    // concrete type). Party ruling N4: there is NO untrusted-tool/extension
+    // population in rustain today, so this binding is intentionally inert —
+    // `None`, not configured — and NO production tool dispatch routes through
+    // it. When such a population exists (Epic 18 territory), construct
+    // `crate::adapters::wasm::WasmIsolationBackend` here and inject the
+    // `Arc<dyn ExecutionSandbox>` BELOW `ToolSetPort::execute`; the approval
+    // seam (`ApprovalRuntime` / `PermissionMode`) and `ToolScheduler` stay
+    // untouched ("subprocess-today → WASM-later changes no call site"). The
+    // proving consumer for 17.3a is the adversarial fixture suite, not this
+    // call site (`tests/wasm_execution_sandbox.rs`).
+    #[cfg(feature = "wasm-sandbox")]
+    let _execution_sandbox: Option<std::sync::Arc<dyn crate::domain::ports::ExecutionSandbox>> =
+        None;
+
     #[cfg(feature = "meta-search")]
     let catalog_registry_for_app_state = _catalog_registry.clone();
 

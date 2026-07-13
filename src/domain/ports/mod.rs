@@ -27,6 +27,8 @@ mod context_assembler;
 #[allow(unused_imports)]
 mod event_emitter;
 #[allow(unused_imports)]
+mod execution_sandbox;
+#[allow(unused_imports)]
 mod isolation_provider;
 mod ledger_journal_sink;
 #[allow(unused_imports)]
@@ -92,6 +94,7 @@ pub use config_store::ConfigStorePort;
 pub use context::ContextPort;
 pub use context_assembler::ContextAssemblerPort;
 pub use event_emitter::EventEmitter;
+pub use execution_sandbox::{ExecutionSandbox, ExecutionSandboxError};
 pub use isolation_provider::IsolationProvider;
 pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
 pub use memory::MemoryPort;

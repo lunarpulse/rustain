@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/trybuild/execution_sandbox/sibling_fails.rs:17:21
+   |
+17 |     wants_isolation(sandbox);
+   |     --------------- ^^^^^^^ expected trait `IsolationProvider`, found trait `ExecutionSandbox`
+   |     |
+   |     arguments to this function are incorrect
+   |
+   = note: expected reference `&dyn IsolationProvider`
+              found reference `&dyn ExecutionSandbox`
+note: function defined here
+  --> tests/trybuild/execution_sandbox/sibling_fails.rs:11:4
+   |
+11 | fn wants_isolation(_: &dyn IsolationProvider) {}
+   |    ^^^^^^^^^^^^^^^ -------------------------

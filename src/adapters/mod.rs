@@ -54,6 +54,13 @@ pub mod workspace_registry;
 #[cfg(feature = "vector-search")]
 pub mod vector_search;
 
+// Story 17.3a — WASM execution-sandbox backend (WasmIsolationBackend over the
+// wasmtime component model). Feature-gated: the default build pulls no wasmtime
+// runtime (NFR9). The `ExecutionSandbox` port + domain value types compile
+// unconditionally; only this adapter needs the feature.
+#[cfg(feature = "wasm-sandbox")]
+pub mod wasm;
+
 #[cfg(feature = "mcp")]
 pub mod mcp;
 

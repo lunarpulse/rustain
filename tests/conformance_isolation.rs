@@ -34,20 +34,66 @@ fn isolation_modules_do_not_read_wall_clock_directly() {
     }
 }
 
+// Story 17.3a FLIPPED this guard. It previously asserted `ExecutionSandbox` was
+// ABSENT everywhere (R2-deferred). It now asserts the port EXISTS as a PROVEN
+// SIBLING of `IsolationProvider` — never a super-trait, never a widening
+// (ADR-11-3 rule 3) — and is defined exactly once. This is the AC1 structural
+// conformance assertion (no shared super-trait / no shared method name). It
+// does NOT assert the sandbox is wired into tool dispatch: there is no
+// production consumer yet (party ruling N4); the proving consumer is
+// `tests/wasm_execution_sandbox.rs`.
 #[test]
-fn execution_sandbox_remains_r2_deferred() {
+fn execution_sandbox_exists_as_proven_sibling() {
+    let port = read("src/domain/ports/execution_sandbox.rs");
+    assert!(
+        port.contains("pub trait ExecutionSandbox"),
+        "ExecutionSandbox port must exist in execution_sandbox.rs (Story 17.3a)"
+    );
+
+    // Sibling, not super-trait: the trait declaration must not extend
+    // IsolationProvider.
+    let decl = port
+        .lines()
+        .find(|l| l.contains("pub trait ExecutionSandbox"))
+        .expect("trait declaration line");
+    assert!(
+        !decl.contains("IsolationProvider"),
+        "ExecutionSandbox must be a sibling, never a super-trait of \
+         IsolationProvider (ADR-11-3 rule 3): {decl:?}"
+    );
+
+    // Single-method port sharing NO method name with IsolationProvider
+    // (start/diff/stop). Its sole async method is `invoke`.
+    let methods: Vec<_> = port
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("async fn "))
+        .map(|rest| rest.split('(').next().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        methods,
+        ["invoke"],
+        "ExecutionSandbox is a single-method (invoke) port"
+    );
+    for shared in ["start", "diff", "stop"] {
+        assert!(
+            !methods.iter().any(|m| m == shared),
+            "ExecutionSandbox must not reuse IsolationProvider's method `{shared}`"
+        );
+    }
+
+    // Defined exactly once across the scanned tree (not duplicated/redefined).
+    let mut definitions = 0;
     for path in ["src/domain", "src/adapters", "src/infrastructure"] {
         for entry in walkdir(path) {
-            if entry.ends_with("isolation_provider.rs") {
-                continue;
+            if read(&entry).contains("pub trait ExecutionSandbox") {
+                definitions += 1;
             }
-            let src = read(&entry);
-            assert!(
-                !src.contains("trait ExecutionSandbox") && !src.contains("ExecutionSandbox:"),
-                "ExecutionSandbox must remain absent until Story 17.3: {entry}"
-            );
         }
     }
+    assert_eq!(
+        definitions, 1,
+        "the ExecutionSandbox trait must be defined exactly once (in execution_sandbox.rs)"
+    );
 }
 
 // DN-1 guardrail (party-mode A, 2026-06-30 — unanimous Winston/Amelia/Murat):

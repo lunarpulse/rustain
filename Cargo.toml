@@ -134,6 +134,17 @@ bincode = { version = "2", optional = true }
 # ── Landlock sandbox (Story 9.5, ADR-06-04) ─────────────────────
 landlock = { version = "0.4", optional = true }
 
+# ── WASM execution sandbox (Story 17.3a, ADR-17-3a-01, feature-gated `wasm-sandbox`) ──
+# Untrusted-guest execution over the wasmtime component model. OUT of `default`
+# (NFR9 binary size; no untrusted-tool population exists yet — party ruling N4):
+# the port compiles unconditionally (pure domain); only the `WasmIsolationBackend`
+# adapter is `#[cfg(feature = "wasm-sandbox")]`. Exact-major pin (wasmtime cuts a
+# new major monthly on the 20th — bump deliberately, never `^`). `default-features
+# = false` keeps the tree to cranelift + component-model + async runtime.
+wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "component-model", "async", "runtime"] }
+wasmtime-wasi = { version = "46", optional = true }
+wasmtime-wasi-io = { version = "46", optional = true }
+
 # ── Telegram channel adapter (Story 12.3, feature-gated) ──────────
 teloxide = { version = "0.17.0", optional = true, default-features = false, features = ["macros", "rustls"] }
 
@@ -199,6 +210,10 @@ mcp = ["dep:rmcp"]
 skills-validation = []
 meta-search = ["dep:bm25"]
 sandbox = ["dep:landlock"]
+# Story 17.3a — WASM execution sandbox (FR146). OFF by default (see the wasmtime
+# dep comment). The port + domain value types compile without it; enabling this
+# pulls in the wasmtime runtime and builds the `WasmIsolationBackend` adapter.
+wasm-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-io"]
 # Test-only instrumentation for P0-2/P0-3 sentinels (Story 13.2a review patch).
 # Off by default; enabled for integration tests via `--features test-instrumentation`.
 test-instrumentation = []

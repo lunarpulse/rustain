@@ -1,0 +1,13 @@
+{
+  "_comment": "Story 17.3a fixture-hash manifest (party ruling F3). Each .wasm is a vendored, content-hash-pinned adversarial component. The test asserts these sha256 hashes at load: a swapped/tampered fixture fails RED. Source (.wat) + build recipe live beside the bytes (README.md) so provenance is reviewable even though the bytes are not greppable and no wasm toolchain runs in CI. Regenerate with: (cd tests/fixtures/wasm && ./build.sh).",
+  "well_behaved": "af81e9e9070d9f2e1ba23c4fcbaaad0a0b73611ac094de74863379d5cbd3607f",
+  "infinite_loop": "9ef0bdd24a7f9f27d09cd8ed59435a7735e055d5868febc1f6f3fb6111504845",
+  "memory_bomb": "f57f3ceb84fc585b5b85202aa2ac2632e462aa2014ead02a0c5399f91f6c5a6a",
+  "memory_grow_then_trap": "9f6392631c7285374bf34df25c708bd50d2526fb0be0511503d375027c8d4c7a",
+  "table_bomb": "b5535942405ed808a1035b519555f14f8a799dc72122fc18b63e0e44c078427c",
+  "ungranted_import": "45973f56ffff55d5a6e575be892736a1e6151961da97dcbcb3bbeb7fd550bbe2",
+  "ungranted_wasi_random": "f7b9cf770cb7142249e1b782e24f627c965074226fb451feb629d5295fb88701",
+  "secret_read": "c1220a0ab6281db1a73e1bdb9eb37e25eb352c8764d465576cda939689555d61",
+  "fuel_ok": "8e2dc2f8c8f0e4a700637fb06344cf2d277e464d8929144479bafd124d815d23",
+  "fuel_bomb": "1738061c127905f2c41bb86193fff337b3c3f2b342eb588ffa8b843baeb46fef"
+}

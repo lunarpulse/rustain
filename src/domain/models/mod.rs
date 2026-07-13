@@ -27,6 +27,7 @@ pub mod credential;
 pub mod cron_config;
 pub mod daemon_crash;
 pub mod doc_key;
+pub mod execution_sandbox;
 pub mod filtered_catalog;
 pub mod filtered_skill_catalog;
 mod focus;
@@ -143,6 +144,11 @@ pub use credential::{
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
+#[allow(unused_imports)]
+pub use execution_sandbox::{
+    CapabilityGrant, ComponentRef, HostImport, PreopenGrant, ResourceCaps, SandboxInvocation,
+    SandboxOutcome, TrapKind,
+};
 pub use focus::FocusState;
 #[allow(unused_imports)]
 pub use invocation_fingerprint::{FingerprintError, InvocationFingerprint};
