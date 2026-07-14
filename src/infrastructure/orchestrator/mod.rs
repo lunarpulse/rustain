@@ -55,14 +55,16 @@ use crate::domain::models::orchestration::{
 };
 use crate::domain::models::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceArtifactDraft, HostBinding, ModelTier,
-    RoomEvent, SubagentError, WaveId, WaveOutcome,
+    OwnershipKind, PermissionMode, RoomEvent, SubagentError, TaskHandle, WaveId, WaveOutcome,
 };
+use crate::domain::ports::SecurityPort;
 use crate::domain::ports::SubagentRunner;
 use crate::domain::ports::wave_handle::{DrillBody, RerunOutcome, WaveHandle, WaveSnapshot};
 use crate::domain::ports::{
     ArtifactStore, AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator,
 };
 use crate::domain::services::authority_ledger::AuthorityLedger;
+use crate::domain::services::patch_review::MergeBackPolicy;
 use crate::infrastructure::runtime::event_bus::EventBus;
 use crate::infrastructure::supervisor::Supervisor;
 
@@ -149,6 +151,14 @@ pub struct ForkJoinExecutor {
     /// DISPATCH (not just retained count): reserve atomically before dispatch,
     /// release on every terminal path. tokio::sync (std::sync ratchet stays 4).
     rerun_reservations: tokio::sync::Mutex<std::collections::HashMap<usize, u8>>,
+    /// Story 17.3c (D1): owner pre-authorization for auto-applying captured
+    /// merge-back patches. Default refuses (patches stay Pending for review);
+    /// production sets `auto_approve_user_originated` so user-originated fanout
+    /// edits reach the workspace as the pre-isolation direct-write path did.
+    merge_back_policy: MergeBackPolicy,
+    /// Story 17.3c (D1): live session permission-mode source for the merge-back
+    /// apply gate. `None` fails closed (treated as Plan → apply refused).
+    permission_source: Option<Arc<dyn SecurityPort>>,
 }
 
 impl ForkJoinExecutor {
@@ -186,6 +196,8 @@ impl ForkJoinExecutor {
             patch_merge_back: None,
             wave_generation: std::sync::atomic::AtomicU64::new(0),
             rerun_reservations: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            merge_back_policy: MergeBackPolicy::default(),
+            permission_source: None,
         }
     }
 
@@ -224,6 +236,21 @@ impl ForkJoinExecutor {
         self
     }
 
+    /// Bind the owner's merge-back auto-approval policy (Story 17.3c / D1).
+    #[must_use]
+    pub fn with_merge_back_policy(mut self, policy: MergeBackPolicy) -> Self {
+        self.merge_back_policy = policy;
+        self
+    }
+
+    /// Bind the live session permission-mode source for the merge-back apply
+    /// gate (Story 17.3c / D1). Absent ⇒ apply is refused fail-closed.
+    #[must_use]
+    pub fn with_permission_source(mut self, security: Arc<dyn SecurityPort>) -> Self {
+        self.permission_source = Some(security);
+        self
+    }
+
     /// Read the ambient cost meter (WaveStrip `$burn`). Returns the cumulative
     /// consumed cost micros under the coordinator's budget (AC4). NOT an
     /// `AtomicU64` — the real surface is [`AuthorityLedger::conservation`]
@@ -235,9 +262,20 @@ impl ForkJoinExecutor {
             .unwrap_or(0)
     }
 
-    /// Mint a per-spoke child gate-token from the coordinator (root) authority.
-    /// The request carries `Spawn` so a normally-minted child HAS it; a probe
-    /// that omits `Spawn` (or pre-revokes) produces a child the gate refuses.
+    /// Mint a per-spoke child gate-token from the root authority. The gate-token
+    /// carries `Spawn` (a probe that omits it — or pre-revokes — produces a
+    /// child the gate refuses) and is settled/refunded at wave end.
+    ///
+    /// NOTE (Story 17.3c, P4): for a non-root coordinator the gate-token debits
+    /// ROOT, not the coordinator. The per-child *expensive* delegations are
+    /// correctly per-parent (delegated inside `launch` from the coordinator's
+    /// token), so lineage is never falsified; only the tiny gate-token +
+    /// synthesis-reserve overhead lands on root. Charging the coordinator
+    /// instead requires resizing its budget model — its r1-child budget is
+    /// sized exactly for its own child delegation, so debiting a gate against it
+    /// starves that delegation — so this is deferred to the executor-native-
+    /// trigger story that owns the non-root coordinator budget design
+    /// (DF-14-5-1).
     fn mint_gate_token(
         &self,
         scope: AgentId,
@@ -255,13 +293,77 @@ impl ForkJoinExecutor {
             not_after: None,
             uses_limit: Some(1),
         };
-        // Synchronous delegate via the ledger (the AuthorityProvider port is
-        // async; the ledger is the concrete single-writer map). The gate-token
-        // is coordinator-delegated, so it debits the coordinator — refunded on
-        // settle.
         self.ledger
             .delegate(&self.root_authority, req)
             .map_err(|e| OrchestrationError::SpawnRefused(e.to_string()))
+    }
+
+    /// Admit root coordination without a handle, or a live non-root
+    /// coordinator whose exact token can still delegate the requested wave.
+    async fn validate_coordinator(
+        &self,
+        request: &ForkJoinRequest,
+        parent: Option<&TaskHandle>,
+    ) -> Result<(), OrchestrationError> {
+        if request.coordinator == self.root_authority.scope {
+            return if parent.is_none() {
+                Ok(())
+            } else {
+                Err(OrchestrationError::SpawnRefused(
+                    "root coordinator must not carry a parent handle".into(),
+                ))
+            };
+        }
+
+        let parent = parent.ok_or_else(|| {
+            OrchestrationError::SpawnRefused(
+                "non-root coordinator requires its live parent handle".into(),
+            )
+        })?;
+        let token = parent.authority_token.as_ref().ok_or_else(|| {
+            OrchestrationError::SpawnRefused(
+                "non-root coordinator handle has no delegation token".into(),
+            )
+        })?;
+        if parent.agent_id != request.coordinator
+            || token.scope != request.coordinator
+            || token.id != parent.authority
+        {
+            return Err(OrchestrationError::SpawnRefused(
+                "coordinator identity does not match the supplied parent handle".into(),
+            ));
+        }
+        self.ledger
+            .validate_delegation(token, &CapabilityFlag::Spawn, &request.coordinator)
+            .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
+
+        let depth = self
+            .ledger
+            .depth_of(&token.id)
+            .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
+        if depth >= token.constraint.max_depth {
+            return Err(OrchestrationError::SpawnRefused(format!(
+                "max depth exceeded: limit {}, attempted {}",
+                token.constraint.max_depth,
+                depth + 1
+            )));
+        }
+
+        let available = self
+            .ledger
+            .available(&token.id)
+            .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
+        let child_budget = CapabilityToken::r1_child_request(AgentId::new()).budget;
+        let required = Budget {
+            requests: child_budget.requests * request.spokes.len() as u64,
+            cost_micros: child_budget.cost_micros * request.spokes.len() as u64,
+        };
+        if !required.is_within(available) {
+            return Err(OrchestrationError::SpawnRefused(
+                AuthorityError::BudgetExhausted.to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Emit a wave lifecycle event (the 14.3a seam — purely additive variants).
@@ -366,7 +468,9 @@ pub fn transitive_artifact_dependents(
         .collect())
 }
 
-/// Build an [`AgentLaunchSpec`] from a spoke (no authority concerns here).
+/// Build an isolated [`AgentLaunchSpec`] for a patch-bearing fork-join spoke.
+/// Root and nested waves use the same CoW launch contract; only their derived
+/// provenance differs.
 fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
     AgentLaunchSpec {
         prompt: spec.prompt.clone(),
@@ -376,7 +480,7 @@ fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
         parent_ctx_tokens: 0,
         sandbox_override: None,
         parent_trace: None,
-        isolated: false,
+        isolated: true,
     }
 }
 
@@ -396,7 +500,8 @@ pub async fn dispatch_launch(
     spec: &SpokeSpec,
     gate_token: CapabilityToken,
     wave_cancel: CancellationToken,
-) -> Result<crate::domain::models::TaskHandle, OrchestrationError> {
+    parent: Option<&TaskHandle>,
+) -> Result<TaskHandle, OrchestrationError> {
     // ── Spawn gate: validate the CHILD token (not the coordinator's). ──
     if let Err(err) = authority
         .validate(&gate_token, &CapabilityFlag::Spawn, &gate_token.scope)
@@ -409,7 +514,7 @@ pub async fn dispatch_launch(
 
     let launch_spec = launch_spec_for(spec);
     let cancel = wave_cancel.child_token();
-    let handle = match runner.launch(launch_spec, cancel).await {
+    let handle = match runner.launch(launch_spec, cancel, parent).await {
         Ok(h) => h,
         Err(e) => {
             // Refund the gate-token reservation on launch failure — the doc
@@ -442,8 +547,9 @@ async fn dispatch_one(
     spec: &SpokeSpec,
     gate_token: CapabilityToken,
     wave_cancel: CancellationToken,
-) -> Result<crate::domain::models::TaskHandle, OrchestrationError> {
-    dispatch_launch(runner, authority, spec, gate_token, wave_cancel).await
+    parent: Option<&TaskHandle>,
+) -> Result<TaskHandle, OrchestrationError> {
+    dispatch_launch(runner, authority, spec, gate_token, wave_cancel, parent).await
 }
 
 #[async_trait::async_trait]
@@ -458,7 +564,9 @@ impl Orchestrator for ForkJoinExecutor {
         // `current_run`, so a later `rerun_spoke` will operate on it. Callers
         // that want an outcome with no retained side-state must be aware of
         // this (or avoid the convenience wrapper).
-        let handle = self.run_wave(request, CancellationToken::new()).await?;
+        let handle = self
+            .run_wave(request, CancellationToken::new(), None)
+            .await?;
         Ok(handle.snapshot().outcome)
     }
 
@@ -466,8 +574,11 @@ impl Orchestrator for ForkJoinExecutor {
         &self,
         request: ForkJoinRequest,
         cancel: CancellationToken,
+        parent: Option<TaskHandle>,
     ) -> Result<Arc<dyn WaveHandle>, OrchestrationError> {
-        let run = self.run_fork_join_run(request, cancel.clone()).await?;
+        let run = self
+            .run_fork_join_run(request, cancel.clone(), parent)
+            .await?;
         // Store the wave_cancel on the run so WaveHandle::cancel() works.
         let run = ForkJoinRun {
             wave_cancel: cancel,
@@ -518,7 +629,7 @@ impl ForkJoinExecutor {
         request: ForkJoinRequest,
         wave_cancel: CancellationToken,
     ) -> Result<ForkJoinOutcome, OrchestrationError> {
-        let run = self.run_fork_join_run(request, wave_cancel).await?;
+        let run = self.run_fork_join_run(request, wave_cancel, None).await?;
         Ok(run.outcome)
     }
 
@@ -531,18 +642,12 @@ impl ForkJoinExecutor {
         &self,
         request: ForkJoinRequest,
         wave_cancel: CancellationToken,
+        parent: Option<TaskHandle>,
     ) -> Result<ForkJoinRun, OrchestrationError> {
         let topological_waves = self.validate_request(&request)?;
-
-        // P13: the coordinator that owns this wave must own the authority the
-        // executor mints child tokens from. A mismatched coordinator would
-        // silently debit root's budget under root's identity.
-        if request.coordinator != self.root_authority.scope {
-            return Err(OrchestrationError::Internal(format!(
-                "coordinator {:?} does not own this executor's root authority {:?}",
-                request.coordinator, self.root_authority.scope
-            )));
-        }
+        let parent = parent.map(Arc::new);
+        self.validate_coordinator(&request, parent.as_deref())
+            .await?;
 
         let spokes = request.spokes.clone();
         let coordinator = request.coordinator.clone();
@@ -701,6 +806,7 @@ impl ForkJoinExecutor {
                 let admission_coordinator = coordinator.clone();
                 let tx = result_tx.clone();
                 let clock = self.clock.clone();
+                let parent = parent.clone();
                 join_set.spawn(async move {
                     let admitted = tokio::select! {
                         _ = wave_cancel_child.cancelled() => {
@@ -741,9 +847,15 @@ impl ForkJoinExecutor {
                         }
                     };
                     let dispatched_at_ms = clock.wall_now_ms();
-                    let launched =
-                        dispatch_one(&runner, &authority, &spoke, gate_token, wave_cancel_child)
-                            .await;
+                    let launched = dispatch_one(
+                        &runner,
+                        &authority,
+                        &spoke,
+                        gate_token,
+                        wave_cancel_child,
+                        parent.as_deref(),
+                    )
+                    .await;
                     let (
                         agent_id,
                         label,
@@ -899,6 +1011,69 @@ impl ForkJoinExecutor {
                         };
                         match captured {
                             Some(patch) => {
+                                // Story 17.3c (D1): preserve the pre-isolation
+                                // direct-write contract for owner-authorized
+                                // fanout edits. When the owner has pre-approved
+                                // user-originated merge-back, auto-apply through
+                                // the journal-authoritative gate so a successful
+                                // /fanout's edits reach the workspace. Otherwise
+                                // the patch stays Pending + durable (captured
+                                // above; surfaced via PatchCaptured) for review.
+                                if self.merge_back_policy.auto_approve_user_originated {
+                                    let mode = self
+                                        .permission_source
+                                        .as_ref()
+                                        .map(|source| source.current_mode())
+                                        .unwrap_or(PermissionMode::Plan);
+                                    match merge_back
+                                        .apply(
+                                            &patch,
+                                            OwnershipKind::Owned,
+                                            mode,
+                                            &self.merge_back_policy,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            self.emit(AppEvent::SystemNotice {
+                                                conversation_id: None,
+                                                level: crate::domain::models::NoticeLevel::Info,
+                                                message: format!(
+                                                    "Applied fan-out edits from {} to the workspace.",
+                                                    spokes[idx].label
+                                                ),
+                                            });
+                                        }
+                                        Err(MergeBackError::ReviewRequired) => {
+                                            // Not owner-approvable under the
+                                            // current policy/mode (e.g. self-
+                                            // originated) — leave it Pending.
+                                        }
+                                        Err(apply_err) => {
+                                            // A real apply failure (conflict/git/
+                                            // malformed) must NEVER be silent:
+                                            // mark the spoke visibly unsuccessful
+                                            // and keep the patch Pending so the
+                                            // edits stay recoverable for review.
+                                            self.emit(AppEvent::SystemNotice {
+                                                conversation_id: None,
+                                                level: crate::domain::models::NoticeLevel::Warning,
+                                                message: format!(
+                                                    "Fan-out edits from {} could not be applied ({apply_err}); retained for review.",
+                                                    spokes[idx].label
+                                                ),
+                                            });
+                                            outcomes[idx] = Some((
+                                                agent_id.clone(),
+                                                SpokeResult::Failed {
+                                                    reason: format!(
+                                                        "isolated patch could not be applied: {apply_err}"
+                                                    ),
+                                                },
+                                            ));
+                                        }
+                                    }
+                                }
                                 patch_by_agent.insert(agent_id.clone(), patch);
                             }
                             None => {
@@ -1032,6 +1207,7 @@ impl ForkJoinExecutor {
             artifact_by_spoke,
             patch_by_agent,
             slots,
+            parent,
             resolve_count: AtomicUsize::new(0),
             // DN-3 (AC4) storm-cap: per-slot re-run counter, starts at 0.
             rerun_counts: vec![0u8; n],
@@ -1118,7 +1294,15 @@ impl ForkJoinExecutor {
         // Dispatch through the sealed chokepoint (AC3 — no new `.launch(`).
         // Story 14.3a (F3): use the provided cancel token (child of wave root),
         // NOT a fresh orphan `CancellationToken::new()`.
-        let launched = dispatch_one(&self.runner, &self.authority, &spec, gate_token, cancel).await;
+        let launched = dispatch_one(
+            &self.runner,
+            &self.authority,
+            &spec,
+            gate_token,
+            cancel,
+            prev.parent.as_deref(),
+        )
+        .await;
 
         let mut handle = match launched {
             Ok(h) => h,
@@ -1295,6 +1479,7 @@ impl ForkJoinExecutor {
                     artifact_by_spoke: next_artifacts,
                     patch_by_agent: next_patches,
                     slots: next_slots,
+                    parent: prev.parent.clone(),
                     resolve_count: AtomicUsize::new(0),
                     rerun_counts: {
                         let mut counts = prev.rerun_counts.clone();
@@ -1380,6 +1565,8 @@ pub struct ForkJoinRun {
         std::collections::HashMap<AgentId, crate::domain::models::ArtifactRef>,
     /// Dispatch-ordered slot AgentIds — `pub(crate)`.
     pub(crate) slots: Vec<AgentId>,
+    /// Live coordinator handle retained so reruns preserve nested lineage.
+    pub(crate) parent: Option<Arc<TaskHandle>>,
     resolve_count: AtomicUsize,
     /// Per-slot re-run counter (DN-3 storm-cap). Indexed by dispatch slot.
     pub(crate) rerun_counts: Vec<u8>,
@@ -2003,6 +2190,7 @@ mod tests {
             &self,
             _spec: AgentLaunchSpec,
             cancel: CancellationToken,
+            _parent: Option<&crate::domain::models::TaskHandle>,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             let (status_tx, status_rx) =
                 tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
@@ -2048,7 +2236,9 @@ mod tests {
                 yield_rx: Some(yield_rx),
                 isolation_diff_rx: Some(diff_rx),
                 effective_workspace: std::path::PathBuf::from("."),
+                isolated: false,
                 authority: crate::domain::models::CapabilityTokenId([9; 32]),
+                authority_token: None,
                 patch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
             })
         }
@@ -2073,7 +2263,9 @@ mod tests {
             concurrency: 1,
         };
         use crate::domain::ports::Orchestrator;
-        exe.run_wave(req_a, CancellationToken::new()).await.unwrap();
+        exe.run_wave(req_a, CancellationToken::new(), None)
+            .await
+            .unwrap();
         // Snapshot the stale prev A (in-crate: read private current_run).
         let prev_a = exe
             .current_run
@@ -2097,7 +2289,9 @@ mod tests {
             wait_policy: crate::domain::models::orchestration::WaitPolicy::All,
             concurrency: 1,
         };
-        exe.run_wave(req_b, CancellationToken::new()).await.unwrap();
+        exe.run_wave(req_b, CancellationToken::new(), None)
+            .await
+            .unwrap();
         // STALE rerun branched from A's prev while current is B.
         let outcome = exe
             .rerun_spoke_run(&prev_a, 0, CancellationToken::new())
@@ -2170,7 +2364,7 @@ mod tests {
             concurrency: 2,
         };
 
-        exe.run_wave(request, CancellationToken::new())
+        exe.run_wave(request, CancellationToken::new(), None)
             .await
             .expect("wave completes");
         let projected = journal.project_room("host-a").await.expect("project room");
@@ -2223,7 +2417,7 @@ mod tests {
         };
 
         let run = exe
-            .run_fork_join_run(request, CancellationToken::new())
+            .run_fork_join_run(request, CancellationToken::new(), None)
             .await
             .unwrap();
         assert_eq!(run.delta_store.len(), 1);
@@ -2280,6 +2474,7 @@ mod tests {
             &self,
             spec: AgentLaunchSpec,
             cancel: CancellationToken,
+            _parent: Option<&crate::domain::models::TaskHandle>,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             let (status_tx, status_rx) =
                 tokio::sync::mpsc::channel::<crate::domain::models::node_state::NodeState>(8);
@@ -2290,11 +2485,11 @@ mod tests {
             let (diff_tx, diff_rx) = tokio::sync::oneshot::channel();
             let new_content = spec.prompt.clone();
             let _ = diff_tx.send(crate::domain::models::UnifiedDiff::new(
-                crate::domain::models::ProvisioningTier::ScratchCopy,
-                format!(
-                    "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+{new_content}\n"
-                ),
-            ));
+            crate::domain::models::ProvisioningTier::ScratchCopy,
+            format!(
+                "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+{new_content}\n"
+            ),
+        ));
             let agent_id = AgentId::new();
             let task_id = nanoid::nanoid!(12);
             let child_cancel = cancel.child_token();
@@ -2324,7 +2519,9 @@ mod tests {
                 yield_rx: Some(yield_rx),
                 isolation_diff_rx: Some(diff_rx),
                 effective_workspace: std::path::PathBuf::from("."),
+                isolated: false,
                 authority: crate::domain::models::CapabilityTokenId([9; 32]),
+                authority_token: None,
                 patch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
             })
         }
@@ -2420,7 +2617,7 @@ mod tests {
             concurrency: 2,
         };
         let run = exe
-            .run_fork_join_run(request, CancellationToken::new())
+            .run_fork_join_run(request, CancellationToken::new(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -2536,7 +2733,7 @@ mod tests {
             concurrency: 2,
         };
         let _ = exe
-            .run_wave(request, CancellationToken::new())
+            .run_wave(request, CancellationToken::new(), None)
             .await
             .unwrap();
         let prev = exe.current_run.lock().await.clone().unwrap();
@@ -2650,6 +2847,7 @@ mod tests {
             &self,
             _spec: AgentLaunchSpec,
             _cancel: CancellationToken,
+            _parent: Option<&crate::domain::models::TaskHandle>,
         ) -> Result<crate::domain::models::TaskHandle, SubagentError> {
             Err(SubagentError::Internal("noop".into()))
         }

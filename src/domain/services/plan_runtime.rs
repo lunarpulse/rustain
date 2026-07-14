@@ -1376,7 +1376,7 @@ impl PlanRuntime {
                 .child_token()
         };
 
-        let task_handle = match runner.launch(spec, child_cancel).await {
+        let task_handle = match runner.launch(spec, child_cancel, None).await {
             Ok(handle) => handle,
             Err(e) => {
                 // Revert on launch failure

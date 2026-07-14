@@ -14,17 +14,6 @@ pub trait SubagentRunner: Send + Sync {
         &self,
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
+        parent: Option<&TaskHandle>,
     ) -> Result<TaskHandle, SubagentError>;
-
-    /// Launch a descendant from its parent's effective filesystem root.
-    ///
-    /// Runners without filesystem isolation retain the legacy behavior.
-    async fn launch_nested(
-        &self,
-        _parent: &TaskHandle,
-        spec: AgentLaunchSpec,
-        cancel: CancellationToken,
-    ) -> Result<TaskHandle, SubagentError> {
-        self.launch(spec, cancel).await
-    }
 }

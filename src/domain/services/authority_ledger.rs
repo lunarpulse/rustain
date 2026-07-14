@@ -387,6 +387,32 @@ impl AuthorityLedger {
         want: &CapabilityFlag,
         scope: &AgentId,
     ) -> Result<(), AuthorityError> {
+        self.validate_inner(token, want, scope, true)
+    }
+
+    /// Admission check for a delegation/coordination action (spawning a
+    /// sub-wave), NOT a leaf tool use. Identical to [`Self::validate`] EXCEPT it
+    /// does not consult `uses_remaining`: `delegate` (the actual operation this
+    /// gate fronts) never checks the parent's use-count, so gating admission on
+    /// it would refuse a coordinator that has already run one tool batch while
+    /// the delegation itself would still succeed. Mirrors `delegate`'s
+    /// admission surface (revoked/settled/TTL/budget/ancestor-revoked).
+    pub fn validate_delegation(
+        &self,
+        token: &CapabilityToken,
+        want: &CapabilityFlag,
+        scope: &AgentId,
+    ) -> Result<(), AuthorityError> {
+        self.validate_inner(token, want, scope, false)
+    }
+
+    fn validate_inner(
+        &self,
+        token: &CapabilityToken,
+        want: &CapabilityFlag,
+        scope: &AgentId,
+        count_uses: bool,
+    ) -> Result<(), AuthorityError> {
         // Signed cross-process grants are trusted only after the ledger has
         // resolved their issuer through an explicitly registered PeerIdentity
         // and verified the Ed25519 attestation. Hash self-consistency alone is
@@ -406,7 +432,7 @@ impl AuthorityLedger {
             .entries
             .get(&token.id)
             .ok_or(AuthorityError::NotFound)?;
-        if entry.revoked {
+        if entry.revoked || entry.settled {
             return Err(AuthorityError::Revoked);
         }
         // TTL (AC1): deny past `not_after`. `None` means "no expiry"; `Some` is
@@ -417,8 +443,10 @@ impl AuthorityLedger {
                 return Err(AuthorityError::Expired);
             }
         }
-        // Use-count (AC1): a token that has spent all its uses is denied.
-        if entry.uses_remaining == Some(0) {
+        // Use-count (AC1): a token that has spent all its uses is denied its
+        // next LEAF action. Skipped for delegation admission (`count_uses`
+        // false): coordinating a sub-wave is not a leaf use.
+        if count_uses && entry.uses_remaining == Some(0) {
             return Err(AuthorityError::BudgetExhausted);
         }
         // Budget (AC1): deny if either dimension is exhausted. OR (not AND) — a

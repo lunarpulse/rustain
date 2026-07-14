@@ -75,7 +75,7 @@ fn launch_wave_request(
     let conv_id = conversation_id;
     let wave = tokio::spawn(async move {
         use crate::domain::ports::Orchestrator;
-        orchestrator.run_wave(request, wave_cancel).await
+        orchestrator.run_wave(request, wave_cancel, None).await
     });
     tokio::spawn(async move {
         match wave.await {

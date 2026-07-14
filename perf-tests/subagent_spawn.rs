@@ -108,7 +108,10 @@ async fn subagent_spawn_latency() {
     for _ in 0..iterations {
         let cancel = CancellationToken::new();
         let start = Instant::now();
-        let handle = runner.launch(spec.clone(), cancel.clone()).await.unwrap();
+        let handle = runner
+            .launch(spec.clone(), cancel.clone(), None)
+            .await
+            .unwrap();
         let elapsed = start.elapsed();
         latencies.push(elapsed);
         handle.cancel.cancel();
@@ -163,7 +166,10 @@ async fn cancellation_propagation_latency() {
 
     for _ in 0..iterations {
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec.clone(), cancel.clone()).await.unwrap();
+        let handle = runner
+            .launch(spec.clone(), cancel.clone(), None)
+            .await
+            .unwrap();
         let start = Instant::now();
         cancel.cancel();
         // Wait for child to observe cancellation via status channel
@@ -203,7 +209,7 @@ async fn memory_rss_per_agent() {
     let mut handles = Vec::new();
     for _ in 0..10 {
         let cancel = CancellationToken::new();
-        let h = runner.launch(spec.clone(), cancel).await.unwrap();
+        let h = runner.launch(spec.clone(), cancel, None).await.unwrap();
         handles.push(h);
     }
     let after = procfs::process::Process::myself()

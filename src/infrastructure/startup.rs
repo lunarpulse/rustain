@@ -1674,7 +1674,14 @@ pub async fn run() -> Result<()> {
                 .with_journal(node_journal.clone())
                 .with_supervisor(supervisor)
                 .with_artifact_store(artifact_store, artifact_host)
-                .with_patch_merge_back(patch_merge_back),
+                .with_patch_merge_back(patch_merge_back)
+                // Story 17.3c (D1): preserve the pre-isolation direct-write
+                // contract — user-originated fanout edits auto-apply through the
+                // journal-authoritative gate; self-originated stay review-gated.
+                .with_merge_back_policy(crate::domain::services::patch_review::MergeBackPolicy {
+                    auto_approve_user_originated: true,
+                })
+                .with_permission_source(security.clone()),
             );
             orchestrator = Some(orchestrator_inner);
 

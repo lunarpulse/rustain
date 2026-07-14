@@ -26,6 +26,9 @@ pub enum SubagentError {
     #[error("cancelled")]
     Cancelled,
 
+    #[error("nested non-isolated launch refused from isolated parent")]
+    NonIsolatedNestedLaunchRefused,
+
     #[error("internal: {0}")]
     Internal(String),
 }

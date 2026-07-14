@@ -35,7 +35,6 @@ pub struct InProcessSubagentRunner {
     spool: Arc<SubagentSpool>,
     authority: Arc<dyn AuthorityProvider>,
     root_authority: CapabilityToken,
-    launch_provenance: crate::domain::models::ProvenanceTag,
 }
 
 impl InProcessSubagentRunner {
@@ -75,7 +74,6 @@ impl InProcessSubagentRunner {
             spool,
             authority,
             root_authority,
-            launch_provenance: crate::domain::models::ProvenanceTag::UserOriginated,
         }
     }
 
@@ -109,9 +107,32 @@ impl SubagentRunner for InProcessSubagentRunner {
         &self,
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
+        parent: Option<&TaskHandle>,
     ) -> Result<TaskHandle, SubagentError> {
+        if parent.is_some_and(|handle| handle.isolated) && !spec.isolated {
+            return Err(SubagentError::NonIsolatedNestedLaunchRefused);
+        }
+        let base_workspace = parent
+            .map(|handle| handle.effective_workspace.as_path())
+            .unwrap_or(self.workspace_path.as_path());
+        let parent_agent_id = parent
+            .map(|handle| handle.agent_id.clone())
+            .unwrap_or_else(AgentId::root);
+        let patch_provenance = if parent.is_some() {
+            crate::domain::models::ProvenanceTag::SelfOriginated
+        } else {
+            crate::domain::models::ProvenanceTag::UserOriginated
+        };
+        let delegation_parent = match parent {
+            Some(handle) => handle.authority_token.as_ref().ok_or_else(|| {
+                SubagentError::Internal(
+                    "nested launch refused: parent handle has no delegation token".into(),
+                )
+            })?,
+            None => &self.root_authority,
+        };
         // 1. Validate sandbox narrowing BEFORE spawn
-        if let Some(ref child_policy) = spec.sandbox_override {
+        if let Some(child_policy) = &spec.sandbox_override {
             let parent_policy = self.parent_sandbox.read().await.clone();
             validate_narrowing(&parent_policy, child_policy)?;
         }
@@ -136,7 +157,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         let child_token = self
             .authority
             .delegate(
-                &self.root_authority,
+                delegation_parent,
                 CapabilityToken::r1_child_request(agent_id.clone()),
             )
             .await
@@ -205,7 +226,7 @@ impl SubagentRunner for InProcessSubagentRunner {
                     "isolated child refused by WriteFs authority gate: {err}"
                 )));
             }
-            let handle = self.isolation.start(&self.workspace_path).await?;
+            let handle = self.isolation.start(base_workspace).await?;
             let tools = (self.tools_factory)(handle.path());
             let security = Arc::new(crate::adapters::security_adapter::SecurityAdapter::new(
                 handle.path().to_path_buf(),
@@ -241,7 +262,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         let effective_workspace = isolation_handle
             .as_ref()
             .map(|handle| handle.path().to_path_buf())
-            .unwrap_or_else(|| self.workspace_path.clone());
+            .unwrap_or_else(|| base_workspace.to_path_buf());
         let child_authority = child_token.id;
         let authority_for_spawn = self.authority.clone();
         let child_token_for_spawn = child_token.clone();
@@ -380,9 +401,25 @@ impl SubagentRunner for InProcessSubagentRunner {
             isolated: spec_isolated,
             mailbox_budget,
         };
-        self.registry
-            .register(agent_id.clone(), AgentId::root(), reg_handle)
-            .await?;
+        if let Err(err) = self
+            .registry
+            .register(agent_id.clone(), parent_agent_id, reg_handle)
+            .await
+        {
+            // Story 17.3c (P3): the child task is already spawned and its
+            // capability token already delegated (parent budget debited). On the
+            // nested path `parent_agent_id` is the real parent, so `register` can
+            // now fail ("parent not found"/"parent is being torn down") where the
+            // old `AgentId::root()` special-case never did. Roll back so a
+            // register failure leaks neither a running child nor budget: cancel
+            // the orphaned task (it tears down its own isolation scratch on exit)
+            // and settle the delegated token (refunds the parent's reservation).
+            // The settle-on-terminal status bridge is spawned only AFTER a
+            // successful register, so it cannot perform this refund.
+            child_cancel.cancel();
+            let _ = self.authority.settle(&child_token.id).await;
+            return Err(err);
+        }
 
         // Read spawned_at from registry for TaskHandle
         let spawned_at = self
@@ -487,21 +524,11 @@ impl SubagentRunner for InProcessSubagentRunner {
             yield_rx: Some(yield_rx),
             isolation_diff_rx,
             effective_workspace,
+            isolated: spec_isolated,
             authority: child_authority,
-            patch_provenance: self.launch_provenance,
+            authority_token: Some(child_token),
+            patch_provenance,
         })
-    }
-
-    async fn launch_nested(
-        &self,
-        parent: &TaskHandle,
-        spec: AgentLaunchSpec,
-        cancel: CancellationToken,
-    ) -> Result<TaskHandle, SubagentError> {
-        let mut nested = self.clone();
-        nested.workspace_path = parent.effective_workspace.clone();
-        nested.launch_provenance = crate::domain::models::ProvenanceTag::SelfOriginated;
-        nested.launch(spec, cancel).await
     }
 }
 
@@ -2093,7 +2120,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let agent_id = handle.agent_id.clone();
         let mut status_rx = handle.status_rx;
 
@@ -2216,7 +2243,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let agent_id = handle.agent_id.clone();
         let mut status_rx = handle.status_rx;
 
@@ -2319,7 +2346,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let agent_id = handle.agent_id.clone();
         let bus = crate::infrastructure::subagent::LocalMessageBus::new(
             (*registry).clone(),
@@ -2411,7 +2438,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         assert!(!handle.task_id.is_empty());
         // Let it run briefly then kill
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -2439,7 +2466,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         handle.cancel.cancel();
         // Wait for status
         let mut rx = handle.status_rx;
@@ -2468,7 +2495,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running — child is now streaming from HangingProvider
@@ -2540,7 +2567,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running
@@ -2606,7 +2633,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running
@@ -2700,7 +2727,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
         let mut status_rx = handle.status_rx;
 
         // Wait for Running
@@ -2859,7 +2886,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel).await.unwrap();
+        let handle = runner.launch(spec, cancel, None).await.unwrap();
         let mut status_rx = handle.status_rx;
 
         let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -2897,7 +2924,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
 
         let _ = handle.command_tx.send(Op::ChangeModel("opus".into())).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -2923,7 +2950,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
 
         let _ = handle
             .command_tx
@@ -2951,7 +2978,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
 
         let mut rx = handle.status_rx;
         let terminal = tokio::time::timeout(tokio::time::Duration::from_millis(500), async {
@@ -3015,7 +3042,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
 
         let crate::domain::models::TaskHandle {
             mut status_rx,
@@ -3076,7 +3103,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel).await.unwrap();
+        let handle = runner.launch(spec, cancel, None).await.unwrap();
         let agent_id = handle.agent_id.clone();
         let mut status_rx = handle.status_rx;
 
@@ -3121,7 +3148,7 @@ mod tests {
             isolated: false,
         };
         let cancel = CancellationToken::new();
-        let handle = runner.launch(spec, cancel.clone()).await.unwrap();
+        let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
 
         // Send ReportFull
         let _ = handle.command_tx.send(Op::ReportFull).await;
@@ -3272,7 +3299,10 @@ mod tests {
             parent_trace: None,
             isolated: false,
         };
-        let handle = runner.launch(spec, CancellationToken::new()).await.unwrap();
+        let handle = runner
+            .launch(spec, CancellationToken::new(), None)
+            .await
+            .unwrap();
         let task_id = handle.task_id.clone();
 
         // Revoke the child's delegated token BEFORE unblocking the provider, so
@@ -3369,7 +3399,7 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         let mut handle = runner
-            .launch(spec, cancel)
+            .launch(spec, cancel, None)
             .await
             .expect("launch should succeed");
 
@@ -3440,7 +3470,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
         };
-        let result = runner.launch(spec, CancellationToken::new()).await;
+        let result = runner.launch(spec, CancellationToken::new(), None).await;
         assert!(
             result.is_err(),
             "P11: isolated launch on the default (parent-rooted) runner must be refused fail-closed"
@@ -3608,7 +3638,7 @@ mod tests {
             parent_trace: None,
             isolated: true,
         };
-        let result = runner.launch(spec, CancellationToken::new()).await;
+        let result = runner.launch(spec, CancellationToken::new(), None).await;
         assert!(
             result.is_err(),
             "AC3: isolation-start failure must refuse the launch, never fall through to the real workspace"
@@ -3679,28 +3709,115 @@ mod tests {
         }
     }
 
+    /// Story 17.3c real-path provider: read a parent-only file through the
+    /// child's clone-rooted scheduler, then write a marker through that same
+    /// scheduler. Conversation state, not global counters, keeps concurrent
+    /// children independent.
+    struct ReadParentThenWriteProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for ReadParentThenWriteProvider {
+        async fn stream_completion(
+            &self,
+            messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let read_result = messages
+                .iter()
+                .flat_map(|message| &message.tool_results)
+                .find(|result| result.tool_use_id == "read-parent");
+            let write_result = messages
+                .iter()
+                .flat_map(|message| &message.tool_results)
+                .find(|result| result.tool_use_id == "write-marker");
+            let chunks = match (read_result, write_result) {
+                (Some(read_result), Some(write_result)) => {
+                    assert!(
+                        read_result.content.contains("parent-visible"),
+                        "grandchild Read must observe the immediate parent's workspace"
+                    );
+                    assert!(
+                        !write_result.is_error,
+                        "grandchild clone-rooted Write failed: {}",
+                        write_result.content
+                    );
+                    vec![
+                        StreamChunk::Text {
+                            content: "done".into(),
+                            parent_tool_use_id: None,
+                        },
+                        StreamChunk::TurnComplete {
+                            stop_reason: crate::domain::models::StopReason::EndTurn,
+                        },
+                    ]
+                }
+                _ => vec![
+                    StreamChunk::ToolUse {
+                        id: "read-parent".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({ "file_path": "parent-only.txt" }),
+                    },
+                    StreamChunk::ToolUse {
+                        id: "write-marker".into(),
+                        name: "Write".into(),
+                        input: serde_json::json!({
+                            "file_path": "p3_marker.txt",
+                            "content": "saw-parent\n",
+                        }),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::ToolUse,
+                    },
+                ],
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "read-parent-then-write".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            Vec::new()
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
     // P3 consensus (party-mode 2026-06-30, Winston/Amelia/Murat unanimous → A):
     // faithfully mirror the production `startup.rs` ToolSetAdapter factory so the
     // tool-execution-to-completion leg is exercised exactly as in production.
     // `set_event_tx(event_bus.domain_tx)` is the leading hypothesis for the
     // prior hang (a completion signaled into a void); mirror it on BOTH the
     // parent `tools` and the isolated factory's per-call adapters.
-    async fn make_write_runner(
+    async fn make_runner_with_provider(
         workspace: &std::path::Path,
         isolated: bool,
-    ) -> InProcessSubagentRunner {
-        let provider = Arc::new(WriteOnceProvider {
-            calls: std::sync::atomic::AtomicU32::new(0),
-            file_path: "p3_marker.txt".into(),
-        }) as Arc<dyn StreamingProvider>;
+        provider: Arc<dyn StreamingProvider>,
+    ) -> (
+        InProcessSubagentRunner,
+        Arc<crate::domain::services::authority_ledger::AuthorityLedger>,
+        crate::domain::models::CapabilityToken,
+    ) {
         let storage = Arc::new(FileSystemStorage::new(workspace.to_path_buf()))
             as Arc<dyn crate::domain::ports::StoragePort>;
         let security = Arc::new(SecurityAdapter::new(workspace.to_path_buf()))
             as Arc<dyn crate::domain::ports::SecurityPort>;
-        // P3 root-cause fix: the scheduler awaits an approval decision for any
-        // non-Yolo permission mode (tool_scheduler.rs:221-256). The test grants
-        // no approvals, so default-Normal would hang forever on the Write tool.
-        // Yolo auto-approves (mirrors the scheduler's own MockSecurity{Yolo}).
         security.set_mode(crate::domain::models::PermissionMode::Yolo);
         let sandbox = Arc::new(ArcSwap::from_pointee(
             Arc::new(NoOpSandbox) as Arc<dyn crate::domain::ports::SandboxManager>
@@ -3723,7 +3840,13 @@ mod tests {
         let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
         let registry = Arc::new(NodeTree::new());
         let spool = Arc::new(SubagentSpool::new(workspace.join("spool")).await.unwrap());
-        let (authority, root_authority) = authority_pair();
+        let root_authority = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
+        let ledger = Arc::new(
+            crate::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        );
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
         let runner = InProcessSubagentRunner::new(
             provider,
             storage.clone(),
@@ -3736,9 +3859,9 @@ mod tests {
             parent_policy.clone(),
             spool,
             authority,
-            root_authority,
+            root_authority.clone(),
         );
-        if isolated {
+        let runner = if isolated {
             let factory_storage = storage.clone();
             let factory_sandbox = sandbox.clone();
             let factory_policy = parent_policy.clone();
@@ -3747,9 +3870,9 @@ mod tests {
                 dyn Fn(&std::path::Path) -> Arc<dyn crate::domain::ports::ToolSetPort>
                     + Send
                     + Sync,
-            > = Arc::new(move |p| {
+            > = Arc::new(move |path| {
                 let mut adapter = ToolSetAdapter::new(
-                    p.to_path_buf(),
+                    path.to_path_buf(),
                     factory_storage.clone(),
                     factory_sandbox.clone(),
                     factory_policy.clone(),
@@ -3765,7 +3888,90 @@ mod tests {
             )
         } else {
             runner
+        };
+        (runner, ledger, root_authority)
+    }
+
+    async fn make_write_runner(
+        workspace: &std::path::Path,
+        isolated: bool,
+    ) -> InProcessSubagentRunner {
+        make_runner_with_provider(
+            workspace,
+            isolated,
+            Arc::new(WriteOnceProvider {
+                calls: std::sync::atomic::AtomicU32::new(0),
+                file_path: "p3_marker.txt".into(),
+            }),
+        )
+        .await
+        .0
+    }
+
+    fn build_real_executor(
+        runner: InProcessSubagentRunner,
+        ledger: Arc<crate::domain::services::authority_ledger::AuthorityLedger>,
+        root: crate::domain::models::CapabilityToken,
+    ) -> crate::infrastructure::orchestrator::ForkJoinExecutor {
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, event_rx) = EventBus::new(64);
+        std::mem::forget(event_rx);
+        crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner) as Arc<dyn SubagentRunner>,
+            authority,
+            ledger,
+            Arc::new(event_bus),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root,
+        )
+    }
+
+    fn single_spoke_request(
+        coordinator: AgentId,
+        label: &str,
+    ) -> crate::domain::ports::ForkJoinRequest {
+        crate::domain::ports::ForkJoinRequest {
+            coordinator,
+            spokes: vec![crate::domain::models::SpokeSpec {
+                id: AgentId::new(),
+                label: label.into(),
+                prompt: format!("produce {label}"),
+                effective_model: "m".into(),
+                tier: crate::domain::models::ModelTier::Flagship,
+                tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                waits_for: Vec::new(),
+            }],
+            wait_policy: crate::domain::models::WaitPolicy::All,
+            concurrency: 1,
         }
+    }
+
+    fn isolated_launch_spec(prompt: &str) -> AgentLaunchSpec {
+        AgentLaunchSpec {
+            prompt: prompt.into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        }
+    }
+
+    fn run_git(workspace: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .expect("git must execute");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     async fn await_terminal(handle: &mut TaskHandle) -> NodeState {
@@ -3811,7 +4017,7 @@ mod tests {
             isolated: false,
         };
         let mut h = runner_a
-            .launch(spec, CancellationToken::new())
+            .launch(spec, CancellationToken::new(), None)
             .await
             .expect("non-isolated launch");
         assert_eq!(
@@ -3840,7 +4046,7 @@ mod tests {
             isolated: true,
         };
         let mut h2 = runner_b
-            .launch(spec_iso, CancellationToken::new())
+            .launch(spec_iso, CancellationToken::new(), None)
             .await
             .expect("isolated launch (with_isolation configured)");
         assert_eq!(
@@ -3870,37 +4076,92 @@ mod tests {
         );
     }
 
+    /// Story 17.3c AC2 [K]: a nested non-isolated launch from an isolated
+    /// parent is refused before root-bound tools can touch the real workspace.
     #[tokio::test]
-    async fn depth_three_isolated_launch_clones_immediate_parent_workspace() {
+    async fn nested_non_isolated_launch_from_isolated_parent_is_refused() {
+        let real = tempfile::tempdir().unwrap();
+        let runner = make_write_runner(real.path(), true).await;
+        let mut parent_runner = runner.clone();
+        parent_runner.provider = Arc::new(HangingProvider);
+        let parent = parent_runner
+            .launch(
+                AgentLaunchSpec {
+                    prompt: "parent".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    parent_ctx_tokens: 0,
+                    sandbox_override: None,
+                    parent_trace: None,
+                    isolated: true,
+                },
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("real isolated parent launch");
+
+        let result = runner
+            .launch(
+                AgentLaunchSpec {
+                    prompt: "nested escape".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    parent_ctx_tokens: 0,
+                    sandbox_override: None,
+                    parent_trace: None,
+                    isolated: false,
+                },
+                CancellationToken::new(),
+                Some(&parent),
+            )
+            .await;
+
+        match result {
+            Err(SubagentError::NonIsolatedNestedLaunchRefused) => {}
+            Err(other) => panic!("expected nested isolation refusal, got {other}"),
+            Ok(_) => panic!("nested non-isolated launch escaped into root-bound tools"),
+        }
+        assert!(
+            !real.path().join("p3_marker.txt").exists(),
+            "refused nested launch must not write the One-Ring workspace"
+        );
+        parent.cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn real_parent_launch_clones_immediate_workspace_and_derives_provenance() {
         let real = tempfile::tempdir().unwrap();
         std::fs::write(real.path().join("root-only.txt"), "root\n").unwrap();
-        let isolation = crate::adapters::isolation::CowIsolationProvider::default();
-        let parent_clone = isolation.start(real.path()).await.unwrap();
-        std::fs::write(parent_clone.path().join("parent-only.txt"), "parent\n").unwrap();
-        let second_clone = isolation.start(parent_clone.path()).await.unwrap();
-        std::fs::write(second_clone.path().join("second-only.txt"), "second\n").unwrap();
-
-        let (status_tx, status_rx) = tokio::sync::mpsc::channel(1);
-        let (command_tx, _) = tokio::sync::mpsc::channel(1);
-        let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
-        let parent = TaskHandle {
-            agent_id: AgentId::new(),
-            status_rx,
-            command_tx,
-            cancel: CancellationToken::new(),
-            task_id: "parent".into(),
-            subagent_type: "test".into(),
-            spawned_at: 0,
-            parent_disconnect,
-            yield_rx: None,
-            isolation_diff_rx: None,
-            effective_workspace: second_clone.path().to_path_buf(),
-            authority: crate::domain::models::CapabilityTokenId::root(),
-            patch_provenance: crate::domain::models::ProvenanceTag::SelfOriginated,
-        };
-        drop(status_tx);
-
         let runner = make_write_runner(real.path(), true).await;
+        let mut parent_runner = runner.clone();
+        parent_runner.provider = Arc::new(HangingProvider);
+        let parent_spec = AgentLaunchSpec {
+            prompt: "parent".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        };
+        let parent = parent_runner
+            .launch(parent_spec, CancellationToken::new(), None)
+            .await
+            .expect("real parent launch");
+        std::fs::write(
+            parent.effective_workspace.join("parent-only.txt"),
+            "parent\n",
+        )
+        .unwrap();
+        std::fs::write(
+            parent.effective_workspace.join("second-only.txt"),
+            "second\n",
+        )
+        .unwrap();
         let spec = AgentLaunchSpec {
             prompt: "nested".into(),
             effective_model: "m".into(),
@@ -3912,7 +4173,7 @@ mod tests {
             isolated: true,
         };
         let mut nested = runner
-            .launch_nested(&parent, spec, CancellationToken::new())
+            .launch(spec, CancellationToken::new(), Some(&parent))
             .await
             .expect("nested isolated launch");
         assert_eq!(
@@ -3924,6 +4185,14 @@ mod tests {
             nested.authority,
             crate::domain::models::CapabilityTokenId::root(),
             "patch sandbox identity must be the producing child's derived authority"
+        );
+        assert_eq!(
+            nested
+                .authority_token
+                .as_ref()
+                .and_then(|token| token.parent),
+            Some(parent.authority),
+            "nested capability must be delegated from the real parent handle, never root"
         );
 
         assert_ne!(nested.effective_workspace, real.path());
@@ -3947,8 +4216,354 @@ mod tests {
             "depth-2 delta must never leak into the One-Ring workspace"
         );
         assert_eq!(await_terminal(&mut nested).await, NodeState::Completed);
-        isolation.stop(second_clone).await.unwrap();
-        isolation.stop(parent_clone).await.unwrap();
+        parent.cancel.cancel();
+    }
+
+    /// Story 17.3c AC1 [K]: a real non-root sub-wave reaches the unified launch
+    /// seam. The grandchild reads an edit that exists only in the immediate
+    /// parent's clone, then writes through the clone-rooted scheduler.
+    #[tokio::test]
+    async fn real_nested_subwave_reads_parent_delta_and_writes_only_child_clone() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("parent-only.txt"), "root-seed\n").unwrap();
+        let (runner, ledger, root) =
+            make_runner_with_provider(real.path(), true, Arc::new(ReadParentThenWriteProvider))
+                .await;
+        let mut parent_runner = runner.clone();
+        parent_runner.provider = Arc::new(HangingProvider);
+        let parent = parent_runner
+            .launch(
+                isolated_launch_spec("live nested coordinator"),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("real isolated parent");
+        std::fs::write(
+            parent.effective_workspace.join("parent-only.txt"),
+            "parent-visible\n",
+        )
+        .unwrap();
+        let coordinator = parent.agent_id.clone();
+        let executor = build_real_executor(runner, ledger, root);
+
+        let run = executor
+            .run_fork_join_run(
+                single_spoke_request(coordinator, "nested"),
+                CancellationToken::new(),
+                Some(parent),
+            )
+            .await
+            .expect("real nested sub-wave");
+
+        assert!(matches!(
+            run.outcome.spokes[0].1,
+            crate::domain::models::SpokeResult::Completed { .. }
+        ));
+        let delta = run
+            .delta_store
+            .values()
+            .next()
+            .expect("nested isolated child must capture a delta");
+        assert!(
+            delta.diff.contains("p3_marker.txt"),
+            "clone-rooted Write must appear in the captured child delta: {}",
+            delta.diff
+        );
+        assert_eq!(
+            std::fs::read_to_string(real.path().join("parent-only.txt")).unwrap(),
+            "root-seed\n",
+            "the parent-only edit must remain isolated from the One-Ring root"
+        );
+        assert!(
+            !real.path().join("p3_marker.txt").exists(),
+            "clone-rooted scheduler must never write the One-Ring root"
+        );
+        run.parent.as_ref().unwrap().cancel.cancel();
+    }
+
+    /// Story 17.3c AC4 [K]: real root and nested launches both produce deltas,
+    /// PatchMergeBack preserves their derived provenance, and one identical
+    /// auto-approve policy applies only the user-originated patch.
+    #[tokio::test]
+    async fn real_launch_provenance_drives_merge_back_policy_end_to_end() {
+        let workspace = tempfile::tempdir().unwrap();
+        run_git(workspace.path(), &["init", "-q"]);
+        std::fs::write(workspace.path().join("parent-only.txt"), "parent-visible\n").unwrap();
+        run_git(workspace.path(), &["add", "parent-only.txt"]);
+        run_git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+
+        let (runner, ledger, root) = make_runner_with_provider(
+            workspace.path(),
+            true,
+            Arc::new(ReadParentThenWriteProvider),
+        )
+        .await;
+        let mut parent_runner = runner.clone();
+        parent_runner.provider = Arc::new(HangingProvider);
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            workspace.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(64);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+            workspace.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let executor = build_real_executor(runner, ledger, root)
+            .with_journal(journal)
+            .with_artifact_store(
+                store,
+                crate::domain::models::HostBinding::new("host-17-3c", "provenance-weld"),
+            )
+            .with_patch_merge_back(merge_back.clone());
+
+        let root_run = executor
+            .run_fork_join_run(
+                single_spoke_request(AgentId::root(), "root-user"),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("real root wave");
+        let root_patch = root_run
+            .patch_by_agent
+            .values()
+            .next()
+            .cloned()
+            .expect("root isolated child delta must become a patch");
+        assert_eq!(
+            root_patch.provenance,
+            vec![crate::domain::models::ProvenanceTag::UserOriginated]
+        );
+        assert_ne!(
+            root_patch.authority,
+            crate::domain::models::CapabilityTokenId::root()
+        );
+
+        let parent = parent_runner
+            .launch(
+                isolated_launch_spec("nested coordinator"),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("real nested coordinator");
+        let parent_authority = parent.authority;
+        let coordinator = parent.agent_id.clone();
+        let nested_run = executor
+            .run_fork_join_run(
+                single_spoke_request(coordinator, "nested-self"),
+                CancellationToken::new(),
+                Some(parent),
+            )
+            .await
+            .expect("real nested wave");
+        let nested_patch = nested_run
+            .patch_by_agent
+            .values()
+            .next()
+            .cloned()
+            .expect("nested isolated child delta must become a patch");
+        assert_eq!(
+            nested_patch.provenance,
+            vec![crate::domain::models::ProvenanceTag::SelfOriginated]
+        );
+        assert_ne!(
+            nested_patch.authority, parent_authority,
+            "patch authority must be the grandchild's delegated token"
+        );
+
+        let policy = crate::domain::services::patch_review::MergeBackPolicy {
+            auto_approve_user_originated: true,
+        };
+        merge_back
+            .apply(
+                &root_patch,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &policy,
+            )
+            .await
+            .expect("same policy auto-applies real user-originated patch");
+        let nested_apply = merge_back
+            .apply(
+                &nested_patch,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &policy,
+            )
+            .await;
+        assert!(matches!(
+            nested_apply,
+            Err(crate::infrastructure::orchestrator::MergeBackError::ReviewRequired)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("p3_marker.txt")).unwrap(),
+            "saw-parent\n"
+        );
+        nested_run.parent.as_ref().unwrap().cancel.cancel();
+    }
+
+    /// Story 17.3c (D1): the production composition — real executor + real
+    /// merge-back + owner auto-approve policy + a live non-Plan permission
+    /// source — AUTO-APPLIES a root wave's user-originated patch into the
+    /// workspace, restoring the pre-isolation direct-write contract end-to-end.
+    /// Positive control: the marker file lands in the real workspace with no
+    /// manual `apply` call. Mutant — drop the disposition (no auto-apply) →
+    /// the marker never lands → RED.
+    #[tokio::test]
+    async fn root_fanout_patch_auto_applies_into_workspace_under_owner_policy() {
+        let workspace = tempfile::tempdir().unwrap();
+        run_git(workspace.path(), &["init", "-q"]);
+        std::fs::write(workspace.path().join("parent-only.txt"), "parent-visible\n").unwrap();
+        run_git(workspace.path(), &["add", "parent-only.txt"]);
+        run_git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-qm",
+                "baseline",
+            ],
+        );
+
+        let (runner, ledger, root) = make_runner_with_provider(
+            workspace.path(),
+            true,
+            Arc::new(ReadParentThenWriteProvider),
+        )
+        .await;
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(workspace.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            workspace.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(64);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+            workspace.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let security = Arc::new(SecurityAdapter::new(workspace.path().to_path_buf()))
+            as Arc<dyn crate::domain::ports::SecurityPort>;
+        security.set_mode(crate::domain::models::PermissionMode::Yolo);
+        let executor = build_real_executor(runner, ledger, root)
+            .with_journal(journal)
+            .with_artifact_store(
+                store,
+                crate::domain::models::HostBinding::new("host-17-3c", "d1-auto-apply"),
+            )
+            .with_patch_merge_back(merge_back)
+            .with_merge_back_policy(crate::domain::services::patch_review::MergeBackPolicy {
+                auto_approve_user_originated: true,
+            })
+            .with_permission_source(security);
+
+        let run = executor
+            .run_fork_join_run(
+                single_spoke_request(AgentId::root(), "root-user"),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .expect("root wave");
+
+        assert!(
+            matches!(
+                run.outcome.spokes[0].1,
+                crate::domain::models::SpokeResult::Completed { .. }
+            ),
+            "auto-applied root spoke must remain Completed, not marked Failed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("p3_marker.txt")).unwrap(),
+            "saw-parent\n",
+            "owner-approved root fanout patch must auto-apply into the One-Ring workspace"
+        );
+    }
+
+    /// Story 17.3c AC3 [K]: the real launch seam can build depths 1→3, but
+    /// ledger delegation refuses the attempted depth-4 descendant.
+    #[tokio::test]
+    async fn real_parent_authority_chain_refuses_depth_four() {
+        let real = tempfile::tempdir().unwrap();
+        let mut runner = make_write_runner(real.path(), true).await;
+        runner.provider = Arc::new(HangingProvider);
+        let spec = || AgentLaunchSpec {
+            prompt: "hanging descendant".into(),
+            effective_model: "m".into(),
+            tier: crate::domain::models::ModelTier::Flagship,
+            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+            parent_ctx_tokens: 0,
+            sandbox_override: None,
+            parent_trace: None,
+            isolated: true,
+        };
+
+        let depth_one = runner
+            .launch(spec(), CancellationToken::new(), None)
+            .await
+            .expect("depth one");
+        let depth_two = runner
+            .launch(spec(), CancellationToken::new(), Some(&depth_one))
+            .await
+            .expect("depth two");
+        let depth_three = runner
+            .launch(spec(), CancellationToken::new(), Some(&depth_two))
+            .await
+            .expect("depth three");
+        let depth_four = runner
+            .launch(spec(), CancellationToken::new(), Some(&depth_three))
+            .await;
+
+        match depth_four {
+            Err(SubagentError::Internal(message)) => assert!(
+                message.contains("max depth exceeded"),
+                "depth-4 refusal must come from the authority ledger: {message}"
+            ),
+            Err(other) => panic!("expected authority depth refusal, got {other}"),
+            Ok(_) => panic!("depth-4 descendant bypassed parent authority depth"),
+        }
+        assert_eq!(
+            depth_three
+                .authority_token
+                .as_ref()
+                .and_then(|token| token.parent),
+            Some(depth_two.authority)
+        );
+
+        depth_three.cancel.cancel();
+        depth_two.cancel.cancel();
+        depth_one.cancel.cancel();
     }
 
     // ── Story 14-4a (AMELIA-1): Recipient-side consent enforcement behavioral tests ──
@@ -4091,7 +4706,7 @@ mod tests {
             isolated: false,
         };
         let mut handle = runner
-            .launch(spec, CancellationToken::new())
+            .launch(spec, CancellationToken::new(), None)
             .await
             .expect("launch owned child");
         let agent_id = handle.agent_id.clone();

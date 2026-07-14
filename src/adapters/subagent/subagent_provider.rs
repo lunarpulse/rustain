@@ -413,7 +413,7 @@ impl SubagentProvider {
         );
 
         // 7. Launch
-        let handle = match self.runner.launch(spec, cancel.clone()).await {
+        let handle = match self.runner.launch(spec, cancel.clone(), None).await {
             Ok(h) => h,
             Err(e) => {
                 return Ok(map_subagent_error(e));
@@ -764,6 +764,9 @@ fn map_subagent_error(e: crate::domain::models::SubagentError) -> ToolResult {
             format!("Subagent panicked: {}", msg)
         }
         crate::domain::models::SubagentError::Cancelled => "Subagent cancelled".into(),
+        crate::domain::models::SubagentError::NonIsolatedNestedLaunchRefused => {
+            "Nested non-isolated launch refused from isolated parent".into()
+        }
         crate::domain::models::SubagentError::Internal(ref msg) => {
             format!("Subagent internal error: {}", msg)
         }

@@ -85,6 +85,7 @@ struct FakeRunner {
     /// the ratchet stays at 4).
     launch_count: Arc<Mutex<u32>>,
     launch_prompts: Arc<Mutex<Vec<String>>>,
+    launch_parents: Arc<Mutex<Vec<Option<AgentId>>>>,
     /// When `true`, every launched child is TRULY STUCK: it holds its status
     /// channel open but NEVER emits a terminal (and never closes it). Drives
     /// the collector's timeout → `Terminal::Stuck` → `StuckWaiting` escalation
@@ -100,6 +101,7 @@ impl FakeRunner {
             yields: None,
             launch_count: Arc::new(Mutex::new(0)),
             launch_prompts: Arc::new(Mutex::new(Vec::new())),
+            launch_parents: Arc::new(Mutex::new(Vec::new())),
             never_emits: false,
         }
     }
@@ -116,6 +118,7 @@ impl FakeRunner {
             yields: Some(Arc::new(Mutex::new(yields.into_iter().collect()))),
             launch_count: Arc::new(Mutex::new(0)),
             launch_prompts: Arc::new(Mutex::new(Vec::new())),
+            launch_parents: Arc::new(Mutex::new(Vec::new())),
             never_emits: false,
         }
     }
@@ -132,6 +135,7 @@ impl FakeRunner {
             launch_count: Arc::new(Mutex::new(0)),
             never_emits: true,
             launch_prompts: Arc::new(Mutex::new(Vec::new())),
+            launch_parents: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -144,6 +148,10 @@ impl FakeRunner {
     async fn launch_prompts(&self) -> Vec<String> {
         self.launch_prompts.lock().await.clone()
     }
+
+    async fn launch_parents(&self) -> Vec<Option<AgentId>> {
+        self.launch_parents.lock().await.clone()
+    }
 }
 
 #[async_trait]
@@ -152,6 +160,7 @@ impl SubagentRunner for FakeRunner {
         &self,
         spec: AgentLaunchSpec,
         cancel: CancellationToken,
+        parent: Option<&rustain::domain::models::TaskHandle>,
     ) -> Result<TaskHandle, SubagentError> {
         // Bump the launch counter BEFORE popping the terminal so the spec-named
         // cancel test can assert no new dispatch happens after cancel.
@@ -160,6 +169,10 @@ impl SubagentRunner for FakeRunner {
             *cnt += 1;
         }
         self.launch_prompts.lock().await.push(spec.prompt);
+        self.launch_parents
+            .lock()
+            .await
+            .push(parent.map(|handle| handle.agent_id.clone()));
         if self.never_emits {
             // TRULY STUCK child: hold the status channel OPEN but NEVER emit a
             // terminal (and never close it). The collector's
@@ -197,7 +210,9 @@ impl SubagentRunner for FakeRunner {
                 yield_rx: None,
                 isolation_diff_rx: None,
                 effective_workspace: std::path::PathBuf::from("."),
+                isolated: false,
                 authority: rustain::domain::models::CapabilityTokenId::root(),
+                authority_token: None,
                 patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
             });
         }
@@ -264,7 +279,9 @@ impl SubagentRunner for FakeRunner {
             yield_rx: Some(yield_rx),
             isolation_diff_rx: None,
             effective_workspace: std::path::PathBuf::from("."),
+            isolated: false,
             authority: rustain::domain::models::CapabilityTokenId::root(),
+            authority_token: None,
             patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
         })
     }
@@ -281,6 +298,7 @@ impl SubagentRunner for FailingLaunchRunner {
         &self,
         _spec: AgentLaunchSpec,
         _cancel: CancellationToken,
+        _parent: Option<&rustain::domain::models::TaskHandle>,
     ) -> Result<TaskHandle, SubagentError> {
         Err(SubagentError::Internal(
             "injected launch failure (PATCH-12 settle coverage)".into(),
@@ -307,6 +325,275 @@ fn build_executor(
     let clock = Arc::new(MockClock::at_wall_ms(0)) as Arc<dyn Clock>;
     let exe = ForkJoinExecutor::new(runner, authority, ledger.clone(), event_bus, clock, root);
     (exe, ledger)
+}
+
+/// Story 17.3c AC1 [K]: a live non-root coordinator reaches the existing
+/// dispatch chokepoint with its exact parent handle. Dropping the parent in the
+/// executor makes the recorded launch context `None` and fails this test.
+#[tokio::test]
+async fn nested_non_root_coordinator_threads_parent_to_launch_chokepoint() {
+    let root = root_token();
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, ledger) = build_executor(runner.clone(), root.clone());
+    let parent_id = AgentId::new();
+    let parent_token = ledger
+        .delegate(&root, CapabilityToken::r1_child_request(parent_id.clone()))
+        .unwrap();
+    let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+    let (command_tx, _) = tokio::sync::mpsc::channel(1);
+    let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
+    let parent = TaskHandle {
+        agent_id: parent_id.clone(),
+        status_rx,
+        command_tx,
+        cancel: CancellationToken::new(),
+        task_id: "live-parent".into(),
+        subagent_type: "test".into(),
+        spawned_at: 0,
+        parent_disconnect,
+        yield_rx: None,
+        isolation_diff_rx: None,
+        effective_workspace: std::path::PathBuf::from("."),
+        isolated: true,
+        authority: parent_token.id,
+        authority_token: Some(parent_token),
+        patch_provenance: rustain::domain::models::ProvenanceTag::UserOriginated,
+    };
+
+    exe.run_wave(
+        request(parent_id.clone(), vec![spoke("nested")]),
+        CancellationToken::new(),
+        Some(parent),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(runner.launch_parents().await, vec![Some(parent_id)]);
+}
+
+#[tokio::test]
+async fn non_root_coordinator_without_live_handle_is_refused_before_dispatch() {
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, _ledger) = build_executor(runner.clone(), root_token());
+    let error = exe
+        .run_wave(
+            request(AgentId::new(), vec![spoke("nested")]),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, OrchestrationError::SpawnRefused(_)));
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+/// Story 17.3c AC3 [K]: an active depth-3 coordinator is real ledger lineage,
+/// but the R3 gate refuses its attempted depth-4 child before dispatch.
+#[tokio::test]
+async fn depth_three_coordinator_is_refused_before_depth_four_dispatch() {
+    let root = root_token();
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, ledger) = build_executor(runner.clone(), root.clone());
+    let depth_one = ledger
+        .delegate(&root, CapabilityToken::r1_child_request(AgentId::new()))
+        .unwrap();
+    let depth_two = ledger
+        .delegate(
+            &depth_one,
+            CapabilityToken::r1_child_request(AgentId::new()),
+        )
+        .unwrap();
+    let depth_three = ledger
+        .delegate(
+            &depth_two,
+            CapabilityToken::r1_child_request(AgentId::new()),
+        )
+        .unwrap();
+    let coordinator = depth_three.scope.clone();
+    let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+    let (command_tx, _) = tokio::sync::mpsc::channel(1);
+    let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
+    let parent = TaskHandle {
+        agent_id: coordinator.clone(),
+        status_rx,
+        command_tx,
+        cancel: CancellationToken::new(),
+        task_id: "depth-three".into(),
+        subagent_type: "test".into(),
+        spawned_at: 0,
+        parent_disconnect,
+        yield_rx: None,
+        isolation_diff_rx: None,
+        effective_workspace: std::path::PathBuf::from("."),
+        isolated: true,
+        authority: depth_three.id,
+        authority_token: Some(depth_three),
+        patch_provenance: rustain::domain::models::ProvenanceTag::SelfOriginated,
+    };
+
+    let error = exe
+        .run_wave(
+            request(coordinator, vec![spoke("depth-four")]),
+            CancellationToken::new(),
+            Some(parent),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, OrchestrationError::SpawnRefused(_)));
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+#[tokio::test]
+async fn exhausted_non_root_coordinator_is_refused_before_dispatch() {
+    let root = root_token();
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, ledger) = build_executor(runner.clone(), root.clone());
+    let coordinator = AgentId::new();
+    let token = ledger
+        .delegate(
+            &root,
+            CapabilityToken::r1_child_request(coordinator.clone()),
+        )
+        .unwrap();
+    ledger.consume(&token.id, token.budget).unwrap();
+    let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+    let (command_tx, _) = tokio::sync::mpsc::channel(1);
+    let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
+    let parent = TaskHandle {
+        agent_id: coordinator.clone(),
+        status_rx,
+        command_tx,
+        cancel: CancellationToken::new(),
+        task_id: "exhausted".into(),
+        subagent_type: "test".into(),
+        spawned_at: 0,
+        parent_disconnect,
+        yield_rx: None,
+        isolation_diff_rx: None,
+        effective_workspace: std::path::PathBuf::from("."),
+        isolated: true,
+        authority: token.id,
+        authority_token: Some(token),
+        patch_provenance: rustain::domain::models::ProvenanceTag::SelfOriginated,
+    };
+
+    let error = exe
+        .run_wave(
+            request(coordinator, vec![spoke("over-budget")]),
+            CancellationToken::new(),
+            Some(parent),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, OrchestrationError::SpawnRefused(_)));
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+/// Story 17.3c (P5): a non-root coordinator that has spent its single use but
+/// still holds budget IS admitted to coordinate a nested sub-wave. Coordinating
+/// is a delegation, not a leaf tool use — `validate_delegation` (mirroring the
+/// `delegate` path, which never checks `uses_remaining`) admits it, whereas the
+/// old `validate`-based gate would refuse. Mutant — gate admission on
+/// `uses_remaining` again → the wave is refused → launch_count == 0 → RED.
+#[tokio::test]
+async fn uses_exhausted_but_budgeted_non_root_coordinator_is_admitted() {
+    let root = root_token();
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, ledger) = build_executor(runner.clone(), root.clone());
+    let coordinator = AgentId::new();
+    let token = ledger
+        .delegate(
+            &root,
+            CapabilityToken::r1_child_request(coordinator.clone()),
+        )
+        .unwrap();
+    // Spend the coordinator's single use WITHOUT drawing budget: uses_remaining
+    // 1 → 0, budget intact. The old `validate`-based coordinator gate refused
+    // exactly this state; `validate_delegation` admits it.
+    ledger.consume(&token.id, Budget::ZERO).unwrap();
+    let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+    let (command_tx, _) = tokio::sync::mpsc::channel(1);
+    let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
+    let parent = TaskHandle {
+        agent_id: coordinator.clone(),
+        status_rx,
+        command_tx,
+        cancel: CancellationToken::new(),
+        task_id: "uses-spent".into(),
+        subagent_type: "test".into(),
+        spawned_at: 0,
+        parent_disconnect,
+        yield_rx: None,
+        isolation_diff_rx: None,
+        effective_workspace: std::path::PathBuf::from("."),
+        isolated: true,
+        authority: token.id,
+        authority_token: Some(token),
+        patch_provenance: rustain::domain::models::ProvenanceTag::SelfOriginated,
+    };
+
+    exe.run_wave(
+        request(coordinator, vec![spoke("nested")]),
+        CancellationToken::new(),
+        Some(parent),
+    )
+    .await
+    .expect("uses-exhausted but budgeted coordinator must be admitted");
+
+    assert_eq!(
+        runner.launch_count().await,
+        1,
+        "coordination is a delegation, not a leaf use — uses_remaining must not gate admission"
+    );
+}
+
+#[tokio::test]
+async fn settled_non_root_coordinator_is_refused_before_dispatch() {
+    let root = root_token();
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, ledger) = build_executor(runner.clone(), root.clone());
+    let coordinator = AgentId::new();
+    let token = ledger
+        .delegate(
+            &root,
+            CapabilityToken::r1_child_request(coordinator.clone()),
+        )
+        .unwrap();
+    ledger.settle(&token.id).unwrap();
+    let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
+    let (command_tx, _) = tokio::sync::mpsc::channel(1);
+    let (parent_disconnect, _) = tokio::sync::mpsc::unbounded_channel();
+    let parent = TaskHandle {
+        agent_id: coordinator.clone(),
+        status_rx,
+        command_tx,
+        cancel: CancellationToken::new(),
+        task_id: "settled".into(),
+        subagent_type: "test".into(),
+        spawned_at: 0,
+        parent_disconnect,
+        yield_rx: None,
+        isolation_diff_rx: None,
+        effective_workspace: std::path::PathBuf::from("."),
+        isolated: true,
+        authority: token.id,
+        authority_token: Some(token),
+        patch_provenance: rustain::domain::models::ProvenanceTag::SelfOriginated,
+    };
+
+    let result = exe
+        .run_wave(
+            request(coordinator, vec![spoke("after-terminal")]),
+            CancellationToken::new(),
+            Some(parent),
+        )
+        .await;
+
+    assert!(matches!(result, Err(OrchestrationError::SpawnRefused(_))));
+    assert_eq!(runner.launch_count().await, 0);
 }
 
 // ─── AC5 — dependency DAG scheduling ──────────────────────────────────────
@@ -600,6 +887,16 @@ fn ac3_orchestrator_has_exactly_one_launch_call_site() {
         "seal-the-spawn-door: orchestrator must have exactly ONE `.launch(` site \
          (the dispatch_launch chokepoint). Found: {launch_sites:?}"
     );
+    for path in [
+        "src/domain/ports/subagent_runner.rs",
+        "src/adapters/subagent/in_process_runner.rs",
+    ] {
+        let content = fs::read_to_string(path).unwrap();
+        assert!(
+            !content.contains("launch_nested"),
+            "parallel nested launch helper reintroduced in {path}"
+        );
+    }
 }
 
 #[test]
@@ -942,6 +1239,7 @@ async fn murat_child_token_lacking_spawn_is_refused_no_node() {
         &spoke("probe"),
         child_no_spawn,
         CancellationToken::new(),
+        None,
     )
     .await
     .err()
@@ -963,6 +1261,7 @@ async fn murat_pre_revoked_child_token_is_refused() {
         &spoke("probe"),
         child,
         CancellationToken::new(),
+        None,
     )
     .await
     .err()
@@ -984,6 +1283,7 @@ async fn murat_valid_child_token_dispatches_once() {
         &spoke("probe"),
         child,
         CancellationToken::new(),
+        None,
     )
     .await
     .unwrap();
@@ -1419,6 +1719,7 @@ async fn patch12_launch_err_settles_gate_token_reservation() {
         &spoke("a"),
         gate_token,
         CancellationToken::new(),
+        None,
     )
     .await
     .err()
@@ -1573,7 +1874,11 @@ proptest! {
             // Obtain the infra handle (pub ForkJoinRun) — rerun borrows it
             // (DD-B6: compiler-enforced non-destructiveness).
             let run = exe
-                .run_fork_join_run(request(AgentId::root(), spokes), CancellationToken::new())
+                .run_fork_join_run(
+                    request(AgentId::root(), spokes),
+                    CancellationToken::new(),
+                    None,
+                )
                 .await
                 .expect("wave runs to completion");
             // Baseline: conservation holds after the wave (gate tokens
@@ -1754,6 +2059,7 @@ async fn rerun_one_spoke_leaves_others_untouched() {
                 vec![spoke("SPOKE-0"), spoke("SPOKE-1"), spoke("SPOKE-2")],
             ),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("wave completes");
@@ -1889,6 +2195,7 @@ async fn rerun_failure_reverts_to_prior_result_nondestructively() {
         .run_fork_join_run(
             request(AgentId::root(), vec![spoke("a"), spoke("b"), spoke("c")]),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("wave completes");
@@ -1938,6 +2245,7 @@ async fn rerun_success_replaces_prior() {
         .run_fork_join_run(
             request(AgentId::root(), vec![spoke("x"), spoke("y")]),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("wave completes");
@@ -1983,6 +2291,7 @@ async fn patch4_drill_body_is_lazy_resolve_count_advances_per_open() {
         .run_fork_join_run(
             request(AgentId::root(), vec![spoke("SPOKE-0"), spoke("SPOKE-1")]),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("wave completes");
@@ -2053,6 +2362,7 @@ async fn dn3_storm_cap_refuses_rerun_past_cap() {
                 vec![spoke("SPOKE-0"), spoke("SPOKE-1"), spoke("SPOKE-2")],
             ),
             CancellationToken::new(),
+            None,
         )
         .await
         .expect("wave completes");

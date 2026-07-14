@@ -71,6 +71,7 @@ impl rustain::domain::ports::Orchestrator for NoOpOrchestrator {
         &self,
         _request: rustain::domain::ports::ForkJoinRequest,
         _cancel: tokio_util::sync::CancellationToken,
+        _parent: Option<rustain::domain::models::TaskHandle>,
     ) -> Result<
         Arc<dyn rustain::domain::ports::WaveHandle>,
         rustain::domain::models::orchestration::OrchestrationError,

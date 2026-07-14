@@ -1072,6 +1072,7 @@ async fn test_subagent_provider_discover_round_trip() {
             &self,
             _spec: rustain::domain::models::AgentLaunchSpec,
             _cancel: tokio_util::sync::CancellationToken,
+            _parent: Option<&rustain::domain::models::TaskHandle>,
         ) -> Result<rustain::domain::models::TaskHandle, rustain::domain::models::SubagentError>
         {
             unimplemented!()

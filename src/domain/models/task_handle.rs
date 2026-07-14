@@ -37,9 +37,16 @@ pub struct TaskHandle {
     /// Effective filesystem root visible to this child. Nested isolated
     /// launches clone this path, never the process-wide One-Ring root.
     pub effective_workspace: std::path::PathBuf,
+    /// Whether this child runs in an isolated workspace. Parent-aware launches
+    /// use this to reject a nested non-isolated escape from an isolated parent.
+    pub isolated: bool,
     /// Capability identity of the producing child; patch artifacts reuse it as
     /// their filesystem-sandbox authority.
     pub authority: crate::domain::models::CapabilityTokenId,
+    /// Full delegated grant used only for further bounded delegation. Real
+    /// runner handles always carry `Some`; synthetic/remote fixtures may omit it
+    /// and are rejected fail-closed when used as nested coordinators.
+    pub authority_token: Option<crate::domain::models::CapabilityToken>,
     /// Provenance derived by the real launch seam: direct root launches are
     /// user-originated, nested agent launches are self-originated/tainted.
     pub patch_provenance: crate::domain::models::ProvenanceTag,
