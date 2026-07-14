@@ -21,11 +21,11 @@ The manifest is signed, not each binary individually. One signed manifest binds 
 | P0 (required) | Linux x86_64 | `x86_64-unknown-linux-gnu` | Required — release fails if this target fails |
 | P1 (best-effort) | macOS aarch64 | `aarch64-apple-darwin` | Allowed to fail without blocking release |
 | P1 (best-effort) | macOS x86_64 | `x86_64-apple-darwin` | Allowed to fail without blocking release |
-| P2 (future) | Windows x86_64 | `x86_64-pc-windows-msvc` | Allowed to fail without blocking release |
+| P2 (future) | Windows x86_64 | `x86_64-pc-windows-msvc` | Future support — currently excluded from the release matrix and published assets |
 
-P1/P2 targets may be added incrementally, but the asset-naming convention must accommodate all of them from day one so that 13-3a's target-triple selection never needs a contract change.
+P1/P2 targets may be added incrementally, but the frozen target-triple artifact-naming convention accommodates current targets and future assets, including Windows, without a contract change to 13-3a's target-triple selection.
 
-**Note on Windows (P2):** The rustain codebase currently uses Unix-specific APIs (`tokio::signal::unix`, `std::os::unix::fs`, `tokio::net::UnixListener`/`UnixStream`, `libc` for PID files and daemon lifecycle) without `#[cfg(unix)]` gates in all paths. Windows builds will fail at compile time. The release workflow is configured with `fail-fast: false` and the sign job uses `if: always() \u0026\u0026 !cancelled()` so that Windows failures do not block signing and publishing of Linux/macOS artifacts. Full Windows support requires a dedicated Epic (not currently scheduled).
+**Note on Windows (P2):** The rustain codebase currently uses Unix-specific APIs (`tokio::signal::unix`, `std::os::unix::fs`, `tokio::net::UnixListener`/`UnixStream`, `libc` for PID files and daemon lifecycle) without `#[cfg(unix)]` gates in all paths. Windows builds will fail at compile time. Windows is future support and is currently excluded from both the release matrix and published assets. Full Windows support requires a dedicated Epic (not currently scheduled).
 
 The release pipeline asserts each published binary is **< 30 MB** (PRD aspirational: < 20 MB). The size check lives in CI, not runtime. The existing release profile (`Cargo.toml` `[profile.release]`) already uses `lto = true`, `strip = true`, `codegen-units = 1`, `panic = "abort"` to minimize size.
 
@@ -119,7 +119,7 @@ When rotating the signing key:
 2. Update `Cargo.toml` version if needed
 3. Push a tag: `git tag v0.2.0 && git push origin v0.2.0`
 4. The `release.yml` workflow triggers automatically:
-   - Builds per-platform binaries (matrix: Linux P0, macOS P1, Windows P2)
+   - Builds per-platform binaries (matrix: Linux P0 and macOS P1; Windows P2 is currently excluded)
    - Size-guard asserts < 30 MB
    - Generates `SHA256SUMS`
    - Signs manifest in the protected `release` environment
@@ -166,7 +166,7 @@ minisign -V -m SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY"
 #    (Use GitHub web UI or gh CLI: gh release create "v${VERSION}" ...)
 ```
 
-For macOS/Windows targets, repeat steps 3-8 on the appropriate host or cross-compile.
+For macOS targets, repeat steps 3-8 on the appropriate host or cross-compile.
 
 ## First Release Checklist
 
