@@ -31,13 +31,29 @@ pub enum FanOutSpec {
     },
 }
 
+fn checked_nested_total(
+    coordinators: usize,
+    grandchildren: usize,
+) -> Result<usize, OrchestrationError> {
+    coordinators
+        .checked_mul(grandchildren)
+        .and_then(|descendants| coordinators.checked_add(descendants))
+        .ok_or(OrchestrationError::Overflow {
+            dimension: "nested node count",
+        })
+}
+
+fn invalid_fanout(message: impl Into<String>) -> OrchestrationError {
+    OrchestrationError::InvalidFanOut(message.into())
+}
+
 /// Parse `/fanout <N> <prompt>` or
 /// `/fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt>`.
 ///
 /// Flat waves retain the legacy cap. Nested input additionally caps the total
 /// declared nodes (`coordinators + coordinators × grandchildren`) so the
 /// executor never receives a multiplicative fan-bomb.
-pub fn parse_fanout(arg: Option<&str>) -> Result<FanOutSpec, String> {
+pub fn parse_fanout(arg: Option<&str>) -> Result<FanOutSpec, OrchestrationError> {
     let raw = arg.unwrap_or("").trim();
     if let Some(rest) = raw
         .strip_prefix("nested")
@@ -48,32 +64,30 @@ pub fn parse_fanout(arg: Option<&str>) -> Result<FanOutSpec, String> {
         let grandchildren_raw = parts.next().unwrap_or("");
         let prompt = parts.next().unwrap_or("").trim();
         let coordinators = coordinators_raw.parse::<usize>().map_err(|_| {
-            format!(
+            invalid_fanout(format!(
                 "Usage: /fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt> — '{coordinators_raw}' is not a number"
-            )
+            ))
         })?;
         let grandchildren = grandchildren_raw.parse::<usize>().map_err(|_| {
-            format!(
+            invalid_fanout(format!(
                 "Usage: /fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt> — '{grandchildren_raw}' is not a number"
-            )
+            ))
         })?;
         if coordinators == 0 || grandchildren == 0 {
-            return Err(
-                "Usage: /fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt> — counts must be at least 1"
-                    .into(),
-            );
-        }
-        let total = coordinators.saturating_add(coordinators.saturating_mul(grandchildren));
-        if total > MAX_NESTED_BREADTH {
-            return Err(format!(
-                "Nested fan-out declares {total} nodes; maximum is {MAX_NESTED_BREADTH}"
+            return Err(invalid_fanout(
+                "Usage: /fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt> — counts must be at least 1",
             ));
         }
+        let total = checked_nested_total(coordinators, grandchildren)?;
+        if total > MAX_NESTED_BREADTH {
+            return Err(invalid_fanout(format!(
+                "Nested fan-out declares {total} nodes; maximum is {MAX_NESTED_BREADTH}"
+            )));
+        }
         if prompt.is_empty() {
-            return Err(
-                "Usage: /fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt> — prompt is required"
-                    .into(),
-            );
+            return Err(invalid_fanout(
+                "Usage: /fanout nested <COORDINATORS> <GRANDCHILDREN> <prompt> — prompt is required",
+            ));
         }
         return Ok(FanOutSpec::Nested {
             coordinators,
@@ -85,19 +99,25 @@ pub fn parse_fanout(arg: Option<&str>) -> Result<FanOutSpec, String> {
     let mut parts = raw.splitn(2, char::is_whitespace);
     let n_str = parts.next().unwrap_or("");
     let prompt = parts.next().unwrap_or("").trim();
-    let count: usize = n_str
-        .parse()
-        .map_err(|_| format!("Usage: /fanout <N> <prompt> — '{n_str}' is not a number"))?;
+    let count: usize = n_str.parse().map_err(|_| {
+        invalid_fanout(format!(
+            "Usage: /fanout <N> <prompt> — '{n_str}' is not a number"
+        ))
+    })?;
     if count == 0 {
-        return Err("Usage: /fanout <N> <prompt> — N must be at least 1".to_string());
-    }
-    if count > FORK_JOIN_SPAWN_CAP {
-        return Err(format!(
-            "Usage: /fanout <N> <prompt> — N must be at most {FORK_JOIN_SPAWN_CAP}"
+        return Err(invalid_fanout(
+            "Usage: /fanout <N> <prompt> — N must be at least 1",
         ));
     }
+    if count > FORK_JOIN_SPAWN_CAP {
+        return Err(invalid_fanout(format!(
+            "Usage: /fanout <N> <prompt> — N must be at most {FORK_JOIN_SPAWN_CAP}"
+        )));
+    }
     if prompt.is_empty() {
-        return Err("Usage: /fanout <N> <prompt> — prompt is required".to_string());
+        return Err(invalid_fanout(
+            "Usage: /fanout <N> <prompt> — prompt is required",
+        ));
     }
     Ok(FanOutSpec::Identical {
         count,
@@ -135,7 +155,7 @@ pub fn to_request(spec: &FanOutSpec, model: &str) -> Result<ForkJoinRequest, Orc
             grandchildren,
             prompt,
         } => {
-            let total = coordinators.saturating_add(coordinators.saturating_mul(*grandchildren));
+            let total = checked_nested_total(*coordinators, *grandchildren)?;
             if total > MAX_NESTED_BREADTH {
                 return Err(OrchestrationError::NestedBreadthExceeded {
                     cap: MAX_NESTED_BREADTH,
@@ -283,5 +303,27 @@ mod tests {
         assert!(parse_fanout(Some("nested 2 4 too wide")).is_err());
         assert!(parse_fanout(Some("nested 0 1 empty")).is_err());
         assert!(parse_fanout(Some("nested 1 0 empty")).is_err());
+    }
+
+    #[test]
+    fn mutant_saturating_node_count_returns_typed_overflow() {
+        let input = format!("nested {} 2 overflow", usize::MAX);
+        assert!(matches!(
+            parse_fanout(Some(&input)),
+            Err(OrchestrationError::Overflow {
+                dimension: "nested node count"
+            }),
+        ));
+        let spec = FanOutSpec::Nested {
+            coordinators: usize::MAX,
+            grandchildren: 2,
+            prompt: "overflow".into(),
+        };
+        assert!(matches!(
+            to_request(&spec, "model"),
+            Err(OrchestrationError::Overflow {
+                dimension: "nested node count"
+            }),
+        ));
     }
 }

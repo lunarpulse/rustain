@@ -312,7 +312,10 @@ fn build_executor(
     runner: Arc<dyn SubagentRunner>,
     root: CapabilityToken,
 ) -> (ForkJoinExecutor, Arc<AuthorityLedger>) {
-    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let authority: Arc<dyn AuthorityProvider> = Arc::new(
         rustain::adapters::authority::in_process::InProcessAuthorityProvider::new(ledger.clone()),
     );
@@ -339,7 +342,10 @@ async fn nested_non_root_coordinator_threads_parent_to_launch_chokepoint() {
     let (exe, ledger) = build_executor(runner.clone(), root.clone());
     let parent_id = AgentId::new();
     let parent_token = ledger
-        .delegate(&root, CapabilityToken::r1_coordinator(parent_id.clone(), 1))
+        .delegate(
+            &root,
+            CapabilityToken::r1_coordinator(parent_id.clone(), 1).unwrap(),
+        )
         .unwrap();
     let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
     let (command_tx, _) = tokio::sync::mpsc::channel(1);
@@ -405,18 +411,21 @@ async fn depth_three_coordinator_is_refused_before_depth_four_dispatch() {
     let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
     let (exe, ledger) = build_executor(runner.clone(), root.clone());
     let depth_one = ledger
-        .delegate(&root, CapabilityToken::r1_coordinator(AgentId::new(), 1))
+        .delegate(
+            &root,
+            CapabilityToken::r1_coordinator(AgentId::new(), 1).unwrap(),
+        )
         .unwrap();
     let depth_two = ledger
         .delegate(
             &depth_one,
-            CapabilityToken::r1_coordinator(AgentId::new(), 1),
+            CapabilityToken::r1_coordinator(AgentId::new(), 1).unwrap(),
         )
         .unwrap();
     let depth_three = ledger
         .delegate(
             &depth_two,
-            CapabilityToken::r1_coordinator(AgentId::new(), 1),
+            CapabilityToken::r1_coordinator(AgentId::new(), 1).unwrap(),
         )
         .unwrap();
     let coordinator = depth_three.scope.clone();
@@ -579,7 +588,7 @@ async fn uses_exhausted_but_budgeted_non_root_coordinator_is_admitted() {
     let token = ledger
         .delegate(
             &root,
-            CapabilityToken::r1_coordinator(coordinator.clone(), 1),
+            CapabilityToken::r1_coordinator(coordinator.clone(), 1).unwrap(),
         )
         .unwrap();
     // Spend the coordinator's single use WITHOUT drawing budget: uses_remaining
@@ -1282,7 +1291,10 @@ async fn gate_probe_harness() -> (
     Arc<AuthorityLedger>,
 ) {
     let root = root_token();
-    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let authority: Arc<dyn AuthorityProvider> = Arc::new(
         rustain::adapters::authority::in_process::InProcessAuthorityProvider::new(ledger.clone()),
     );
@@ -1767,7 +1779,10 @@ async fn patch12_launch_err_settles_gate_token_reservation() {
     use rustain::adapters::authority::in_process::InProcessAuthorityProvider;
 
     let root = root_token();
-    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let authority: Arc<dyn AuthorityProvider> =
         Arc::new(InProcessAuthorityProvider::new(ledger.clone()));
 

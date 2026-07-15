@@ -187,7 +187,10 @@ fn canonical_id_excludes_signature_and_uses_length_prefixes() {
 #[test]
 fn delegate_debits_and_settle_refunds_unused_once() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -237,7 +240,10 @@ fn delegate_debits_and_settle_refunds_unused_once() {
 #[test]
 fn revoke_scope_denies_next_point_of_use() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -278,7 +284,10 @@ fn revoke_scope_denies_next_point_of_use() {
 #[test]
 fn conservation_invariant_holds_across_delegate_consume_settle() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -345,7 +354,10 @@ fn conservation_invariant_holds_across_delegate_consume_settle() {
 #[test]
 fn token_scope_is_single_leaf_and_bijective_with_registered_tokens() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -412,7 +424,10 @@ async fn register_authorized_child(
 #[tokio::test(flavor = "current_thread")]
 async fn synchronous_revoke_differential_real_hook_denies_deferred_allows() {
     let root = root_token();
-    let ledger = std::sync::Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let child = ledger
         .delegate(
             &root,
@@ -448,7 +463,10 @@ async fn synchronous_revoke_differential_real_hook_denies_deferred_allows() {
     );
 
     let root = root_token();
-    let deferred_ledger = AuthorityLedger::new(root.clone());
+    let deferred_ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let deferred_child = deferred_ledger
         .delegate(
             &root,
@@ -502,7 +520,10 @@ proptest! {
         ttl_delta in 0u64..=10_000,
     ) {
         let root = root_token();
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        );
         let mut req = child_request("child-prop", budget);
         req.uses_limit = Some(uses);
         req.not_after = Some(4_102_444_800_000 - ttl_delta);
@@ -518,7 +539,10 @@ proptest! {
         extra_cost in 1u64..=500_000,
     ) {
         let root = root_token();
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        );
         let mut req = child_request(
             "child-escalates",
             Budget {
@@ -554,7 +578,10 @@ fn restricted_root() -> CapabilityToken {
 #[test]
 fn leapfrog_differential_token_rejects_depth_node_tree_would_allow() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     // Depth-1 child carrying a stricter max_depth (1) than node_tree MAX_DEPTH (3).
     let mut req1 = child_request(
         "leap-1",
@@ -595,7 +622,10 @@ fn leapfrog_differential_token_rejects_depth_node_tree_would_allow() {
 #[test]
 fn delegate_rejects_non_subset_on_every_axis() {
     let parent = restricted_root(); // caps/allowed/max_subset = {Spawn}, max_depth = 3
-    let ledger = AuthorityLedger::new(parent.clone());
+    let ledger = AuthorityLedger::new(
+        parent.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
 
     // (a) capabilities axis
     let mut req = child_request(
@@ -720,7 +750,10 @@ fn subset_algebra_is_antisymmetric() {
 #[test]
 fn subset_algebra_is_transitive_via_delegate() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child1 = ledger
         .delegate(
             &root,
@@ -784,7 +817,10 @@ fn canonical_bytes_length_prefixes_scope() {
 fn validate_rejects_malformed_and_signed_tokens() {
     use rustain::domain::models::peer_identity::{Ed25519Sig, PeerId};
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let mut child = ledger
         .delegate(
             &root,
@@ -835,7 +871,10 @@ fn capability_token_serialized_field_count_pinned() {
 #[tokio::test(flavor = "current_thread")]
 async fn token_node_bijection_live_counts_match() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let tree = rustain::infrastructure::subagent::NodeTree::new();
     let mut scopes = Vec::new();
     for name in ["alpha", "beta", "gamma"] {
@@ -887,7 +926,10 @@ proptest! {
         extra_settles in 0u32..=3,
     ) {
         let root = root_token();
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        );
         let child = ledger
             .delegate(
                 &root,
@@ -926,7 +968,10 @@ proptest! {
 #[test]
 fn post_order_settle_propagates_grandchild_consumption_at_depth_two() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     let child = ledger
         .delegate(
             &root,
@@ -989,7 +1034,10 @@ fn post_order_settle_propagates_grandchild_consumption_at_depth_two() {
 #[tokio::test(flavor = "current_thread")]
 async fn ac5_trust_drop_revoke_routes_into_cascade_kill() {
     let root = root_token();
-    let ledger = std::sync::Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let tree = std::sync::Arc::new(rustain::infrastructure::subagent::NodeTree::new());
     let provider = rustain::adapters::authority::InProcessAuthorityProvider::new(ledger.clone())
         .with_node_tree(tree.clone());
@@ -1033,7 +1081,10 @@ async fn ac5_trust_drop_revoke_routes_into_cascade_kill() {
 #[test]
 fn point_of_use_use_count_denies_after_limit() {
     let root = root_token();
-    let ledger = AuthorityLedger::new(root.clone());
+    let ledger = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     // child_request sets uses_limit: Some(10). Spend them all.
     let child = ledger
         .delegate(
@@ -1080,7 +1131,10 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
     use std::thread;
 
     let root = root_token();
-    let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let child = ledger
         .delegate(
             &root,
@@ -1188,7 +1242,10 @@ fn revoke_happens_before_subsequent_validates_under_concurrency() {
 #[tokio::test]
 async fn terminal_prune_requires_journal_proof_and_preserves_conservation() {
     let root = root_token();
-    let ledger = std::sync::Arc::new(AuthorityLedger::new(root.clone()));
+    let ledger = std::sync::Arc::new(AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    ));
     let provider =
         rustain::adapters::authority::in_process::InProcessAuthorityProvider::new(ledger.clone());
     let child = ledger
@@ -1344,10 +1401,13 @@ async fn ledger_head_survives_crash_after_flush() {
     let full = root.budget;
     {
         let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
-        let ledger =
-            AuthorityLedger::new(root.clone())
-                .with_journal_sink(journal.clone()
-                    as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>);
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        )
+        .with_journal_sink(
+            journal.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+        );
         ledger
             .consume(
                 &root_id,
@@ -1364,7 +1424,10 @@ async fn ledger_head_survives_crash_after_flush() {
     } // ledger dropped == process death
 
     let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
-    let recovered = AuthorityLedger::new(root.clone());
+    let recovered = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     recovered.recover_conservation(journaled_conservation(&journal).await);
     let available = recovered.available(&root_id).unwrap();
     assert_eq!(
@@ -1393,10 +1456,13 @@ async fn ledger_head_crash_before_flush_does_not_resurrect() {
     let full = root.budget;
     {
         let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
-        let ledger =
-            AuthorityLedger::new(root.clone())
-                .with_journal_sink(journal.clone()
-                    as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>);
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        )
+        .with_journal_sink(
+            journal.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+        );
         ledger
             .consume(
                 &root_id,
@@ -1410,7 +1476,10 @@ async fn ledger_head_crash_before_flush_does_not_resurrect() {
     }
 
     let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
-    let recovered = AuthorityLedger::new(root.clone());
+    let recovered = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    );
     recovered.recover_conservation(journaled_conservation(&journal).await);
     let available = recovered.available(&root_id).unwrap();
     assert_eq!(
@@ -1425,7 +1494,11 @@ async fn ledger_flush_failure_requeues_conservation_head() {
     let root = CapabilityToken::r1_root(AgentId::root());
     let root_id = root.id;
     let sink = std::sync::Arc::new(FailOnceLedgerJournalSink::new());
-    let ledger = AuthorityLedger::new(root).with_journal_sink(
+    let ledger = AuthorityLedger::new(
+        root,
+        std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+    )
+    .with_journal_sink(
         sink.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
     );
 

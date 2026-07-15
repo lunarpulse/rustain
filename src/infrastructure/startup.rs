@@ -1430,9 +1430,12 @@ pub async fn run() -> Result<()> {
                     .await
                     .expect("NodeJournal creation failed"),
             );
+            let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
+                as Arc<dyn crate::domain::clock::Clock>;
             let authority_ledger = Arc::new(
                 crate::domain::services::authority_ledger::AuthorityLedger::new(
                     root_authority.clone(),
+                    orchestration_clock.clone(),
                 )
                 .with_journal_sink(
                     node_journal.clone() as Arc<dyn crate::domain::ports::LedgerJournalSink>
@@ -1615,8 +1618,6 @@ pub async fn run() -> Result<()> {
             // loop invokes `run_fork_join` when it fans out (the trigger — a
             // model fan-out intent — is the connection point wired with the
             // turn-loop integration).
-            let orchestration_clock = Arc::new(crate::domain::clock::SystemClock::default())
-                as Arc<dyn crate::domain::clock::Clock>;
             let supervisor = Arc::new(
                 crate::infrastructure::supervisor::Supervisor::new(
                     crate::domain::models::FORK_JOIN_SPAWN_CAP,

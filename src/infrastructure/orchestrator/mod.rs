@@ -68,7 +68,7 @@ use crate::domain::ports::{
 use crate::domain::services::authority_ledger::AuthorityLedger;
 use crate::domain::services::patch_review::MergeBackPolicy;
 use crate::infrastructure::runtime::event_bus::EventBus;
-use crate::infrastructure::supervisor::Supervisor;
+use crate::infrastructure::supervisor::{AdmissionClass, Supervisor};
 
 /// Ambient cost-meter escalation threshold: a wave whose cumulative cost micros
 /// crosses this triggers a `$burn ↑` surfacing on the WaveStrip (config-
@@ -345,6 +345,25 @@ fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
     }
 }
 
+fn map_authority_construction_error(error: AuthorityError) -> OrchestrationError {
+    match error {
+        AuthorityError::Overflow { dimension } => OrchestrationError::Overflow { dimension },
+        other => OrchestrationError::Internal(other.to_string()),
+    }
+}
+
+fn checked_wave_budget(spoke_count: usize) -> Result<Budget, OrchestrationError> {
+    let count = u64::try_from(spoke_count).map_err(|_| OrchestrationError::Overflow {
+        dimension: "wave spoke count",
+    })?;
+    GATE_TOKEN_BUDGET
+        .checked_mul(count)
+        .and_then(|aggregate| SYNTHESIS_RESERVE.checked_add(aggregate))
+        .ok_or(OrchestrationError::Overflow {
+            dimension: "wave budget",
+        })
+}
+
 /// **The sole spawn chokepoint** (DD1 / AC3). The single function that:
 /// 1. validates the CHILD's own delegated `gate_token` for `Spawn` (Murat
 ///    vacuity-closer — NOT the coordinator/root token);
@@ -571,7 +590,12 @@ impl ForkJoinExecutor {
         // across the dispatch and the spoke's run.
         let admission_permit = match self
             .supervisor
-            .admit(&self.root_authority.scope, &spec.label, GATE_TOKEN_BUDGET)
+            .admit(
+                &self.root_authority.scope,
+                &spec.label,
+                GATE_TOKEN_BUDGET,
+                AdmissionClass::LeafExecution,
+            )
             .await
         {
             Ok(Some(permit)) => permit,
@@ -1049,6 +1073,9 @@ impl WaveCtx {
         request: &ForkJoinRequest,
         parent: Option<&TaskHandle>,
     ) -> Result<CapabilityToken, OrchestrationError> {
+        let required = CapabilityToken::r1_coordinator(AgentId::new(), request.spokes.len())
+            .map_err(map_authority_construction_error)?
+            .budget;
         if request.coordinator == self.root_authority.scope {
             if parent.is_some() {
                 return Err(OrchestrationError::SpawnRefused(
@@ -1092,7 +1119,6 @@ impl WaveCtx {
             .ledger
             .available(&token.id)
             .map_err(|error| OrchestrationError::SpawnRefused(error.to_string()))?;
-        let required = CapabilityToken::r1_coordinator(AgentId::new(), request.spokes.len()).budget;
         if !required.is_within(available) {
             return Err(OrchestrationError::SpawnRefused(
                 AuthorityError::BudgetExhausted.to_string(),
@@ -1138,18 +1164,27 @@ impl WaveCtx {
                 attempted,
             });
         }
-        let nested_nodes = request
-            .spokes
-            .iter()
-            .filter_map(|spoke| match &spoke.role {
-                SpokeRole::Coordinator { grandchildren, .. } => Some(grandchildren.len()),
-                SpokeRole::Leaf => None,
-            })
-            .sum::<usize>();
-        if nested_nodes > 0 && attempted.saturating_add(nested_nodes) > MAX_NESTED_BREADTH {
+        let nested_nodes = request.spokes.iter().try_fold(0usize, |total, spoke| {
+            let descendants = match &spoke.role {
+                SpokeRole::Coordinator { grandchildren, .. } => grandchildren.len(),
+                SpokeRole::Leaf => 0,
+            };
+            total
+                .checked_add(descendants)
+                .ok_or(OrchestrationError::Overflow {
+                    dimension: "nested node count",
+                })
+        })?;
+        let total_nodes =
+            attempted
+                .checked_add(nested_nodes)
+                .ok_or(OrchestrationError::Overflow {
+                    dimension: "nested node count",
+                })?;
+        if nested_nodes > 0 && total_nodes > MAX_NESTED_BREADTH {
             return Err(OrchestrationError::NestedBreadthExceeded {
                 cap: MAX_NESTED_BREADTH,
-                attempted: attempted.saturating_add(nested_nodes),
+                attempted: total_nodes,
             });
         }
         for spoke in &request.spokes {
@@ -1222,6 +1257,8 @@ impl WaveCtx {
         Box::pin(async move {
             let wave_ctx = ctx.clone();
             let topological_waves = ctx.validate_request(&request)?;
+            let n = request.spokes.len();
+            let needed = checked_wave_budget(n)?;
             let parent = parent.map(Arc::new);
             let coordinator_authority = ctx
                 .validate_coordinator(&request, parent.as_deref())
@@ -1229,7 +1266,6 @@ impl WaveCtx {
 
             let spokes = request.spokes.clone();
             let coordinator = request.coordinator.clone();
-            let n = spokes.len();
             if spokes.iter().any(|spoke| !spoke.waits_for.is_empty())
                 && ctx.artifact_store.is_none()
             {
@@ -1251,14 +1287,6 @@ impl WaveCtx {
             // coordinator near its ceiling must not pass a single-dimension check
             // then fail mid-mint. The reserve + the aggregate gate reservation are
             // checked TOGETHER (AND, not OR) so draining either dimension refuses.
-            let gate_aggregate = Budget {
-                requests: GATE_TOKEN_BUDGET.requests * n as u64,
-                cost_micros: GATE_TOKEN_BUDGET.cost_micros * n as u64,
-            };
-            let needed = Budget {
-                requests: SYNTHESIS_RESERVE.requests + gate_aggregate.requests,
-                cost_micros: SYNTHESIS_RESERVE.cost_micros + gate_aggregate.cost_micros,
-            };
             let available = ctx
                 .ledger
                 .available(&coordinator_authority.id)
@@ -1387,6 +1415,10 @@ impl WaveCtx {
                     let clock = Arc::clone(&ctx.clock);
                     let parent = parent.clone();
                     join_set.spawn(async move {
+                        let admission_class = match &spoke.role {
+                            SpokeRole::Leaf => AdmissionClass::LeafExecution,
+                            SpokeRole::Coordinator { .. } => AdmissionClass::Delegation,
+                        };
                         let admitted = tokio::select! {
                             _ = wave_cancel_child.cancelled() => {
                                 let _ = ctx.authority.settle(&gate_token.id).await;
@@ -1408,6 +1440,7 @@ impl WaveCtx {
                                 &admission_coordinator,
                                 &spoke.label,
                                 GATE_TOKEN_BUDGET,
+                                admission_class,
                             ) => result,
                         };
                         let _permit = match admitted {
@@ -2180,6 +2213,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mutant_raw_wave_budget_arithmetic_returns_typed_overflow() {
+        assert!(matches!(
+            checked_wave_budget(usize::MAX),
+            Err(OrchestrationError::Overflow {
+                dimension: "wave budget"
+            }),
+        ));
+    }
+
+    #[test]
     fn elapsed_ms_casts_i64_to_u64_once_and_handles_skew() {
         let clock = crate::domain::clock::MockClock::at_wall_ms(100_000);
         // dispatched at 90_000 → elapsed 10_000.
@@ -2213,7 +2256,10 @@ mod tests {
     fn ambient_cost_reads_conservation_consumed_micros() {
         // budget available, zero consumed.
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
         let exe = ForkJoinExecutor::new(
             Arc::new(NoopRunner) as Arc<dyn SubagentRunner>,
             Arc::new(
@@ -2360,7 +2406,10 @@ mod tests {
     // Minimal in-crate harness: a runner whose launched children emit Completed.
     fn build_exe_for_rerun() -> ForkJoinExecutor {
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
         ForkJoinExecutor::new(
             Arc::new(CompletedRunner) as Arc<dyn SubagentRunner>,
             Arc::new(
@@ -2775,7 +2824,10 @@ mod tests {
         ));
 
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
         let exe = ForkJoinExecutor::new(
             Arc::new(ConflictingDiffRunner) as Arc<dyn SubagentRunner>,
             Arc::new(

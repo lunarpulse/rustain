@@ -93,7 +93,10 @@ async fn legacy_agent_prompt_only_invoke_succeeds() {
     let root_authority =
         rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
     let authority_ledger = std::sync::Arc::new(
-        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(
+            root_authority.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        ),
     );
     let authority: std::sync::Arc<dyn rustain::domain::ports::AuthorityProvider> =
         std::sync::Arc::new(

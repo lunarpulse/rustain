@@ -381,6 +381,12 @@ pub enum OrchestrationError {
     /// R1 permits root → coordinator → leaf only.
     #[error("nested coordinator grandchildren must all be leaves")]
     NestedDepthUnsupported,
+    /// Checked construction arithmetic refused an unrepresentable value.
+    #[error("orchestration construction overflow in {dimension}")]
+    Overflow { dimension: &'static str },
+    /// The `/fanout` command did not satisfy its typed input contract.
+    #[error("{0}")]
+    InvalidFanOut(String),
     /// `WaitPolicy::Quorum` supplied in R1 (AC9 — reserved & inert).
     #[error("{0}")]
     WaitPolicyUnsupported(&'static str),

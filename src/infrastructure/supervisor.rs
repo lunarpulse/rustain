@@ -22,12 +22,21 @@ use crate::infrastructure::runtime::event_bus::EventBus;
 pub const SPAWN_RATE_LIMIT: usize = 16;
 pub const SPAWN_RATE_WINDOW_MS: i64 = 1_000;
 
-/// RAII admission guard. Dropping it releases the wave-local sub-permit and the
-/// shared global running permit exactly once. Queue capacity is held only while
-/// `Supervisor::admit` awaits the running permit.
+/// Admission ownership class. Pure delegation participates in policy gates but
+/// never occupies a shared host execution slot while awaiting descendants.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmissionClass {
+    LeafExecution,
+    Delegation,
+}
+
+/// RAII admission guard. Dropping it releases any permits owned by this
+/// admission exactly once. Queue capacity is held only while `Supervisor::admit`
+/// awaits the class-specific concurrency permits.
 #[derive(Debug)]
 pub struct AdmissionPermit {
-    _running: OwnedSemaphorePermit,
+    _running: Option<OwnedSemaphorePermit>,
     _wave_local: Option<OwnedSemaphorePermit>,
     coordinator: AgentId,
     recorded_at: i64,
@@ -46,6 +55,12 @@ impl AdmissionPermit {
     #[must_use]
     pub fn coordinator(&self) -> &AgentId {
         &self.coordinator
+    }
+
+    /// Whether this admission owns one shared host execution slot.
+    #[must_use]
+    pub fn owns_shared_running(&self) -> bool {
+        self._running.is_some()
     }
 }
 
@@ -196,18 +211,19 @@ impl Supervisor {
         }
     }
 
-    /// Ordered rate → concurrency → budget admission cascade.
+    /// Ordered rate → bounded queue → class-specific concurrency → budget
+    /// admission cascade.
     ///
     /// `Ok(None)` is a host-local defer/refusal; it never enters a signed peer
-    /// envelope. The rate ticket is recorded ONLY after every gate passes
-    /// (ironclaw record-after-success), so a refusal or a cancelled acquire
-    /// never spends a churn slot. The wave-local and shared-global running
-    /// permits are released by RAII on every exit path (cancel-by-drop).
+    /// envelope. The rate ticket is recorded ONLY after every gate passes.
+    /// `Delegation` retains wave-local ordering but never owns a shared-global
+    /// running permit while it awaits descendants.
     pub async fn admit(
         &self,
         coordinator: &AgentId,
         spoke: &str,
         needed: Budget,
+        class: AdmissionClass,
     ) -> Result<Option<AdmissionPermit>, OrchestrationError> {
         // Gate 1 (rate): read-only churn check; nothing is recorded yet.
         if !self.rate_within_limit(coordinator).await {
@@ -234,12 +250,19 @@ impl Supervisor {
             ),
             None => None,
         };
-        // Shared global running permit — the real host cap. Dropping the queue
-        // permit only after acquiring keeps the queue bound honest.
-        let running = Arc::clone(&self.running)
-            .acquire_owned()
-            .await
-            .map_err(|_| OrchestrationError::Internal("supervisor semaphore closed".into()))?;
+        // Pure delegation is coordination, not provider execution. It never
+        // takes a shared host slot; ordinary leaves retain the global cap.
+        let running = match class {
+            AdmissionClass::LeafExecution => Some(
+                Arc::clone(&self.running)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        OrchestrationError::Internal("supervisor semaphore closed".into())
+                    })?,
+            ),
+            AdmissionClass::Delegation => None,
+        };
         drop(queue_permit);
 
         // Gate 3 (budget): reuse the ledger's conservation head.
@@ -524,7 +547,7 @@ mod tests {
     use crate::domain::services::authority_ledger::AuthorityLedger;
     use crate::infrastructure::runtime::event_bus::EventBus;
 
-    use super::Supervisor;
+    use super::{AdmissionClass, Supervisor};
 
     fn supervisor(max_running: usize, max_waiters: usize) -> (Supervisor, Arc<MockClock>, AgentId) {
         let clock = Arc::new(MockClock::at_wall_ms(0));
@@ -540,7 +563,10 @@ mod tests {
             None,
             None,
         );
-        let ledger = Arc::new(AuthorityLedger::new(root.clone()));
+        let ledger = Arc::new(AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        ));
         let supervisor = Supervisor::new(
             max_running,
             max_waiters,
@@ -550,6 +576,24 @@ mod tests {
             Arc::new(EventBus::new(32).0),
         );
         (supervisor, clock, coordinator)
+    }
+
+    #[tokio::test]
+    async fn delegation_admission_owns_no_shared_running_permit() {
+        let (supervisor, _clock, coordinator) = supervisor(1, 1);
+        let permit = supervisor
+            .admit(
+                &coordinator,
+                "delegation",
+                Budget::default(),
+                AdmissionClass::Delegation,
+            )
+            .await
+            .unwrap()
+            .expect("delegation admits");
+
+        assert!(!permit.owns_shared_running());
+        assert_eq!(supervisor.available_running_permits(), 1);
     }
 
     /// AC2 integrated keystone (17-2c / D7 / R10): a wave-abort drives every
@@ -612,7 +656,12 @@ mod tests {
 
         // Wave-1 holds the single running permit.
         let held = supervisor
-            .admit(&coordinator, "wave1", Budget::default())
+            .admit(
+                &coordinator,
+                "wave1",
+                Budget::default(),
+                AdmissionClass::LeafExecution,
+            )
             .await
             .unwrap()
             .expect("wave1 admits");
@@ -624,7 +673,12 @@ mod tests {
             (Arc::clone(&supervisor), coordinator.clone(), cancel.clone());
         let parked = tokio::spawn(async move {
             tokio::select! {
-                r = sup2.admit(&coord2, "wave2", Budget::default()) => { let _ = r; }
+                r = sup2.admit(
+                    &coord2,
+                    "wave2",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                ) => { let _ = r; }
                 _ = cancel2.cancelled() => {}
             }
         });
@@ -681,7 +735,12 @@ mod tests {
         let (supervisor, _clock, coordinator) = supervisor(1, 1);
         let supervisor = Arc::new(supervisor);
         let held = supervisor
-            .admit(&coordinator, "held", Budget::default())
+            .admit(
+                &coordinator,
+                "held",
+                Budget::default(),
+                AdmissionClass::LeafExecution,
+            )
             .await
             .unwrap()
             .expect("first admission");
@@ -690,7 +749,12 @@ mod tests {
         let queued_coordinator = coordinator.clone();
         let queued = tokio::spawn(async move {
             queued_supervisor
-                .admit(&queued_coordinator, "queued", Budget::default())
+                .admit(
+                    &queued_coordinator,
+                    "queued",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
         });
         tokio::task::yield_now().await;
@@ -702,7 +766,12 @@ mod tests {
         drop(held);
         assert!(
             supervisor
-                .admit(&coordinator, "replacement", Budget::default())
+                .admit(
+                    &coordinator,
+                    "replacement",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -713,7 +782,12 @@ mod tests {
     async fn held_cancellation_reclaims_running_permit() {
         let (supervisor, _clock, coordinator) = supervisor(1, 1);
         let held = supervisor
-            .admit(&coordinator, "held", Budget::default())
+            .admit(
+                &coordinator,
+                "held",
+                Budget::default(),
+                AdmissionClass::LeafExecution,
+            )
             .await
             .unwrap()
             .expect("first admission");
@@ -727,7 +801,12 @@ mod tests {
         let (supervisor, _clock, coordinator) = supervisor(1, 2);
         let supervisor = Arc::new(supervisor);
         let held = supervisor
-            .admit(&coordinator, "running", Budget::default())
+            .admit(
+                &coordinator,
+                "running",
+                Budget::default(),
+                AdmissionClass::LeafExecution,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -737,7 +816,12 @@ mod tests {
             let coordinator = coordinator.clone();
             parked.push(tokio::spawn(async move {
                 supervisor
-                    .admit(&coordinator, label, Budget::default())
+                    .admit(
+                        &coordinator,
+                        label,
+                        Budget::default(),
+                        AdmissionClass::LeafExecution,
+                    )
                     .await
             }));
         }
@@ -757,7 +841,12 @@ mod tests {
         let (supervisor, _clock, coordinator) = supervisor(1, 1);
         let supervisor = Arc::new(supervisor);
         let _held = supervisor
-            .admit(&coordinator, "held", Budget::default())
+            .admit(
+                &coordinator,
+                "held",
+                Budget::default(),
+                AdmissionClass::LeafExecution,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -765,13 +854,23 @@ mod tests {
         let queued_coordinator = coordinator.clone();
         let queued = tokio::spawn(async move {
             queued_supervisor
-                .admit(&queued_coordinator, "queued", Budget::default())
+                .admit(
+                    &queued_coordinator,
+                    "queued",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
         });
         tokio::task::yield_now().await;
         assert!(
             supervisor
-                .admit(&coordinator, "refused", Budget::default())
+                .admit(
+                    &coordinator,
+                    "refused",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
                 .unwrap()
                 .is_none()
@@ -784,7 +883,12 @@ mod tests {
         let (supervisor, clock, coordinator) = supervisor(8, 8);
         for idx in 0..super::SPAWN_RATE_LIMIT {
             let permit = supervisor
-                .admit(&coordinator, &format!("hot-{idx}"), Budget::default())
+                .admit(
+                    &coordinator,
+                    &format!("hot-{idx}"),
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
                 .unwrap()
                 .expect("within churn limit");
@@ -792,7 +896,12 @@ mod tests {
         }
         assert!(
             supervisor
-                .admit(&coordinator, "hot-refused", Budget::default())
+                .admit(
+                    &coordinator,
+                    "hot-refused",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
                 .unwrap()
                 .is_none()
@@ -801,7 +910,12 @@ mod tests {
         clock.set_wall_anchor_ms(super::SPAWN_RATE_WINDOW_MS + 1);
         assert!(
             supervisor
-                .admit(&coordinator, "paced", Budget::default())
+                .admit(
+                    &coordinator,
+                    "paced",
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
                 .unwrap()
                 .is_some()
@@ -813,7 +927,12 @@ mod tests {
         let (supervisor, _clock, coordinator) = supervisor(3, 2);
         supervisor.resize_for_test(2).await.unwrap();
         let held = supervisor
-            .admit(&coordinator, "held", Budget::default())
+            .admit(
+                &coordinator,
+                "held",
+                Budget::default(),
+                AdmissionClass::LeafExecution,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -836,7 +955,12 @@ mod tests {
         let (supervisor, _clock, coordinator) = supervisor(1, 1);
         for idx in 0..(super::SPAWN_RATE_LIMIT * 2) {
             let permit = supervisor
-                .admit(&coordinator, &format!("failed-{idx}"), Budget::default())
+                .admit(
+                    &coordinator,
+                    &format!("failed-{idx}"),
+                    Budget::default(),
+                    AdmissionClass::LeafExecution,
+                )
                 .await
                 .unwrap()
                 .expect("failed spawns do not exhaust churn allowance");

@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::domain::models::agent_id::AgentId;
 use crate::domain::models::peer_identity::{Ed25519Sig, PeerId};
+use crate::domain::ports::AuthorityError;
 
 const DOMAIN_TAG: &[u8] = b"rustain.captoken.";
 const FORMAT_VERSION: u8 = 1;
@@ -117,6 +118,32 @@ impl Budget {
             requests: self.requests.saturating_sub(rhs.requests),
             cost_micros: self.cost_micros.saturating_sub(rhs.cost_micros),
         }
+    }
+
+    pub const fn checked_add(self, rhs: Self) -> Option<Self> {
+        let Some(requests) = self.requests.checked_add(rhs.requests) else {
+            return None;
+        };
+        let Some(cost_micros) = self.cost_micros.checked_add(rhs.cost_micros) else {
+            return None;
+        };
+        Some(Self {
+            requests,
+            cost_micros,
+        })
+    }
+
+    pub const fn checked_mul(self, rhs: u64) -> Option<Self> {
+        let Some(requests) = self.requests.checked_mul(rhs) else {
+            return None;
+        };
+        let Some(cost_micros) = self.cost_micros.checked_mul(rhs) else {
+            return None;
+        };
+        Some(Self {
+            requests,
+            cost_micros,
+        })
     }
 }
 
@@ -258,16 +285,47 @@ impl CapabilityToken {
     /// plus one deterministic synthesis reservation. No arbitrary padding is
     /// added: changing `grandchild_count` changes the grant by exactly one
     /// child budget plus one gate budget.
-    pub fn r1_coordinator(scope: AgentId, grandchild_count: usize) -> DelegateRequest {
-        let mut request = Self::r1_child_request(scope);
-        let count = grandchild_count as u64;
-        request.budget = Budget {
-            requests: (R1_CHILD_BUDGET.requests + R1_GATE_TOKEN_BUDGET.requests) * count
-                + R1_SYNTHESIS_RESERVE.requests,
-            cost_micros: (R1_CHILD_BUDGET.cost_micros + R1_GATE_TOKEN_BUDGET.cost_micros) * count
-                + R1_SYNTHESIS_RESERVE.cost_micros,
-        };
-        request
+    pub fn r1_coordinator(
+        scope: AgentId,
+        grandchild_count: usize,
+    ) -> Result<DelegateRequest, AuthorityError> {
+        let capabilities = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+        let delegable = CapabilitySet::from_flags(&[
+            CapabilityFlag::Spawn,
+            CapabilityFlag::ReadFs,
+            CapabilityFlag::WriteFs,
+            CapabilityFlag::Network,
+        ]);
+        let count = u64::try_from(grandchild_count).map_err(|_| AuthorityError::Overflow {
+            dimension: "coordinator grandchild count",
+        })?;
+        let uses_limit = u32::try_from(grandchild_count).map_err(|_| AuthorityError::Overflow {
+            dimension: "coordinator grandchild count",
+        })?;
+        let per_grandchild =
+            R1_CHILD_BUDGET
+                .checked_add(R1_GATE_TOKEN_BUDGET)
+                .ok_or(AuthorityError::Overflow {
+                    dimension: "coordinator budget",
+                })?;
+        let budget = per_grandchild
+            .checked_mul(count)
+            .and_then(|aggregate| aggregate.checked_add(R1_SYNTHESIS_RESERVE))
+            .ok_or(AuthorityError::Overflow {
+                dimension: "coordinator budget",
+            })?;
+        Ok(DelegateRequest {
+            scope,
+            capabilities,
+            constraint: DelegateConstraint {
+                allowed: delegable,
+                max_depth: 3,
+                max_subset: delegable,
+            },
+            budget,
+            not_after: None,
+            uses_limit: Some(uses_limit),
+        })
     }
 
     pub fn child(parent: &Self, req: DelegateRequest) -> Self {
@@ -612,7 +670,8 @@ mod sign_verify_tests {
 
     #[test]
     fn coordinator_budget_is_exactly_derived_from_grandchild_count() {
-        let request = CapabilityToken::r1_coordinator(AgentId::parse("coordinator").unwrap(), 3);
+        let request =
+            CapabilityToken::r1_coordinator(AgentId::parse("coordinator").unwrap(), 3).unwrap();
         assert_eq!(
             request.budget,
             Budget {
@@ -620,9 +679,38 @@ mod sign_verify_tests {
                 cost_micros: 4_003,
             }
         );
+        let coordinator_capabilities = CapabilitySet::from_flags(&[CapabilityFlag::Spawn]);
+        assert_eq!(request.capabilities, coordinator_capabilities);
+        let child_capabilities =
+            CapabilityToken::r1_child_request(AgentId::parse("delegated-child").unwrap())
+                .capabilities;
+        assert_eq!(request.constraint.allowed, child_capabilities);
+        assert_eq!(request.constraint.max_subset, child_capabilities);
+        assert_eq!(request.uses_limit, Some(3));
+        for denied in [
+            CapabilityFlag::ReadFs,
+            CapabilityFlag::WriteFs,
+            CapabilityFlag::Network,
+        ] {
+            assert!(!request.capabilities.contains(denied));
+        }
 
         let empty =
-            CapabilityToken::r1_coordinator(AgentId::parse("empty-coordinator").unwrap(), 0);
+            CapabilityToken::r1_coordinator(AgentId::parse("empty-coordinator").unwrap(), 0)
+                .unwrap();
         assert_eq!(empty.budget, R1_SYNTHESIS_RESERVE);
+    }
+
+    #[test]
+    fn mutant_raw_coordinator_arithmetic_returns_typed_overflow() {
+        assert!(matches!(
+            CapabilityToken::r1_coordinator(
+                AgentId::parse("overflow-coordinator").unwrap(),
+                usize::MAX,
+            ),
+            Err(crate::domain::ports::AuthorityError::Overflow {
+                dimension: "coordinator grandchild count"
+            }),
+        ));
     }
 }

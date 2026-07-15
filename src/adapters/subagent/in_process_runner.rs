@@ -156,11 +156,14 @@ impl SubagentRunner for InProcessSubagentRunner {
         let task_id = nanoid::nanoid!(12);
         let started_at_ms = chrono::Utc::now().timestamp_millis();
         let delegation_request = match spec.delegation {
-            DelegationProfile::Child => CapabilityToken::r1_child_request(agent_id.clone()),
+            DelegationProfile::Child => Ok(CapabilityToken::r1_child_request(agent_id.clone())),
             DelegationProfile::Coordinator { grandchild_count } => {
                 CapabilityToken::r1_coordinator(agent_id.clone(), grandchild_count)
             }
-        };
+        }
+        .map_err(|error| {
+            SubagentError::Internal(format!("authority construction failed: {error}"))
+        })?;
         let child_token = self
             .authority
             .delegate(delegation_parent, delegation_request)
@@ -192,6 +195,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         let bridge_tx_for_spawn = bridge_tx.clone();
         let bridge_tx_for_panic = bridge_tx.clone();
 
+        let is_coordinator = matches!(spec.delegation, DelegationProfile::Coordinator { .. });
         let isolation_provider = self.isolation.clone();
         let mut isolation_handle = None;
         // P1 (DD3): the diff-capture channel — the runner sends the captured
@@ -212,23 +216,21 @@ impl SubagentRunner for InProcessSubagentRunner {
                         .to_string(),
                 ));
             }
-            // AC7 (DN-1 party-mode resolution A, 2026-06-30 — unanimous
-            // Winston/Amelia/Murat): entry is an AUTHORIZATION gate, not a
-            // consumption event. Validate the child's own WriteFs (refusal
-            // keystone — a child lacking WriteFs is refused at start) but do
-            // NOT `spend_use` here: the per-tool-batch ReadFs gate in
-            // `run_child` is the genuine consumption site and draws from the
-            // same single non-refunded `uses_remaining` counter. Spending at
-            // entry too would double-charge and brick isolated children
-            // (`uses_remaining == Some(1)` → no tool batch can run).
-            if let Err(err) = self
-                .authority
-                .validate(&child_token, &CapabilityFlag::WriteFs, &agent_id)
-                .await
-            {
-                return Err(SubagentError::Internal(format!(
-                    "isolated child refused by WriteFs authority gate: {err}"
-                )));
+            // Leaf entry is an authorization gate, not a consumption event.
+            // A pure coordinator receives a system-created isolation clone so
+            // descendants can inherit state, but its Spawn-only token never
+            // authorizes filesystem use and its no-provider branch cannot run
+            // tools. Ordinary leaves must hold WriteFs before isolation starts.
+            if !is_coordinator {
+                if let Err(err) = self
+                    .authority
+                    .validate(&child_token, &CapabilityFlag::WriteFs, &agent_id)
+                    .await
+                {
+                    return Err(SubagentError::Internal(format!(
+                        "isolated child refused by WriteFs authority gate: {err}"
+                    )));
+                }
             }
             let handle = self.isolation.start(base_workspace).await?;
             let tools = (self.tools_factory)(handle.path());
@@ -1971,8 +1973,12 @@ mod tests {
         crate::domain::models::CapabilityToken,
     ) {
         let root = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
-        let ledger =
-            Arc::new(crate::domain::services::authority_ledger::AuthorityLedger::new(root.clone()));
+        let ledger = Arc::new(
+            crate::domain::services::authority_ledger::AuthorityLedger::new(
+                root.clone(),
+                Arc::new(crate::domain::clock::SystemClock::default()),
+            ),
+        );
         (
             Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
                 ledger,
@@ -3298,7 +3304,10 @@ mod tests {
         // Shared ledger (test revokes) + shared spool (test reads the denial).
         let root = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
         let ledger = std::sync::Arc::new(
-            crate::domain::services::authority_ledger::AuthorityLedger::new(root.clone()),
+            crate::domain::services::authority_ledger::AuthorityLedger::new(
+                root.clone(),
+                std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+            ),
         );
         let registry = std::sync::Arc::new(NodeTree::new());
         let authority: std::sync::Arc<dyn AuthorityProvider> = std::sync::Arc::new(
@@ -3545,7 +3554,10 @@ mod tests {
         use crate::domain::services::authority_ledger::AuthorityLedger;
 
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        );
         let scope = AgentId::new();
         let child = ledger
             .delegate(&root, CapabilityToken::r1_child_request(scope.clone()))
@@ -3593,7 +3605,10 @@ mod tests {
         use crate::domain::services::authority_ledger::AuthorityLedger;
 
         let root = CapabilityToken::r1_root(AgentId::root());
-        let ledger = AuthorityLedger::new(root.clone());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(crate::domain::clock::SystemClock::default()),
+        );
         let scope = AgentId::new();
         // Delegate a child WITHOUT WriteFs (a strict subset of the root → delegation succeeds).
         let no_write = CapabilitySet::from_flags(&[CapabilityFlag::Spawn, CapabilityFlag::ReadFs]);
@@ -3719,6 +3734,79 @@ mod tests {
 
         fn provider_id(&self) -> String {
             "panic-if-invoked".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            Vec::new()
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    struct AdmissionProbeProvider {
+        barrier: tokio::sync::Barrier,
+        started: std::sync::atomic::AtomicUsize,
+        active: std::sync::atomic::AtomicUsize,
+        maximum_active: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AdmissionProbeProvider {
+        fn new(expected: usize) -> Self {
+            Self {
+                barrier: tokio::sync::Barrier::new(expected),
+                started: std::sync::atomic::AtomicUsize::new(0),
+                active: std::sync::atomic::AtomicUsize::new(0),
+                maximum_active: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for AdmissionProbeProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let active = self
+                .active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.maximum_active
+                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+            self.barrier.wait().await;
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![
+                StreamChunk::Text {
+                    content: "completed".into(),
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: crate::domain::models::StopReason::EndTurn,
+                },
+            ])))
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "admission-probe".into()
         }
 
         fn list_models(&self) -> Vec<ModelDescriptor> {
@@ -3985,7 +4073,10 @@ mod tests {
         let spool = Arc::new(SubagentSpool::new(workspace.join("spool")).await.unwrap());
         let root_authority = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
         let ledger = Arc::new(
-            crate::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+            crate::domain::services::authority_ledger::AuthorityLedger::new(
+                root_authority.clone(),
+                Arc::new(crate::domain::clock::SystemClock::default()),
+            ),
         );
         let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
             ledger.clone(),
@@ -4500,10 +4591,14 @@ mod tests {
             .await
             .expect("declarative nested production chain");
 
-        assert!(matches!(
+        assert!(
+            matches!(
+                &run.outcome.spokes[0].1,
+                crate::domain::models::SpokeResult::Completed { .. }
+            ),
+            "coordinator outcome: {:?}",
             run.outcome.spokes[0].1,
-            crate::domain::models::SpokeResult::Completed { .. }
-        ));
+        );
         assert!(
             run.delta_store
                 .values()
@@ -4554,7 +4649,9 @@ mod tests {
         assert_eq!(coordinator_launch.token.parent, Some(root.id));
         assert_eq!(
             coordinator_launch.token.budget,
-            CapabilityToken::r1_coordinator(coordinator_launch.agent_id.clone(), 1).budget
+            CapabilityToken::r1_coordinator(coordinator_launch.agent_id.clone(), 1)
+                .unwrap()
+                .budget
         );
         assert_eq!(
             grandchild_launch.token.parent,
@@ -4568,6 +4665,74 @@ mod tests {
         assert_eq!(room.waves().len(), 2);
         assert_eq!(room.waves()[0].coordinator, AgentId::root());
         assert_eq!(room.waves()[1].coordinator, coordinator_launch.agent_id);
+    }
+
+    #[tokio::test]
+    async fn four_delegations_at_global_cap_do_not_block_four_grandchildren() {
+        const CAP: usize = 4;
+        let workspace = tempfile::tempdir().unwrap();
+        let provider = Arc::new(AdmissionProbeProvider::new(CAP));
+        let (leaf, ledger, root) =
+            make_runner_with_provider(workspace.path(), true, provider.clone()).await;
+        let mut coordinator = leaf.clone();
+        coordinator.provider = Arc::new(PanicIfInvokedProvider);
+        let runner = DeclarativeNestedRunner {
+            coordinator,
+            leaf,
+            launches: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        };
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, event_rx) = EventBus::new(64);
+        std::mem::forget(event_rx);
+        let event_bus = Arc::new(event_bus);
+        let clock = Arc::new(crate::domain::clock::MockClock::at_wall_ms(0))
+            as Arc<dyn crate::domain::clock::Clock>;
+        let supervisor = Arc::new(crate::infrastructure::supervisor::Supervisor::new(
+            CAP,
+            CAP,
+            ledger.clone(),
+            root.clone(),
+            clock.clone(),
+            event_bus.clone(),
+        ));
+        let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger,
+            event_bus,
+            clock,
+            root,
+        )
+        .with_supervisor(supervisor);
+        let spec = crate::adapters::tui::fanout_spec::parse_fanout(Some(
+            "nested 4 1 complete concurrently",
+        ))
+        .unwrap();
+        let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m").unwrap();
+
+        let run = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            executor.run_fork_join_run(request, CancellationToken::new(), None),
+        )
+        .await
+        .expect("delegation admission must not deadlock at the global cap")
+        .expect("nested cap fixture completes");
+
+        assert!(run.outcome.spokes.iter().all(|(_, result)| {
+            matches!(result, crate::domain::models::SpokeResult::Completed { .. })
+        }));
+        assert_eq!(
+            provider.started.load(std::sync::atomic::Ordering::SeqCst),
+            CAP,
+        );
+        assert_eq!(
+            provider
+                .maximum_active
+                .load(std::sync::atomic::Ordering::SeqCst),
+            CAP,
+        );
     }
 
     /// KTC-8: a failed grandchild makes the coordinator result fail; the

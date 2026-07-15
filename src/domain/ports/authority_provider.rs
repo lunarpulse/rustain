@@ -11,12 +11,15 @@ use crate::domain::models::{
     JournaledTerminalCheckpoint,
 };
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AuthorityError {
     #[error("non-subset authority delegation on {dimension}")]
     NonSubset { dimension: &'static str },
     #[error("max depth exceeded: limit {limit}, attempted {attempted}")]
     MaxDepthExceeded { limit: usize, attempted: usize },
+    #[error("authority construction overflow in {dimension}")]
+    Overflow { dimension: &'static str },
     #[error("authority token expired")]
     Expired,
     #[error("authority budget exhausted")]

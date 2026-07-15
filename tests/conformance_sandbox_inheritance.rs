@@ -205,7 +205,10 @@ async fn make_runner_with_parent(
     let root_authority =
         rustain::domain::models::CapabilityToken::r1_root(rustain::domain::models::AgentId::root());
     let authority_ledger = Arc::new(
-        rustain::domain::services::authority_ledger::AuthorityLedger::new(root_authority.clone()),
+        rustain::domain::services::authority_ledger::AuthorityLedger::new(
+            root_authority.clone(),
+            std::sync::Arc::new(rustain::domain::clock::SystemClock::default()),
+        ),
     );
     let authority =
         Arc::new(rustain::adapters::authority::InProcessAuthorityProvider::new(authority_ledger))

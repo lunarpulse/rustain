@@ -2440,7 +2440,7 @@ pub async fn run(
                                                     let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                         conversation_id: Some(conversation.id.clone()),
                                                         level: crate::domain::models::NoticeLevel::Warning,
-                                                        message: msg,
+                                                        message: msg.to_string(),
                                                     });
                                                     state.needs_redraw = true;
                                                 }
