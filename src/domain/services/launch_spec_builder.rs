@@ -43,6 +43,7 @@ impl LaunchSpecBuilder {
             sandbox_override: None,
             parent_trace,
             isolated: agent_def.isolated,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         }
     }
 
@@ -79,6 +80,7 @@ impl LaunchSpecBuilder {
             sandbox_override: None,
             parent_trace,
             isolated: agent_def.isolated,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         }
     }
 
@@ -117,6 +119,7 @@ impl LaunchSpecBuilder {
             sandbox_override: None,
             parent_trace,
             isolated: agent_def.isolated,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         }
     }
 }

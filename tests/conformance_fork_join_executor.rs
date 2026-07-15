@@ -25,7 +25,8 @@ use rustain::domain::models::capability_token::{
 use rustain::domain::models::launch_spec::AgentLaunchSpec;
 use rustain::domain::models::node_state::NodeState;
 use rustain::domain::models::orchestration::{
-    FORK_JOIN_SPAWN_CAP, OrchestrationError, SpokeResult, SpokeSpec, WaitPolicy,
+    FORK_JOIN_SPAWN_CAP, MAX_NESTED_BREADTH, OrchestrationError, SpokeResult, SpokeRole, SpokeSpec,
+    WaitPolicy,
 };
 use rustain::domain::models::subagent_error::SubagentError;
 use rustain::domain::models::task_handle::TaskHandle;
@@ -55,6 +56,7 @@ fn spoke(label: &str) -> SpokeSpec {
         tier: ModelTier::Flagship,
         tools_allow: ToolPolicy::InheritFromParent,
         waits_for: Vec::new(),
+        role: SpokeRole::Leaf,
     }
 }
 
@@ -337,7 +339,7 @@ async fn nested_non_root_coordinator_threads_parent_to_launch_chokepoint() {
     let (exe, ledger) = build_executor(runner.clone(), root.clone());
     let parent_id = AgentId::new();
     let parent_token = ledger
-        .delegate(&root, CapabilityToken::r1_child_request(parent_id.clone()))
+        .delegate(&root, CapabilityToken::r1_coordinator(parent_id.clone(), 1))
         .unwrap();
     let (_status_tx, status_rx) = tokio::sync::mpsc::channel(1);
     let (command_tx, _) = tokio::sync::mpsc::channel(1);
@@ -372,20 +374,27 @@ async fn nested_non_root_coordinator_threads_parent_to_launch_chokepoint() {
 }
 
 #[tokio::test]
-async fn non_root_coordinator_without_live_handle_is_refused_before_dispatch() {
+async fn non_root_coordinator_without_live_handle_returns_host_bound_unavailable() {
     let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
-    let (exe, _ledger) = build_executor(runner.clone(), root_token());
+    let root = root_token();
+    let (exe, ledger) = build_executor(runner.clone(), root.clone());
+    let coordinator = AgentId::new();
+    let available_before = ledger.available(&root.id).unwrap();
     let error = exe
         .run_wave(
-            request(AgentId::new(), vec![spoke("nested")]),
+            request(coordinator.clone(), vec![spoke("nested")]),
             CancellationToken::new(),
             None,
         )
         .await
         .unwrap_err();
 
-    assert!(matches!(error, OrchestrationError::SpawnRefused(_)));
+    assert!(matches!(
+        error,
+        OrchestrationError::HostBoundUnavailable(id) if id == coordinator
+    ));
     assert_eq!(runner.launch_count().await, 0);
+    assert_eq!(ledger.available(&root.id).unwrap(), available_before);
 }
 
 /// Story 17.3c AC3 [K]: an active depth-3 coordinator is real ledger lineage,
@@ -396,18 +405,18 @@ async fn depth_three_coordinator_is_refused_before_depth_four_dispatch() {
     let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
     let (exe, ledger) = build_executor(runner.clone(), root.clone());
     let depth_one = ledger
-        .delegate(&root, CapabilityToken::r1_child_request(AgentId::new()))
+        .delegate(&root, CapabilityToken::r1_coordinator(AgentId::new(), 1))
         .unwrap();
     let depth_two = ledger
         .delegate(
             &depth_one,
-            CapabilityToken::r1_child_request(AgentId::new()),
+            CapabilityToken::r1_coordinator(AgentId::new(), 1),
         )
         .unwrap();
     let depth_three = ledger
         .delegate(
             &depth_two,
-            CapabilityToken::r1_child_request(AgentId::new()),
+            CapabilityToken::r1_coordinator(AgentId::new(), 1),
         )
         .unwrap();
     let coordinator = depth_three.scope.clone();
@@ -442,6 +451,69 @@ async fn depth_three_coordinator_is_refused_before_depth_four_dispatch() {
         .unwrap_err();
 
     assert!(matches!(error, OrchestrationError::SpawnRefused(_)));
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+#[tokio::test]
+async fn nested_breadth_over_cap_is_refused_before_any_launch() {
+    let runner = Arc::new(FakeRunner::new(Vec::new()));
+    let (exe, _) = build_executor(runner.clone(), root_token());
+    let mut coordinator = spoke("coordinator");
+    coordinator.role = SpokeRole::Coordinator {
+        grandchildren: (0..=MAX_NESTED_BREADTH)
+            .map(|index| spoke(&format!("grandchild-{index}")))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+        concurrency: MAX_NESTED_BREADTH + 1,
+        wait_policy: WaitPolicy::All,
+    };
+
+    let error = exe
+        .run_wave(
+            request(AgentId::root(), vec![coordinator]),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        OrchestrationError::NestedBreadthExceeded {
+            cap: MAX_NESTED_BREADTH,
+            attempted
+        } if attempted == MAX_NESTED_BREADTH + 2
+    ));
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+#[tokio::test]
+async fn nested_coordinator_grandchild_is_refused_before_any_launch() {
+    let runner = Arc::new(FakeRunner::new(Vec::new()));
+    let (exe, _) = build_executor(runner.clone(), root_token());
+    let mut nested_coordinator = spoke("nested-coordinator");
+    nested_coordinator.role = SpokeRole::Coordinator {
+        grandchildren: vec![spoke("depth-three-leaf")].into_boxed_slice(),
+        concurrency: 1,
+        wait_policy: WaitPolicy::All,
+    };
+    let mut coordinator = spoke("coordinator");
+    coordinator.role = SpokeRole::Coordinator {
+        grandchildren: vec![nested_coordinator].into_boxed_slice(),
+        concurrency: 1,
+        wait_policy: WaitPolicy::All,
+    };
+
+    let error = exe
+        .run_wave(
+            request(AgentId::root(), vec![coordinator]),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, OrchestrationError::NestedDepthUnsupported));
     assert_eq!(runner.launch_count().await, 0);
 }
 
@@ -507,7 +579,7 @@ async fn uses_exhausted_but_budgeted_non_root_coordinator_is_admitted() {
     let token = ledger
         .delegate(
             &root,
-            CapabilityToken::r1_child_request(coordinator.clone()),
+            CapabilityToken::r1_coordinator(coordinator.clone(), 1),
         )
         .unwrap();
     // Spend the coordinator's single use WITHOUT drawing budget: uses_remaining
@@ -547,6 +619,26 @@ async fn uses_exhausted_but_budgeted_non_root_coordinator_is_admitted() {
         runner.launch_count().await,
         1,
         "coordination is a delegation, not a leaf use — uses_remaining must not gate admission"
+    );
+}
+
+#[tokio::test]
+async fn flat_root_wave_budget_remains_exactly_one_synthesis_debit() {
+    let root = root_token();
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, ledger) = build_executor(runner, root.clone());
+
+    exe.run_wave(
+        request(AgentId::root(), vec![spoke("flat-root")]),
+        CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("flat root wave");
+
+    assert_eq!(
+        ledger.conservation(&root.id).unwrap().consumed,
+        rustain::infrastructure::orchestrator::SYNTHESIS_RESERVE
     );
 }
 

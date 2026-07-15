@@ -5,6 +5,7 @@ use futures::FutureExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::models::launch_spec::DelegationProfile;
 use crate::domain::models::{
     AgentId, AgentLaunchSpec, CapabilityFlag, CapabilityToken, NodeState, Op, OwnershipKind,
     SubagentError, TaskHandle,
@@ -154,12 +155,15 @@ impl SubagentRunner for InProcessSubagentRunner {
         let agent_id = AgentId::new();
         let task_id = nanoid::nanoid!(12);
         let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let delegation_request = match spec.delegation {
+            DelegationProfile::Child => CapabilityToken::r1_child_request(agent_id.clone()),
+            DelegationProfile::Coordinator { grandchild_count } => {
+                CapabilityToken::r1_coordinator(agent_id.clone(), grandchild_count)
+            }
+        };
         let child_token = self
             .authority
-            .delegate(
-                delegation_parent,
-                CapabilityToken::r1_child_request(agent_id.clone()),
-            )
+            .delegate(delegation_parent, delegation_request)
             .await
             .map_err(|err| {
                 SubagentError::Internal(format!("authority delegation failed: {err}"))
@@ -862,6 +866,39 @@ async fn run_child(
     // Story 14-4a (F9) — idempotency guard: `drain_mailbox` is invoked at
     // every terminal exit path; once drained, subsequent calls are no-ops.
     let mut mailbox_drained = false;
+
+    // Story 17.3d R9: a declarative coordinator is a pure delegation node.
+    // It owns the live isolation/authority handle while the executor drives its
+    // child wave, but it never invokes the streaming provider for an LLM turn.
+    if matches!(spec.delegation, DelegationProfile::Coordinator { .. }) {
+        tokio::select! {
+            _ = cancel.cancelled() => {}
+            _ = parent_disconnect_rx.recv() => {}
+        }
+        emit_status(
+            NodeState::Cancelled,
+            &status_tx,
+            &bridge_tx,
+            &child_state,
+            &spool,
+            &task_id,
+            &subagent_type,
+            &agent_id,
+            started_at_ms,
+        )
+        .await;
+        drain_mailbox(
+            &mailbox_budget,
+            &mut parked_queue,
+            &mut command_rx,
+            &event_bus,
+            &agent_id,
+            &mut pending_injected_headers,
+            &mut mailbox_drained,
+        )
+        .await;
+        return;
+    }
 
     let max_iterations = 10;
 
@@ -2118,6 +2155,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2241,6 +2279,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2344,6 +2383,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2436,6 +2476,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2464,6 +2505,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2493,6 +2535,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2565,6 +2608,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2631,6 +2675,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2725,6 +2770,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2884,6 +2930,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel, None).await.unwrap();
@@ -2922,6 +2969,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2948,6 +2996,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -2976,6 +3025,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -3040,6 +3090,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -3101,6 +3152,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel, None).await.unwrap();
@@ -3146,6 +3198,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let handle = runner.launch(spec, cancel.clone(), None).await.unwrap();
@@ -3298,6 +3351,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let handle = runner
             .launch(spec, CancellationToken::new(), None)
@@ -3396,6 +3450,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let cancel = CancellationToken::new();
         let mut handle = runner
@@ -3469,6 +3524,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let result = runner.launch(spec, CancellationToken::new(), None).await;
         assert!(
@@ -3637,6 +3693,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let result = runner.launch(spec, CancellationToken::new(), None).await;
         assert!(
@@ -3644,6 +3701,44 @@ mod tests {
             "AC3: isolation-start failure must refuse the launch, never fall through to the real workspace"
         );
     }
+    struct PanicIfInvokedProvider;
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for PanicIfInvokedProvider {
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            panic!("pure declarative coordinator invoked the LLM provider");
+        }
+
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        fn provider_id(&self) -> String {
+            "panic-if-invoked".into()
+        }
+
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            Vec::new()
+        }
+
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
     // P3 / AC4 [K] capstone provider: turn 1 emits a `Write` tool-use followed
     // by `TurnComplete{ToolUse}` (the signal run_child needs to dispatch the
     // tool — mirrors GateProbeProvider's shape); turn 2 (after the tool result)
@@ -3799,6 +3894,54 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct NestedLaunchRecord {
+        agent_id: AgentId,
+        parent: Option<AgentId>,
+        token: CapabilityToken,
+        provenance: crate::domain::models::ProvenanceTag,
+    }
+
+    #[derive(Clone)]
+    struct DeclarativeNestedRunner {
+        coordinator: InProcessSubagentRunner,
+        leaf: InProcessSubagentRunner,
+        launches: Arc<tokio::sync::Mutex<Vec<NestedLaunchRecord>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SubagentRunner for DeclarativeNestedRunner {
+        async fn launch(
+            &self,
+            spec: AgentLaunchSpec,
+            cancel: CancellationToken,
+            parent: Option<&TaskHandle>,
+        ) -> Result<TaskHandle, SubagentError> {
+            let parent_id = parent.map(|handle| handle.agent_id.clone());
+            let handle = match spec.delegation {
+                DelegationProfile::Coordinator { .. } => {
+                    let handle = self.coordinator.launch(spec, cancel, parent).await?;
+                    std::fs::write(
+                        handle.effective_workspace.join("parent-only.txt"),
+                        "parent-visible\n",
+                    )
+                    .map_err(|error| SubagentError::Internal(error.to_string()))?;
+                    handle
+                }
+                DelegationProfile::Child => self.leaf.launch(spec, cancel, parent).await?,
+            };
+            self.launches.lock().await.push(NestedLaunchRecord {
+                agent_id: handle.agent_id.clone(),
+                parent: parent_id,
+                token: handle.authority_token.clone().ok_or_else(|| {
+                    SubagentError::Internal("nested test launch has no authority token".into())
+                })?,
+                provenance: handle.patch_provenance,
+            });
+            Ok(handle)
+        }
+    }
+
     // P3 consensus (party-mode 2026-06-30, Winston/Amelia/Murat unanimous → A):
     // faithfully mirror the production `startup.rs` ToolSetAdapter factory so the
     // tool-execution-to-completion leg is exercised exactly as in production.
@@ -3942,6 +4085,7 @@ mod tests {
                 tier: crate::domain::models::ModelTier::Flagship,
                 tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
                 waits_for: Vec::new(),
+                role: crate::domain::models::orchestration::SpokeRole::Leaf,
             }],
             wait_policy: crate::domain::models::WaitPolicy::All,
             concurrency: 1,
@@ -3958,6 +4102,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         }
     }
 
@@ -4015,6 +4160,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut h = runner_a
             .launch(spec, CancellationToken::new(), None)
@@ -4044,6 +4190,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut h2 = runner_b
             .launch(spec_iso, CancellationToken::new(), None)
@@ -4095,6 +4242,7 @@ mod tests {
                     sandbox_override: None,
                     parent_trace: None,
                     isolated: true,
+                    delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
                 },
                 CancellationToken::new(),
                 None,
@@ -4113,6 +4261,7 @@ mod tests {
                     sandbox_override: None,
                     parent_trace: None,
                     isolated: false,
+                    delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
                 },
                 CancellationToken::new(),
                 Some(&parent),
@@ -4147,6 +4296,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let parent = parent_runner
             .launch(parent_spec, CancellationToken::new(), None)
@@ -4171,6 +4321,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut nested = runner
             .launch(spec, CancellationToken::new(), Some(&parent))
@@ -4231,12 +4382,12 @@ mod tests {
                 .await;
         let mut parent_runner = runner.clone();
         parent_runner.provider = Arc::new(HangingProvider);
+        let mut parent_spec = isolated_launch_spec("live nested coordinator");
+        parent_spec.delegation = DelegationProfile::Coordinator {
+            grandchild_count: 1,
+        };
         let parent = parent_runner
-            .launch(
-                isolated_launch_spec("live nested coordinator"),
-                CancellationToken::new(),
-                None,
-            )
+            .launch(parent_spec, CancellationToken::new(), None)
             .await
             .expect("real isolated parent");
         std::fs::write(
@@ -4280,6 +4431,257 @@ mod tests {
             "clone-rooted scheduler must never write the One-Ring root"
         );
         run.parent.as_ref().unwrap().cancel.cancel();
+    }
+
+    /// Story 17.3d KTC-1/KTC-2b: the production executor consumes a
+    /// declarative coordinator role, retains its real handle, and launches a
+    /// grandchild from that handle. The grandchild sees coordinator-only state,
+    /// writes only its own clone, and carries Self-originated provenance.
+    #[tokio::test]
+    async fn declarative_nested_role_drives_real_root_child_grandchild_chain() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("parent-only.txt"), "root-seed\n").unwrap();
+        let (leaf, ledger, root) =
+            make_runner_with_provider(real.path(), true, Arc::new(ReadParentThenWriteProvider))
+                .await;
+        let mut coordinator = leaf.clone();
+        coordinator.provider = Arc::new(PanicIfInvokedProvider);
+        let launches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runner = DeclarativeNestedRunner {
+            coordinator,
+            leaf,
+            launches: Arc::clone(&launches),
+        };
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, event_rx) = EventBus::new(64);
+        std::mem::forget(event_rx);
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(real.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            real.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(64);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+            real.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger,
+            Arc::new(event_bus),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root.clone(),
+        )
+        .with_journal(journal.clone())
+        .with_artifact_store(
+            store,
+            crate::domain::models::HostBinding::new("host-17-3d", "nested-trigger"),
+        )
+        .with_patch_merge_back(merge_back.clone());
+
+        let spec = crate::adapters::tui::fanout_spec::parse_fanout(Some(
+            "nested 1 1 read coordinator state and write marker",
+        ))
+        .expect("nested front-door DSL");
+        let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m")
+            .expect("bounded leaf-only nested request");
+        let run = executor
+            .run_fork_join_run(request, CancellationToken::new(), None)
+            .await
+            .expect("declarative nested production chain");
+
+        assert!(matches!(
+            run.outcome.spokes[0].1,
+            crate::domain::models::SpokeResult::Completed { .. }
+        ));
+        assert!(
+            run.delta_store
+                .values()
+                .any(|delta| delta.diff.contains("p3_marker.txt")),
+            "the retained run must expose the grandchild's non-empty isolated diff"
+        );
+        assert_eq!(
+            run.patch_by_agent.len(),
+            1,
+            "the pure coordinator must not emit or cascade a patch"
+        );
+        let nested_patch = run
+            .patch_by_agent
+            .values()
+            .find(|patch| {
+                patch.provenance == vec![crate::domain::models::ProvenanceTag::SelfOriginated]
+            })
+            .expect("grandchild patch must remain reviewable");
+        let review_required = merge_back
+            .apply(
+                nested_patch,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &crate::domain::services::patch_review::MergeBackPolicy {
+                    auto_approve_user_originated: true,
+                },
+            )
+            .await;
+        assert!(matches!(
+            review_required,
+            Err(crate::infrastructure::orchestrator::MergeBackError::ReviewRequired)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(real.path().join("parent-only.txt")).unwrap(),
+            "root-seed\n"
+        );
+        assert!(!real.path().join("p3_marker.txt").exists());
+
+        let launches = launches.lock().await;
+        assert_eq!(launches.len(), 2);
+        let coordinator_launch = &launches[0];
+        let grandchild_launch = &launches[1];
+        assert_eq!(coordinator_launch.parent, None);
+        assert_eq!(
+            grandchild_launch.parent.as_ref(),
+            Some(&coordinator_launch.agent_id)
+        );
+        assert_eq!(coordinator_launch.token.parent, Some(root.id));
+        assert_eq!(
+            coordinator_launch.token.budget,
+            CapabilityToken::r1_coordinator(coordinator_launch.agent_id.clone(), 1).budget
+        );
+        assert_eq!(
+            grandchild_launch.token.parent,
+            Some(coordinator_launch.token.id)
+        );
+        assert_eq!(
+            grandchild_launch.provenance,
+            crate::domain::models::ProvenanceTag::SelfOriginated
+        );
+        let room = journal.project_room("host-17-3d").await.unwrap();
+        assert_eq!(room.waves().len(), 2);
+        assert_eq!(room.waves()[0].coordinator, AgentId::root());
+        assert_eq!(room.waves()[1].coordinator, coordinator_launch.agent_id);
+    }
+
+    /// KTC-8: a failed grandchild makes the coordinator result fail; the
+    /// mechanical synthesis floor cannot report a false successful parent.
+    #[tokio::test]
+    async fn nested_grandchild_failure_propagates_to_coordinator_result() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (leaf, ledger, root) =
+            make_runner_with_provider(workspace.path(), true, Arc::new(PanicIfInvokedProvider))
+                .await;
+        let launches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runner = DeclarativeNestedRunner {
+            coordinator: leaf.clone(),
+            leaf,
+            launches,
+        };
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, event_rx) = EventBus::new(64);
+        std::mem::forget(event_rx);
+        let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger,
+            Arc::new(event_bus),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root,
+        );
+        let spec =
+            crate::adapters::tui::fanout_spec::parse_fanout(Some("nested 1 1 fail the grandchild"))
+                .unwrap();
+        let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m").unwrap();
+
+        let run = executor
+            .run_fork_join_run(request, CancellationToken::new(), None)
+            .await
+            .expect("failed grandchild remains a valid wave result");
+        assert!(matches!(
+            run.outcome.spokes[0].1,
+            crate::domain::models::SpokeResult::Failed { .. }
+        ));
+    }
+
+    /// Story 17.3d KTC-10: the root cancel token reaches a grandchild that is
+    /// still running in the nested wave and the whole chain terminates.
+    #[tokio::test]
+    async fn nested_wave_cancel_cascades_to_inflight_grandchild() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("parent-only.txt"), "root-seed\n").unwrap();
+        let (leaf, ledger, root) =
+            make_runner_with_provider(workspace.path(), true, Arc::new(HangingProvider)).await;
+        let coordinator = leaf.clone();
+        let launches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runner = DeclarativeNestedRunner {
+            coordinator,
+            leaf,
+            launches: Arc::clone(&launches),
+        };
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, event_rx) = EventBus::new(64);
+        std::mem::forget(event_rx);
+        let executor = Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger,
+            Arc::new(event_bus),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root,
+        ));
+        let spec = crate::adapters::tui::fanout_spec::parse_fanout(Some(
+            "nested 1 1 hang until cancelled",
+        ))
+        .expect("nested front-door DSL");
+        let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m")
+            .expect("bounded leaf-only nested request");
+        let cancel = CancellationToken::new();
+        let run_task = {
+            let executor = Arc::clone(&executor);
+            let cancel_for_run = cancel.clone();
+            tokio::spawn(async move {
+                crate::domain::ports::Orchestrator::run_wave(
+                    executor.as_ref(),
+                    request,
+                    cancel_for_run,
+                    None,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if launches.lock().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("grandchild must become in-flight");
+
+        cancel.cancel();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(10), run_task)
+            .await
+            .expect("nested cancel must terminate")
+            .expect("wave task must join")
+            .expect("cancelled wave remains a valid outcome");
+        assert!(matches!(
+            run.snapshot().outcome.spokes[0].1,
+            crate::domain::models::SpokeResult::Cancelled
+        ));
+        assert_eq!(launches.lock().await.len(), 2);
     }
 
     /// Story 17.3c AC4 [K]: real root and nested launches both produce deltas,
@@ -4360,12 +4762,12 @@ mod tests {
             crate::domain::models::CapabilityTokenId::root()
         );
 
+        let mut parent_spec = isolated_launch_spec("nested coordinator");
+        parent_spec.delegation = DelegationProfile::Coordinator {
+            grandchild_count: 1,
+        };
         let parent = parent_runner
-            .launch(
-                isolated_launch_spec("nested coordinator"),
-                CancellationToken::new(),
-                None,
-            )
+            .launch(parent_spec, CancellationToken::new(), None)
             .await
             .expect("real nested coordinator");
         let parent_authority = parent.authority;
@@ -4527,6 +4929,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: true,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
 
         let depth_one = runner
@@ -4704,6 +5107,7 @@ mod tests {
             sandbox_override: None,
             parent_trace: None,
             isolated: false,
+            delegation: crate::domain::models::launch_spec::DelegationProfile::Child,
         };
         let mut handle = runner
             .launch(spec, CancellationToken::new(), None)

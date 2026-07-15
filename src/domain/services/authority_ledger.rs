@@ -499,6 +499,33 @@ impl AuthorityLedger {
         Ok(())
     }
 
+    /// Debit coordinator overhead without spending a leaf-action use.
+    ///
+    /// Delegation gates and deterministic synthesis are orchestration
+    /// accounting, not tool invocations. They still consume both budget
+    /// dimensions and obey revocation/settlement, but must not make a
+    /// uses-exhausted coordinator unable to delegate.
+    pub fn debit_budget(
+        &self,
+        id: &CapabilityTokenId,
+        amount: Budget,
+    ) -> Result<(), AuthorityError> {
+        let mut state = self.lock_state();
+        let entry = state.entries.get_mut(id).ok_or(AuthorityError::NotFound)?;
+        if entry.revoked || entry.settled {
+            return Err(AuthorityError::Revoked);
+        }
+        if !amount.is_within(entry.available) {
+            return Err(AuthorityError::BudgetExhausted);
+        }
+        entry.available = entry.available - amount;
+        entry.consumed += amount;
+        if self.sink.is_some() {
+            Self::stage_head_locked(&mut state, id);
+        }
+        Ok(())
+    }
+
     pub fn revoke(&self, id: &CapabilityTokenId) -> Result<(), AuthorityError> {
         let mut state = self.lock_state();
         if !state.entries.contains_key(id) {

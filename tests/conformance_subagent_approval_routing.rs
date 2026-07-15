@@ -155,6 +155,7 @@ async fn test_in_process_subagent_runner_launch_returns_handle() {
         sandbox_override: None,
         parent_trace: None,
         isolated: false,
+        delegation: rustain::domain::models::launch_spec::DelegationProfile::Child,
     };
 
     let cancel = CancellationToken::new();

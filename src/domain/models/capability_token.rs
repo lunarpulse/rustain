@@ -84,6 +84,24 @@ pub struct Budget {
     pub cost_micros: u64,
 }
 
+/// Budget reserved by one fork-join child delegation.
+pub const R1_CHILD_BUDGET: Budget = Budget {
+    requests: 1,
+    cost_micros: 1_000,
+};
+
+/// Budget reserved by one fork-join spawn gate.
+pub const R1_GATE_TOKEN_BUDGET: Budget = Budget {
+    requests: 1,
+    cost_micros: 1,
+};
+
+/// Budget consumed by the coordinator's deterministic synthesis floor.
+pub const R1_SYNTHESIS_RESERVE: Budget = Budget {
+    requests: 1,
+    cost_micros: 1_000,
+};
+
 impl Budget {
     pub const ZERO: Self = Self {
         requests: 0,
@@ -228,13 +246,28 @@ impl CapabilityToken {
                 max_depth: 3,
                 max_subset: capabilities,
             },
-            budget: Budget {
-                requests: 1,
-                cost_micros: 1_000,
-            },
+            budget: R1_CHILD_BUDGET,
             not_after: None,
             uses_limit: Some(1),
         }
+    }
+
+    /// Build the exact authority request for a declarative nested coordinator.
+    ///
+    /// The coordinator must fund each grandchild's delegation and spawn gate,
+    /// plus one deterministic synthesis reservation. No arbitrary padding is
+    /// added: changing `grandchild_count` changes the grant by exactly one
+    /// child budget plus one gate budget.
+    pub fn r1_coordinator(scope: AgentId, grandchild_count: usize) -> DelegateRequest {
+        let mut request = Self::r1_child_request(scope);
+        let count = grandchild_count as u64;
+        request.budget = Budget {
+            requests: (R1_CHILD_BUDGET.requests + R1_GATE_TOKEN_BUDGET.requests) * count
+                + R1_SYNTHESIS_RESERVE.requests,
+            cost_micros: (R1_CHILD_BUDGET.cost_micros + R1_GATE_TOKEN_BUDGET.cost_micros) * count
+                + R1_SYNTHESIS_RESERVE.cost_micros,
+        };
+        request
     }
 
     pub fn child(parent: &Self, req: DelegateRequest) -> Self {
@@ -575,5 +608,21 @@ mod sign_verify_tests {
             bad.verify(&real_vk),
             Err(CapabilityTokenError::IssuerKeyMismatch)
         ));
+    }
+
+    #[test]
+    fn coordinator_budget_is_exactly_derived_from_grandchild_count() {
+        let request = CapabilityToken::r1_coordinator(AgentId::parse("coordinator").unwrap(), 3);
+        assert_eq!(
+            request.budget,
+            Budget {
+                requests: 7,
+                cost_micros: 4_003,
+            }
+        );
+
+        let empty =
+            CapabilityToken::r1_coordinator(AgentId::parse("empty-coordinator").unwrap(), 0);
+        assert_eq!(empty.budget, R1_SYNTHESIS_RESERVE);
     }
 }

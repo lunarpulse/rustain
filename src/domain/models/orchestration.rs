@@ -35,6 +35,9 @@ use crate::domain::models::{AgentId, Budget, ModelTier, ToolPolicy};
 /// dispatched (`attempted > cap`); fan-out exactly at the cap is permitted.
 pub const FORK_JOIN_SPAWN_CAP: usize = 8;
 
+/// Maximum grandchildren accepted by one declarative coordinator.
+pub const MAX_NESTED_BREADTH: usize = FORK_JOIN_SPAWN_CAP;
+
 /// Wave-completion policy. `All` is the only active variant in R1; `Quorum(n)`
 /// is reserved + inert (R3 consensus, Story 18.6 activates it).
 ///
@@ -75,6 +78,29 @@ impl WaitPolicy {
     }
 }
 
+/// Declarative execution role for one spoke.
+///
+/// R1 supports one nested coordinator layer. Grandchildren must be leaves;
+/// deeper role composition is refused before any launch.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpokeRole {
+    /// Execute the spoke once and collect its terminal result.
+    Leaf,
+    /// Retain this spoke's live host-bound handle and drive one child wave.
+    Coordinator {
+        grandchildren: Box<[SpokeSpec]>,
+        concurrency: usize,
+        wait_policy: WaitPolicy,
+    },
+}
+
+impl Default for SpokeRole {
+    fn default() -> Self {
+        Self::Leaf
+    }
+}
+
 /// A single child spoke in a fork-join wave. The declarative input the
 /// coordinator hands to `run_fork_join`; the executor converts each spoke into
 /// an `AgentLaunchSpec` + a delegated child token before dispatching.
@@ -97,6 +123,8 @@ pub struct SpokeSpec {
     pub tools_allow: ToolPolicy,
     /// Stable logical ids of prerequisite spokes.
     pub waits_for: Vec<AgentId>,
+    /// Declarative execution behavior. Defaults to a single leaf.
+    pub role: SpokeRole,
 }
 
 /// The declarative fork-join request handed to `run_fork_join`.
@@ -347,6 +375,12 @@ pub enum OrchestrationError {
     /// authority.
     #[error("fan-out {attempted} exceeds spawn cap {cap}")]
     SpawnCapExceeded { cap: usize, attempted: usize },
+    /// A declarative coordinator exceeded the nested fan-out bound.
+    #[error("nested fan-out {attempted} exceeds nested breadth cap {cap}")]
+    NestedBreadthExceeded { cap: usize, attempted: usize },
+    /// R1 permits root → coordinator → leaf only.
+    #[error("nested coordinator grandchildren must all be leaves")]
+    NestedDepthUnsupported,
     /// `WaitPolicy::Quorum` supplied in R1 (AC9 — reserved & inert).
     #[error("{0}")]
     WaitPolicyUnsupported(&'static str),
@@ -368,6 +402,12 @@ pub enum OrchestrationError {
     /// turn-loop integration (deferred) maps it to a recoverable paused state.
     #[error("budget ceiling reached: auto-paused (have {available:?}, need {needed:?})")]
     BudgetPaused { available: Budget, needed: Budget },
+    /// A nested drive lost the in-memory owner handle required for delegation.
+    #[error("host-bound coordinator handle unavailable for {0}")]
+    HostBoundUnavailable(AgentId),
+    /// Nested coordinator waves are intentionally one-shot in R1.
+    #[error("nested coordinator spokes are not rerunnable")]
+    NestedRerunUnsupported,
     /// Internal invariant violation.
     #[error("orchestration internal error: {0}")]
     Internal(String),
@@ -392,6 +432,7 @@ mod tests {
             tier: ModelTier::Flagship,
             tools_allow: ToolPolicy::InheritFromParent,
             waits_for: Vec::new(),
+            role: SpokeRole::Leaf,
         }
     }
 
