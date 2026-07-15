@@ -72,6 +72,34 @@ fn launch_wave_request(
     let wave_cancel = tokio_util::sync::CancellationToken::new();
     state.wave_cancel = Some(wave_cancel.clone());
     let wave_id = state.begin_wave_fanout();
+    spawn_wave_run(
+        orchestrator,
+        event_bus,
+        conversation_id,
+        request,
+        wave_cancel,
+        wave_id,
+    );
+    state.needs_redraw = true;
+}
+
+/// Spawn a fan-out wave on the orchestrator and publish its terminal outcome on
+/// the event bus — the spawn-and-publish core of the `/fanout` front door.
+///
+/// Extracted as a `pub(crate)` seam (Story 17.3d-RC-B / RC-1) so the front-door
+/// keystone can enter the EXACT production path — `run_wave` on the real
+/// orchestrator, then `WaveRunReady` / `WaveTerminated` on the real `EventBus` —
+/// without constructing a full `AppState` / `TuiState`. `wave_cancel` IS the
+/// root wave-cancel token that `state.request_wave_cancel` fires; its
+/// child-token tree terminates every descendant.
+pub(crate) fn spawn_wave_run(
+    orchestrator: Arc<dyn crate::domain::ports::Orchestrator>,
+    event_bus: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
+    conversation_id: crate::domain::models::tab::ConversationId,
+    request: crate::domain::ports::ForkJoinRequest,
+    wave_cancel: CancellationToken,
+    wave_id: u64,
+) {
     let conv_id = conversation_id;
     let wave = tokio::spawn(async move {
         use crate::domain::ports::Orchestrator;
@@ -115,7 +143,6 @@ fn launch_wave_request(
             }
         }
     });
-    state.needs_redraw = true;
 }
 
 fn wave_result_rows(

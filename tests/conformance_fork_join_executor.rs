@@ -2532,3 +2532,55 @@ async fn dn3_storm_cap_refuses_rerun_past_cap() {
         "prior slots untouched after cap-refuse"
     );
 }
+
+// ─── RC-6 — one shared construction validator (Story 17.3d-RC-B) ───────────
+
+/// The executor's `validate_request` now delegates construction validity to the
+/// shared `validate_nested_request`. Concurrency bounds were validated by
+/// NEITHER caller before RC-B; a request with `concurrency: 0` (built directly,
+/// bypassing the adapter that never emits it) must now be refused before any
+/// dispatch. Mutant: drop the `validate_nested_request` call in
+/// `validate_request` → concurrency:0 is admitted and a spoke launches → RED.
+#[tokio::test]
+async fn rc6_executor_refuses_out_of_bounds_concurrency_before_dispatch() {
+    let runner = Arc::new(FakeRunner::new(vec![NodeState::Completed]));
+    let (exe, _) = build_executor(runner.clone(), root_token());
+    let mut req = request(AgentId::root(), vec![spoke("a")]);
+    req.concurrency = 0;
+    let err = exe
+        .run_wave(req, CancellationToken::new(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            OrchestrationError::InvalidConcurrency { bound, requested }
+                if bound == FORK_JOIN_SPAWN_CAP && requested == 0
+        ),
+        "out-of-bounds concurrency refused before dispatch: {err:?}"
+    );
+    assert_eq!(runner.launch_count().await, 0);
+}
+
+/// POSITIVE CONTROL for the concurrency bound: a request at the top of the
+/// legal range (`concurrency == FORK_JOIN_SPAWN_CAP`) is admitted and every
+/// spoke reaches a terminal — the validator refuses only genuinely
+/// out-of-bounds values, never the boundary.
+#[tokio::test]
+async fn rc6_executor_admits_concurrency_at_the_cap_boundary() {
+    let runner = Arc::new(FakeRunner::new(vec![
+        NodeState::Completed;
+        FORK_JOIN_SPAWN_CAP
+    ]));
+    let (exe, _) = build_executor(runner.clone(), root_token());
+    let spokes: Vec<SpokeSpec> = (0..FORK_JOIN_SPAWN_CAP)
+        .map(|i| spoke(&format!("s{i}")))
+        .collect();
+    let mut req = request(AgentId::root(), spokes);
+    req.concurrency = FORK_JOIN_SPAWN_CAP;
+    let outcome = exe
+        .run_fork_join(req)
+        .await
+        .expect("concurrency at the cap boundary is admitted");
+    assert_eq!(outcome.spokes.len(), FORK_JOIN_SPAWN_CAP);
+}

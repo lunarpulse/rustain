@@ -22,7 +22,7 @@
 //! own delegated token at the spawn gate (Murat vacuity-closer — the 14.2-AC9
 //! defeat was validating the root token, which always passes).
 
-mod dag;
+use crate::domain::services::dag;
 mod merge_back;
 mod result_contract;
 mod result_store;
@@ -51,9 +51,8 @@ use crate::domain::models::capability_token::{
 use crate::domain::models::launch_spec::{AgentLaunchSpec, DelegationProfile};
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::orchestration::{
-    CoverageLine, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, MAX_NESTED_BREADTH,
-    OrchestrationError, SpokeCitation, SpokeResult, SpokeRole, SpokeSpec, SynthesisView,
-    WaitPolicy, WaitReason,
+    CoverageLine, DrillId, FORK_JOIN_SPAWN_CAP, ForkJoinOutcome, OrchestrationError, SpokeCitation,
+    SpokeResult, SpokeRole, SpokeSpec, SynthesisView, WaitPolicy, WaitReason,
 };
 use crate::domain::models::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceArtifactDraft, HostBinding, ModelTier,
@@ -66,6 +65,9 @@ use crate::domain::ports::{
     ArtifactStore, AuthorityError, AuthorityProvider, ForkJoinRequest, Orchestrator,
 };
 use crate::domain::services::authority_ledger::AuthorityLedger;
+use crate::domain::services::fork_join_validation::{
+    map_authority_construction_error, validate_nested_request,
+};
 use crate::domain::services::patch_review::MergeBackPolicy;
 use crate::infrastructure::runtime::event_bus::EventBus;
 use crate::infrastructure::supervisor::{AdmissionClass, Supervisor};
@@ -345,13 +347,6 @@ fn launch_spec_for(spec: &SpokeSpec) -> AgentLaunchSpec {
     }
 }
 
-fn map_authority_construction_error(error: AuthorityError) -> OrchestrationError {
-    match error {
-        AuthorityError::Overflow { dimension } => OrchestrationError::Overflow { dimension },
-        other => OrchestrationError::Internal(other.to_string()),
-    }
-}
-
 fn checked_wave_budget(spoke_count: usize) -> Result<Budget, OrchestrationError> {
     let count = u64::try_from(spoke_count).map_err(|_| OrchestrationError::Overflow {
         dimension: "wave spoke count",
@@ -523,6 +518,15 @@ impl ForkJoinExecutor {
         self.wave_ctx()
             .run_wave_body(request, wave_cancel, parent)
             .await
+    }
+
+    /// Snapshot the retained wave run (Story 17.3d-RC-B / RC-1). `run_wave`
+    /// stores the live [`ForkJoinRun`] here; the front-door keystone reads it
+    /// back after observing `WaveRunReady` to assert patch/delta evidence the
+    /// domain `WaveHandle` trait deliberately does not expose.
+    #[cfg(test)]
+    pub(crate) async fn current_run(&self) -> Option<Arc<ForkJoinRun>> {
+        self.current_run.lock().await.clone()
     }
 
     /// Concrete single-spoke rerun (DD-B6). Borrows the prior [`ForkJoinRun`]
@@ -1149,65 +1153,7 @@ impl WaveCtx {
         &self,
         request: &ForkJoinRequest,
     ) -> Result<Vec<Vec<usize>>, OrchestrationError> {
-        if let Some(reason) = request.wait_policy.r1_unsupported_reason() {
-            return Err(OrchestrationError::WaitPolicyUnsupported(reason));
-        }
-        let attempted = request.spokes.len();
-        if attempted == 0 {
-            return Err(OrchestrationError::Internal(
-                "fork-join requires at least one spoke".into(),
-            ));
-        }
-        if attempted > FORK_JOIN_SPAWN_CAP {
-            return Err(OrchestrationError::SpawnCapExceeded {
-                cap: FORK_JOIN_SPAWN_CAP,
-                attempted,
-            });
-        }
-        let nested_nodes = request.spokes.iter().try_fold(0usize, |total, spoke| {
-            let descendants = match &spoke.role {
-                SpokeRole::Coordinator { grandchildren, .. } => grandchildren.len(),
-                SpokeRole::Leaf => 0,
-            };
-            total
-                .checked_add(descendants)
-                .ok_or(OrchestrationError::Overflow {
-                    dimension: "nested node count",
-                })
-        })?;
-        let total_nodes =
-            attempted
-                .checked_add(nested_nodes)
-                .ok_or(OrchestrationError::Overflow {
-                    dimension: "nested node count",
-                })?;
-        if nested_nodes > 0 && total_nodes > MAX_NESTED_BREADTH {
-            return Err(OrchestrationError::NestedBreadthExceeded {
-                cap: MAX_NESTED_BREADTH,
-                attempted: total_nodes,
-            });
-        }
-        for spoke in &request.spokes {
-            if let SpokeRole::Coordinator { grandchildren, .. } = &spoke.role {
-                if grandchildren.is_empty() {
-                    return Err(OrchestrationError::Internal(
-                        "nested coordinator requires at least one grandchild".into(),
-                    ));
-                }
-                if grandchildren.len() > MAX_NESTED_BREADTH {
-                    return Err(OrchestrationError::NestedBreadthExceeded {
-                        cap: MAX_NESTED_BREADTH,
-                        attempted: grandchildren.len(),
-                    });
-                }
-                if grandchildren
-                    .iter()
-                    .any(|grandchild| !matches!(grandchild.role, SpokeRole::Leaf))
-                {
-                    return Err(OrchestrationError::NestedDepthUnsupported);
-                }
-            }
-        }
+        validate_nested_request(request)?;
         let graph = dag::DependencyGraph::new(
             request
                 .spokes

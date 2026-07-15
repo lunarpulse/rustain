@@ -375,6 +375,10 @@ pub enum OrchestrationError {
     /// authority.
     #[error("fan-out {attempted} exceeds spawn cap {cap}")]
     SpawnCapExceeded { cap: usize, attempted: usize },
+    /// The requested concurrency bound is outside `1..=cap`. Neither validator
+    /// checked this before RC-B; the shared `validate_nested_request` does.
+    #[error("concurrency {requested} out of bounds 1..={bound}")]
+    InvalidConcurrency { bound: usize, requested: usize },
     /// A declarative coordinator exceeded the nested fan-out bound.
     #[error("nested fan-out {attempted} exceeds nested breadth cap {cap}")]
     NestedBreadthExceeded { cap: usize, attempted: usize },

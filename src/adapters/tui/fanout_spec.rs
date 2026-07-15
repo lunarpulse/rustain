@@ -14,6 +14,7 @@ use crate::domain::models::orchestration::{
 use crate::domain::models::router::ModelTier;
 use crate::domain::models::tool_policy::ToolPolicy;
 use crate::domain::ports::ForkJoinRequest;
+use crate::domain::services::validate_nested_request;
 
 /// Turn-seam adapter DTO for the `/fanout` command (DD-B1).
 /// Parsed CLI grammar; the adapter translates FanOutSpec → ForkJoinRequest
@@ -141,20 +142,38 @@ pub fn to_request(spec: &FanOutSpec, model: &str) -> Result<ForkJoinRequest, Orc
         waits_for: Vec::new(),
         role: SpokeRole::Leaf,
     };
-    match spec {
-        FanOutSpec::Identical { count, prompt } => Ok(ForkJoinRequest {
-            coordinator: AgentId::root(),
-            spokes: (0..*count)
-                .map(|slot| leaf(format!("SPOKE-{slot}"), prompt.clone()))
-                .collect(),
-            wait_policy: WaitPolicy::All,
-            concurrency: *count,
-        }),
+    let request = match spec {
+        FanOutSpec::Identical { count, prompt } => {
+            // Pre-build guard: refuse an over-cap fan-out BEFORE materializing
+            // the spokes (a `usize::MAX` count would otherwise OOM). Mirrors the
+            // nested arm's guard; the shared validator re-checks the same bound
+            // on the built request. `count == 0` flows through to the shared
+            // validator, which rejects it as an empty wave (`Internal`).
+            if *count > FORK_JOIN_SPAWN_CAP {
+                return Err(OrchestrationError::SpawnCapExceeded {
+                    cap: FORK_JOIN_SPAWN_CAP,
+                    attempted: *count,
+                });
+            }
+            ForkJoinRequest {
+                coordinator: AgentId::root(),
+                spokes: (0..*count)
+                    .map(|slot| leaf(format!("SPOKE-{slot}"), prompt.clone()))
+                    .collect(),
+                wait_policy: WaitPolicy::All,
+                concurrency: *count,
+            }
+        }
         FanOutSpec::Nested {
             coordinators,
             grandchildren,
             prompt,
         } => {
+            // Pre-build guard: refuse an overflowing or multiplicative fan-bomb
+            // BEFORE materializing the coordinator spokes (a `usize::MAX`
+            // coordinator count would otherwise OOM). The shared validator
+            // re-checks the same bound on the built request, but on a small,
+            // already-bounded shape.
             let total = checked_nested_total(*coordinators, *grandchildren)?;
             if total > MAX_NESTED_BREADTH {
                 return Err(OrchestrationError::NestedBreadthExceeded {
@@ -188,14 +207,18 @@ pub fn to_request(spec: &FanOutSpec, model: &str) -> Result<ForkJoinRequest, Orc
                     }
                 })
                 .collect();
-            Ok(ForkJoinRequest {
+            ForkJoinRequest {
                 coordinator: AgentId::root(),
                 spokes,
                 wait_policy: WaitPolicy::All,
                 concurrency: *coordinators,
-            })
+            }
         }
-    }
+    };
+    // RC-6: the single shared construction validator, run by BOTH the adapter
+    // (here) and the executor (`WaveCtx::validate_request`).
+    validate_nested_request(&request)?;
+    Ok(request)
 }
 
 #[cfg(test)]
@@ -324,6 +347,24 @@ mod tests {
             Err(OrchestrationError::Overflow {
                 dimension: "nested node count"
             }),
+        ));
+    }
+
+    #[test]
+    fn to_request_rejects_manually_built_empty_spec_via_shared_validator() {
+        // RC-6 divergence closure: before RC-B, `to_request` accepted a
+        // manually-constructed `count: 0` spec — returning an empty,
+        // `concurrency: 0` request — while the executor's `validate_request`
+        // rejected it. That divergence is now closed: the adapter runs the same
+        // shared `validate_nested_request`. Reverting the `to_request` call site
+        // to its old bespoke checks re-opens the divergence and turns this RED.
+        let spec = FanOutSpec::Identical {
+            count: 0,
+            prompt: "x".into(),
+        };
+        assert!(matches!(
+            to_request(&spec, "model"),
+            Err(OrchestrationError::Internal(_))
         ));
     }
 }

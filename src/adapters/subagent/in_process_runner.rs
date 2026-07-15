@@ -5,6 +5,7 @@ use futures::FutureExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::clock::Clock;
 use crate::domain::models::launch_spec::DelegationProfile;
 use crate::domain::models::{
     AgentId, AgentLaunchSpec, CapabilityFlag, CapabilityToken, NodeState, Op, OwnershipKind,
@@ -36,6 +37,10 @@ pub struct InProcessSubagentRunner {
     spool: Arc<SubagentSpool>,
     authority: Arc<dyn AuthorityProvider>,
     root_authority: CapabilityToken,
+    /// Injected wall clock for the child's `started_at` (Story 17.3d-RC-B).
+    /// Defaults to [`SystemClock`]; a golden-trace test injects a `MockClock`
+    /// so the recorded launch time is deterministic.
+    clock: Arc<dyn Clock>,
 }
 
 impl InProcessSubagentRunner {
@@ -75,7 +80,15 @@ impl InProcessSubagentRunner {
             spool,
             authority,
             root_authority,
+            clock: Arc::new(crate::domain::clock::SystemClock::default()),
         }
+    }
+
+    /// Inject a wall clock for the child `started_at` timestamp (Story
+    /// 17.3d-RC-B). Non-breaking; defaults to [`SystemClock`] in [`new`].
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn with_isolation(
@@ -154,7 +167,7 @@ impl SubagentRunner for InProcessSubagentRunner {
         // 4. Generate IDs
         let agent_id = AgentId::new();
         let task_id = nanoid::nanoid!(12);
-        let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let started_at_ms = self.clock.wall_now_ms();
         let delegation_request = match spec.delegation {
             DelegationProfile::Child => Ok(CapabilityToken::r1_child_request(agent_id.clone())),
             DelegationProfile::Coordinator { grandchild_count } => {
@@ -4461,6 +4474,10 @@ mod tests {
         parent.cancel.cancel();
     }
 
+    /// UNIT-LEVEL component test (Story 17.3d-RC-B): drives the executor via
+    /// `run_fork_join_run` directly — it is NOT an RC-1 front-door keystone. The
+    /// front-door path (via `event_loop::spawn_wave_run` + `WaveRunReady`) is
+    /// `rc1_front_door_nested_wave_drives_real_depth_two_chain`.
     /// Story 17.3c AC1 [K]: a real non-root sub-wave reaches the unified launch
     /// seam. The grandchild reads an edit that exists only in the immediate
     /// parent's clone, then writes through the clone-rooted scheduler.
@@ -4524,6 +4541,10 @@ mod tests {
         run.parent.as_ref().unwrap().cancel.cancel();
     }
 
+    /// UNIT-LEVEL component test (Story 17.3d-RC-B): drives the executor via
+    /// `run_fork_join_run` directly — it is NOT an RC-1 front-door keystone (it
+    /// never enters `launch_wave_request` nor observes `WaveRunReady`). The RC-1
+    /// front-door keystone is `rc1_front_door_nested_wave_drives_real_depth_two_chain`.
     /// Story 17.3d KTC-1/KTC-2b: the production executor consumes a
     /// declarative coordinator role, retains its real handle, and launches a
     /// grandchild from that handle. The grandchild sees coordinator-only state,
@@ -4665,6 +4686,344 @@ mod tests {
         assert_eq!(room.waves().len(), 2);
         assert_eq!(room.waves()[0].coordinator, AgentId::root());
         assert_eq!(room.waves()[1].coordinator, coordinator_launch.agent_id);
+    }
+
+    /// Story 17.3d-RC-B / RC-1 — the ONE front-door keystone. It enters the REAL
+    /// production entry `event_loop::spawn_wave_run` (the spawn-and-publish core
+    /// of `launch_wave_request`, NOT `run_fork_join_run`), observes
+    /// `AppEvent::WaveRunReady` on the real `EventBus`, and asserts the exact
+    /// depth-two contract end-to-end.
+    ///
+    /// Each named mutant turns this RED:
+    ///  - call `run_fork_join_run` directly (bypass the front door) → no
+    ///    `WaveRunReady` is ever published → the drain below times out;
+    ///  - pass `None`/root as the coordinator → the grandchild token parent ≠
+    ///    the coordinator token id;
+    ///  - re-clone ROOT for the grandchild → it reads "root-seed" not
+    ///    "parent-visible" → `ReadParentThenWriteProvider` panics → no marker
+    ///    diff is captured;
+    ///  - invoke the coordinator provider → `PanicIfInvokedProvider` panics;
+    ///  - omit the seeded coordinator delta → the grandchild read assertion fails;
+    ///  - write through the coordinator/root scheduler → the marker lands in the
+    ///    real tree (asserted absent);
+    ///  - omit the nested journal events → the room does not have two waves.
+    #[tokio::test]
+    async fn rc1_front_door_nested_wave_drives_real_depth_two_chain() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("parent-only.txt"), "root-seed\n").unwrap();
+        let (leaf, ledger, root) =
+            make_runner_with_provider(real.path(), true, Arc::new(ReadParentThenWriteProvider))
+                .await;
+        let mut coordinator = leaf.clone();
+        coordinator.provider = Arc::new(PanicIfInvokedProvider);
+        let launches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runner = DeclarativeNestedRunner {
+            coordinator,
+            leaf,
+            launches: Arc::clone(&launches),
+        };
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        // The SAME EventBus the executor emits on AND the front door publishes
+        // `WaveRunReady` on — exactly the production wiring.
+        let (event_bus, mut event_rx) = EventBus::new(256);
+        let event_bus = Arc::new(event_bus);
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(real.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            real.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(64);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+            real.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let executor = Arc::new(
+            crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                Arc::new(runner),
+                authority,
+                ledger,
+                event_bus.clone(),
+                Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+                root.clone(),
+            )
+            .with_journal(journal.clone())
+            .with_artifact_store(
+                store,
+                crate::domain::models::HostBinding::new("host-rc1", "front-door"),
+            )
+            .with_patch_merge_back(merge_back.clone()),
+        );
+
+        let spec = crate::adapters::tui::fanout_spec::parse_fanout(Some(
+            "nested 1 1 read coordinator state and write marker",
+        ))
+        .expect("nested front-door DSL");
+        let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m")
+            .expect("bounded leaf-only nested request");
+
+        // Enter the REAL front door — the spawn-and-publish core of
+        // `launch_wave_request`. NOT `run_fork_join_run`.
+        let wave_cancel = CancellationToken::new();
+        crate::infrastructure::runtime::event_loop::spawn_wave_run(
+            executor.clone() as Arc<dyn crate::domain::ports::Orchestrator>,
+            event_bus.clone(),
+            "rc1-front-door".to_string(),
+            request,
+            wave_cancel,
+            1,
+        );
+
+        // (1) The event loop emits `WaveRunReady` from the nested request.
+        let handle = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(crate::domain::events::AppEvent::WaveRunReady(handle)) => {
+                        break Some(handle);
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .expect("WaveRunReady must arrive from the front door")
+        .expect("event bus closed before WaveRunReady");
+
+        let snap = handle.snapshot();
+        assert!(
+            matches!(
+                snap.outcome.spokes[0].1,
+                crate::domain::models::SpokeResult::Completed { .. }
+            ),
+            "front-door coordinator outcome: {:?}",
+            snap.outcome.spokes[0].1
+        );
+
+        // The retained run exposes patch/delta evidence the `WaveHandle` trait
+        // deliberately hides.
+        let run = executor
+            .current_run()
+            .await
+            .expect("run_wave retains the wave on the executor");
+
+        // (5) grandchild wrote only its own clone; (6) root workspace unchanged.
+        assert!(
+            run.delta_store
+                .values()
+                .any(|d| d.diff.contains("p3_marker.txt")),
+            "grandchild's isolated diff must carry its clone-rooted write"
+        );
+        assert_eq!(
+            std::fs::read_to_string(real.path().join("parent-only.txt")).unwrap(),
+            "root-seed\n",
+            "root workspace must be unchanged"
+        );
+        assert!(
+            !real.path().join("p3_marker.txt").exists(),
+            "the clone-rooted write must never touch the One-Ring root"
+        );
+
+        // (8) exactly ONE grandchild patch, SelfOriginated, review Pending;
+        // (9) the pure coordinator emits no patch.
+        assert_eq!(
+            run.patch_by_agent.len(),
+            1,
+            "only the grandchild retains a patch; the pure coordinator emits none"
+        );
+        let nested_patch = run
+            .patch_by_agent
+            .values()
+            .find(|p| p.provenance == vec![crate::domain::models::ProvenanceTag::SelfOriginated])
+            .expect("grandchild patch must be SelfOriginated + reviewable");
+        assert!(
+            matches!(
+                nested_patch.review,
+                Some(crate::domain::models::artifact::ReviewStatus::Pending)
+            ),
+            "RC-1 item 8: the grandchild patch review status must be exactly Pending, got {:?}",
+            nested_patch.review
+        );
+        let review_required = merge_back
+            .apply(
+                nested_patch,
+                crate::domain::models::OwnershipKind::Owned,
+                crate::domain::models::PermissionMode::Yolo,
+                &crate::domain::services::patch_review::MergeBackPolicy {
+                    auto_approve_user_originated: true,
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                review_required,
+                Err(crate::infrastructure::orchestrator::MergeBackError::ReviewRequired)
+            ),
+            "a SelfOriginated grandchild patch stays Pending (never auto-applied)"
+        );
+
+        // (3) grandchild token parent == coordinator token id; (7) coordinator
+        // provider calls == 0 (a PanicIfInvoked coordinator that completed).
+        let launches = launches.lock().await;
+        assert_eq!(
+            launches.len(),
+            2,
+            "exactly the coordinator + one grandchild launched"
+        );
+        let coordinator_launch = &launches[0];
+        let grandchild_launch = &launches[1];
+        assert_eq!(coordinator_launch.parent, None);
+        assert_eq!(
+            grandchild_launch.parent.as_ref(),
+            Some(&coordinator_launch.agent_id)
+        );
+        assert_eq!(coordinator_launch.token.parent, Some(root.id));
+        assert_eq!(
+            grandchild_launch.token.parent,
+            Some(coordinator_launch.token.id)
+        );
+        assert_eq!(
+            grandchild_launch.provenance,
+            crate::domain::models::ProvenanceTag::SelfOriginated
+        );
+        // (9, exact) the pure coordinator retains NO patch under its own id —
+        // not merely "only one patch exists".
+        assert!(
+            !run.patch_by_agent
+                .contains_key(&coordinator_launch.agent_id),
+            "the pure coordinator must retain no patch of its own"
+        );
+
+        // (2) root + non-root WaveStarted/WaveCompleted pairs are journaled.
+        let room = journal.project_room("host-rc1").await.unwrap();
+        assert_eq!(
+            room.waves().len(),
+            2,
+            "root + non-root waves must both be journaled"
+        );
+        assert_eq!(room.waves()[0].coordinator, AgentId::root());
+        assert_eq!(room.waves()[1].coordinator, coordinator_launch.agent_id);
+        // Both waves must record a `WaveCompleted` (outcome filled), not merely
+        // a `WaveStarted` — the "omit nested journal events" mutant that drops a
+        // WaveCompleted leaves two WaveViews with `outcome: None` and must be RED.
+        assert!(
+            room.waves().iter().all(|wave| wave.outcome.is_some()),
+            "root + non-root waves must each record a WaveCompleted outcome"
+        );
+    }
+
+    /// Story 17.3d-RC-B / RC-1 item 10 — root cancellation issued from the SAME
+    /// front-door token terminates an in-flight grandchild. The grandchild hangs
+    /// so the wave stays live until `wave_cancel.cancel()` (what
+    /// `state.request_wave_cancel` fires) propagates down the child-token tree.
+    /// Mutant: a cancel that does not reach the grandchild → the wave never
+    /// terminates → the drain below times out RED.
+    #[tokio::test]
+    async fn rc1_front_door_root_cancel_terminates_grandchild() {
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("parent-only.txt"), "root-seed\n").unwrap();
+        // The grandchild HANGS: the wave stays in-flight until the root cancel.
+        let (leaf, ledger, root) =
+            make_runner_with_provider(real.path(), true, Arc::new(HangingProvider)).await;
+        let mut coordinator = leaf.clone();
+        coordinator.provider = Arc::new(PanicIfInvokedProvider);
+        let launches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let runner = DeclarativeNestedRunner {
+            coordinator,
+            leaf,
+            launches: Arc::clone(&launches),
+        };
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, mut event_rx) = EventBus::new(256);
+        let event_bus = Arc::new(event_bus);
+        let executor = Arc::new(crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger,
+            event_bus.clone(),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root.clone(),
+        ));
+
+        let spec = crate::adapters::tui::fanout_spec::parse_fanout(Some("nested 1 1 hang here"))
+            .expect("nested front-door DSL");
+        let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m")
+            .expect("bounded leaf-only nested request");
+
+        let wave_cancel = CancellationToken::new();
+        crate::infrastructure::runtime::event_loop::spawn_wave_run(
+            executor.clone() as Arc<dyn crate::domain::ports::Orchestrator>,
+            event_bus.clone(),
+            "rc1-cancel".to_string(),
+            request,
+            wave_cancel.clone(),
+            7,
+        );
+
+        // The grandchild must actually be in-flight before we cancel (otherwise
+        // the cancel would race a not-yet-launched node — a vacuous pass).
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if launches.lock().await.len() == 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("coordinator + grandchild must both launch before cancel");
+
+        // Root cancel from the SAME front-door token (`state.request_wave_cancel`).
+        wave_cancel.cancel();
+
+        // The wave must TERMINATE (never hang). A graceful cancel-all returns an
+        // Ok run, so the front door publishes `WaveRunReady` with a cancelled
+        // outcome; a bare `WaveTerminated` here is the Err path and is NOT
+        // expected (the coordinator is panic-free and only the root cancel can
+        // end the hanging grandchild). Draining to `WaveRunReady` and asserting
+        // the cancelled grandchild proves the cancel propagated.
+        let handle = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match event_rx.recv().await {
+                    Some(crate::domain::events::AppEvent::WaveRunReady(handle)) => {
+                        break Some(handle);
+                    }
+                    Some(crate::domain::events::AppEvent::WaveTerminated { .. }) => {
+                        panic!(
+                            "front-door root cancel produced WaveTerminated (Err path); \
+                             expected a cancelled WaveRunReady"
+                        );
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            }
+        })
+        .await
+        .expect("front-door root cancel must terminate the wave, not hang")
+        .expect("event bus closed before WaveRunReady");
+
+        let snap = handle.snapshot();
+        assert!(
+            snap.cancelled
+                || snap.outcome.spokes.iter().all(|(_, r)| matches!(
+                    r,
+                    crate::domain::models::SpokeResult::Cancelled
+                        | crate::domain::models::SpokeResult::Empty
+                )),
+            "front-door root cancel must terminate the grandchild: {:?}",
+            snap.outcome.spokes
+        );
     }
 
     #[tokio::test]
@@ -5333,5 +5692,640 @@ mod tests {
             .expect("read terminal proof")
             .expect("Cancelled checkpoint must be durable before bridge teardown");
         assert_eq!(proof.checkpoint().state, NodeState::Cancelled);
+    }
+
+    // ─── RC-5 — canonical flat-root golden trace (Story 17.3d-RC-B) ─────────
+
+    /// A per-child-stateless write provider (conversation-keyed, NOT a shared
+    /// counter like `WriteOnceProvider`) so a multi-spoke flat wave produces
+    /// exactly one isolated patch per spoke, deterministically.
+    struct MarkerWriteProvider;
+    #[async_trait::async_trait]
+    impl StreamingProvider for MarkerWriteProvider {
+        async fn stream_completion(
+            &self,
+            messages: Vec<Message>,
+            _options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, crate::domain::errors::ProviderError> {
+            let wrote = messages
+                .iter()
+                .flat_map(|m| &m.tool_results)
+                .any(|r| r.tool_use_id == "mw");
+            let chunks = if wrote {
+                vec![
+                    StreamChunk::Text {
+                        content: "done".into(),
+                        parent_tool_use_id: None,
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::EndTurn,
+                    },
+                ]
+            } else {
+                vec![
+                    StreamChunk::ToolUse {
+                        id: "mw".into(),
+                        name: "Write".into(),
+                        input: serde_json::json!({
+                            "file_path": "marker.txt",
+                            "content": "golden\n",
+                        }),
+                    },
+                    StreamChunk::TurnComplete {
+                        stop_reason: crate::domain::models::StopReason::ToolUse,
+                    },
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(chunks)))
+        }
+        async fn abort(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "marker-write".into()
+        }
+        fn list_models(&self) -> Vec<ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), crate::domain::errors::ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<crate::domain::ports::ProbeOutcome, crate::domain::errors::ProviderError>
+        {
+            Ok(crate::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    /// Deterministic id normalizer: generated ids → encounter-order symbolic
+    /// ids; the root agent → `ROOT`. This is the ONLY allowed normalization
+    /// (ids, timestamps [none surface], paths). Presence/order/relationships/
+    /// budgets/outcomes/patch-metadata/transitions are NEVER normalized.
+    #[derive(Default)]
+    struct IdInterner {
+        map: std::collections::HashMap<String, String>,
+        next: usize,
+    }
+    impl IdInterner {
+        fn sym(&mut self, raw: &str) -> String {
+            if raw == AgentId::root().as_str() {
+                return "ROOT".into();
+            }
+            if let Some(existing) = self.map.get(raw) {
+                return existing.clone();
+            }
+            let sym = format!("id{}", self.next);
+            self.next += 1;
+            self.map.insert(raw.to_string(), sym.clone());
+            sym
+        }
+    }
+
+    #[derive(Clone)]
+    struct AppLifecycle {
+        kind: &'static str,
+        agent: Option<String>,
+        label: Option<String>,
+        count: Option<usize>,
+        honest_empty: Option<bool>,
+    }
+
+    #[derive(Clone)]
+    struct FlatRootTrace {
+        conservation_before: crate::domain::services::authority_ledger::ConservationSnapshot,
+        conservation_after: crate::domain::services::authority_ledger::ConservationSnapshot,
+        room_events: Vec<crate::domain::models::RoomEvent>,
+        app_events: Vec<AppLifecycle>,
+        outcome_spokes: Vec<(String, crate::domain::models::SpokeResult)>,
+        coverage: crate::domain::models::orchestration::CoverageLine,
+        patches: Vec<(
+            String,
+            Vec<crate::domain::models::ProvenanceTag>,
+            Option<crate::domain::models::artifact::ReviewStatus>,
+        )>,
+        synthesis_summary: String,
+        synthesis_honest_empty: bool,
+        synthesis_citations: Vec<crate::domain::models::orchestration::SpokeCitation>,
+    }
+
+    fn canonicalize(trace: &FlatRootTrace) -> String {
+        use crate::domain::models::RoomEvent;
+        let mut it = IdInterner::default();
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!(
+            "conservation.before {:?}",
+            trace.conservation_before
+        ));
+        for event in &trace.room_events {
+            match event {
+                RoomEvent::NodeRegistered { node, origin, host } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal NodeRegistered node={n} origin={origin:?} host={host:?}"
+                    ));
+                }
+                RoomEvent::NodeStateChanged { node, from, to } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal NodeStateChanged node={n} from={from:?} to={to:?}"
+                    ));
+                }
+                RoomEvent::WaveStarted {
+                    wave,
+                    coordinator,
+                    spokes,
+                } => {
+                    let w = it.sym(wave.as_str());
+                    let c = it.sym(coordinator.as_str());
+                    let s: Vec<String> = spokes.iter().map(|id| it.sym(id.as_str())).collect();
+                    lines.push(format!(
+                        "journal WaveStarted wave={w} coordinator={c} spokes={s:?}"
+                    ));
+                }
+                RoomEvent::WaveCompleted { wave, outcome } => {
+                    let w = it.sym(wave.as_str());
+                    lines.push(format!(
+                        "journal WaveCompleted wave={w} outcome={outcome:?}"
+                    ));
+                }
+                RoomEvent::AdmissionDeferred {
+                    coordinator,
+                    spoke,
+                    gate,
+                } => {
+                    let c = it.sym(coordinator.as_str());
+                    lines.push(format!(
+                        "journal AdmissionDeferred coordinator={c} spoke={spoke:?} gate={gate:?}"
+                    ));
+                }
+                RoomEvent::ArtifactCreated { artifact } => {
+                    let a = it.sym(artifact.id.as_str());
+                    let p = it.sym(artifact.producer.as_str());
+                    lines.push(format!(
+                        "journal ArtifactCreated id={a} kind={:?} producer={p} provenance={:?} review={:?}",
+                        artifact.kind, artifact.provenance, artifact.review
+                    ));
+                }
+                RoomEvent::ApprovalRequested { node, fingerprint } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal ApprovalRequested node={n} fingerprint={fingerprint:?}"
+                    ));
+                }
+                RoomEvent::ApprovalResolved {
+                    node,
+                    fingerprint,
+                    source,
+                    outcome,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal ApprovalResolved node={n} fingerprint={fingerprint:?} source={source:?} outcome={outcome:?}"
+                    ));
+                }
+                RoomEvent::PatchCaptured { artifact, producer } => {
+                    let a = it.sym(artifact.as_str());
+                    let p = it.sym(producer.as_str());
+                    lines.push(format!("journal PatchCaptured artifact={a} producer={p}"));
+                }
+                RoomEvent::PatchReviewed {
+                    artifact,
+                    reviewer,
+                    verdict,
+                } => {
+                    let a = it.sym(artifact.as_str());
+                    let r = it.sym(reviewer.as_str());
+                    lines.push(format!(
+                        "journal PatchReviewed artifact={a} reviewer={r} verdict={verdict:?}"
+                    ));
+                }
+                RoomEvent::RemoteEnvelopeAccepted {
+                    peer,
+                    node,
+                    content_hash,
+                } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal RemoteEnvelopeAccepted peer={peer:?} node={n} content_hash={content_hash:?}"
+                    ));
+                }
+                RoomEvent::RemoteEnvelopeRejected { peer, reason } => {
+                    lines.push(format!(
+                        "journal RemoteEnvelopeRejected peer={peer:?} reason={reason:?}"
+                    ));
+                }
+                RoomEvent::HostBoundUnavailable { node, host } => {
+                    let n = it.sym(node.as_str());
+                    lines.push(format!(
+                        "journal HostBoundUnavailable node={n} host={host:?}"
+                    ));
+                }
+            }
+        }
+        for ev in &trace.app_events {
+            let agent = ev.agent.as_deref().map(|a| it.sym(a)).unwrap_or_default();
+            lines.push(format!(
+                "app {} agent={agent} label={:?} count={:?} honest_empty={:?}",
+                ev.kind, ev.label, ev.count, ev.honest_empty
+            ));
+        }
+        for (agent, result) in &trace.outcome_spokes {
+            let a = it.sym(agent);
+            lines.push(format!("outcome spoke={a} result={result:?}"));
+        }
+        lines.push(format!(
+            "coverage completed={} failed={} cancelled={} empty={} total={}",
+            trace.coverage.completed,
+            trace.coverage.failed,
+            trace.coverage.cancelled,
+            trace.coverage.empty,
+            trace.coverage.total
+        ));
+        for (agent, provenance, review) in &trace.patches {
+            let a = it.sym(agent);
+            lines.push(format!(
+                "patch producer={a} provenance={provenance:?} review={review:?}"
+            ));
+        }
+        lines.push(format!(
+            "synthesis summary={:?} honest_empty={}",
+            trace.synthesis_summary, trace.synthesis_honest_empty
+        ));
+        for citation in &trace.synthesis_citations {
+            let a = it.sym(citation.agent_id.as_str());
+            lines.push(format!(
+                "synthesis citation agent={a} label={:?} summary={:?}",
+                citation.label, citation.summary
+            ));
+        }
+        lines.push(format!("conservation.after {:?}", trace.conservation_after));
+        lines.join("\n")
+    }
+
+    async fn collect_flat_root_trace() -> FlatRootTrace {
+        let real = tempfile::tempdir().unwrap();
+        let (runner, ledger, root) =
+            make_runner_with_provider(real.path(), true, Arc::new(MarkerWriteProvider)).await;
+        // P3 (RC-B review): the child runner runs under the SAME injected
+        // MockClock as the executor, so the RC-5 golden genuinely runs "under an
+        // injected MockClock" (AC2) and the `with_clock` seam is exercised — not
+        // dead code behind an overstated claim.
+        let runner = runner.with_clock(Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)));
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, mut event_rx) = EventBus::new(512);
+        let event_bus = Arc::new(event_bus);
+        let journal = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(real.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+            real.path(),
+        ));
+        let (merge_bus, merge_rx) = EventBus::new(64);
+        std::mem::forget(merge_rx);
+        let merge_back = Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+            real.path().to_path_buf(),
+            store.clone(),
+            journal.clone(),
+            Arc::new(merge_bus),
+            Arc::new(crate::adapters::merge_back::GitPatchApplier),
+        ));
+        let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger.clone(),
+            event_bus.clone(),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root.clone(),
+        )
+        .with_journal(journal.clone())
+        .with_artifact_store(
+            store,
+            crate::domain::models::HostBinding::new("host-golden", "flat-root"),
+        )
+        .with_patch_merge_back(merge_back)
+        .with_merge_back_policy(crate::domain::services::patch_review::MergeBackPolicy {
+            auto_approve_user_originated: false,
+        });
+
+        let conservation_before = ledger.conservation(&root.id).unwrap();
+
+        // Two leaf spokes, dispatched sequentially (concurrency = 1) so the
+        // journal append order is deterministic.
+        let request = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![
+                crate::domain::models::SpokeSpec {
+                    id: AgentId::new(),
+                    label: "SPOKE-0".into(),
+                    prompt: "write marker".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    waits_for: Vec::new(),
+                    role: crate::domain::models::orchestration::SpokeRole::Leaf,
+                },
+                crate::domain::models::SpokeSpec {
+                    id: AgentId::new(),
+                    label: "SPOKE-1".into(),
+                    prompt: "write marker".into(),
+                    effective_model: "m".into(),
+                    tier: crate::domain::models::ModelTier::Flagship,
+                    tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                    waits_for: Vec::new(),
+                    role: crate::domain::models::orchestration::SpokeRole::Leaf,
+                },
+            ],
+            wait_policy: crate::domain::models::WaitPolicy::All,
+            concurrency: 1,
+        };
+        let run = executor
+            .run_fork_join_run(request, CancellationToken::new(), None)
+            .await
+            .expect("flat-root wave");
+        let conservation_after = ledger.conservation(&root.id).unwrap();
+
+        // Journal RoomEvents in append order (lifecycle subset filtered in the
+        // canonicalizer).
+        let room_events: Vec<crate::domain::models::RoomEvent> = journal
+            .load()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| match entry.record {
+                crate::domain::models::node_journal::JournalRecord::Room(event) => Some(event),
+                _ => None,
+            })
+            .collect();
+
+        // App lifecycle events drained from the executor's event bus.
+        let mut app_events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                crate::domain::events::AppEvent::ForkJoinStarted {
+                    coordinator,
+                    spoke_count,
+                } => app_events.push(AppLifecycle {
+                    kind: "ForkJoinStarted",
+                    agent: Some(coordinator.as_str().to_string()),
+                    label: None,
+                    count: Some(spoke_count),
+                    honest_empty: None,
+                }),
+                crate::domain::events::AppEvent::SpokeCompleted { agent_id, label } => app_events
+                    .push(AppLifecycle {
+                        kind: "SpokeCompleted",
+                        agent: Some(agent_id.as_str().to_string()),
+                        label: Some(label),
+                        count: None,
+                        honest_empty: None,
+                    }),
+                crate::domain::events::AppEvent::SynthesisReady {
+                    coordinator,
+                    honest_empty,
+                } => app_events.push(AppLifecycle {
+                    kind: "SynthesisReady",
+                    agent: Some(coordinator.as_str().to_string()),
+                    label: None,
+                    count: None,
+                    honest_empty: Some(honest_empty),
+                }),
+                _ => {}
+            }
+        }
+
+        let outcome_spokes: Vec<(String, crate::domain::models::SpokeResult)> = run
+            .outcome
+            .spokes
+            .iter()
+            .map(|(agent, result)| (agent.as_str().to_string(), result.clone()))
+            .collect();
+        let coverage = run.outcome.synthesis.coverage;
+        let synthesis_summary = run.outcome.synthesis.summary.clone();
+        let synthesis_honest_empty = run.outcome.synthesis.honest_empty;
+        let synthesis_citations = run.outcome.synthesis.citations.clone();
+        let patches: Vec<_> = run
+            .outcome
+            .spokes
+            .iter()
+            .filter_map(|(agent, _)| {
+                run.patch_by_agent.get(agent).map(|patch| {
+                    (
+                        agent.as_str().to_string(),
+                        patch.provenance.clone(),
+                        patch.review.clone(),
+                    )
+                })
+            })
+            .collect();
+        // P3 (RC-B review): assert the injected clock actually drives child
+        // `started_at` — every persisted spool meta carries the fixed mock wall
+        // time (0), proving the injection is live, not merely claimed.
+        let spool_dir = real.path().join("spool");
+        let mut started_at_metas = 0usize;
+        for entry in std::fs::read_dir(&spool_dir).expect("spool dir exists") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) == Some("meta") {
+                let meta: SpoolMeta =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(
+                    meta.started_at, 0,
+                    "child started_at must read the injected MockClock, not wall time"
+                );
+                started_at_metas += 1;
+            }
+        }
+        assert!(
+            started_at_metas >= 2,
+            "both flat-root spokes must persist spool meta under the injected clock"
+        );
+
+        FlatRootTrace {
+            conservation_before,
+            conservation_after,
+            room_events,
+            app_events,
+            outcome_spokes,
+            coverage,
+            patches,
+            synthesis_summary,
+            synthesis_honest_empty,
+            synthesis_citations,
+        }
+    }
+
+    /// RC-5 canonical flat-root golden — pinned line-by-line (regenerate
+    /// deliberately, never by blind paste, when the flat-root contract changes).
+    /// The ONLY normalization is ids → encounter-order symbolic ids + `ROOT`.
+    fn flat_root_golden() -> String {
+        [
+            "conservation.before ConservationSnapshot { total: Budget { requests: 1000, cost_micros: 1000000000 }, available: Budget { requests: 1000, cost_micros: 1000000000 }, live_reservations: Budget { requests: 0, cost_micros: 0 }, consumed: Budget { requests: 0, cost_micros: 0 } }",
+            "journal WaveStarted wave=id0 coordinator=ROOT spokes=[\"id1\", \"id2\"]",
+            "journal ArtifactCreated id=id3 kind=Evidence producer=id4 provenance=[] review=None",
+            "journal ArtifactCreated id=id5 kind=Patch producer=id4 provenance=[UserOriginated] review=Some(Pending)",
+            "journal PatchCaptured artifact=id5 producer=id4",
+            "journal ArtifactCreated id=id6 kind=Evidence producer=id7 provenance=[] review=None",
+            "journal ArtifactCreated id=id8 kind=Patch producer=id7 provenance=[UserOriginated] review=Some(Pending)",
+            "journal PatchCaptured artifact=id8 producer=id7",
+            "journal WaveCompleted wave=id0 outcome=Completed",
+            "app ForkJoinStarted agent=ROOT label=None count=Some(2) honest_empty=None",
+            "app SpokeCompleted agent=id4 label=Some(\"SPOKE-0\") count=None honest_empty=None",
+            "app SpokeCompleted agent=id7 label=Some(\"SPOKE-1\") count=None honest_empty=None",
+            "app SynthesisReady agent=ROOT label=None count=None honest_empty=Some(false)",
+            "outcome spoke=id4 result=Completed { summary: \"done\" }",
+            "outcome spoke=id7 result=Completed { summary: \"done\" }",
+            "coverage completed=2 failed=0 cancelled=0 empty=0 total=2",
+            "patch producer=id4 provenance=[UserOriginated] review=Some(Pending)",
+            "patch producer=id7 provenance=[UserOriginated] review=Some(Pending)",
+            "synthesis summary=\"Synthesized SPOKE-0, SPOKE-1 — over 2 of 2.\" honest_empty=false",
+            "synthesis citation agent=id4 label=\"SPOKE-0\" summary=\"done\"",
+            "synthesis citation agent=id7 label=\"SPOKE-1\" summary=\"done\"",
+            "conservation.after ConservationSnapshot { total: Budget { requests: 1000, cost_micros: 1000000000 }, available: Budget { requests: 999, cost_micros: 999999000 }, live_reservations: Budget { requests: 0, cost_micros: 0 }, consumed: Budget { requests: 1, cost_micros: 1000 } }",
+        ]
+        .join("\n")
+    }
+
+    #[tokio::test]
+    async fn rc5_flat_root_wave_matches_canonical_golden() {
+        let trace = collect_flat_root_trace().await;
+        let canonical = canonicalize(&trace);
+        assert_eq!(
+            canonical,
+            flat_root_golden(),
+            "flat-root canonical trace drifted from the pinned golden:\n{canonical}"
+        );
+    }
+
+    /// RC-5 forbidden-normalization sensitivity: the canonicalizer must PRESERVE
+    /// event presence/order, budget values, and patch disposition. Each mutation
+    /// below (reorder, drop, alter-budget, flip-disposition) must change the
+    /// canonical output; a canonicalizer that normalized any of these away would
+    /// make the corresponding assertion RED.
+    #[tokio::test]
+    async fn rc5_golden_is_sensitive_to_forbidden_mutations() {
+        let base = collect_flat_root_trace().await;
+        let golden = canonicalize(&base);
+
+        // reorder — swap two room events.
+        let mut reordered = base.clone();
+        assert!(
+            reordered.room_events.len() >= 2,
+            "need >=2 journal events to test order sensitivity"
+        );
+        let last_room = reordered.room_events.len() - 1;
+        reordered.room_events.swap(0, last_room);
+        assert_ne!(
+            canonicalize(&reordered),
+            golden,
+            "reordering journal events must change the canonical trace"
+        );
+
+        // drop — remove one app event.
+        let mut dropped = base.clone();
+        assert!(!dropped.app_events.is_empty());
+        dropped.app_events.pop();
+        assert_ne!(
+            canonicalize(&dropped),
+            golden,
+            "dropping an app event must change the canonical trace"
+        );
+
+        // alter-budget — perturb the after-conservation consumed budget.
+        let mut rebudgeted = base.clone();
+        rebudgeted.conservation_after.consumed.requests += 1;
+        assert_ne!(
+            canonicalize(&rebudgeted),
+            golden,
+            "altering a budget value must change the canonical trace"
+        );
+
+        // flip-disposition — flip a patch review from Pending to Reviewed.
+        let mut reviewed = base.clone();
+        assert!(
+            !reviewed.patches.is_empty(),
+            "the flat wave must retain patches"
+        );
+        reviewed.patches[0].2 = Some(crate::domain::models::artifact::ReviewStatus::Reviewed {
+            reviewer: AgentId::root(),
+            verdict: crate::domain::models::orchestration_room::ReviewVerdict::Approved,
+        });
+        assert_ne!(
+            canonicalize(&reviewed),
+            golden,
+            "flipping a patch disposition must change the canonical trace"
+        );
+
+        // alter-synthesis-summary — RC-5 forbids normalizing outcome summaries.
+        let mut resummarized = base.clone();
+        resummarized.synthesis_summary.push_str(" TAMPERED");
+        assert_ne!(
+            canonicalize(&resummarized),
+            golden,
+            "altering the synthesis summary must change the canonical trace"
+        );
+    }
+
+    /// RC-6 divergence closure (RC-B review): ONE malformed request, refused
+    /// identically at BOTH call sites through the shared `validate_nested_request`.
+    /// The adapter (`to_request`) and the executor (`run_fork_join_run` →
+    /// `validate_request`) each delegate to it; reverting either call site to a
+    /// bespoke check re-opens the divergence and turns this RED.
+    #[tokio::test]
+    async fn rc6_shared_validator_refuses_same_request_at_both_call_sites() {
+        use crate::adapters::tui::fanout_spec::{FanOutSpec, to_request};
+        use crate::domain::models::orchestration::OrchestrationError;
+        // Adapter call site: to_request runs the shared validator on the request
+        // it builds from the (empty) spec.
+        let adapter_err = to_request(
+            &FanOutSpec::Identical {
+                count: 0,
+                prompt: "x".into(),
+            },
+            "m",
+        )
+        .expect_err("adapter must refuse an empty wave");
+        // Executor call site: validate_request runs the SAME shared validator on
+        // the exact empty shape the adapter would have built.
+        let real = tempfile::tempdir().unwrap();
+        let (runner, ledger, root) =
+            make_runner_with_provider(real.path(), false, Arc::new(PanicIfInvokedProvider)).await;
+        let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
+            ledger.clone(),
+        )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
+        let (event_bus, event_rx) = EventBus::new(16);
+        std::mem::forget(event_rx);
+        let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+            Arc::new(runner),
+            authority,
+            ledger,
+            Arc::new(event_bus),
+            Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+            root,
+        );
+        let empty = crate::domain::ports::ForkJoinRequest {
+            coordinator: AgentId::root(),
+            spokes: vec![],
+            wait_policy: crate::domain::models::WaitPolicy::All,
+            concurrency: 0,
+        };
+        let exec_err = executor
+            .run_fork_join_run(empty, CancellationToken::new(), None)
+            .await
+            .expect_err("executor must refuse an empty wave before dispatch");
+        // One shared validator → identical typed refusal at both call sites.
+        assert!(
+            matches!(adapter_err, OrchestrationError::Internal(_)),
+            "adapter refusal: {adapter_err:?}"
+        );
+        assert!(
+            matches!(exec_err, OrchestrationError::Internal(_)),
+            "executor refusal: {exec_err:?}"
+        );
     }
 }
