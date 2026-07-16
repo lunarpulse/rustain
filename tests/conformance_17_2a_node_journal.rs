@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use rustain::domain::events::{AppEvent, DomainEventPayload};
 use rustain::domain::models::{
-    AgentId, CapabilityTokenId, CorrelationId, HostBinding, JournalRecord, NodeCheckpoint,
-    NodeOrigin, NodeState, OrchestrationRoomId, RoomEvent, WaveId, WireOwnershipKind,
+    AgentId, Budget, CapabilityTokenId, CorrelationId, HostBinding, JournalEntry, JournalRecord,
+    LedgerConservationRecord, NodeCheckpoint, NodeOrigin, NodeState, OrchestrationRoomId,
+    RoomEvent, WaveId, WaveOutcome, WireOwnershipKind,
 };
 use rustain::infrastructure::subagent::{
     AgentHandle, DaemonSingletonLock, JournalError, MailboxBudget, NodeJournal, NodeRecovery,
@@ -115,6 +116,46 @@ async fn journal_rejects_schema_mismatch_instead_of_guessing() {
         .await
         .expect_err("schema drift must fail closed");
     assert!(error.to_string().contains("unsupported journal schema"));
+}
+
+#[tokio::test]
+async fn pre_watermark_conservation_record_remains_readable() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let room = OrchestrationRoomId::parse("room-legacy-conservation").expect("valid room id");
+    let journal = NodeJournal::open(workspace.path(), room)
+        .await
+        .expect("open journal");
+    let entry = JournalEntry::new(
+        1,
+        JournalRecord::LedgerConservation(LedgerConservationRecord {
+            token: CapabilityTokenId::root(),
+            total: Budget::ZERO,
+            available: Budget::ZERO,
+            consumed: Budget::ZERO,
+            uses_remaining: None,
+            settled: false,
+            revoked: false,
+            authority_time_ms: 900,
+        }),
+    );
+    let mut legacy = serde_json::to_value(entry).expect("serialize current record");
+    legacy
+        .pointer_mut("/record/payload")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("ledger payload is an object")
+        .remove("authority_time_ms");
+    let mut bytes = serde_json::to_vec(&legacy).expect("serialize legacy record");
+    bytes.push(b'\n');
+    append_raw(journal.path(), &bytes).await;
+
+    let loaded = journal.load().await.expect("load pre-watermark journal");
+    let JournalRecord::LedgerConservation(record) = &loaded[0].record else {
+        panic!("expected conservation record");
+    };
+    assert_eq!(
+        record.authority_time_ms, 0,
+        "legacy records default to the fail-safe fresh-ledger watermark"
+    );
 }
 
 #[tokio::test]
@@ -396,6 +437,14 @@ async fn reopen_on_different_host_does_not_fabricate_a_live_handle() {
         .await
         .expect("append registration on host-a");
     journal
+        .append_room(RoomEvent::NodeStateChanged {
+            node: node.clone(),
+            from: NodeState::Created,
+            to: NodeState::Running,
+        })
+        .await
+        .expect("append host-a Running transition");
+    journal
         .append_checkpoint(checkpoint(node.as_str(), NodeState::Running))
         .await
         .expect("append running checkpoint");
@@ -409,11 +458,113 @@ async fn reopen_on_different_host_does_not_fabricate_a_live_handle() {
         .await
         .expect("reconcile on foreign host");
     assert_eq!(report.host_bound_unavailable, vec![node.clone()]);
-    assert!(report.suspended.is_empty());
+    assert_eq!(
+        report.suspended,
+        vec![node.clone()],
+        "foreign-host Running checkpoints become durably Suspended"
+    );
     assert!(
         tree.delivery_target(&node).await.is_none(),
         "a foreign-host node must never receive a fabricated live handle"
     );
+    let room = journal
+        .project_room("host-b")
+        .await
+        .expect("project foreign-host recovery");
+    let view = &room.nodes()[&node];
+    assert_eq!(view.state, NodeState::Suspended);
+    assert!(view.host_bound_unavailable);
+}
+
+#[tokio::test]
+async fn recovery_closes_an_inflight_wave_that_never_completed() {
+    // AC1 item 5: a wave that journaled `WaveStarted` but never `WaveCompleted`
+    // (host loss / crash mid-flight) is closed by recovery with the EXISTING
+    // `RoomEvent::WaveCompleted{Failed}` — visibly interrupted, never left as a
+    // phantom in-progress wave (outcome `None`).
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let journal = Arc::new(
+        NodeJournal::open_workspace(workspace.path())
+            .await
+            .expect("open journal"),
+    );
+    let coordinator = AgentId::parse("wave-coord").expect("valid fixture agent id");
+    let interrupted = WaveId::parse("wave-interrupted").expect("valid wave id");
+    let completed = WaveId::parse("wave-completed").expect("valid wave id");
+    // Control: a wave that both started AND completed must be untouched.
+    journal
+        .append_room(RoomEvent::WaveStarted {
+            wave: completed.clone(),
+            coordinator: coordinator.clone(),
+            spokes: Vec::new(),
+        })
+        .await
+        .expect("append completed WaveStarted");
+    journal
+        .append_room(RoomEvent::WaveCompleted {
+            wave: completed.clone(),
+            outcome: WaveOutcome::Completed,
+        })
+        .await
+        .expect("append WaveCompleted");
+    // The in-flight wave: started, never completed (the crash interrupted it).
+    journal
+        .append_room(RoomEvent::WaveStarted {
+            wave: interrupted.clone(),
+            coordinator: coordinator.clone(),
+            spokes: Vec::new(),
+        })
+        .await
+        .expect("append interrupted WaveStarted");
+
+    let tree = NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000)).with_journal(journal.clone());
+    let singleton = DaemonSingletonLock::try_acquire(workspace.path())
+        .await
+        .expect("acquire daemon singleton");
+    let report = NodeRecovery::reconcile(&journal, &tree, &singleton, "host-a")
+        .await
+        .expect("reconcile folds the incomplete wave");
+
+    assert_eq!(
+        report.interrupted_waves,
+        vec![interrupted.clone()],
+        "only the started-without-completion wave is folded",
+    );
+    let room = journal
+        .project_room("host-a")
+        .await
+        .expect("project room after fold");
+    let interrupted_view = room
+        .waves()
+        .iter()
+        .find(|wave| wave.id == interrupted)
+        .expect("interrupted wave projected");
+    assert_eq!(
+        interrupted_view.outcome,
+        Some(WaveOutcome::Failed),
+        "the interrupted wave is closed as Failed, not phantom in-progress",
+    );
+    let completed_view = room
+        .waves()
+        .iter()
+        .find(|wave| wave.id == completed)
+        .expect("completed wave projected");
+    assert_eq!(
+        completed_view.outcome,
+        Some(WaveOutcome::Completed),
+        "an already-completed wave is never re-folded",
+    );
+
+    // Idempotent: a re-run observes the appended completion and folds nothing.
+    let second = NodeRecovery::reconcile(&journal, &tree, &singleton, "host-a")
+        .await
+        .expect("second reconcile");
+    assert!(
+        second.interrupted_waves.is_empty(),
+        "the incomplete-wave fold is idempotent across a re-run",
+    );
+    // RED mutant: omit the fold → the interrupted wave keeps outcome `None`
+    // (phantom in-progress) → the Some(Failed) assertion goes RED.
 }
 
 // ── Review-patch behavioral proofs (2026-07-11 code review) ──────────────────

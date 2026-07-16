@@ -1529,3 +1529,82 @@ async fn ledger_flush_failure_requeues_conservation_head() {
         "the retry must persist the snapshot that the failed flush retained"
     );
 }
+
+#[tokio::test]
+async fn authority_time_watermark_survives_restart_and_defeats_clock_rollback() {
+    // AC2 (RC-A residual i): the nondecreasing authority-time watermark is made
+    // DURABLE on the SAME `LedgerConservation` stream (no second store). A clock
+    // rolled back AFTER a restart cannot revive authority that expired before
+    // the durable watermark.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = CapabilityToken::r1_root(AgentId::root()); // not_after == None
+    let root_id = root.id;
+
+    // Phase 1 — wall time T = 1000: an authority op observes the watermark up to
+    // 1000 and flushes a conservation head that carries it.
+    {
+        let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+        let ledger = AuthorityLedger::new(
+            root.clone(),
+            std::sync::Arc::new(rustain::domain::clock::MockClock::at_wall_ms(1000)),
+        )
+        .with_journal_sink(
+            journal.clone() as std::sync::Arc<dyn rustain::domain::ports::LedgerJournalSink>
+        );
+        ledger
+            .consume(
+                &root_id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            )
+            .expect("stage the root head at T=1000");
+        ledger
+            .journal_head()
+            .await
+            .expect("watermark 1000 made durable on the conservation stream");
+    } // process death
+
+    // Phase 2 — reopen with the clock ROLLED BACK to 100 (well before the child's
+    // 600ms expiry). Without the durable watermark the fresh ledger's watermark
+    // resets to 0, so effective-now = max(0, 100) = 100 < 600 and the expired
+    // child would be revived.
+    let journal = std::sync::Arc::new(NodeJournal::open_workspace(tmp.path()).await.unwrap());
+    let recovered = AuthorityLedger::new(
+        root.clone(),
+        std::sync::Arc::new(rustain::domain::clock::MockClock::at_wall_ms(100)),
+    );
+    recovered.recover_conservation(journaled_conservation(&journal).await);
+
+    // A child minted after the restart that expired at 600 must stay expired:
+    // effective-now = max(watermark 1000, clock 100) = 1000 > 600.
+    let child = recovered
+        .delegate(
+            &root,
+            DelegateRequest {
+                scope: AgentId::parse("rollback-child").unwrap(),
+                capabilities: CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
+                constraint: DelegateConstraint {
+                    allowed: CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
+                    max_depth: 3,
+                    max_subset: CapabilitySet::from_flags(&[CapabilityFlag::Spawn]),
+                },
+                budget: Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+                not_after: Some(600),
+                uses_limit: Some(1),
+            },
+        )
+        .expect("delegation itself does not evaluate expiry");
+    assert_eq!(
+        recovered.validate(&child, &CapabilityFlag::Spawn, &child.scope),
+        Err(AuthorityError::Expired),
+        "durable watermark keeps expired authority dead across a clock rollback",
+    );
+    // RED mutant: drop `authority_time_ms` from the head (or skip restoring it in
+    // `recover_conservation`) → the watermark resets to 0, effective-now = 100 <
+    // 600, validate returns Ok → the expired child is revived → RED.
+}

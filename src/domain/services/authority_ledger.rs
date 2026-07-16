@@ -168,7 +168,7 @@ impl AuthorityLedger {
         self
     }
 
-    fn snapshot_of(entry: &LedgerEntry) -> LedgerConservationRecord {
+    fn snapshot_of(entry: &LedgerEntry, authority_time_ms: u64) -> LedgerConservationRecord {
         LedgerConservationRecord {
             token: entry.token.id,
             total: entry.total,
@@ -177,6 +177,7 @@ impl AuthorityLedger {
             uses_remaining: entry.uses_remaining,
             settled: entry.settled,
             revoked: entry.revoked,
+            authority_time_ms,
         }
     }
 
@@ -190,7 +191,10 @@ impl AuthorityLedger {
         let mut current = Some(*id);
         while let Some(token_id) = current {
             let (snapshot, parent) = match state.entries.get(&token_id) {
-                Some(entry) => (Self::snapshot_of(entry), entry.token.parent),
+                Some(entry) => (
+                    Self::snapshot_of(entry, state.authority_time_ms),
+                    entry.token.parent,
+                ),
                 None => break,
             };
             current = parent;
@@ -239,6 +243,11 @@ impl AuthorityLedger {
     ) {
         let mut state = self.lock_state();
         for record in records {
+            // The authority-time watermark is global, not per-token: restore it
+            // from EVERY record (even one whose token is absent from the fresh
+            // ledger) so a clock rolled back after a restart still sees the
+            // durable high-water mark and cannot revive expired authority.
+            state.authority_time_ms = state.authority_time_ms.max(record.authority_time_ms);
             if let Some(entry) = state.entries.get_mut(&record.token) {
                 entry.available = record.available;
                 entry.consumed = record.consumed;
@@ -1258,7 +1267,8 @@ mod atomic_authority_chain_tests {
         let ledger = AuthorityLedger::new(root.clone(), clock);
         {
             let mut state = ledger.lock_state();
-            let head = AuthorityLedger::snapshot_of(&state.entries[&root.id]);
+            let head =
+                AuthorityLedger::snapshot_of(&state.entries[&root.id], state.authority_time_ms);
             state.outbox.push(head);
         }
         let before = fingerprint(&ledger);
@@ -1307,6 +1317,184 @@ mod atomic_authority_chain_tests {
         assert_eq!(fingerprint(&ledger), before);
         assert_eq!(ledger.spend_use(&root.id), Err(AuthorityError::Expired));
         assert_eq!(fingerprint(&ledger), before);
+    }
+
+    #[test]
+    fn revoked_refusal_preserves_conservation() {
+        // AC3 (RC-A residual): a REVOKED token refuses every mutator without
+        // touching entries / scope index / child index / budget / staged head.
+        let (ledger, _clock, _root, _parent, child) = chain(None, None, None, 10);
+        ledger.revoke(&child.id).unwrap();
+        let before = fingerprint(&ledger);
+        assert_eq!(
+            ledger.consume(
+                &child.id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            ),
+            Err(AuthorityError::Revoked),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+        assert_eq!(
+            ledger.debit_budget(
+                &child.id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            ),
+            Err(AuthorityError::Revoked),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+        assert_eq!(ledger.spend_use(&child.id), Err(AuthorityError::Revoked));
+        assert_eq!(fingerprint(&ledger), before);
+        assert_eq!(
+            ledger.delegate(
+                &child,
+                request(
+                    "revoked-gc",
+                    Budget {
+                        requests: 1,
+                        cost_micros: 1,
+                    },
+                    None,
+                    Some(1),
+                ),
+            ),
+            Err(AuthorityError::Revoked),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+    }
+
+    #[test]
+    fn settled_refusal_preserves_conservation() {
+        // AC3: a SETTLED token (terminal, refunded) refuses every mutator with no
+        // further state change beyond the settle itself.
+        let (ledger, _clock, _root, _parent, child) = chain(None, None, None, 10);
+        ledger.settle(&child.id).unwrap();
+        let before = fingerprint(&ledger);
+        assert_eq!(
+            ledger.consume(
+                &child.id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            ),
+            Err(AuthorityError::Revoked),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+        assert_eq!(
+            ledger.debit_budget(
+                &child.id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            ),
+            Err(AuthorityError::Revoked),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+        assert_eq!(ledger.spend_use(&child.id), Err(AuthorityError::Revoked));
+        assert_eq!(fingerprint(&ledger), before);
+    }
+
+    #[test]
+    fn budget_refusal_preserves_conservation() {
+        // AC3: an over-budget request is refused as BudgetExhausted BEFORE any
+        // debit — conservation is preserved exactly.
+        let (ledger, _clock, _root, _parent, child) = chain(None, None, None, 10);
+        let before = fingerprint(&ledger);
+        let over = Budget {
+            requests: 1_000_000,
+            cost_micros: 1_000_000,
+        };
+        assert_eq!(
+            ledger.consume(&child.id, over),
+            Err(AuthorityError::BudgetExhausted),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+        assert_eq!(
+            ledger.debit_budget(&child.id, over),
+            Err(AuthorityError::BudgetExhausted),
+        );
+        assert_eq!(fingerprint(&ledger), before);
+    }
+
+    #[test]
+    fn malformed_refusal_preserves_conservation() {
+        // AC3: a token whose body diverges from the ledger entry (same id) is
+        // rejected as Malformed by the shared validator with no mutation.
+        let (ledger, _clock, _root, parent, _child) = chain(None, None, None, 10);
+        let before = fingerprint(&ledger);
+        // id intentionally NOT recomputed: it still matches the ledger entry, but
+        // the token body no longer does → "does not match ledger entry".
+        let mut tampered = parent.clone();
+        tampered.budget.requests = tampered.budget.requests.wrapping_add(1);
+        let err = ledger
+            .delegate(
+                &tampered,
+                request(
+                    "malformed-gc",
+                    Budget {
+                        requests: 1,
+                        cost_micros: 1,
+                    },
+                    None,
+                    Some(1),
+                ),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, AuthorityError::Malformed { .. }),
+            "expected Malformed, got {err:?}",
+        );
+        assert_eq!(fingerprint(&ledger), before);
+    }
+
+    #[test]
+    fn mutant_e_mutators_cannot_route_around_validator() {
+        // Standalone mutant-e (AC3): deleting the `validate_active_chain_locked`
+        // call from consume / debit_budget / spend_use would let a REVOKED token
+        // be mutated. Each mutator must refuse AND leave available budget
+        // untouched (a route-around debit would drop `available` → RED).
+        let (ledger, _clock, _root, _parent, child) = chain(None, None, None, 10);
+        let available_before = ledger.available(&child.id).unwrap();
+        ledger.revoke(&child.id).unwrap();
+        assert_eq!(
+            ledger.consume(
+                &child.id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            ),
+            Err(AuthorityError::Revoked),
+            "consume must route through the validator",
+        );
+        assert_eq!(
+            ledger.debit_budget(
+                &child.id,
+                Budget {
+                    requests: 1,
+                    cost_micros: 1,
+                },
+            ),
+            Err(AuthorityError::Revoked),
+            "debit_budget must route through the validator",
+        );
+        assert_eq!(
+            ledger.spend_use(&child.id),
+            Err(AuthorityError::Revoked),
+            "spend_use must route through the validator",
+        );
+        assert_eq!(
+            ledger.available(&child.id).unwrap(),
+            available_before,
+            "no mutator may debit a token the validator rejects",
+        );
     }
 
     #[test]

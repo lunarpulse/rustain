@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::domain::models::{
     AgentId, CorrelationId, HostBinding, JournalRecord, NodeCheckpoint, NodeState, RoomEvent,
+    WaveId, WaveOutcome,
 };
 use crate::infrastructure::subagent::{NodeJournal, NodeTree, RecoveryError};
 pub fn current_host_id(_workspace: &Path) -> String {
@@ -149,6 +150,9 @@ pub struct RecoveryReport {
     pub failed: Vec<AgentId>,
     pub host_bound_unavailable: Vec<AgentId>,
     pub hazards: Vec<AgentId>,
+    /// Waves that journaled `WaveStarted` before the crash but never reached
+    /// `WaveCompleted`; recovery closes each with `WaveOutcome::Failed`.
+    pub interrupted_waves: Vec<WaveId>,
 }
 
 enum AliasLink {
@@ -184,6 +188,10 @@ impl NodeRecovery {
         // accepted − discharged − violated.
         let mut accepted = BTreeMap::<AgentId, std::collections::HashSet<CorrelationId>>::new();
         let mut resolved = BTreeMap::<AgentId, std::collections::HashSet<CorrelationId>>::new();
+        // Track in-flight waves so recovery can close any wave that started but
+        // never completed (host-loss / crash mid-flight) — see the fold below.
+        let mut started_waves = Vec::<WaveId>::new();
+        let mut completed_waves = std::collections::HashSet::<WaveId>::new();
 
         for entry in entries {
             match entry.record {
@@ -195,6 +203,14 @@ impl NodeRecovery {
                 }
                 JournalRecord::Room(RoomEvent::HostBoundUnavailable { node, .. }) => {
                     unavailable.insert(node);
+                }
+                JournalRecord::Room(RoomEvent::WaveStarted { wave, .. }) => {
+                    if !started_waves.contains(&wave) {
+                        started_waves.push(wave);
+                    }
+                }
+                JournalRecord::Room(RoomEvent::WaveCompleted { wave, .. }) => {
+                    completed_waves.insert(wave);
                 }
                 JournalRecord::Room(_) => {}
                 JournalRecord::AliasBound { node, alias } => {
@@ -251,11 +267,33 @@ impl NodeRecovery {
                 .filter(|host| host.host_id != current_host_id)
                 .cloned()
             {
-                if !unavailable.contains(&node) {
-                    let event = RoomEvent::HostBoundUnavailable {
+                let unavailable_event =
+                    (!unavailable.contains(&node)).then(|| RoomEvent::HostBoundUnavailable {
                         node: node.clone(),
                         host,
+                    });
+                if checkpoint.state == NodeState::Running {
+                    checkpoint.state = NodeState::Suspended;
+                    let state_event = RoomEvent::NodeStateChanged {
+                        node: node.clone(),
+                        from: NodeState::Running,
+                        to: NodeState::Suspended,
                     };
+                    let mut records = vec![
+                        JournalRecord::Checkpoint(checkpoint),
+                        JournalRecord::Room(state_event.clone()),
+                    ];
+                    if let Some(event) = &unavailable_event {
+                        records.push(JournalRecord::Room(event.clone()));
+                    }
+                    journal.append_batch(records).await?;
+                    tree.emit_room_event(state_event);
+                    report.suspended.push(node.clone());
+                    if let Some(event) = unavailable_event {
+                        tree.emit_room_event(event);
+                        report.host_bound_unavailable.push(node);
+                    }
+                } else if let Some(event) = unavailable_event {
                     journal.append_room(event.clone()).await?;
                     tree.emit_room_event(event);
                     report.host_bound_unavailable.push(node);
@@ -289,6 +327,27 @@ impl NodeRecovery {
             {
                 report.restored.push(node);
             }
+        }
+
+        // Incomplete-wave fold (RC-7): a wave that journaled `WaveStarted` but
+        // never reached `WaveCompleted` was interrupted by the crash/host loss.
+        // Close it by appending the EXISTING `RoomEvent::WaveCompleted` with a
+        // `Failed` outcome — reusing the variant, adding no new `NodeState`
+        // variant and no portable runtime state — so the in-flight nested wave
+        // is visibly projected as interrupted instead of phantom in-progress
+        // (outcome `None`). Idempotent: a re-run observes the appended
+        // completion and skips.
+        for wave in started_waves {
+            if completed_waves.contains(&wave) {
+                continue;
+            }
+            let event = RoomEvent::WaveCompleted {
+                wave: wave.clone(),
+                outcome: WaveOutcome::Failed,
+            };
+            journal.append_room(event.clone()).await?;
+            tree.emit_room_event(event);
+            report.interrupted_waves.push(wave);
         }
 
         for link in alias_links {

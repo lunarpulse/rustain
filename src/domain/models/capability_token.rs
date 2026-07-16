@@ -308,6 +308,10 @@ impl CapabilityToken {
                 .ok_or(AuthorityError::Overflow {
                     dimension: "coordinator budget",
                 })?;
+        // Defense-in-depth (RC-C AC3): for any u32-valid `count` this checked
+        // add/mul cannot overflow u64 (per-grandchild budget × ≤u32::MAX + reserve
+        // stays far below u64::MAX); the reachable overflow is the count
+        // conversion above. Kept fail-closed regardless.
         let budget = per_grandchild
             .checked_mul(count)
             .and_then(|aggregate| aggregate.checked_add(R1_SYNTHESIS_RESERVE))
@@ -702,7 +706,14 @@ mod sign_verify_tests {
     }
 
     #[test]
-    fn mutant_raw_coordinator_arithmetic_returns_typed_overflow() {
+    fn oversized_coordinator_count_returns_typed_overflow() {
+        // Precision (RC-C AC3): `usize::MAX` trips the `u32::try_from`
+        // grandchild-count conversion (line ~302, the `uses_limit` bound) and
+        // returns the typed `Overflow{ "coordinator grandchild count" }`. This
+        // proves the COUNT-CONVERSION guard, NOT the budget arithmetic — the
+        // checked budget add/mul is defense-only (unreachable for a valid u32
+        // count). Renamed from `mutant_raw_coordinator_arithmetic_*`, which
+        // overstated it as budget-arithmetic proof.
         assert!(matches!(
             CapabilityToken::r1_coordinator(
                 AgentId::parse("overflow-coordinator").unwrap(),

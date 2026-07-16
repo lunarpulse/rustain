@@ -2437,28 +2437,41 @@ pub async fn run(
                                             match crate::adapters::tui::fanout_spec::parse_fanout(cmd_arg) {
                                                 Ok(spec) => {
                                                     use crate::adapters::tui::widgets::exceptional_spawn_gate::{gate_decision, GateDecision};
-                                                    let request = crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config))
-                                                        .expect("parse_fanout validates nested breadth and role depth");
-                                                    let requested = request.spokes.len();
-                                                    let threshold = config.fanout_spawn_gate_threshold;
-                                                    match gate_decision(requested, threshold) {
-                                                        GateDecision::Allow => {
-                                                            launch_wave_request(
-                                                                &mut state,
-                                                                &app_state,
-                                                                conversation.id.clone(),
-                                                                request,
-                                                            );
+                                                    match crate::adapters::tui::fanout_spec::to_request(&spec, effective_model(&state, config)) {
+                                                        Ok(request) => {
+                                                            let requested = request.spokes.len();
+                                                            let threshold = config.fanout_spawn_gate_threshold;
+                                                            match gate_decision(requested, threshold) {
+                                                                GateDecision::Allow => {
+                                                                    launch_wave_request(
+                                                                        &mut state,
+                                                                        &app_state,
+                                                                        conversation.id.clone(),
+                                                                        request,
+                                                                    );
+                                                                }
+                                                                GateDecision::Refuse => {
+                                                                    state.pending_spawn_gate = Some(
+                                                                        crate::adapters::tui::state::PendingSpawnGate {
+                                                                            spec,
+                                                                            requested,
+                                                                            threshold,
+                                                                            adjusted: None,
+                                                                        },
+                                                                    );
+                                                                    state.needs_redraw = true;
+                                                                }
+                                                            }
                                                         }
-                                                        GateDecision::Refuse => {
-                                                            state.pending_spawn_gate = Some(
-                                                                crate::adapters::tui::state::PendingSpawnGate {
-                                                                    spec,
-                                                                    requested,
-                                                                    threshold,
-                                                                    adjusted: None,
-                                                                },
-                                                            );
+                                                        Err(err) => {
+                                                            // Latent-panic removal (RC-C AC3): surface a
+                                                            // to_request refusal as a notice, mirroring the
+                                                            // parse_fanout error path — never `.expect()` panic.
+                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                                conversation_id: Some(conversation.id.clone()),
+                                                                level: crate::domain::models::NoticeLevel::Warning,
+                                                                message: err.to_string(),
+                                                            });
                                                             state.needs_redraw = true;
                                                         }
                                                     }
@@ -5864,14 +5877,25 @@ pub async fn run(
                                                 *coordinators = effective_n.min(cap.max(1));
                                             }
                                         }
-                                        let request = crate::adapters::tui::fanout_spec::to_request(&pending.spec, effective_model(&state, config))
-                                            .expect("spawn-gate adjustment preserves nested breadth");
-                                        launch_wave_request(
-                                            &mut state,
-                                            &app_state,
-                                            conversation.id.clone(),
-                                            request,
-                                        );
+                                        match crate::adapters::tui::fanout_spec::to_request(&pending.spec, effective_model(&state, config)) {
+                                            Ok(request) => {
+                                                launch_wave_request(
+                                                    &mut state,
+                                                    &app_state,
+                                                    conversation.id.clone(),
+                                                    request,
+                                                );
+                                            }
+                                            Err(err) => {
+                                                // Latent-panic removal (RC-C AC3): surface the refusal as a
+                                                // notice instead of `.expect()` panic.
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation.id.clone()),
+                                                    level: crate::domain::models::NoticeLevel::Warning,
+                                                    message: err.to_string(),
+                                                });
+                                            }
+                                        }
                                     }
                                     state.needs_redraw = true;
                                 }

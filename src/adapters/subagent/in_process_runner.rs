@@ -4001,6 +4001,8 @@ mod tests {
         parent: Option<AgentId>,
         token: CapabilityToken,
         provenance: crate::domain::models::ProvenanceTag,
+        effective_workspace: std::path::PathBuf,
+        parent_only_at_launch: Option<String>,
     }
 
     #[derive(Clone)]
@@ -4038,6 +4040,11 @@ mod tests {
                     SubagentError::Internal("nested test launch has no authority token".into())
                 })?,
                 provenance: handle.patch_provenance,
+                effective_workspace: handle.effective_workspace.clone(),
+                parent_only_at_launch: std::fs::read_to_string(
+                    handle.effective_workspace.join("parent-only.txt"),
+                )
+                .ok(),
             });
             Ok(handle)
         }
@@ -4053,6 +4060,25 @@ mod tests {
         workspace: &std::path::Path,
         isolated: bool,
         provider: Arc<dyn StreamingProvider>,
+    ) -> (
+        InProcessSubagentRunner,
+        Arc<crate::domain::services::authority_ledger::AuthorityLedger>,
+        crate::domain::models::CapabilityToken,
+    ) {
+        make_runner_with_provider_on_registry(
+            workspace,
+            isolated,
+            provider,
+            Arc::new(NodeTree::new()),
+        )
+        .await
+    }
+
+    async fn make_runner_with_provider_on_registry(
+        workspace: &std::path::Path,
+        isolated: bool,
+        provider: Arc<dyn StreamingProvider>,
+        registry: Arc<NodeTree>,
     ) -> (
         InProcessSubagentRunner,
         Arc<crate::domain::services::authority_ledger::AuthorityLedger>,
@@ -4082,7 +4108,6 @@ mod tests {
         let tools = Arc::new(tools) as Arc<dyn crate::domain::ports::ToolSetPort>;
         let approval = ApprovalRuntime::new(1024, Arc::new(NoOpApprovalPersistence));
         let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval.clone(), 1024);
-        let registry = Arc::new(NodeTree::new());
         let spool = Arc::new(SubagentSpool::new(workspace.join("spool")).await.unwrap());
         let root_authority = crate::domain::models::CapabilityToken::r1_root(AgentId::root());
         let ledger = Arc::new(
@@ -4902,6 +4927,30 @@ mod tests {
             "the pure coordinator must retain no patch of its own"
         );
 
+        // RC-1 #4 explicit workspace-path relation (RC-C AC3): each node runs in
+        // its OWN clone, distinct from the One-Ring root, and the grandchild's
+        // clone DERIVES from the coordinator's clone — it carries the
+        // coordinator's edit ("parent-visible"), not the root seed ("root-seed").
+        assert_ne!(
+            coordinator_launch.effective_workspace.as_path(),
+            real.path(),
+            "the coordinator must run in its own clone, not the One-Ring root"
+        );
+        assert_ne!(
+            grandchild_launch.effective_workspace.as_path(),
+            real.path(),
+            "the grandchild must run in its own clone, not the One-Ring root"
+        );
+        assert_ne!(
+            grandchild_launch.effective_workspace, coordinator_launch.effective_workspace,
+            "the grandchild's clone is distinct from the coordinator's"
+        );
+        assert_eq!(
+            grandchild_launch.parent_only_at_launch.as_deref(),
+            Some("parent-visible\n"),
+            "the grandchild's clone derives from the coordinator's clone content, not the root seed"
+        );
+
         // (2) root + non-root WaveStarted/WaveCompleted pairs are journaled.
         let room = journal.project_room("host-rc1").await.unwrap();
         assert_eq!(
@@ -5024,6 +5073,364 @@ mod tests {
             "front-door root cancel must terminate the grandchild: {:?}",
             snap.outcome.spokes
         );
+    }
+
+    /// Story 17.3d-RC-C / RC-7 (AC1) — a REAL in-flight nested wave loses its
+    /// host and degrades to `HostBoundUnavailable` with NO portable state. Drives
+    /// the RC-1 front door with a `HangingProvider` grandchild so the nested wave
+    /// stays in flight (a non-root `WaveStarted` is journaled with NO matching
+    /// `WaveCompleted`), journals the coordinator + grandchild registrations with
+    /// the host-A binding via `NodeTree::register_with_identity`, terminates the
+    /// runtime that owns the live handles, then reopens the SAME workspace journal
+    /// and reconciles on host B.
+    ///
+    /// Mutants (each turns this keystone RED):
+    ///  - project a foreign-host node as `Running` / restore a `TaskHandle` on it
+    ///    → the delivery-target + not-restored assertions fail;
+    ///  - return a non-`None` `delivery_target` for a foreign node → RED;
+    ///  - serialize any live-handle/path/PID/stream field into the journal → the
+    ///    no-leak assertion fails;
+    ///  - omit the incomplete-wave fold → the interrupted wave stays outcome
+    ///    `None` and `interrupted_waves` is empty → RED.
+    #[tokio::test]
+    async fn rc7_host_loss_degrades_inflight_nested_wave_without_portable_state() {
+        use std::time::Duration;
+
+        fn forbidden_schema_key(value: &serde_json::Value) -> Option<String> {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    for (key, nested) in fields {
+                        let normalized = key.to_ascii_lowercase();
+                        let forbidden = matches!(
+                            normalized.as_str(),
+                            "workspace_path"
+                                | "effective_workspace"
+                                | "pid"
+                                | "process_id"
+                                | "provider_stream"
+                                | "stream"
+                                | "receiver"
+                                | "status_rx"
+                                | "command_tx"
+                                | "cancellation_token"
+                                | "cancel_token"
+                                | "task_handle"
+                                | "node_handle"
+                                | "live_handle"
+                        ) || normalized.ends_with("_receiver")
+                            || normalized.ends_with("_stream")
+                            || normalized.ends_with("_rx")
+                            || normalized.ends_with("_tx");
+                        if forbidden {
+                            return Some(key.clone());
+                        }
+                        if let Some(found) = forbidden_schema_key(nested) {
+                            return Some(found);
+                        }
+                    }
+                    None
+                }
+                serde_json::Value::Array(values) => values.iter().find_map(forbidden_schema_key),
+                _ => None,
+            }
+        }
+
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("parent-only.txt"), "root-seed\n").unwrap();
+        let workspace = real.path().to_path_buf();
+        let workspace_id = crate::infrastructure::paths::workspace_hash(&workspace);
+        let (ready_tx, ready_rx) =
+            tokio::sync::oneshot::channel::<(AgentId, AgentId, crate::domain::models::WaveId)>();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+
+        // Host A runs on a dedicated Tokio runtime. Dropping that runtime below
+        // destroys the task tree that owns the real TaskHandles; reopening the
+        // journal therefore models host loss, not a detached task left alive in
+        // the test runtime.
+        let host_a_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("build host-A runtime");
+            let ready = runtime.block_on(async move {
+                let host_a =
+                    crate::domain::models::HostBinding::new("host-A", workspace_id.clone());
+                let journal = Arc::new(
+                    crate::infrastructure::subagent::NodeJournal::open_workspace(&workspace)
+                        .await
+                        .expect("open host-A journal"),
+                );
+                let host_a_tree = Arc::new(
+                    crate::infrastructure::subagent::NodeTree::with_now_fn(Arc::new(|| {
+                        1_700_000_000_000
+                    }))
+                    .with_journal(journal.clone())
+                    .with_host_binding(host_a.clone()),
+                );
+                let (leaf, ledger, root) = make_runner_with_provider_on_registry(
+                    &workspace,
+                    true,
+                    Arc::new(HangingProvider),
+                    host_a_tree,
+                )
+                .await;
+                let mut coordinator = leaf.clone();
+                coordinator.provider = Arc::new(PanicIfInvokedProvider);
+                let launches = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+                let runner = DeclarativeNestedRunner {
+                    coordinator,
+                    leaf,
+                    launches: Arc::clone(&launches),
+                };
+                let authority = Arc::new(
+                    crate::adapters::authority::InProcessAuthorityProvider::new(ledger.clone()),
+                )
+                    as Arc<dyn crate::domain::ports::AuthorityProvider>;
+                let (event_bus, _event_rx) = EventBus::new(256);
+                let event_bus = Arc::new(event_bus);
+                let store = Arc::new(crate::adapters::artifact::FileSystemArtifactStore::new(
+                    &workspace,
+                ));
+                let (merge_bus, merge_rx) = EventBus::new(64);
+                std::mem::forget(merge_rx);
+                let merge_back =
+                    Arc::new(crate::infrastructure::orchestrator::PatchMergeBack::new(
+                        workspace.clone(),
+                        store.clone(),
+                        journal.clone(),
+                        Arc::new(merge_bus),
+                        Arc::new(crate::adapters::merge_back::GitPatchApplier),
+                    ));
+                let executor = Arc::new(
+                    crate::infrastructure::orchestrator::ForkJoinExecutor::new(
+                        Arc::new(runner),
+                        authority,
+                        ledger,
+                        event_bus.clone(),
+                        Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
+                        root,
+                    )
+                    .with_journal(journal.clone())
+                    .with_artifact_store(store, host_a)
+                    .with_patch_merge_back(merge_back),
+                );
+                let spec = crate::adapters::tui::fanout_spec::parse_fanout(Some(
+                    "nested 1 1 read coordinator state and write marker",
+                ))
+                .expect("nested front-door DSL");
+                let request = crate::adapters::tui::fanout_spec::to_request(&spec, "m")
+                    .expect("bounded leaf-only nested request");
+                crate::infrastructure::runtime::event_loop::spawn_wave_run(
+                    executor as Arc<dyn crate::domain::ports::Orchestrator>,
+                    event_bus,
+                    "rc7-front-door".to_string(),
+                    request,
+                    CancellationToken::new(),
+                    1,
+                );
+
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        let launched = {
+                            let guard = launches.lock().await;
+                            (guard.len() >= 2)
+                                .then(|| (guard[0].agent_id.clone(), guard[1].agent_id.clone()))
+                        };
+                        if let Some((coordinator_id, grandchild_id)) = launched {
+                            let entries = journal.load().await.expect("load host-A journal");
+                            let mut registered = std::collections::BTreeSet::new();
+                            let mut states = std::collections::BTreeMap::new();
+                            let mut started = Vec::new();
+                            let mut completed = std::collections::HashSet::new();
+                            for entry in entries {
+                                match entry.record {
+                                    crate::domain::models::JournalRecord::Checkpoint(
+                                        checkpoint,
+                                    ) => {
+                                        states.insert(checkpoint.id, checkpoint.state);
+                                    }
+                                    crate::domain::models::JournalRecord::Room(
+                                        crate::domain::models::RoomEvent::NodeRegistered {
+                                            node,
+                                            host,
+                                            ..
+                                        },
+                                    ) if host.host_id == "host-A" => {
+                                        registered.insert(node);
+                                    }
+                                    crate::domain::models::JournalRecord::Room(
+                                        crate::domain::models::RoomEvent::WaveStarted {
+                                            wave,
+                                            coordinator,
+                                            ..
+                                        },
+                                    ) if coordinator != AgentId::root() => started.push(wave),
+                                    crate::domain::models::JournalRecord::Room(
+                                        crate::domain::models::RoomEvent::WaveCompleted {
+                                            wave,
+                                            ..
+                                        },
+                                    ) => {
+                                        completed.insert(wave);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let inflight =
+                                started.into_iter().find(|wave| !completed.contains(wave));
+                            if registered.contains(&coordinator_id)
+                                && registered.contains(&grandchild_id)
+                                && states.get(&coordinator_id) == Some(&NodeState::Running)
+                                && states.get(&grandchild_id) == Some(&NodeState::Running)
+                                && let Some(wave) = inflight
+                            {
+                                break (coordinator_id, grandchild_id, wave);
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("real host-A nodes and non-root wave must be durably in flight")
+            });
+            ready_tx
+                .send(ready)
+                .expect("host-B side must receive host-A readiness");
+            let _ = shutdown_rx.recv();
+            drop(runtime);
+        });
+
+        let (coordinator_id, grandchild_id, non_root_wave) = match ready_rx.await {
+            Ok(ready) => ready,
+            Err(_) => {
+                let _ = shutdown_tx.send(());
+                let join = tokio::task::spawn_blocking(move || host_a_thread.join())
+                    .await
+                    .expect("join host-A thread task");
+                panic!("host-A runtime failed before readiness: {join:?}");
+            }
+        };
+        shutdown_tx
+            .send(())
+            .expect("request host-A runtime termination");
+        tokio::task::spawn_blocking(move || host_a_thread.join())
+            .await
+            .expect("join host-A thread task")
+            .expect("host-A runtime exits cleanly");
+
+        // Host B reopens the SAME journal only after the runtime that owned every
+        // live handle has ceased to exist.
+        let reopened = Arc::new(
+            crate::infrastructure::subagent::NodeJournal::open_workspace(real.path())
+                .await
+                .unwrap(),
+        );
+        let host_b_tree =
+            crate::infrastructure::subagent::NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_100))
+                .with_journal(reopened.clone());
+        let singleton =
+            crate::infrastructure::subagent::DaemonSingletonLock::try_acquire(real.path())
+                .await
+                .expect("host B acquires the daemon singleton");
+        let report = crate::infrastructure::subagent::NodeRecovery::reconcile(
+            &reopened,
+            &host_b_tree,
+            &singleton,
+            "host-B",
+        )
+        .await
+        .expect("reconcile on the foreign host");
+
+        for node in [&coordinator_id, &grandchild_id] {
+            assert!(
+                report.host_bound_unavailable.contains(node),
+                "{node} must be HostBoundUnavailable on host B"
+            );
+            assert!(
+                report.suspended.contains(node),
+                "{node} must recover as Suspended, never phantom Running"
+            );
+            assert!(
+                !report.restored.contains(node),
+                "{node} must not be restored with a live handle"
+            );
+            assert!(
+                host_b_tree.delivery_target(node).await.is_none(),
+                "{node} must not receive a fabricated delivery target"
+            );
+        }
+        assert!(
+            report.interrupted_waves.contains(&non_root_wave),
+            "the in-flight non-root wave must be folded to an interrupted outcome"
+        );
+        let room = reopened
+            .project_room("host-B")
+            .await
+            .expect("project room on host B");
+        for node in [&coordinator_id, &grandchild_id] {
+            let view = &room.nodes()[node];
+            assert_eq!(
+                view.state,
+                NodeState::Suspended,
+                "{node} must never project as phantom Running"
+            );
+            assert!(view.host_bound_unavailable);
+        }
+        let wave_view = room
+            .waves()
+            .iter()
+            .find(|wave| wave.id == non_root_wave)
+            .expect("the non-root wave must be projected");
+        assert_eq!(
+            wave_view.outcome,
+            Some(crate::domain::models::WaveOutcome::Failed),
+            "the interrupted wave must project as Failed"
+        );
+
+        // Schema-ratchet positive controls: every prohibited portable-runtime
+        // category is recognized before the real journal is checked.
+        for key in [
+            "workspace_path",
+            "pid",
+            "provider_stream",
+            "receiver",
+            "cancel_token",
+            "task_handle",
+        ] {
+            let mut canary = serde_json::Map::new();
+            canary.insert(key.to_string(), serde_json::Value::Null);
+            assert_eq!(
+                forbidden_schema_key(&serde_json::Value::Object(canary)),
+                Some(key.to_string()),
+                "no-leak guard must recognize {key}"
+            );
+        }
+        let entries = reopened.load().await.unwrap();
+        let json = serde_json::to_value(&entries).expect("journal serializes");
+        assert!(
+            forbidden_schema_key(&json).is_none(),
+            "journal schema contains portable runtime field {:?}",
+            forbidden_schema_key(&json)
+        );
+        let dump = serde_json::to_string(&json).expect("journal JSON");
+        assert!(
+            !dump.contains(real.path().to_str().unwrap()),
+            "journal must not serialize the absolute workspace path"
+        );
+        for entry in &entries {
+            if let crate::domain::models::JournalRecord::Room(
+                crate::domain::models::RoomEvent::NodeRegistered { host, .. },
+            ) = &entry.record
+            {
+                assert_eq!(
+                    host.workspace_id,
+                    crate::infrastructure::paths::workspace_hash(real.path()),
+                    "workspace_id must be the opaque workspace hash"
+                );
+                assert!(!std::path::Path::new(&host.workspace_id).is_absolute());
+            }
+        }
     }
 
     #[tokio::test]
@@ -6065,6 +6472,15 @@ mod tests {
             .collect();
 
         // App lifecycle events drained from the executor's event bus.
+        //
+        // Scope note (RC-C AC3): this collector intentionally captures the
+        // FLAT-ROOT lifecycle SUBSET — ForkJoinStarted / SpokeCompleted /
+        // SynthesisReady — the only AppEvent variants a successful flat-root wave
+        // emits. Cancel/failure variants (e.g. WaveCancelled / WaveTerminated) are
+        // out of scope here; they are covered by the dedicated cancel keystones
+        // (rc1_front_door_root_cancel_terminates_grandchild). If this harness is
+        // ever reused for cancel/failure traces, extend the match to the full
+        // AppEvent lifecycle rather than widening the golden silently.
         let mut app_events = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
             match event {
@@ -6202,6 +6618,20 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn rc5_flat_root_wave_is_deterministic_across_repeated_runs() {
+        // RC-5 repeated-run determinism (RC-C AC3): two independent runs of the
+        // same flat-root wave produce byte-identical canonical traces. A source of
+        // nondeterminism (unstable ordering, wall-clock leakage, or id churn
+        // surfacing in the canonical form) would make these differ.
+        let first = canonicalize(&collect_flat_root_trace().await);
+        let second = canonicalize(&collect_flat_root_trace().await);
+        assert_eq!(
+            first, second,
+            "repeated flat-root runs must canonicalize identically",
+        );
+    }
+
     /// RC-5 forbidden-normalization sensitivity: the canonicalizer must PRESERVE
     /// event presence/order, budget values, and patch disposition. Each mutation
     /// below (reorder, drop, alter-budget, flip-disposition) must change the
@@ -6271,17 +6701,24 @@ mod tests {
         );
     }
 
-    /// RC-6 divergence closure (RC-B review): ONE malformed request, refused
-    /// identically at BOTH call sites through the shared `validate_nested_request`.
-    /// The adapter (`to_request`) and the executor (`run_fork_join_run` →
-    /// `validate_request`) each delegate to it; reverting either call site to a
-    /// bespoke check re-opens the divergence and turns this RED.
+    /// RC-6 divergence closure (RC-C precision fix): BOTH call sites route
+    /// construction validity through the shared `validate_nested_request`, proven
+    /// with a call-site-UNIQUE input each so reverting EITHER site to a bespoke
+    /// check turns this RED. This corrects the earlier overstated "both mutants
+    /// proven RED empirically" claim, which used a single empty-wave input that
+    /// prior bespoke checks could also have caught:
+    ///  - Adapter (`to_request`): a `count: 0` wave is refused ONLY by the shared
+    ///    validator inside `to_request`; reverting that call returns `Ok(empty
+    ///    request)` → RED.
+    ///  - Executor (`validate_request`): a NON-EMPTY wave with `concurrency: 0`
+    ///    was validated by NEITHER caller before RC-B; reverting the executor call
+    ///    site admits it and launches a spoke (PanicIfInvoked) → RED.
     #[tokio::test]
     async fn rc6_shared_validator_refuses_same_request_at_both_call_sites() {
         use crate::adapters::tui::fanout_spec::{FanOutSpec, to_request};
         use crate::domain::models::orchestration::OrchestrationError;
-        // Adapter call site: to_request runs the shared validator on the request
-        // it builds from the (empty) spec.
+        // Adapter call site — unique input: an empty wave, refused ONLY by the
+        // shared validator inside to_request.
         let adapter_err = to_request(
             &FanOutSpec::Identical {
                 count: 0,
@@ -6289,9 +6726,15 @@ mod tests {
             },
             "m",
         )
-        .expect_err("adapter must refuse an empty wave");
-        // Executor call site: validate_request runs the SAME shared validator on
-        // the exact empty shape the adapter would have built.
+        .expect_err("adapter must refuse an empty wave via the shared validator");
+        assert!(
+            matches!(adapter_err, OrchestrationError::Internal(_)),
+            "adapter refusal: {adapter_err:?}"
+        );
+
+        // Executor call site — unique input: a NON-EMPTY wave with concurrency 0.
+        // The executor's pre-RC-B bespoke checks (no concurrency bound) would have
+        // ADMITTED this; only the shared validator refuses it before dispatch.
         let real = tempfile::tempdir().unwrap();
         let (runner, ledger, root) =
             make_runner_with_provider(real.path(), false, Arc::new(PanicIfInvokedProvider)).await;
@@ -6308,23 +6751,23 @@ mod tests {
             Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)),
             root,
         );
-        let empty = crate::domain::ports::ForkJoinRequest {
-            coordinator: AgentId::root(),
-            spokes: vec![],
-            wait_policy: crate::domain::models::WaitPolicy::All,
-            concurrency: 0,
-        };
+        let mut unique_reject = to_request(
+            &FanOutSpec::Identical {
+                count: 1,
+                prompt: "x".into(),
+            },
+            "m",
+        )
+        .expect("a valid 1-spoke request builds");
+        unique_reject.concurrency = 0;
         let exec_err = executor
-            .run_fork_join_run(empty, CancellationToken::new(), None)
+            .run_fork_join_run(unique_reject, CancellationToken::new(), None)
             .await
-            .expect_err("executor must refuse an empty wave before dispatch");
-        // One shared validator → identical typed refusal at both call sites.
+            .expect_err(
+                "executor must refuse concurrency:0 via the shared validator before dispatch",
+            );
         assert!(
-            matches!(adapter_err, OrchestrationError::Internal(_)),
-            "adapter refusal: {adapter_err:?}"
-        );
-        assert!(
-            matches!(exec_err, OrchestrationError::Internal(_)),
+            matches!(exec_err, OrchestrationError::InvalidConcurrency { .. }),
             "executor refusal: {exec_err:?}"
         );
     }

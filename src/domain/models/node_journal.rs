@@ -65,6 +65,11 @@ pub struct LedgerConservationRecord {
     pub uses_remaining: Option<u32>,
     pub settled: bool,
     pub revoked: bool,
+    /// Story 17.3d-RC-C (AC2): the ledger's nondecreasing authority-time
+    /// watermark at journal time, made durable on the SAME conservation stream
+    /// so a clock rolled back after a restart cannot revive expired authority.
+    #[serde(default)]
+    pub authority_time_ms: u64,
 }
 
 #[non_exhaustive]

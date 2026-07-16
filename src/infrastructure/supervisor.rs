@@ -596,6 +596,44 @@ mod tests {
         assert_eq!(supervisor.available_running_permits(), 1);
     }
 
+    #[tokio::test]
+    async fn many_delegations_at_running_cap_do_not_deadlock() {
+        // Standalone retain-global-permit deadlock mutant (RC-C AC3): with a
+        // global running cap of 1, admitting several Delegations concurrently must
+        // ALL succeed — a Delegation never occupies a shared running slot while it
+        // awaits descendants. If `admit` retained a running permit for the
+        // Delegation class, the 2nd admission would block on the cap-1 semaphore
+        // forever → this test times out RED. (Previously only IMPLICIT in the
+        // cap-4 in_process_runner fixture's timeout.)
+        const DELEGATIONS: usize = 4;
+        let (supervisor, _clock, coordinator) = supervisor(1, DELEGATIONS);
+        let mut held = Vec::new();
+        for i in 0..DELEGATIONS {
+            let permit = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                supervisor.admit(
+                    &coordinator,
+                    "delegation",
+                    Budget::default(),
+                    AdmissionClass::Delegation,
+                ),
+            )
+            .await
+            .expect("delegation admission must never block on the running cap")
+            .unwrap()
+            .expect("delegation admits");
+            assert!(
+                !permit.owns_shared_running(),
+                "delegation {i} must own no shared running permit",
+            );
+            held.push(permit);
+        }
+        // The single global running slot remains fully available despite N held
+        // delegations — none consumed it.
+        assert_eq!(supervisor.available_running_permits(), 1);
+        drop(held);
+    }
+
     /// AC2 integrated keystone (17-2c / D7 / R10): a wave-abort drives every
     /// RUNNING subtree node terminal-`Cancelled` (journaled) + deregistered
     /// THROUGH the `SupervisedNodes` seam, AND the parked acquirer's queue slot

@@ -367,4 +367,30 @@ mod tests {
             Err(OrchestrationError::Internal(_))
         ));
     }
+
+    #[test]
+    fn to_request_refuses_over_cap_spec_instead_of_panicking() {
+        // RC-C AC3: `to_request` returns a TYPED refusal (not an infallible
+        // value), so the `/fanout` event-loop callers surface it as a notice
+        // rather than `.expect()`-panicking. This proves the Err path the event
+        // loop now handles is real: an over-cap spec, constructible directly, is
+        // refused, not built.
+        let over_cap = FanOutSpec::Identical {
+            count: FORK_JOIN_SPAWN_CAP + 1,
+            prompt: "boom".into(),
+        };
+        assert!(matches!(
+            to_request(&over_cap, "m"),
+            Err(OrchestrationError::SpawnCapExceeded { .. })
+        ));
+        let over_breadth = FanOutSpec::Nested {
+            coordinators: MAX_NESTED_BREADTH,
+            grandchildren: MAX_NESTED_BREADTH,
+            prompt: "boom".into(),
+        };
+        assert!(
+            to_request(&over_breadth, "m").is_err(),
+            "an over-breadth nested spec must be refused, never `.expect()`-panicked",
+        );
+    }
 }
