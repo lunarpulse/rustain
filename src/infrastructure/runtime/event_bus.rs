@@ -71,6 +71,12 @@ pub enum RawEventKind {
         server_id: String,
         tool_count: usize,
     },
+    /// Story 17.4a — A2A AgentCard inventory changed for one peer.
+    #[cfg(feature = "a2a")]
+    A2aCatalogChanged {
+        peer_id: String,
+        skill_count: usize,
+    },
     /// Story 9.3a — Capability lifecycle event from the CapabilityRegistry.
     Capability(crate::domain::events::CapabilityEvent),
     /// Story 14.4 — attributed child→parent subagent event.
@@ -199,6 +205,18 @@ impl RawEvent {
                 kind: RawEventKind::McpCatalogChanged {
                     server_id: server_id.clone(),
                     tool_count: *tool_count,
+                },
+            },
+            #[cfg(feature = "a2a")]
+            AppEvent::A2aCatalogChanged {
+                peer_id,
+                skill_count,
+            } => RawEvent {
+                conversation_id: None,
+                timestamp_ms: now,
+                kind: RawEventKind::A2aCatalogChanged {
+                    peer_id: peer_id.clone(),
+                    skill_count: *skill_count,
                 },
             },
             AppEvent::CapabilityEvent(event) => RawEvent {

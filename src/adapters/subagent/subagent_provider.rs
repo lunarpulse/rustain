@@ -135,6 +135,7 @@ impl CapabilityProvider for SubagentProvider {
         // Story 10.7 — advertise the generic `task` tool + `read_task_output` escape hatch.
         let mut caps = vec![
             Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),
@@ -156,6 +157,7 @@ impl CapabilityProvider for SubagentProvider {
                 parallel_safe: true,
             },
             Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),
@@ -180,6 +182,7 @@ impl CapabilityProvider for SubagentProvider {
         let agents = guard.agents();
         for agent in agents.iter().cloned() {
             caps.push(Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "subagent".into(),
                     server: String::new(),

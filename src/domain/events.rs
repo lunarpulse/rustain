@@ -333,6 +333,12 @@ pub enum AppEvent {
         server_id: String,
         tool_count: usize,
     },
+    /// Story 17.4a — one peer's verified AgentCard cache changed.
+    #[cfg(feature = "a2a")]
+    A2aCatalogChanged {
+        peer_id: String,
+        skill_count: usize,
+    },
     /// Story 9.3a — capability lifecycle events from the CapabilityRegistry.
     /// Wraps the three sub-variants (Registered, Deregistered, Updated) in one
     /// nested enum to keep the top-level surface lean and group related events

@@ -1,0 +1,4 @@
+[advisories]
+# Unmaintained transitive crates remain visible as warnings; direct workspace
+# dependencies still fail. bm25 2.3.2 currently has no fxhash-free release.
+unmaintained = "workspace"

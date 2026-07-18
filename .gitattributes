@@ -2,3 +2,5 @@
 # Signed self-update trust fixtures (Story 13-3a) — NEVER convert line endings,
 # or the signature/manifest bytes change and verification false-fails on CRLF checkouts.
 tests/fixtures/self_update/** -text
+# Signed A2A AgentCard fixtures (Story 17.4a) — preserve captured JCS bytes.
+tests/fixtures/a2a/** -text

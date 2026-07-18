@@ -337,6 +337,7 @@ async fn ac4_signal_cancel_before_shutdown() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,

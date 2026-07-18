@@ -1,4 +1,4 @@
-use super::CapabilityId;
+use super::{CapabilityId, TrustTier};
 use serde::{Deserialize, Serialize};
 
 /// A discovered capability from a provider.
@@ -18,6 +18,8 @@ pub struct Capability {
     pub input_schema: serde_json::Value,
     /// Whether the capability is safe for parallel execution.
     pub parallel_safe: bool,
+    /// Trust assigned by the provider's configuration and preserved by the registry.
+    pub trust: TrustTier,
 }
 
 /// Errors from capability provider operations.

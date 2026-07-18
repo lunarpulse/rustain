@@ -144,6 +144,7 @@ mod tests {
             overrides,
             preview: false,
             mcp_servers: Vec::new(),
+            a2a_peers: Vec::new(),
             include_builtin_tools: true,
         }
     }

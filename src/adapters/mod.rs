@@ -1,3 +1,4 @@
+pub mod a2a;
 pub mod acp;
 pub mod agent_activation;
 pub mod agent_registry;

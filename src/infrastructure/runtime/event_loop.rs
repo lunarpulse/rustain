@@ -8100,6 +8100,19 @@ pub async fn run(
                             tool_count,
                         ).await;
                     }
+                    #[cfg(feature = "a2a")]
+                    AppEvent::A2aCatalogChanged {
+                        peer_id,
+                        skill_count,
+                    } => {
+                        crate::adapters::tui::handlers::a2a_catalog::handle_a2a_catalog_changed(
+                            &mut state,
+                            &tools,
+                            &peer_id,
+                            skill_count,
+                        )
+                        .await;
+                    }
                     AppEvent::CapabilityEvent(ref ev) => {
                         let protocol = match ev {
                             crate::domain::events::CapabilityEvent::Registered { capability } => &capability.id.protocol,

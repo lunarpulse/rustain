@@ -121,6 +121,7 @@ mod tests {
     #[test]
     fn test_from_registered_capability_round_trip() {
         let rc = RegisteredCapability {
+            trust: crate::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "builtin".into(),
                 server: String::new(),

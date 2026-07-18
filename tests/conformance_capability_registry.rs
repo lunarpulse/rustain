@@ -22,6 +22,7 @@ use rustain::domain::ports::ObserverError;
 
 fn test_capability(protocol: &str, server: &str, tool: &str) -> RegisteredCapability {
     RegisteredCapability {
+        trust: rustain::domain::models::TrustTier::Verified,
         id: CapabilityId {
             protocol: protocol.to_string(),
             server: server.to_string(),
@@ -860,6 +861,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
 
     let snap = vec![
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "mcp".into(),
                 server: "srv1".into(),
@@ -873,6 +875,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
             parallel_safe: true,
         },
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "mcp".into(),
                 server: "srv2".into(),
@@ -886,6 +889,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
             parallel_safe: true,
         },
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "builtin".into(),
                 server: String::new(),
@@ -899,6 +903,7 @@ fn test_status_panel_shows_all_three_protocol_counts() {
             parallel_safe: false,
         },
         RegisteredCapability {
+            trust: rustain::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "skill".into(),
                 server: String::new(),
@@ -1012,6 +1017,7 @@ async fn test_catalog_delta_added_removed_correctness() {
     // Register a new capability manually (simulating MCP list_changed adding a tool)
     use rustain::domain::models::capability_registry::RegisteredCapability;
     let extra = RegisteredCapability {
+        trust: rustain::domain::models::TrustTier::Verified,
         id: rustain::domain::models::capability_id::CapabilityId {
             protocol: "mcp".into(),
             server: "delta-test".into(),

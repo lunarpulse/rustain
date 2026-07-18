@@ -186,10 +186,13 @@ fn expose_secret_matcher_self_test() {
 fn expose_url_file_set_is_exactly_the_allowlist() {
     let (files, count) = scan_src_for_pattern(".expose_url()");
 
-    let expected: BTreeSet<String> = ["infrastructure/provider_factory.rs"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let expected: BTreeSet<String> = [
+        "adapters/a2a/client.rs",
+        "infrastructure/provider_factory.rs",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
 
     assert_eq!(
         files, expected,
@@ -201,8 +204,8 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 5,
-        "expose_url() pinned count changed: got {count}, expected 5. \
+        count, 7,
+        "expose_url() pinned count changed: got {count}, expected 7. \
          If you added a legitimate call site, update the allowlist AND this count."
     );
 }
@@ -214,6 +217,10 @@ fn expose_url_per_sink_positive_control() {
     assert!(
         files.contains("infrastructure/provider_factory.rs"),
         "provider_factory.rs must call expose_url()"
+    );
+    assert!(
+        files.contains("adapters/a2a/client.rs"),
+        "A2A client must expose the configured URL only at its transport boundary"
     );
 }
 

@@ -74,6 +74,9 @@ pub struct CompositeToolsetAdapter {
     /// Story 10.0 — optional subagent provider for agent dispatch.
     /// Uses OnceLock for two-phase wiring (adapter built first, then provider).
     subagent_provider: std::sync::OnceLock<Arc<crate::adapters::subagent::SubagentProvider>>,
+    /// Story 17.4a — cached AgentCard inventory provider, injected after startup composition.
+    #[cfg(feature = "a2a")]
+    a2a_provider: std::sync::OnceLock<Arc<dyn CapabilityProvider>>,
     /// D1 fix: per-turn context stored here, injected into subagent input JSON at dispatch.
     parent_ctx: Arc<
         tokio::sync::RwLock<Option<crate::adapters::subagent::subagent_provider::TaskToolContext>>,
@@ -119,6 +122,8 @@ impl CompositeToolsetAdapter {
             #[cfg(feature = "meta-search")]
             catalog_broadcast: std::sync::OnceLock::new(),
             subagent_provider: subagent_provider_cell,
+            #[cfg(feature = "a2a")]
+            a2a_provider: std::sync::OnceLock::new(),
             parent_ctx: Arc::new(tokio::sync::RwLock::new(None)),
             conversation_id: Arc::new(tokio::sync::RwLock::new(String::new())),
         }
@@ -150,6 +155,12 @@ impl CompositeToolsetAdapter {
         provider: Arc<crate::adapters::subagent::SubagentProvider>,
     ) {
         let _ = self.subagent_provider.set(provider);
+    }
+
+    /// Story 17.4a — wire the discovery-only A2A provider after composition.
+    #[cfg(feature = "a2a")]
+    pub fn set_a2a_provider(&self, provider: Arc<dyn CapabilityProvider>) {
+        let _ = self.a2a_provider.set(provider);
     }
 
     /// Story 9.3b — read the current catalog version (for tests).
@@ -218,6 +229,19 @@ impl CompositeToolsetAdapter {
             {
                 Ok(h) => handles.extend(h),
                 Err(e) => errors.push(format!("subagent: {e}")),
+            }
+        }
+
+        // 5. A2A AgentCard inventory (Story 17.4a; discovery only).
+        #[cfg(feature = "a2a")]
+        if let Some(a2a_provider) = self.a2a_provider.get() {
+            match self
+                .capability_registry
+                .discover_and_register_all(a2a_provider.as_ref(), "a2a")
+                .await
+            {
+                Ok(h) => handles.extend(h),
+                Err(e) => errors.push(format!("a2a: {e}")),
             }
         }
 

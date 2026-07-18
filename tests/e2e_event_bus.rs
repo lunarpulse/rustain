@@ -145,6 +145,7 @@ fn test_app_state_honors_raw_capacity() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus,
@@ -225,6 +226,7 @@ fn test_app_state_session_cancel_is_root_token() {
         search_config: rustain::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     });
     let (app_state, _domain_rx) = AppState::new(
         event_bus2,

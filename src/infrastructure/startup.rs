@@ -49,6 +49,53 @@ impl std::fmt::Display for SubcommandExit {
 
 impl std::error::Error for SubcommandExit {}
 
+fn ensure_a2a_feature_enabled(peers: &[crate::domain::models::A2aPeerSpec]) -> Result<()> {
+    #[cfg(feature = "a2a")]
+    {
+        let _ = peers;
+        Ok(())
+    }
+    #[cfg(not(feature = "a2a"))]
+    {
+        if peers.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("A2A peers are configured, but this build has the `a2a` feature disabled")
+        }
+    }
+}
+
+#[cfg(test)]
+mod a2a_feature_tests {
+    use super::ensure_a2a_feature_enabled;
+    use crate::domain::models::{A2aPeerSource, A2aPeerSpec, RedactedUrl};
+
+    fn configured_peer() -> A2aPeerSpec {
+        A2aPeerSpec {
+            id: "peer".to_owned(),
+            url: RedactedUrl::from("https://peer.example"),
+            pinned_key: None,
+            source: A2aPeerSource::Workspace,
+        }
+    }
+
+    #[test]
+    fn configured_peer_matches_the_compile_time_feature_policy() {
+        let peer = configured_peer();
+        let result = ensure_a2a_feature_enabled(std::slice::from_ref(&peer));
+        #[cfg(feature = "a2a")]
+        assert!(result.is_ok());
+        #[cfg(not(feature = "a2a"))]
+        assert!(
+            result
+                .expect_err("feature-off A2A config must fail loud")
+                .to_string()
+                .contains("feature disabled")
+        );
+        assert!(ensure_a2a_feature_enabled(&[]).is_ok());
+    }
+}
+
 /// Ordered startup sequence.
 /// 1. Parse CLI args
 /// 2. Initialize logging (so config warnings are captured)
@@ -1285,12 +1332,14 @@ pub async fn run() -> Result<()> {
     let resolved = profile_resolver_arc
         .resolve_active()
         .expect("post-Pass-2 toml_resolver always has resolve_active populated");
+    ensure_a2a_feature_enabled(&resolved.a2a_peers)?;
     let compose_ctx = crate::infrastructure::composition::ComposeContext {
         workspace_path: workspace_path.clone(),
         project_context: project_context.clone(),
         storage: Arc::clone(&tools_storage) as Arc<dyn StoragePort>,
         skill_activator: Arc::clone(&skill_activator),
         mcp_servers: resolved.mcp_servers.clone(),
+        a2a_peers: resolved.a2a_peers.clone(),
         include_builtin_tools: resolved.include_builtin_tools,
         domain_tx: Some(domain_tx.clone()),
         channel_turn_tx: None,
@@ -1417,6 +1466,55 @@ pub async fn run() -> Result<()> {
     {
         use crate::adapters::composite_toolset_adapter::CompositeToolsetAdapter;
         if let Some(composite) = tools.as_any().downcast_ref::<CompositeToolsetAdapter>() {
+            #[cfg(feature = "a2a")]
+            {
+                let mut bindings = Vec::with_capacity(resolved.a2a_peers.len());
+                for spec in resolved.a2a_peers.iter().cloned() {
+                    let client = Arc::new(
+                        crate::adapters::a2a::client::A2aClientAdapter::new(&spec, None).map_err(
+                            |error| {
+                                anyhow::anyhow!(
+                                    "A2A peer {:?} configuration failed: {error}",
+                                    spec.id
+                                )
+                            },
+                        )?,
+                    );
+                    bindings.push((spec, client));
+                }
+
+                let refresh_bindings = bindings.clone();
+                let provider = Arc::new(crate::adapters::a2a::provider::A2aProvider::new(bindings))
+                    as Arc<dyn crate::domain::ports::CapabilityProvider>;
+                composite.set_a2a_provider(provider);
+
+                for (spec, client) in refresh_bindings {
+                    let event_tx = domain_tx.clone();
+                    tokio::spawn(async move {
+                        match client.refresh_agent_card(&spec).await {
+                            Ok(()) => {
+                                let skill_count = client
+                                    .cached_card()
+                                    .await
+                                    .map(|(card, _)| card.skills.len())
+                                    .unwrap_or(0);
+                                let _ = event_tx.send(AppEvent::A2aCatalogChanged {
+                                    peer_id: spec.id,
+                                    skill_count,
+                                });
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    peer_id = %spec.id,
+                                    %error,
+                                    "A2A AgentCard refresh failed"
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+
             // Eager agent discovery (needed for SubagentProvider::discover)
             let agent_registry = Arc::new(tokio::sync::RwLock::new(
                 crate::adapters::agent_registry::AgentRegistry::discover(&workspace_path),

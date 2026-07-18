@@ -1,3 +1,4 @@
+pub mod a2a_peer_spec;
 pub mod adapter_health;
 pub mod agent;
 pub mod agent_envelope;
@@ -91,6 +92,9 @@ pub mod waiting_hazard;
 // Re-exports for all domain model types.
 // Many are unused until later stories wire port implementations — suppress warnings.
 #[allow(unused_imports)]
+pub use a2a_peer_spec::{
+    A2aPeerSource, A2aPeerSpec, A2aPeerSpecError, PinnedKey, PinnedKeyAlgorithm, TrustTier,
+};
 pub use agent::{
     ActiveAgent, AgentDef, AgentValidationError, MAX_AGENT_FILE_SIZE, MAX_AGENT_SCAN_FILES,
     validate_agent_frontmatter,

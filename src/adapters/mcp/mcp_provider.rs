@@ -65,6 +65,7 @@ impl CapabilityProvider for McpProvider {
         Ok(tools
             .iter()
             .map(|t| Capability {
+                trust: crate::domain::models::TrustTier::Verified,
                 id: CapabilityId {
                     protocol: "mcp".into(),
                     server: server_id.into(),

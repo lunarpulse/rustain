@@ -910,6 +910,7 @@ impl NodeTree {
 
     fn capability_for(&self, agent_id: &AgentId) -> RegisteredCapability {
         RegisteredCapability {
+            trust: crate::domain::models::TrustTier::Verified,
             id: CapabilityId {
                 protocol: "subagent".into(),
                 server: String::new(),
@@ -1036,6 +1037,7 @@ impl NodeTree {
             let guard = self.inner.read().await;
             if let Some(node) = guard.nodes.get(agent_id) {
                 let old_cap = RegisteredCapability {
+                    trust: crate::domain::models::TrustTier::Verified,
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),
@@ -1049,6 +1051,7 @@ impl NodeTree {
                     parallel_safe: false,
                 };
                 let new_cap = RegisteredCapability {
+                    trust: crate::domain::models::TrustTier::Verified,
                     id: CapabilityId {
                         protocol: "subagent".into(),
                         server: String::new(),

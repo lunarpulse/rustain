@@ -31,6 +31,8 @@ pub struct ComposeContext {
     /// MCP server specs resolved from workspace `.claude/mcp.json` + profile TOML.
     /// Populated by startup.rs after profile resolution (Story 9.1).
     pub mcp_servers: Vec<crate::domain::models::McpServerSpec>,
+    /// Allowlisted A2A peers resolved from workspace and profile configuration.
+    pub a2a_peers: Vec<crate::domain::models::A2aPeerSpec>,
     /// Whether composite adapter includes builtin tools (default true).
     /// `[tools.config] include_builtin = false` disables builtin tools
     /// so only MCP tools are available (Story 9.1 AC-4, used by 9.2).
@@ -1131,6 +1133,7 @@ pub fn build_daemon_memory(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
     build_memory(memory_adapter, None, &ctx)
 }
@@ -1182,6 +1185,7 @@ pub(crate) fn daemon_compose_context(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     }
 }
 
@@ -1461,6 +1465,7 @@ pub fn build_cli_core(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let tools = build_tools("builtin-only", None, &ctx)?;
@@ -1566,6 +1571,7 @@ pub fn build_acp_core(
         search_config: crate::domain::models::SearchConfig::default(),
         #[cfg(feature = "meta-search")]
         meta_search_engine: None,
+        a2a_peers: Vec::new(),
     };
 
     let tools: Arc<dyn ToolSetPort> = {
@@ -1692,6 +1698,7 @@ mod tests {
             search_config: crate::domain::models::SearchConfig::default(),
             #[cfg(feature = "meta-search")]
             meta_search_engine: None,
+            a2a_peers: Vec::new(),
         }
     }
 

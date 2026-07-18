@@ -1,0 +1,426 @@
+{
+  "name": "MolTrust Trust Registry",
+  "description": "Production trust infrastructure for autonomous AI agents. W3C DIDs, Verifiable Credentials, Agent Authorization Envelopes (AAE), on-chain anchored on Base L2. Reference implementation of the Trust Registry Binding for A2A v1.0.",
+  "version": "1.0.1",
+  "supportedInterfaces": [
+    {
+      "url": "https://api.moltrust.ch/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "provider": {
+    "organization": "CryptoKRI GmbH",
+    "url": "https://moltrust.ch"
+  },
+  "documentationUrl": "https://api.moltrust.ch/docs",
+  "iconUrl": "https://moltrust.ch/img/moltrust-logo.png",
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "extendedAgentCard": true,
+    "extensions": [
+      {
+        "uri": "https://moltrust.ch/extensions/trust-score/v1",
+        "description": "W3C DID-based agent trust scoring with on-chain behavioral history",
+        "required": false,
+        "params": {
+          "trust_score_endpoint": "https://api.moltrust.ch/skill/trust-score/{did}",
+          "min_score_header": "X-MolTrust-Min-Score",
+          "did_resolution": "https://uresolver.moltrust.ch/1.0/identifiers/{did}",
+          "agent_type_endpoint": "https://api.moltrust.ch/identity/agent-type/{did}",
+          "agent_types_listing": "https://api.moltrust.ch/identity/agent-types"
+        }
+      },
+      {
+        "uri": "https://moltrust.ch/extensions/aae/v1",
+        "description": "Agent Authorization Envelope - Storage-only declarative permission model with MANDATE/CONSTRAINTS/VALIDITY blocks; runtime enforcement is roadmap (Q3 2026).",
+        "required": false,
+        "params": {
+          "delegation_lookup": "https://api.moltrust.ch/identity/delegations/{did}",
+          "delegation_configure": "https://api.moltrust.ch/delegation/configure",
+          "blocks": [
+            "mandate",
+            "constraints",
+            "validity"
+          ]
+        }
+      },
+      {
+        "uri": "https://moltrust.ch/extensions/erc8004/v1",
+        "description": "ERC-8004 on-chain agent registration cross-link",
+        "required": false,
+        "params": {
+          "agentId": 33553,
+          "agentRegistry": "eip155:8453:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+          "registrationFile": "https://api.moltrust.ch/.well-known/agent-registration.json",
+          "platformDid": "did:web:api.moltrust.ch"
+        }
+      },
+      {
+        "uri": "https://moltrust.ch/extensions/x402-payment/v1",
+        "description": "x402 micropayment protocol on Base L2 for paid skill endpoints",
+        "required": false,
+        "params": {
+          "chain": "eip155:8453",
+          "currency": "USDC",
+          "facilitator": "https://api.moltrust.ch/x402"
+        }
+      },
+      {
+        "uri": "https://moltrust.ch/extensions/discovery-surfaces/v1",
+        "description": "Inventory of additional discovery files beyond agent-card",
+        "required": false,
+        "params": {
+          "agentRegistration": "https://api.moltrust.ch/.well-known/agent-registration.json",
+          "jwks": "https://api.moltrust.ch/.well-known/jwks.json",
+          "didDocument": "https://api.moltrust.ch/.well-known/did.json",
+          "perAgentCardEndpoint": "https://api.moltrust.ch/a2a/agent-card/{did}",
+          "llmsTxt": "https://api.moltrust.ch/llms.txt"
+        }
+      },
+      {
+        "uri": "https://moltrust.ch/extensions/caep/v1",
+        "required": false,
+        "description": "Proprietary MolTrust event protocol (pending/acknowledge polling). Name-inspired by OpenID-CAEP but NOT SET/RFC 8417 compliant — not a Shared Signals stream/transmitter/receiver implementation."
+      }
+    ]
+  },
+  "securitySchemes": {
+    "apiKey": {
+      "type": "apiKey",
+      "in": "header",
+      "name": "X-API-Key",
+      "description": "Free API key from POST /auth/signup (email only, no card): Free tier is 100 requests/day, and POST /identity/register grants 100 credits. Paid tiers (Professional/Scale/Enterprise) raise usage limits but are not required to register."
+    },
+    "moltrust-did": {
+      "type": "apiKey",
+      "in": "header",
+      "name": "X-MolTrust-DID",
+      "description": "Agent DID for self-identification on trust-gated endpoints"
+    },
+    "aae-envelope": {
+      "type": "http",
+      "scheme": "bearer",
+      "bearerFormat": "AAE-JWS",
+      "description": "Agent Authorization Envelope as JWS-signed bearer token. MANDATE/CONSTRAINTS/VALIDITY blocks. Declared schema; HTTP-auth-layer implementation in progress."
+    }
+  },
+  "securityRequirements": [
+    {
+      "apiKey": []
+    },
+    {
+      "moltrust-did": []
+    }
+  ],
+  "defaultInputModes": [
+    "text"
+  ],
+  "defaultOutputModes": [
+    "text",
+    "data"
+  ],
+  "skills": [
+    {
+      "id": "trust-score",
+      "name": "Agent Trust Score",
+      "description": "Returns W3C DID-based trust score (0-100) with behavioral history breakdown, sybil penalty, anomaly flags, on-chain proof. Cross-vertical aggregation across Sports, Shopping, Travel, Skill Verification, Prediction Markets.",
+      "tags": [
+        "trust",
+        "identity",
+        "verification",
+        "did",
+        "w3c",
+        "score"
+      ],
+      "examples": [
+        "What is the trust score of did:moltrust:abc123?",
+        "Verify this agent's behavioral history",
+        "Check if this agent meets minimum trust requirements"
+      ],
+      "inputModes": [
+        "text"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "did-resolution",
+      "name": "DID Resolution",
+      "description": "Resolves W3C Decentralized Identifiers (did:moltrust) to DID Documents with verification methods and service endpoints. DIF Universal Resolver compatible (driver published at uresolver.moltrust.ch).",
+      "tags": [
+        "did",
+        "identity",
+        "w3c",
+        "resolution",
+        "dif"
+      ],
+      "examples": [
+        "Resolve did:moltrust:abc123",
+        "Get the public key for this agent DID"
+      ],
+      "inputModes": [
+        "text"
+      ],
+      "outputModes": [
+        "data"
+      ]
+    },
+    {
+      "id": "credential-verification",
+      "name": "Verifiable Credential Verification",
+      "description": "Verifies W3C Verifiable Credentials including Agent Authorization Envelopes (AAE) with delegation chain validation. Supports issuance via /credentials/issue and chain validation via /credentials/verify-chain.",
+      "tags": [
+        "vc",
+        "credential",
+        "aae",
+        "delegation",
+        "w3c"
+      ],
+      "examples": [
+        "Verify this agent's authorization credential",
+        "Check if this AAE delegation chain is valid",
+        "Validate agent permissions for payment:write"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "data"
+      ]
+    },
+    {
+      "id": "wallet-binding",
+      "name": "Wallet Binding Verification",
+      "description": "Verifies cryptographic binding between agent DID and blockchain wallet address (EVM Base + Solana). Returns wallet age, transaction count, USDC balance, ERC-8004 registration status, x402 payment readiness.",
+      "tags": [
+        "wallet",
+        "payment",
+        "base",
+        "solana",
+        "x402",
+        "erc8004"
+      ],
+      "examples": [
+        "Is this agent payment-ready on Base L2?",
+        "Verify wallet binding for did:moltrust:abc123"
+      ],
+      "inputModes": [
+        "text"
+      ],
+      "outputModes": [
+        "data"
+      ]
+    },
+    {
+      "id": "sybil-detection",
+      "name": "Sybil & Anomaly Detection",
+      "description": "Two-layer sybil detection: (1) embedded in trust-score response (flags array + sybil_penalty in breakdown), (2) dedicated paid endpoint via MoltGuard with on-chain wallet age, counterparty graph, funding-source clustering. Paid via x402 ($0.10 USDC).",
+      "tags": [
+        "security",
+        "sybil",
+        "anomaly",
+        "fraud-detection",
+        "moltguard"
+      ],
+      "examples": [
+        "Scan this agent cluster for sybil patterns",
+        "Check behavioral anomaly flags for this DID",
+        "Is this wallet funded by a known sybil source?"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "data"
+      ]
+    },
+    {
+      "id": "compliance-assess",
+      "name": "EU AI Act risk classification",
+      "description": "Classify an AI system under Regulation (EU) 2024/1689: risk tier (prohibited/high/limited/minimal), obligations checklist, gap analysis, with EUR-Lex article pins.",
+      "tags": [
+        "compliance",
+        "eu-ai-act",
+        "risk",
+        "classification",
+        "annex-iii"
+      ],
+      "examples": [
+        "Is a CV-screening agent high-risk under the EU AI Act?",
+        "Assess this use case against Annex III"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "compliance-declaration",
+      "name": "EU declaration of conformity (Annex V)",
+      "description": "Issue an Annex V EU declaration of conformity as a signed W3C Verifiable Credential (MolTrustConformityDeclaration).",
+      "tags": [
+        "compliance",
+        "annex-v",
+        "declaration",
+        "verifiable-credential"
+      ],
+      "examples": [
+        "Issue a declaration of conformity for my AI system",
+        "Create an Annex V VC"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "compliance-report",
+      "name": "Compliance report",
+      "description": "HTML/JSON report: identity, latest risk assessment, obligations, gaps, declarations on record, audit summary.",
+      "tags": [
+        "compliance",
+        "report",
+        "audit"
+      ],
+      "examples": [
+        "Show the compliance report for did:moltrust:abc123"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "compliance-incident",
+      "name": "Article 73 serious-incident recording",
+      "description": "Record an Article 73 serious incident and compute its staggered reporting deadline (2/10/15 days) with deadline status.",
+      "tags": [
+        "compliance",
+        "incident",
+        "article-73",
+        "deadline"
+      ],
+      "examples": [
+        "Record a serious incident and tell me the reporting deadline"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "delegation-create",
+      "name": "UCAN delegation minting",
+      "description": "Mint a UCAN 0.10.0 delegation token with scoped capabilities, attenuation and a proof chain.",
+      "tags": [
+        "delegation",
+        "ucan",
+        "authorization",
+        "capabilities"
+      ],
+      "examples": [
+        "Delegate scoped authority to another agent"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "delegation-verify",
+      "name": "UCAN delegation verification",
+      "description": "Verify a UCAN token and its proof chain: signature, time bounds, iss/aud alignment, attenuation monotonicity, revocation.",
+      "tags": [
+        "delegation",
+        "ucan",
+        "verification"
+      ],
+      "examples": [
+        "Verify this UCAN delegation token"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "reputation-batch-sync",
+      "name": "Batch reputation",
+      "description": "Reputation scores and ratings for up to 500 agent DIDs in a single call.",
+      "tags": [
+        "reputation",
+        "batch",
+        "score"
+      ],
+      "examples": [
+        "Get reputation for these 300 agents"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    },
+    {
+      "id": "anchors-batch",
+      "name": "Merkle batch anchoring",
+      "description": "Merkle-batch a set of evidence hashes into a single root with per-leaf proof paths.",
+      "tags": [
+        "anchoring",
+        "merkle",
+        "evidence",
+        "provenance"
+      ],
+      "examples": [
+        "Anchor these evidence hashes into one Merkle root"
+      ],
+      "inputModes": [
+        "text",
+        "data"
+      ],
+      "outputModes": [
+        "text",
+        "data"
+      ]
+    }
+  ],
+  "signatures": [
+    {
+      "protected": "eyJhbGciOiJFZERTQSIsImtpZCI6Im1vbHRydXN0LXJlZ2lzdHJ5LTIwMjYtdjEiLCJ0eXAiOiJhMmEtY2FyZCtqd3MifQ",
+      "signature": "_nTdRzC6sXtRFuxPU6HiYR-hBIGzioIkLkChOGeP28b-DDoSwhNAYznsPnRQ3AtuE6VZ0c5mIAlT0nQC2WxVBg"
+    }
+  ]
+}
